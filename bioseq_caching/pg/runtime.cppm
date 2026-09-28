@@ -1,15 +1,12 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file bioseq_caching/pg/runtime.cppm
+ * @brief Connects query planning and execution to the PostgreSQL result cache.
  *
- * bioseq_cache PostgreSQL runtime interface.
- *
- * The sibling extension deliberately contains no sequence or Bioseq table-AM
- * knowledge.  Product integrations arrive through bioseq.cache.provider_api.
- * This named module owns the behavior-preserving shared runtime and exports
- * its typed SQL backend surfaces. The public primary interface only composes
- * this owner with the PostgreSQL extension entry point. Storage and registry
- * behavior is enabled incrementally behind the same fail-open node.
- *
- *-------------------------------------------------------------------------
+ * The runtime manages exact results and reusable provider results, tracks
+ * writes that invalidate them, and exposes cache status through SQL.
+ * Providers describe their data through bioseq.cache.provider_api.
+ * Shared registries coordinate producers and readers, while the storage
+ * module owns the cached blocks.
  */
 module;
 
@@ -149,7 +146,7 @@ inline constexpr std::size_t k_relation_epoch_capacity =
 inline constexpr std::size_t k_maximum_relation_dependencies =
     static_cast<std::size_t>(k_maximum_dependencies_per_generation);
 
-/** One exact-plan syscache dependency, matching PostgreSQL PlanInvalItem. */
+/** Stores the catalog cache and hash used to invalidate an exact plan. */
 struct exact_syscache_dependency {
     std::int32_t cache_id = -1;
     std::uint32_t hash_value = 0;
@@ -159,7 +156,7 @@ struct exact_syscache_dependency {
 
 static_assert(std::is_trivially_copyable_v<exact_syscache_dependency>);
 
-/** PostgreSQL-backed checksums for the shared generic column-store format. */
+/** Uses PostgreSQL CRC32C and SHA-256 routines to checksum cached column data. */
 struct postgres_column_checksum_policy {
     [[nodiscard]] std::expected<std::uint32_t, checksum_error>
     block_crc32c(std::span<const std::byte> bytes) const noexcept {
@@ -215,7 +212,7 @@ struct postgres_column_checksum_policy {
     }
 };
 
-/** Shared counters exposed by bioseq_cache.stats(). */
+/** Shared cache counters used  by the statistics interface. */
 struct cache_shared_stats {
     pg_atomic_uint64 produced;
     pg_atomic_uint64 completed_hits;
@@ -325,7 +322,7 @@ struct registry_reader_owner {
     std::uint64_t registration_sequence;
 };
 
-/** One bounded registry record. Full key bytes make hash collisions harmless. */
+/** Stores one exact-result entry, including the full key used to check hash matches. */
 struct cache_entry {
     shared_entry_state state;
     std::uint32_t key_size;
@@ -373,7 +370,7 @@ struct cache_entry {
     unsigned char key[k_maximum_key_bytes];
 };
 
-/** Collision-checked bounded dependency epoch; protected by registry lock. */
+/** Tracks a relation's committed writes and pending transitions under the registry lock. */
 struct relation_epoch_slot {
     Oid database_oid;
     Oid relation_oid;
@@ -384,7 +381,7 @@ struct relation_epoch_slot {
     ConditionVariable changed;
 };
 
-/** Bounded postmaster-lifetime header. Variable cache state is added via DSA. */
+/** Shared exact-result entries, write counters and startup state for this servr run */
 struct cache_shared_state {
     std::uint32_t magic;
     std::uint32_t shared_abi_revision;
@@ -430,7 +427,7 @@ inline bool g_forced_coverage_domain_digest_active = false;
 inline cache_digest_256 g_forced_coverage_domain_digest{};
 #endif
 
-/** One allocation-free query-state link drained before DSA/storage detach. */
+/** Links a query state to backend-exit cleanup without a separate allocation. */
 struct backend_query_cleanup_link {
     backend_query_cleanup_link* previous = nullptr;
     backend_query_cleanup_link* next = nullptr;
@@ -475,7 +472,7 @@ void link_backend_query_cleanup(backend_query_cleanup_link& link,
     g_backend_query_cleanup_head = &link;
 }
 
-/** Drain query-owned capabilities while shared mappings are still attached. */
+/** Cleans up active query states before detaching their shared storage mappings. */
 void cache_backend_query_cleanup_exit(int, Datum) noexcept {
     while (g_backend_query_cleanup_head != nullptr) {
         backend_query_cleanup_link* link = g_backend_query_cleanup_head;
@@ -505,7 +502,7 @@ void register_backend_query_cleanup_exit() noexcept {
 }
 
 #if defined(BIOSEQ_CACHE_TESTING)
-/** Backend-local verifier faults exercise unavailable third-party AM paths. */
+/** Test faults for unsupported scans, access methods and dependency collection. */
 enum class test_exact_plan_fault : std::uint8_t {
     none,
     unknown_custom_scan,
@@ -514,13 +511,13 @@ enum class test_exact_plan_fault : std::uint8_t {
     dependency_finalization_declined,
 };
 
-/** Corrupt only one recipe copied into each exact wrapper plan. */
+/** Test fault that changes the expected digest in an exact-plan recipe. */
 enum class test_exact_recipe_fault : std::uint8_t {
     none,
     expected_digest_mismatch,
 };
 
-/** Checksum-consistent wire faults exercise total descriptor validation. */
+/** Test faults for invalid  coverage descriptors whose outer checksum still matches. */
 enum class test_coverage_descriptor_fault : std::uint8_t {
     none,
     raw_producer_var,
@@ -538,7 +535,7 @@ inline test_coverage_descriptor_fault g_test_coverage_descriptor_fault =
     test_coverage_descriptor_fault::none;
 #endif
 
-/** Backend-local dirty state follows savepoint commit and rollback exactly. */
+/** Records a relation write and the physical identity available when it was observed. */
 struct dirty_relation_observation {
     Oid relation_oid;
     bool physical_identity_valid;
@@ -589,9 +586,10 @@ void observe_runtime_provider_relation_write(Oid relation_oid,
 void mark_shared_cache_failed() noexcept;
 
 /**
- * Writers must bind the reusable registry even when their cache GUC is
- * disabled.  Do this while normal executor/utility error handling is still
- * available; transaction callbacks are too late to attach shared storage.
+ * Attaches writers to an existing reusable registry so their writes
+ * invalidate cached results even when caching is disabled for the
+ * session. This happens during normal execution, before transaction
+ * callbacks where attaching shared storage would be unsafe.
  */
 void bind_reusable_registry_for_write_invalidation() noexcept {
     if (!guc::preload_requested() || g_shared == nullptr ||
@@ -599,12 +597,9 @@ void bind_reusable_registry_for_write_invalidation() noexcept {
         pg_atomic_read_u32(&g_shared->bootstrap_failure) != 0) {
         return;
     }
-    /*
-     * A disabled writer must invalidate an existing reusable registry, but it
-     * must not become or wait for the lazy initializer.  Before READY there is
-     * no published reusable generation; the preallocated emergency write
-     * dependency remains the conservative transition authority.
-     */
+    /* While the shared registry is starting, use, the preallocated emergency
+     * dependency to record writes. A writer  with caching disabled should
+     * not wait for initialization or become the initializer. */
     const bootstrap_state current_bootstrap_state =
         shared_registry::shared_registry_bootstrap_state();
     if (current_bootstrap_state != bootstrap_state::ready) {
@@ -618,15 +613,13 @@ void bind_reusable_registry_for_write_invalidation() noexcept {
         return;
     }
     if (!bind_shared_reusable_registry()) {
-        /*
-         * The source write must remain fail-open, but reusable reads cannot
-         * remain enabled when this commit cannot invalidate their registry.
-         */
+        /* Let the write continue, but disable cache reads if its invalidation
+         * cannot reach the shared registry. */
         mark_shared_cache_failed();
     }
 }
 
-/** One query-local provider intent retained only for this planner invocation. */
+/** Keeps a provider's query analysis for this planner vnvocation. */
 struct nested_planner_intent {
     Query* query = nullptr;
     const provider_registry::provider* provider = nullptr;
@@ -655,7 +648,7 @@ enum class exact_bypass_marker : int {
     coverage_gate_finalizer = 2,
 };
 
-/** Per-planner invocation frame; PostgreSQL backends are single-threaded. */
+/** Holds cache-planning state and links nested planner invocations to their caller. */
 struct planner_frame {
     planner_frame* previous = nullptr;
     Query* delegated_query = nullptr;
@@ -685,11 +678,9 @@ inline bool g_producer_plan_capture_active = false;
 inline MemoryContext g_plan_capture_context = nullptr;
 
 /**
- * Remember each selected gate until the top root is created.  PostgreSQL
- * identifies outer Params before create_plan(), so adding a gate only to a
- * nested root is insufficient: its extParam later propagates into the top
- * SS_finalize_plan pass.  Re-applying the bounded records at the selected
- * top CustomPath is the first stable point after every identify pass.
+ * Remembers the boolean parameter that enables a cached source and
+ * adds it to this planner root and its ancestors. The saved records let
+ * finalization restore those memberships after planning nested queries.
  */
 [[nodiscard]] bool remember_selected_coverage_gate(PlannerInfo& root, int param_id) {
     planner_frame* frame = g_planner_frame;
@@ -723,7 +714,7 @@ inline MemoryContext g_plan_capture_context = nullptr;
     return true;
 }
 
-/** Re-union nested selected gates after all outer-Param identification. */
+/** Restores cached-source enable parameters in their planner roots after outer-parameter  discovery */
 [[nodiscard]] bool finalize_selected_coverage_gates(PlannerInfo& root) {
     planner_frame* frame = g_planner_frame;
     if (frame == nullptr || root.glob == nullptr || frame->selected_coverage_gate_overflow) {
@@ -757,7 +748,7 @@ struct bioseq_cache_state;
 
 inline constexpr std::size_t k_maximum_executor_start_producer_claims = 256;
 
-/** Query-context producers claimed while one chained ExecutorStart runs. */
+/** Tracks producer claims made while a chained ExecutorStart call is running. */
 struct executor_start_claim_frame {
     executor_start_claim_frame* previous = nullptr;
     std::array<reusable_coverage_state*, k_maximum_executor_start_producer_claims>
@@ -771,7 +762,7 @@ inline executor_start_claim_frame* g_executor_start_claim_frame = nullptr;
 
 [[nodiscard]] relation_epoch_slot* ensure_relation_epoch_locked(Oid relation_oid) noexcept;
 
-/** Initialize all shared atomics exactly once. */
+/** Initializes a new shared cache header, its counters and condition variables. */
 void initialize_shared_state(cache_shared_state& shared) noexcept {
     std::memset(&shared, 0, sizeof(shared));
     shared.magic = k_shared_magic;
@@ -824,7 +815,7 @@ void initialize_shared_state(cache_shared_state& shared) noexcept {
     }
 }
 
-/** Remember a possible result-changing write until its transaction outcome. */
+/** Records a possible write whose affected relations are unknown. */
 void mark_current_transaction_dirty() noexcept {
     if (IsTransactionState()) {
         bind_reusable_registry_for_write_invalidation();
@@ -843,7 +834,7 @@ enum class relation_physical_identity_status : std::uint8_t {
 inline constexpr std::size_t k_pg_rel_file_locator_identity_bytes =
     sizeof(Oid) + sizeof(Oid) + sizeof(RelFileNumber);
 
-/** Encode PostgreSQL's full relfile locator exactly, without digest aliases. */
+/** Copies a relation's physical file identity, or reports a partitioned parent or unknown identity. */
 [[nodiscard]] relation_physical_identity_status
 relation_physical_identity(Oid relation_oid, physical_identity* destination) noexcept {
     if (!OidIsValid(relation_oid) || destination == nullptr) {
@@ -903,7 +894,7 @@ copy_provider_physical_identity(const provider_registry::physical_identity* sour
     return true;
 }
 
-/** Record one relation/physical write, falling back when the set is full. */
+/** Records a relation write for cache invalidation, using database-wide tracking if per-relation tracking fails. */
 void mark_current_transaction_relation_dirty(
     Oid relation_oid, const provider_registry::physical_identity* provider_identity = nullptr) {
     if (!IsTransactionState()) {
@@ -960,7 +951,7 @@ void mark_current_transaction_relation_dirty(
     }
 }
 
-/** Provider write observations join the same savepoint-aware epoch ledger. */
+/** Records provider-reported writes, using database-wide tracking when identity checks fail. */
 void observe_provider_relation_write(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
@@ -978,14 +969,14 @@ void observe_provider_relation_write(
     mark_current_transaction_relation_dirty(static_cast<Oid>(relation_oid), provider_identity);
 }
 
-/** Implemented after the reusable-registry lock adapters are available. */
+// Defined below the registry helpers used to add reusable paths.
 void consider_provider_reusable_paths(PlannerInfo*,
                                       RelOptInfo*,
                                       unsigned int,
                                       RangeTblEntry*,
                                       const provider_registry::provider*) noexcept;
 
-/** Provider-owned path hook rendezvous; every optional failure is fail-open. */
+/** Lets a provider offer reusable paths when reusable caching is enabled and attached. */
 void observe_provider_rel_paths(PlannerInfo* root,
                                 RelOptInfo* relation,
                                 unsigned int range_table_index,
@@ -997,18 +988,18 @@ void observe_provider_rel_paths(PlannerInfo* root,
     consider_provider_reusable_paths(root, relation, range_table_index, range_entry, provider);
 }
 
-/** True when at least one non-aborted savepoint performed a write. */
+/** Reports whether the  transaction has recorded writes or requires database-wide invalidation. */
 [[nodiscard]] bool transaction_is_dirty() noexcept {
     return g_dirty_observations.transaction_dirty();
 }
 
-/** Drop all backend-local transaction frames without retaining stale pointers. */
+/** Clears this backend's write observations and deferred-invalidation flag. */
 void clear_dirty_frames() noexcept {
     g_dirty_observations.reset();
     g_write_invalidation_deferred_to_emergency = false;
 }
 
-/** Remove one subtransaction frame and optionally merge it into its parent. */
+/** Discards a rolled-back savepoint's writes or merges a committed savepoint into its parent. */
 void finish_dirty_subtransaction(SubTransactionId child_id,
                                  SubTransactionId parent_id,
                                  bool committed) noexcept {
@@ -1023,7 +1014,7 @@ void finish_dirty_subtransaction(SubTransactionId child_id,
     return static_cast<std::size_t>(mixed % k_relation_epoch_capacity);
 }
 
-/** Find one provisioned dependency while the registry lock is held. */
+/** Finds this database's relation counter while the caller holds the registry lock. */
 [[nodiscard]] relation_epoch_slot* find_relation_epoch_locked(Oid relation_oid) noexcept {
     const std::size_t start = relation_epoch_start(MyDatabaseId, relation_oid);
     for (std::size_t probe = 0; probe < k_relation_epoch_capacity; ++probe) {
@@ -1039,7 +1030,7 @@ void finish_dirty_subtransaction(SubTransactionId child_id,
     return nullptr;
 }
 
-/** Provision one fixed dependency slot while allocation and ERROR are legal. */
+/** Finds or creates a relation counter, returning nullptr jhen the fixed table is full. */
 [[nodiscard]] relation_epoch_slot* ensure_relation_epoch_locked(Oid relation_oid) noexcept {
     const std::size_t start = relation_epoch_start(MyDatabaseId, relation_oid);
     for (std::size_t probe = 0; probe < k_relation_epoch_capacity; ++probe) {
@@ -1060,7 +1051,7 @@ void finish_dirty_subtransaction(SubTransactionId child_id,
     return nullptr;
 }
 
-/** Read the current precise epoch; unseen relations begin at epoch one. */
+/** Reads a relation's committed-write counter, using one for relations not yet recorded. */
 [[nodiscard]] std::uint64_t relation_dependency_epoch(Oid relation_oid) noexcept {
     if (g_shared == nullptr || !OidIsValid(relation_oid)) {
         return 0;
@@ -1083,7 +1074,7 @@ void finish_dirty_subtransaction(SubTransactionId child_id,
     return epoch;
 }
 
-/** Canonical conservative dependency used by every exact write bracket. */
+/** Describes the database-wide write counter used, when tracking exact-result dependencies. */
 [[nodiscard]] dependency_version database_write_dependency_version() noexcept {
     if (g_shared == nullptr || !OidIsValid(MyDatabaseId)) {
         return {};
@@ -1100,7 +1091,7 @@ void finish_dirty_subtransaction(SubTransactionId child_id,
     };
 }
 
-/** Convert one precise/topology observation into its directory capability. */
+/** Describes a relation dependency using its write counter and available physical  identity. */
 [[nodiscard]] dependency_version
 relation_dependency_version(const dirty_relation_observation& observation) noexcept {
     if (!OidIsValid(observation.relation_oid)) {
@@ -1124,7 +1115,7 @@ relation_dependency_version(const dirty_relation_observation& observation) noexc
     };
 }
 
-/** Provision the conservative owner capability during normal execution. */
+/** Records a database-wide dependency write, using emergency tracking if registration fails. */
 void observe_runtime_database_dependency_write() noexcept {
     const dependency_runtime::dependency_runtime_result result =
         dependency_runtime::observe_dirty_dependency(database_write_dependency_version());
@@ -1133,7 +1124,7 @@ void observe_runtime_database_dependency_write() noexcept {
     }
 }
 
-/** Ordinary executor/utility writes advance their exact -1 relation key. */
+/** Records an executor or utility write under its relation dependency. */
 void observe_runtime_relation_write(const dirty_relation_observation& observation) noexcept {
     const dependency_version version = relation_dependency_version(observation);
     const dependency_runtime::dependency_runtime_result result =
@@ -1145,7 +1136,7 @@ void observe_runtime_relation_write(const dirty_relation_observation& observatio
     }
 }
 
-/** Provider callbacks establish precise relation ownership before PRE_COMMIT. */
+/** Records a provider write with the relation's physical identity */
 void observe_runtime_provider_relation_write(Oid relation_oid,
                                              const physical_identity& relation_identity) noexcept {
     const dirty_relation_observation observation{
@@ -1163,7 +1154,7 @@ void observe_runtime_provider_relation_write(Oid relation_oid,
     }
 }
 
-/** Advance one precise dependency under the registry lock; false means full. */
+/** Advances a relation's write counter under the registry lock, returning false if its table is full. */
 [[nodiscard]] bool bump_relation_epoch_locked(Oid relation_oid) noexcept {
     relation_epoch_slot* slot = ensure_relation_epoch_locked(relation_oid);
     if (slot == nullptr) {
@@ -1176,7 +1167,7 @@ void observe_runtime_provider_relation_write(Oid relation_oid,
     return true;
 }
 
-/** Finalize this backend's precise transition prefix without allocation. */
+/** Ends recorded relation transitions and advances their counters on commit. */
 [[nodiscard]] bool finish_dirty_dependency_transitions(bool committed) noexcept {
     bool coarse = g_force_coarse_transition || g_dirty_observations.coarse();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -1199,10 +1190,14 @@ void observe_runtime_provider_relation_write(Oid relation_oid,
     return coarse;
 }
 
-/** Defined after reusable lock/CV adapters; called only during commit cleanup. */
+// Defined after the lock helpers used for reusable-result invalidation.
 void invalidate_dirty_reusable_generations() noexcept;
 
-/** Announce a commit transition so concurrent captures cannot race visibility. */
+/**
+ * Marks this database and the affected relations as having a write
+ * transition  in progress. Readers can detect the transition while a
+ * commit or prepared-transaction operation changes which rows are visible.
+ */
 void begin_database_transition(
     database_transition_purpose purpose = database_transition_purpose::top_level_write) noexcept {
     if (g_database_transition_state != database_transition_state::idle ||
@@ -1256,7 +1251,12 @@ void begin_database_transition(
     ConditionVariableBroadcast(&g_shared->database_changed);
 }
 
-/** Complete or abandon an announced transition in visibility-safe order. */
+/**
+ * Ends a write transition. On commit, it advances write counters and
+ * invalidates reusable results before ending the database-wide transition
+ * and waking readers. An aborted transitin clears its counters without
+ * publishing new write versions.
+ */
 void finish_database_transition(bool committed) noexcept {
     if (g_database_transition_owner_token == 0 ||
         g_database_transition_state == database_transition_state::idle ||
@@ -1301,7 +1301,7 @@ void finish_database_transition(bool committed) noexcept {
     ConditionVariableBroadcast(&g_shared->database_changed);
 }
 
-/** Release this backend's shared transition ownership before shmem detach. */
+/** Finishes any remaining write transition before backend exit detaches shared memory. */
 void cache_backend_transition_exit(int, Datum) {
     if (g_database_transition_owner_token == 0 ||
         g_database_transition_state == database_transition_state::idle) {
@@ -1318,7 +1318,7 @@ void cache_backend_transition_exit(int, Datum) {
     clear_dirty_frames();
 }
 
-/** Publish write epochs only for successful top-level outcomes. */
+/** Starts write transitions before commit or prepare, then finishes them for the transaction  outcome. */
 void cache_transaction_callback(XactEvent event, void*) {
     switch (event) {
     case XACT_EVENT_PRE_COMMIT:
@@ -1342,7 +1342,7 @@ void cache_transaction_callback(XactEvent event, void*) {
         break;
     case XACT_EVENT_PARALLEL_COMMIT:
     case XACT_EVENT_PARALLEL_ABORT:
-        /* Only the leader publishes the database-wide transition. */
+        /* The leader owns the database-wide transition for parallel work. */
         clear_dirty_frames();
         break;
     case XACT_EVENT_PARALLEL_PRE_COMMIT:
@@ -1350,7 +1350,7 @@ void cache_transaction_callback(XactEvent event, void*) {
     }
 }
 
-/** Savepoint rollback discards dirty state; release merges it upward. */
+/** Updates recorded writes when a savepoint commits or rolls back. */
 void cache_subtransaction_callback(SubXactEvent event,
                                    SubTransactionId child_id,
                                    SubTransactionId parent_id,
@@ -1397,10 +1397,7 @@ void release_reusable_coverage_partition(void*, std::uint32_t partition) noexcep
     };
 }
 
-/**
- * The bridge definition remains before the implementation so provider hooks
- * can call it without exposing planner internals through the rendezvous ABI.
- */
+// Keep the provider bridge separate from the planner implementation below.
 void consider_provider_reusable_paths_impl(PlannerInfo*,
                                            RelOptInfo*,
                                            unsigned int,
@@ -1551,7 +1548,7 @@ void append_backend_identity(backend_identity_batch& batch,
     batch.identities[batch.count++] = identity;
 }
 
-/** Deduplicate and probe only after every cache lock has been released. */
+/** Probes each distinct backend identity. The caller must release cache locks first. */
 void probe_backend_liveness(const backend_identity_batch& batch,
                             backend_liveness_sample& sample) noexcept {
     if (!batch.complete) {
@@ -1588,7 +1585,7 @@ struct reusable_janitor_liveness_workspace {
         dependency_vector{};
 };
 
-/** Cache-lock-safe lookup; an unsampled or changed observation stays live. */
+/** Looks up a saved liveness result, treating missing or changed owner records as alive. */
 [[nodiscard]] bool
 sampled_reusable_owner_alive(void* opaque,
                              const reusable_janitor_owner_observation& observation) noexcept {
@@ -1604,7 +1601,7 @@ sampled_reusable_owner_alive(void* opaque,
     return true;
 }
 
-/** Deduplicate backend probes while retaining exact owner ABA observations. */
+/** Probes each, distinct backend once and returns liveness for every saved owner record. */
 void probe_reusable_owner_liveness(std::span<const reusable_janitor_owner_observation> observations,
                                    std::span<bool> alive) noexcept {
     if (alive.size() < observations.size()) {
@@ -1629,7 +1626,7 @@ void probe_reusable_owner_liveness(std::span<const reusable_janitor_owner_observ
     }
 }
 
-/** Request the bounded exact-result header and the pinned-DSA shared root. */
+/** Requests the exact-result registry, its lock and the storage startup resources. */
 void cache_shmem_request() {
     if (const auto previous = executor::lifecycle::previous_shmem_request(); previous != nullptr) {
         previous();
@@ -1639,7 +1636,7 @@ void cache_shmem_request() {
     storage::request_storage_resources();
 }
 
-/** Attach or initialize the postmaster-lifetime cache header. */
+/** Attaches or initializes the shared cache  header and starts the storage registry */
 void cache_shmem_startup() {
     if (const auto previous = executor::lifecycle::previous_shmem_startup(); previous != nullptr) {
         previous();
@@ -1668,7 +1665,7 @@ void cache_shmem_startup() {
     }
 }
 
-/** Inspect PostgreSQL's restart-reconstructed prepared-xact dummy procs. */
+/** Checks this database's prepared-transaction records while the caller holds ProcArrayLock. */
 [[nodiscard]] bool database_has_prepared_xacts_locked(Oid database_oid) noexcept {
     if (max_prepared_xacts <= 0) {
         return false;
@@ -1691,7 +1688,7 @@ void cache_shmem_startup() {
     return false;
 }
 
-/** Dynamic 2PC gate survives restart and covers every prepared GID. */
+/** Checks whether prepared transactions require cache reads to be disabled for this database. */
 [[nodiscard]] bool database_has_prepared_xacts(Oid database_oid) noexcept {
     if (max_prepared_xacts <= 0) {
         return false;
@@ -1702,7 +1699,7 @@ void cache_shmem_startup() {
     return present;
 }
 
-/** Bind process-local PostgreSQL pointers from the one validated DSA root. */
+/** Attaches this backend to the reusable registry and its shared locks and wait queues. */
 [[nodiscard]] bool bind_shared_reusable_registry() noexcept {
     if (g_reusable_registry && g_reusable_membership_lock != nullptr &&
         g_reusable_exact_locks != nullptr && g_reusable_coverage_locks != nullptr &&
@@ -1738,10 +1735,9 @@ void cache_shmem_startup() {
 }
 
 /**
- * Administrative callers must not mistake an unbound process-local adapter
- * for an empty shared registry.  Fresh backends attach through the validated
- * shared root; once the cache header is ready, attachment failure is a
- * fail-closed administrative error rather than a silent zero-row result.
+ * Attaches an administrative operation to the shared registry. If the
+ * cache header says the registry should be available, aqtachment failure
+ * raises an error so the operation cannot report an empty cache by mistake.
  */
 [[nodiscard]] bool bind_admin_reusable_registry(const char* operation) {
     if (bind_shared_reusable_registry()) {
@@ -1761,7 +1757,7 @@ void cache_shmem_startup() {
     return false;
 }
 
-/** True only when preload installed and the shared ABI is usable. */
+/** Checks cache startup, attachment  and correctness state, and excludes prepared transactions. */
 [[nodiscard]] bool shared_cache_ready() noexcept {
     const bool header_ready = guc::preload_requested() && g_shared != nullptr &&
                               g_shared->magic == k_shared_magic &&
@@ -1791,7 +1787,7 @@ void cache_shmem_startup() {
 
 inline constexpr std::uint32_t k_coverage_descriptor_magic = 0x42434431U;
 
-/** Find one provider column by attno without trusting array position. */
+/** Finds a provider column by its column number, or returns nullptr. */
 [[nodiscard]] const bioseq_cache_column_schema*
 coverage_schema_column(const bioseq_cache_column_schema* columns,
                        std::size_t column_count,
@@ -1820,7 +1816,7 @@ struct coverage_predicate_contract {
     bool valid = true;
 };
 
-/** Admit only immutable built-in comparison operators. */
+/** Accepts binary boolean operators with an immutable pg_catalog function and a selectivity estimator. */
 [[nodiscard]] bool coverage_comparison_operator_valid(const OpExpr& operation) noexcept {
     const Oid function_oid = get_opcode(operation.opno);
     return list_length(operation.args) == 2 && !operation.opretset &&
@@ -1830,7 +1826,7 @@ struct coverage_predicate_contract {
            OidIsValid(get_oprrest(operation.opno));
 }
 
-/** Check one Var against either the provider output or exact wire sentinel. */
+/** Checks a column reference against the provider schema and its expected query or stored binding. */
 [[nodiscard]] bool
 coverage_predicate_var_valid(const Var& variable,
                              const coverage_predicate_contract& contract) noexcept {
@@ -1858,7 +1854,7 @@ coverage_predicate_var_valid(const Var& variable,
            variable.varattnosyn == variable.varattno && variable.location == -1;
 }
 
-/** Total whitelist used after cache-artifact syntax decoding. */
+/** Checks predicate nodes against the supported expression types and column-binding rules. */
 bool validate_coverage_predicate_walker(Node* node, void* opaque) {
     if (node == nullptr) {
         return false;
@@ -1921,7 +1917,7 @@ bool validate_coverage_predicate_walker(Node* node, void* opaque) {
     return expression_tree_walker(node, validate_coverage_predicate_walker, opaque);
 }
 
-/** Validate the exact binding-neutral Node representation without repair. */
+/** Checks that a predicate is boolean and already uses the stored column-binding format. */
 [[nodiscard]] bool normalized_coverage_predicate_valid(const bioseq_cache_path_domain& domain,
                                                        const Expr* predicate) {
     if (predicate == nullptr) {
@@ -1936,7 +1932,7 @@ bool validate_coverage_predicate_walker(Node* node, void* opaque) {
     return contract.valid && exprType(reinterpret_cast<const Node*>(predicate)) == BOOLOID;
 }
 
-/** Copy provider Nodes while erasing all query-global binding/location state. */
+/** Copies a  predicate, replacing query relation numbers with the stored column marker. */
 Node* normalize_coverage_predicate_mutator(Node* node, void* opaque) {
     if (node == nullptr) {
         return nullptr;
@@ -2022,7 +2018,11 @@ Node* normalize_coverage_predicate_mutator(Node* node, void* opaque) {
     return result;
 }
 
-/** Normalize the provider's current raw predicate in planner-owned memory. */
+/**
+ * Copies and normalizes a provider predicate in planner memory.
+ * Unsupported expressions make caching unavailable for this path.
+ * Query cdncellation and shutdown errors still propagate.
+ */
 [[nodiscard]] Expr* normalize_coverage_predicate_fail_open(const bioseq_cache_path_domain& domain,
                                                            Index relation_index,
                                                            MemoryContext planner_context) noexcept {
@@ -2066,7 +2066,7 @@ Node* normalize_coverage_predicate_mutator(Node* node, void* opaque) {
     return const_cast<Expr*>(accepted);
 }
 
-/** Compute the stable logical occurrence independently of raw RTI values. */
+/** Identifies this occurrence of a provider table, including its logical parent for partition scans. */
 [[nodiscard]] std::optional<reuse::coverage_fragment_binding_signature>
 coverage_fragment_binding_base(PlannerInfo* root,
                                const RelOptInfo* relation,
@@ -2123,7 +2123,7 @@ coverage_fragment_binding_base(PlannerInfo* root,
                                                                             : std::nullopt;
 }
 
-/** Pointer-free persisted provider contract stored in the reusable registry. */
+/** Stored descriptor header for provider columns, predicate bytes and table binding */
 struct coverage_descriptor_header {
     std::uint32_t magic = k_coverage_descriptor_magic;
     std::uint32_t format_revision = k_coverage_descriptor_format_revision;
@@ -2149,7 +2149,7 @@ struct coverage_descriptor_header {
 static_assert(std::is_standard_layout_v<coverage_descriptor_header>);
 static_assert(std::is_trivially_copyable_v<coverage_descriptor_header>);
 
-/** Planner-owned reconstruction of one pointer-free coverage descriptor. */
+/** Holds a decoded provider descriptor and the planner memory  context that owns its data. */
 struct planner_decoded_coverage {
     MemoryContext owner_context = nullptr;
     bioseq_cache_path_domain domain{};
@@ -2171,7 +2171,7 @@ struct planner_decoded_coverage {
     return total <= k_maximum_provider_recipe_bytes;
 }
 
-/** CRC covers the complete variable payload while allowing header inspection. */
+/** Checksums the descriptor payload after the fixed header. */
 [[nodiscard]] std::optional<std::uint32_t>
 coverage_descriptor_payload_crc32c(std::span<const std::byte> descriptor) noexcept {
     if (descriptor.size() < sizeof(coverage_descriptor_header)) {
@@ -2218,7 +2218,11 @@ coverage_descriptor_payload_crc32c(std::span<const std::byte> descriptor) noexce
     return true;
 }
 
-/** Serialize validated provider POD and Nodes without retaining any pointer. */
+/**
+ * Stores a validated provider descriptor as bytes in planner memory.
+ * Column metadata is, copied directly and PostgreSQL nodes are serialized,
+ * so the stored form has no pointers into the current plan.
+ */
 [[nodiscard]] bytea*
 serialize_coverage_descriptor_fail_open(const bioseq_cache_path_domain& domain,
                                         const reuse::coverage_fragment_binding_signature& binding,
@@ -2354,7 +2358,11 @@ serialize_coverage_descriptor_fail_open(const bioseq_cache_path_domain& domain,
     return stringToNode(serialized);
 }
 
-/** Reconstruct one source in disposable planner memory before releasing pin. */
+/**
+ * Checks and decodes a stored descriptor into a separate planner memory
+ * context. The result owns copies of its columns and PostgreSQL nodes,
+ * so callers can release the shared source after decoding succeeds.
+ */
 [[nodiscard]] bool decode_coverage_descriptor_fail_open(
     std::span<const std::byte> bytes,
     MemoryContext planner_context,
@@ -2507,7 +2515,7 @@ struct coverage_descriptor_fault_var {
                test_coverage_descriptor_fault::binding_signature_mismatch;
 }
 
-/** Replace exactly one sentinel Var so mixed-form faults remain deterministic. */
+/** Changes the first column reference to the test's relation number, then stops. */
 bool mutate_coverage_descriptor_var_walker(Node* node, void* opaque) {
     if (node == nullptr) {
         return false;
@@ -2526,7 +2534,7 @@ bool mutate_coverage_descriptor_var_walker(Node* node, void* opaque) {
     return expression_tree_walker(node, mutate_coverage_descriptor_var_walker, opaque);
 }
 
-/** Rebuild one copied candidate with a valid outer CRC around bad inner data. */
+/** Copies a descriptor with invalid test data and a matching payload checksum. */
 [[nodiscard]] bytea*
 inject_coverage_descriptor_fault_fail_open(const bytea* original,
                                            MemoryContext planner_context) noexcept {
@@ -2700,7 +2708,12 @@ current_reusable_security_namespace(const cache_digest_256& provider_security_di
     };
 }
 
-/** Capture both provider-defined canonical keys and their SHA-256 directories. */
+/**
+ * Builds provider cache keys that include the security context  and
+ * table occurrence, then computes their SHA-256 hashes. The generation
+ * key also includes the normalized predicate, so results with different
+ * filters have different key bytes.
+ */
 [[nodiscard]] bool capture_planner_semantic_keys_fail_open(
     const provider_registry::provider* provider,
     const bioseq_cache_path_domain& domain,
@@ -2878,7 +2891,7 @@ planner_security_namespace(const reusable_security_namespace& source) noexcept {
 
 inline constexpr std::uint32_t k_coverage_current_plan_magic = 0x42435031U;
 
-/** Fixed prefix of executor metadata embedded as one bytea Const Node. */
+/** Header for the provider keys and descriptor savd in a plan's bytea constant. */
 struct coverage_current_plan_header {
     std::uint32_t magic = k_coverage_current_plan_magic;
     std::uint32_t format_revision = reuse::k_reusable_plan_format_revision;
@@ -2951,7 +2964,7 @@ struct coverage_dependency_ticket {
     bool valid = false;
 };
 
-/** Refuse a reusable snapshot that can observe this backend's own writes. */
+/** Reports whether this transaction may have written to the relation behind a reusable result. */
 [[nodiscard]] bool
 current_transaction_touches_dependency(Oid relation_oid,
                                        const physical_identity& dependency_identity) noexcept {
@@ -2974,7 +2987,12 @@ current_transaction_touches_dependency(Oid relation_oid,
     return false;
 }
 
-/** The current encoding admits one precise provider leaf plus the coarse overflow epoch. */
+/**
+ * Captures a dependency version for one provider table. The provider
+ * must report all writes. Capture checks for our own writes, prepared
+ * transactions and concurrent  write transitions, then verifies the
+ * relation and database-wide fallback counters again after hashing.
+ */
 [[nodiscard]] coverage_dependency_ticket
 mint_coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
                                 const provider_registry::provider* provider,
@@ -3145,18 +3163,20 @@ void broadcast_reusable_generation(const reusable_generation_reference& referenc
     }
 }
 
-/** Commit-time invalidation is bounded, ABA-safe, and wakes after lock drop. */
+/**
+ * Invalidates reusable results affected by committed writes. Known
+ * physical identities limit the search Missing identity information
+ * requires invalidation across the database. Waiters are woken after
+ * the registry lock is released.
+ */
 void invalidate_dirty_reusable_generations() noexcept {
     if (MyDatabaseId == InvalidOid) {
         return;
     }
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
-        /*
-         * A dirty preloaded backend should have bound during write
-         * observation.  Failing closed here prevents stale COMPLETE replay if
-         * that invariant is ever broken without attempting an unsafe attach
-         * from XACT_EVENT_COMMIT.
-         */
+        /* Write observation should have attached this backend already. At
+         * commit, disable cache reads if attachment is missing instead of
+         * trying to initialize shared storage from the transaction callback. */
         if (guc::preload_requested() && g_shared != nullptr &&
             !g_write_invalidation_deferred_to_emergency &&
             shared_registry::shared_registry_bootstrap_state() == bootstrap_state::ready &&
@@ -3288,7 +3308,7 @@ void invalidate_dirty_reusable_generations() noexcept {
     }
 }
 
-/** Membership mutations are centralized for lock-order and future owner tokens. */
+/** Claims a reusable result under  the membership lock and retires any displaced manifests. */
 [[nodiscard]] reusable_claim_result
 claim_current_reusable_generation(const reusable_claim_request& request) noexcept {
     reusable_claim_result result{};
@@ -3352,7 +3372,7 @@ void mark_shared_cache_failed() noexcept {
     }
 }
 
-/** Dependency -> membership -> partition is the single claim lock order. */
+/** Claims a result while the dependency lock is held, taking membership before, partition locks. */
 bool apply_runtime_dependency_claim(void* opaque,
                                     std::span<const dependency_vector_entry> entries) noexcept {
     auto* context = static_cast<runtime_dependency_claim_context*>(opaque);
@@ -3367,7 +3387,7 @@ bool apply_runtime_dependency_claim(void* opaque,
     return static_cast<bool>(context->claim);
 }
 
-/** Undo pins or fail a newly linked producer after a locked recheck fails. */
+/** Undoes a claim afer dependency validation fails, releasing a reference or failing the new producer. */
 void rollback_runtime_dependency_claim(void* opaque) noexcept {
     auto* context = static_cast<runtime_dependency_claim_context*>(opaque);
     if (context == nullptr || !context->claim) {
@@ -3407,7 +3427,12 @@ void retire_runtime_claim_manifests(const reusable_claim_result& claim) noexcept
     }
 }
 
-/** Atomically hand one canonical dependency capability into the registry. */
+/**
+ * Claims a reusable result with a checked snapshot of its dependencies.
+ * The claim is made during a locked dependency check and is undone if
+ * the final check fails. A new producer keeps the saved dependency
+ * versions for later  publication and replay checks.
+ */
 [[nodiscard]] reusable_claim_result claim_reusable_generation_with_dependencies(
     reusable_claim_request request,
     std::span<const dependency_version> dependencies,
@@ -3571,7 +3596,7 @@ storage_waiter_owner(const reusable_reference_token& waiter) noexcept {
     return false;
 }
 
-/** Transfer every still-live registry waiter before COMPLETE is visible. */
+/** Registers manifest waiters before publication and checks that every remaining registry waiter was included. */
 [[nodiscard]] bool
 register_runtime_manifest_waiters(const reusable_generation_reference& reference,
                                   const storage::manifest_handle& manifest,
@@ -3635,7 +3660,7 @@ register_runtime_manifest_waiters(const reusable_generation_reference& reference
     return complete;
 }
 
-/** Dependency -> membership -> partition terminal publication. */
+/** Publishes a completed result while dependency, membership and partition locks protect the handoff. */
 bool apply_runtime_dependency_publish(void* opaque,
                                       std::span<const dependency_vector_entry> entries) noexcept {
     auto* context = static_cast<runtime_dependency_publish_context*>(opaque);
@@ -3677,7 +3702,7 @@ bool apply_runtime_dependency_publish(void* opaque,
     return context->action_applied;
 }
 
-/** An emergency-epoch race after COMPLETE invalidates registry ownership. */
+/** Invalidates a published result when the final dependency check detects a change. */
 void rollback_runtime_dependency_publish(void* opaque) noexcept {
     auto* context = static_cast<runtime_dependency_publish_context*>(opaque);
     if (context == nullptr || !context->action_applied || g_reusable_membership_lock == nullptr) {
@@ -3696,7 +3721,7 @@ void rollback_runtime_dependency_publish(void* opaque) noexcept {
     }
 }
 
-/** Validate the immutable vector borrowed through a live generation reference. */
+/** Checks a pinned result's saved dependencies and optionally runs an action under their lock. */
 [[nodiscard]] dependency_runtime::dependency_runtime_result
 validate_reusable_generation_dependencies_locked(
     const reusable_generation_snapshot& snapshot,
@@ -3811,7 +3836,7 @@ begin_current_reusable_generation(const reusable_diagnostic_text_update& diagnos
     return result;
 }
 
-/** ABA-refresh producer diagnostics while membership remains stable. */
+/** Updates a producer's diagnostic text while holding the registry membership lock */
 [[nodiscard]] reusable_registry_error
 store_current_reusable_diagnostics(const reusable_diagnostic_text_update& diagnostics) noexcept {
     if (!diagnostics.reference || g_reusable_membership_lock == nullptr) {
@@ -3914,7 +3939,7 @@ void fail_current_reusable_generation(const reusable_generation_reference& refer
     return result;
 }
 
-/** Persist current exact-generation identity for executor-time claiming. */
+/** Saves provider keys and the coverage descriptor in a plan constant for execution. */
 [[nodiscard]] Const* make_current_coverage_plan_node(const provider_registry::provider& provider,
                                                      const bioseq_cache_path_domain& domain,
                                                      const planner_semantic_keys& keys,
@@ -4011,7 +4036,7 @@ void destroy_decoded_source_mapping_plan(decoded_source_mapping_plan& plan) noex
     };
 }
 
-/** NIL is the provider-independent sentinel; otherwise node zero is the revision. */
+/** Reads the  positive revision at the start of a provider list, using zero for NIL. */
 [[nodiscard]] bool source_mapping_private_revision(const List* nodes,
                                                    std::uint32_t* revision) noexcept {
     if (revision == nullptr) {
@@ -4034,7 +4059,7 @@ void destroy_decoded_source_mapping_plan(decoded_source_mapping_plan& plan) noex
     return true;
 }
 
-/** PG-owned opaque-tail copy produced before any C++ byte owner exists. */
+/** PostgreSQL-owned serialization of provider dta after the list's revision field. */
 struct canonical_source_mapping_private {
     char* bytes = nullptr;
     std::size_t size = 0;
@@ -4046,7 +4071,7 @@ struct canonical_source_mapping_private {
 
 static_assert(std::is_trivially_destructible_v<canonical_source_mapping_private>);
 
-/** Canonicalize the opaque tail under the same generic Node byte budget. */
+/** Serializes the provider list after its revision field, and checks the byte limit. */
 [[nodiscard]] canonical_source_mapping_private
 canonicalize_source_mapping_private_bytes(const List* nodes) {
     canonical_source_mapping_private result{};
@@ -4375,7 +4400,7 @@ source_mapping_private_revisions_match(const bioseq_cache_path_domain& consumer,
     return lappend(result, makeInteger(static_cast<std::int32_t>(entry.reserved)));
 }
 
-/** Build the exact fixed-shape, self-authenticating mapping plan List. */
+/** Saves validated column maps and schema hashes in a copyable PostgreSQL list. */
 [[nodiscard]] List* make_source_mapping_plan_node(const bioseq_cache_path_domain& consumer,
                                                   const bioseq_cache_reusable_source& source,
                                                   const bioseq_cache_decorated_path& decorated,
@@ -4517,7 +4542,7 @@ decode_source_mapping_entry_node(const void* node, bioseq_cache_column_map_entry
     return true;
 }
 
-/** Strictly decode fixed tags, lengths, counts, entry Nodes, and digests. */
+/** Decodes a mapping list after checking its format, field types and sizes. */
 [[nodiscard]] bool decode_source_mapping_plan_node(const void* node,
                                                    decoded_source_mapping_plan* output) {
     if (node == nullptr || output == nullptr || !IsA(node, List)) {
@@ -4584,7 +4609,7 @@ decode_source_mapping_entry_node(const void* node, bioseq_cache_column_map_entry
     return true;
 }
 
-/** Recompute every fingerprint and the generic semantic map validator. */
+/** Checks a saved column map against the current schemas and recomputed hashes. */
 [[nodiscard]] bool
 validate_source_mapping_plan_node(const void* node,
                                   const bioseq_cache_path_domain& consumer,
@@ -4711,7 +4736,7 @@ struct planner_coverage_predicate_instances {
     Expr* replay = nullptr;
 };
 
-/** Resolve exactly one consumer column with the provider's source meaning. */
+/** Finds the consumer column with the same meaning and type. Rejects multiple matches at different  column numbers. */
 [[nodiscard]] const bioseq_cache_column_schema*
 coverage_consumer_column_for_source(const bioseq_cache_path_domain& consumer,
                                     const bioseq_cache_column_schema& source) noexcept {
@@ -4732,7 +4757,7 @@ coverage_consumer_column_for_source(const bioseq_cache_path_domain& consumer,
     return match;
 }
 
-/** Dense replay attno is the rank of one real attno in sorted schema order. */
+/** Converts a real column number to its one-based position in the sorted replay schema. */
 [[nodiscard]] AttrNumber coverage_synthetic_attno(const bioseq_cache_path_domain& domain,
                                                   std::uint32_t consumer_attno) noexcept {
     if (consumer_attno == 0 || coverage_schema_column(domain.boundary_columns,
@@ -4750,7 +4775,7 @@ coverage_consumer_column_for_source(const bioseq_cache_path_domain& consumer,
                                                                      : InvalidAttrNumber;
 }
 
-/** Deep-copy one exact sentinel into either executable binding role. */
+/** Copies a stored predicate and binds its columns to the provider scan or cached-row replay. */
 Node* rebind_coverage_predicate_mutator(Node* node, void* opaque) {
     if (node == nullptr) {
         return nullptr;
@@ -4804,7 +4829,7 @@ Node* rebind_coverage_predicate_mutator(Node* node, void* opaque) {
     return reinterpret_cast<Node*>(rebound);
 }
 
-/** Instantiate independent residual and replay copies from immutable wire P. */
+/** Builds separate predicate copies for filtering the provider scan and replaying cached rows. */
 [[nodiscard]] bool
 instantiate_coverage_predicates(const bioseq_cache_path_domain& source,
                                 const reuse::coverage_fragment_binding_signature& source_binding,
@@ -4850,7 +4875,7 @@ instantiate_coverage_predicates(const bioseq_cache_path_domain& source,
     return true;
 }
 
-/** Planner-context callback target; idempotent token clearing prevents leaks. */
+/** Releases a candidate's provisional registry pin during planner cleanup. */
 void release_planner_pin_noerror(void* opaque,
                                  const cache_entry_id&,
                                  reuse::candidate_reference_kind kind) noexcept {
@@ -4866,9 +4891,10 @@ void release_planner_pin_noerror(void* opaque,
 [[nodiscard]] const CustomPathMethods& coverage_path_methods();
 
 /**
- * Build one coverage wrapper from a provider-owned path.  Candidate pins are
- * copied into planner-context cleanup records before any provider callback;
- * every callback then releases its pin after copying validated output.
+ * Replaces a provider path with a cache path that can reuse matching
+ * results and run the provider for remaining rows. Candidate data is
+ * copied while pinned, then validated and mapped to  the query's columns.
+ * Planner-context cleanup records hold the pins until they are released.
  */
 [[nodiscard]] bool wrap_one_provider_path(PlannerInfo* root,
                                           RelOptInfo* relation,
@@ -5201,7 +5227,7 @@ void release_planner_pin_noerror(void* opaque,
                                      candidate_private,
                                      copyObject(current_predicates.replay));
     private_nodes = lappend(private_nodes, makeInteger(current_gate.param_id));
-    /* Subplan roots remain bypassed unless the finalized main-tree walk clears. */
+    /* Start with caching bypassed until the finalized-plan check enables it */
     private_nodes =
         lappend(private_nodes, makeInteger(static_cast<int>(coverage_bypass_marker::provisional)));
     const Cost overhead =
@@ -5235,7 +5261,7 @@ void release_planner_pin_noerror(void* opaque,
     return replaced;
 }
 
-/** Resolve one copied intent for the current Query root without shared Nodes. */
+/** Finds or caches the provider's analysis for the current query, including nested queries. */
 [[nodiscard]] const bioseq_cache_query_intent* planner_provider_intent(
     planner_frame& frame, PlannerInfo& root, const provider_registry::provider* provider) noexcept {
     if (provider == nullptr || root.parse == nullptr) {
@@ -5271,7 +5297,7 @@ void release_planner_pin_noerror(void* opaque,
     return destination.supported ? &destination.intent.value : nullptr;
 }
 
-/** Discover, map, decorate, and replace paths owned by one provider bridge. */
+/** Tries to wrap the provider's relation paths with reusable-cache paths. */
 void consider_provider_reusable_paths_impl(PlannerInfo* root,
                                            RelOptInfo* relation,
                                            unsigned int range_table_index,
@@ -5321,7 +5347,12 @@ enum class visibility_ticket_purpose : std::uint8_t {
     continuation,
 };
 
-/** Bind the committed-write epoch to the statement's already-active snapshot. */
+/**
+ * Captures write counters for the statement's active MVCC sxapshot.
+ * It rejects unresolved write transitions and prepared transactions.
+ * A new cache admission also checks that the snapshot can see the latest
+ * recorded committed write.
+ */
 [[nodiscard]] visibility_ticket mint_visibility_ticket(
     write_observability observability,
     visibility_ticket_purpose purpose = visibility_ticket_purpose::admission) noexcept {
@@ -5364,7 +5395,7 @@ enum class visibility_ticket_purpose : std::uint8_t {
     return ticket;
 }
 
-/** Bind generic execution to committed writes, not harmless XID rollbacks. */
+/** Checks that database-wide write state still matches the captured visibility ticket. */
 [[nodiscard]] bool visibility_ticket_still_bound(const visibility_ticket& ticket) noexcept {
     if (!ticket.valid || g_shared == nullptr ||
         ticket.observability != write_observability::database_wide_fallback) {
@@ -5381,7 +5412,7 @@ enum class visibility_ticket_purpose : std::uint8_t {
     return valid;
 }
 
-/** Provider-complete execution ignores unrelated precise commits. */
+/** Checks the database-wide fallback counter for a provider  that tracks its own relation writes. */
 [[nodiscard]] bool
 provider_visibility_ticket_still_bound(const visibility_ticket& ticket) noexcept {
     if (!ticket.valid || g_shared == nullptr) {
@@ -5397,7 +5428,12 @@ provider_visibility_ticket_still_bound(const visibility_ticket& ticket) noexcept
     return valid;
 }
 
-/** Sample liveness outside cache locks, then ABA-recheck while sweeping. */
+/**
+ * Cleans reusable registry entries and retires their storage manifests.
+ * Backend liveness is checked outside, cache locks and matched to the
+ * saved owner records during cleanup. Dependency references are released
+ * after the registry locks are dropped.
+ */
 void sweep_reusable_registry() noexcept {
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr ||
         g_reusable_exact_locks == nullptr || g_reusable_coverage_locks == nullptr ||
@@ -5457,10 +5493,9 @@ void sweep_reusable_registry() noexcept {
         }
     }
 
-    /* Retired records keep Generation references until their copied vector
-     * has been released with every registry lock dropped.  Persist an applied
-     * prefix after each bounded attempt so errors are retryable and cannot
-     * double-release an earlier dependency. */
+    /* Keep retired records until their dependency references are released.
+     * Release outside registry locks and save how many references were
+     * released, so the next pass can resume without releasing them twice. */
     if (sweep.error == reusable_registry_error::none) {
         for (std::size_t attempt = 0; attempt < k_maximum_reusable_janitor_batch; ++attempt) {
             LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
@@ -5506,7 +5541,7 @@ void sweep_reusable_registry() noexcept {
                 break;
             }
             if (!released.complete) {
-                /* Pending cursor is authoritative; retry on a future sweep. */
+                /* The saved  cursor lets a later pass resume the unfinished release. */
                 break;
             }
         }
@@ -5521,7 +5556,7 @@ void sweep_reusable_registry() noexcept {
     executor::destroy_context_owned(workspace);
 }
 
-/** Snapshot reference ownership only while membership is fully quiesced. */
+/** Copies registry counts while holding the membership lock exclusively. */
 [[nodiscard]] reusable_registry_snapshot runtime_reusable_registry_snapshot() noexcept {
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
         return {};
@@ -5534,7 +5569,7 @@ void sweep_reusable_registry() noexcept {
 
 #if defined(BIOSEQ_CACHE_TESTING)
 
-/** Snapshot test-drain progress through the production reference aggregate. */
+/** Returns registry counts used to check progress during test cleanup. */
 [[nodiscard]] reusable_registry_snapshot test_reusable_registry_snapshot() noexcept {
     return runtime_reusable_registry_snapshot();
 }
@@ -5553,10 +5588,9 @@ void sweep_reusable_registry() noexcept {
 }
 
 /**
- * Deterministically exercise the production unified janitor from SQL tests.
- * One cycle covers every generation slot when no references interfere.  A
- * bounded retry covers owner reaping and the later dependency-release pass;
- * two unchanged cycles prove that no immediately reclaimable work remains.
+ * Runs repeated janitor passes for SQL tests. It stops after two cycles
+ * with unchanged counts or after the retry limit. Existing references
+ * or cleanup failures can still leave entries in the registry
  */
 void drain_reusable_registry_for_testing() noexcept {
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr ||
@@ -5581,7 +5615,7 @@ void drain_reusable_registry_for_testing() noexcept {
 
 #endif
 
-/** Copy executor support OIDs while the aggregate syscache tuple is pinned. */
+/** Holds copies of the support-function OIDs read from an aggregate's catalog enty. */
 struct aggregate_support_functions {
     std::array<Oid, 8> functions{};
     bool found = false;
@@ -5609,7 +5643,7 @@ struct aggregate_support_functions {
     return result;
 }
 
-/** Aggregates are immutable only when every executor support function is. */
+/** Reports whether aggregate support is  missing or any support function is mutable. */
 [[nodiscard]] bool aggregate_has_mutable_support(Oid aggregate_oid) {
     const aggregate_support_functions support = load_aggregate_support_functions(aggregate_oid);
     if (!support.found) {
@@ -5623,7 +5657,7 @@ struct aggregate_support_functions {
     return mutable_support;
 }
 
-/** Reject execution state that cannot be represented by the exact key/epoch. */
+/** Detects query features whose effects are not covered by the exact cache key and write counters. */
 bool query_contains_unsafe_state_walker(Node* node, void*) {
     if (node == nullptr) {
         return false;
@@ -5672,7 +5706,7 @@ bool query_contains_unsafe_state_walker(Node* node, void*) {
     return expression_tree_walker(node, query_contains_unsafe_state_walker, nullptr);
 }
 
-/** Append one full PlanInvalItem identity exactly once. */
+/** Adds a system-catalog dependency once, rejecting invalid entries or a full dependency list. */
 [[nodiscard]] bool
 append_exact_syscache_dependency(List** dependencies, int cache_id, std::uint32_t hash_value) {
     if (dependencies == nullptr || cache_id < 0 || cache_id >= SysCacheSize) {
@@ -5698,7 +5732,7 @@ append_exact_syscache_dependency(List** dependencies, int cache_id, std::uint32_
     return true;
 }
 
-/** Add one user aggregate and every user support procedure definition. */
+/** Adds catalog dependencies for a user-defined aggregate and its user-defined support functions. */
 [[nodiscard]] bool append_aggregate_syscache_dependencies(List** dependencies, Oid aggregate_oid) {
     const aggregate_support_functions support = load_aggregate_support_functions(aggregate_oid);
     if (!support.found) {
@@ -5730,7 +5764,7 @@ struct exact_syscache_collector {
     bool overflow = false;
 };
 
-/** Collect aggregate support definitions from Aggref and aggregate WindowFunc. */
+/** Collects aggregate catalog dependencies from ordinary and window aggregates. */
 bool collect_aggregate_syscache_walker(Node* node, void* context) {
     if (node == nullptr) {
         return false;
@@ -5789,7 +5823,7 @@ int compare_external_parameters(const ListCell* left, const ListCell* right) noe
     return left_parameter->paramid > right_parameter->paramid ? 1 : 0;
 }
 
-/** Collect one typed metadata record for each referenced PARAM_EXTERN. */
+/** Collects each external parameter once and rejects inconsistent type metadata for the same parameter. */
 bool collect_external_parameter_walker(Node* node, void* context) {
     if (node == nullptr) {
         return false;
@@ -5820,8 +5854,7 @@ bool collect_external_parameter_walker(Node* node, void* context) {
         return false;
     }
     if (IsA(node, RangeTblEntry)) {
-        // query_tree_walker supplies RTEs to the callback when
-        // QTW_EXAMINE_RTES_BEFORE is set; it owns walking their expressions.
+        // query_tree_walker visits range-table expressions after this callback.
         return false;
     }
     if (IsA(node, Query)) {
@@ -5883,7 +5916,7 @@ bool collect_relation_oid_walker(Node* node, void* context) {
     return collector.relation_oids;
 }
 
-/** Conservative exact-cache eligibility before path decoration. */
+/** Checks whether a SELECT query can be,  considered for exact-result caching. */
 [[nodiscard]] bool query_is_exact_cache_eligible(const Query& query) {
     if (query.commandType != CMD_SELECT || query.hasModifyingCTE || query.rowMarks != NIL ||
         query.hasTargetSRFs || query.hasRowSecurity || query.hasForUpdate) {
@@ -5901,7 +5934,7 @@ bool collect_relation_oid_walker(Node* node, void* context) {
     return true;
 }
 
-/** Canonical analyzed-tree bytes; source locations are omitted by nodeToString. */
+/** Serializes a query copy after clearing its query ID and top-level statement position. */
 [[nodiscard]] char* canonicalize_query(const Query& query) {
     Query* copy = static_cast<Query*>(copyObject(const_cast<Query*>(&query)));
     copy->queryId = 0;
@@ -5910,7 +5943,7 @@ bool collect_relation_oid_walker(Node* node, void* context) {
     return nodeToString(copy);
 }
 
-/** Extract one bounded display statement for diagnostics only. */
+/** Copies query text for diagnostics, marking it when the display limit truncates it. */
 [[nodiscard]] char* copy_display_sql(const char* query_string) {
     if (query_string == nullptr) {
         return pstrdup("<query text unavailable>");
@@ -5927,7 +5960,7 @@ bool collect_relation_oid_walker(Node* node, void* context) {
     return result;
 }
 
-/** Outer scan execution state; CustomScanState must remain first. */
+/** Selects pass-through execution, cache production or cached-result replay. */
 enum class runtime_role : std::uint8_t {
     bypass,
     producer,
@@ -6027,7 +6060,7 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
     return true;
 }
 
-/** Read one String node from serialized custom-private metadata. */
+/** Reads a private String node, returning a diagnostic placeholder if it is absent or has the wrong type. */
 [[nodiscard]] const char* private_string(const CustomScan& scan, int index) {
     if (scan.custom_private == NIL || list_length(scan.custom_private) <= index) {
         return "<metadata unavailable>";
@@ -6036,7 +6069,7 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
     return IsA(node, String) ? strVal(node) : "<metadata invalid>";
 }
 
-/** Read the post-setrefs fail-open bit; malformed metadata always bypasses. */
+/** Reads the plan's bypass marker, bypassing caching if the marker is missing or invalid. */
 [[nodiscard]] bool private_force_bypass(const CustomScan& scan) noexcept {
     if (scan.custom_private == NIL || list_length(scan.custom_private) <= 2) {
         return true;
@@ -6055,7 +6088,7 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
                ? reinterpret_cast<const Integer*>(marker)->ival : -1;
 }
 
-/** Mutate only the preallocated scalar; never reshape a finalized Plan. */
+/** Updates the existing bypaos  marker while preserving the coverage-finalizer marker */
 [[nodiscard]] bool set_private_force_bypass(CustomScan& scan, bool force_bypass) noexcept {
     if (scan.custom_private == NIL || list_length(scan.custom_private) <= 2) {
         return false;
@@ -6073,7 +6106,7 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
     return true;
 }
 
-/** Count one typed private list; -1 identifies malformed finalized metadata. */
+/** Returns a private list's length, or -1 when the slot is missing or has the wrong list type. */
 [[nodiscard]] int
 private_list_length(const CustomScan& scan, int index, NodeTag expected_tag) noexcept {
     if (scan.custom_private == NIL || list_length(scan.custom_private) <= index) {
@@ -6086,7 +6119,7 @@ private_list_length(const CustomScan& scan, int index, NodeTag expected_tag) noe
     return nodeTag(values) == expected_tag ? list_length(values) : -1;
 }
 
-/** Append a length-delimited field to an exact key without ambiguous joins. */
+/** Appends a field with its byte length so neighboring cache-key fields remain distinguishable. */
 [[nodiscard]] bool append_key_field(StringInfo key, const void* bytes, std::size_t size) {
     if (size > static_cast<std::size_t>(k_maximum_canonical_key_bytes) ||
         static_cast<std::size_t>(key->len) + sizeof(std::uint32_t) + size >
@@ -6107,7 +6140,7 @@ template <class p_value_type>
     return append_key_field(key, &value, sizeof(value));
 }
 
-/** Hash the exact output type/collation identity stored beside every result. */
+/** Hashes output column types, type modifiers and collations in column order. */
 [[nodiscard]] std::uint64_t output_schema_hash(const TupleDesc descriptor) {
     std::uint64_t value = 0x9e3779b97f4a7c15ULL;
     for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
@@ -6124,7 +6157,7 @@ template <class p_value_type>
     return value;
 }
 
-/** Confirm every output column has both binary directions before claiming. */
+/** Checks that every output column has PostgreSQL binary send and receive functions. */
 void validate_binary_schema(const TupleDesc descriptor) {
     if (descriptor->natts < 0 ||
         static_cast<std::uint32_t>(descriptor->natts) > k_maximum_provider_boundary_columns) {
@@ -6166,7 +6199,7 @@ void validate_binary_schema(const TupleDesc descriptor) {
     pg_unreachable();
 }
 
-/** Freeze PostgreSQL tuple metadata into the portable column-store schema. */
+/** Builds the cached column schema and resolves PostgreSQL binary I/O functions for each column. */
 [[nodiscard]] std::vector<column_schema> build_column_schema(TupleDesc descriptor,
                                                              Oid* send_functions) {
     if (descriptor == nullptr || descriptor->natts < 0 ||
@@ -6258,7 +6291,7 @@ void destroy_column_builder(bioseq_cache_state& state) noexcept {
     }
 }
 
-/** Serialize one external parameter with analyzed and runtime identity. */
+/** Adds a parameter's type metadata, null flag and binary value to the cache key. */
 [[nodiscard]] bool
 append_parameter_key(StringInfo key, const Param& analyzed, const ParamExternData& parameter) {
     if (!append_key_scalar(key, analyzed.paramtype) ||
@@ -6279,7 +6312,12 @@ append_parameter_key(StringInfo key, const Param& analyzed, const ParamExternDat
     return appended;
 }
 
-/** Build the execution-time exact key, including parameters and environment. */
+/**
+ * Builds the exact-result key from  the query, current user and database,
+ * selected session settings and referenced parameter values. Output
+ * column types are included so a result is reused only with the same
+ * result schema.
+ */
 [[nodiscard]] StringInfo
 build_runtime_key(const CustomScan& scan, EState* estate, TupleDesc descriptor) {
     StringInfo key = makeStringInfo();
@@ -6389,7 +6427,7 @@ build_runtime_key(const CustomScan& scan, EState* estate, TupleDesc descriptor) 
 
 const CustomScanMethods& coverage_scan_methods();
 
-/** Stable semantic material carried by one finalized reusable coverage Plan. */
+/** Holds the provider keys and descriptor header read from a finalized coverage plan. */
 struct exact_coverage_semantic_frame {
     coverage_current_plan_view current{};
     coverage_descriptor_header descriptor{};
@@ -6401,7 +6439,7 @@ struct exact_coverage_semantic_frame {
            (left.empty() || std::memcmp(left.data(), right.data(), left.size()) == 0);
 }
 
-/** A duplicate logical occurrence must describe byte-identical semantics. */
+/** Checks whether two bindings identify the same provider-table occurrence. */
 [[nodiscard]] bool exact_coverage_binding_anchor_equal(
     const reuse::coverage_fragment_binding_signature& left,
     const reuse::coverage_fragment_binding_signature& right) noexcept {
@@ -6439,7 +6477,7 @@ exact_coverage_frames_equal(const exact_coverage_semantic_frame& left,
                                       right.current.canonical_generation_key);
 }
 
-/** Canonical order is the stable provider/relation occurrence identity. */
+/** Orders coverage entries by provider and table occurrence for a repeatable cache key. */
 [[nodiscard]] bool exact_coverage_frame_less(const exact_coverage_semantic_frame& left,
                                              const exact_coverage_semantic_frame& right) noexcept {
     const auto& l = left.descriptor.binding;
@@ -6467,12 +6505,12 @@ exact_coverage_frames_equal(const exact_coverage_semantic_frame& left,
 
 struct exact_coverage_semantic_collector;
 
-/* The collector walk calls this decoder, while the decoder requires the
- * complete collector to insert its validated frame. */
+/* The plan walk calls this decoder, which inserts into the collector
+ * defined bylow. */
 [[nodiscard]] bool collect_exact_coverage_frame(exact_coverage_semantic_collector& collector,
                                                 const CustomScan& scan) noexcept;
 
-/** Walk all finalized Plan children without recursion cycles or unbounded work. */
+/** Collects coverage entries from supported plan children, skipping  repeated nodes and limiting the walk. */
 struct exact_coverage_semantic_collector {
     std::array<exact_coverage_semantic_frame, k_maximum_provider_recipes_per_exact_plan> frames{};
     std::array<const Plan*, k_maximum_exact_plan_walk_nodes> visited{};
@@ -6594,7 +6632,7 @@ struct exact_coverage_semantic_collector {
     }
 };
 
-/** Decode and validate one coverage node without retaining physical state. */
+/** Checks a coverage plan's saved metadata and adds its provider keys to the collector. */
 [[nodiscard]] bool collect_exact_coverage_frame(exact_coverage_semantic_collector& collector,
                                                 const CustomScan& scan) noexcept {
     if (scan.custom_private == NIL || list_length(scan.custom_private) < 3 ||
@@ -6644,7 +6682,7 @@ struct exact_coverage_semantic_collector {
     return collector.insert(candidate);
 }
 
-/** Frame all reusable semantics that can affect one exact root's result. */
+/** Adds coverage-provider identities and keys from the child plan and subplans to the exact-result key */
 [[nodiscard]] bool
 append_exact_coverage_semantic_key(const CustomScan& scan, EState* estate, StringInfo key) {
     if (estate == nullptr || estate->es_plannedstmt == nullptr || key == nullptr ||
@@ -6719,14 +6757,19 @@ append_exact_coverage_semantic_key(const CustomScan& scan, EState* estate, Strin
     return true;
 }
 
-/** Exact replay may elide only providers that explicitly opt into it. */
+/** Checks whether a provider permits cached exact results to, skip its execution. */
 [[nodiscard]] bool
 provider_allows_exact_source_elision(const provider_registry::provider* provider) noexcept {
     return provider != nullptr &&
            (provider->provider_flags & bioseq_cache_provider_exact_source_elision_safe) != 0;
 }
 
-/** Revalidate every finalized provider recipe and frame its semantic bytes. */
+/**
+ * Checks the saved provider recipes against their runtime digests and
+ * adds the expected digests to the exact-result key. Provider leases
+ * keep the callbacks available during execution. Coverage-provider
+ * keys are appended after all recipes pass.
+ */
 [[nodiscard]] bool append_exact_runtime_recipe_key(const CustomScan& scan,
                                                    EState* estate,
                                                    StringInfo key,
@@ -6880,7 +6923,7 @@ provider_allows_exact_source_elision(const provider_registry::provider* provider
     return nullptr;
 }
 
-/** Deterministic test pause compiled out of production builds. */
+/** Pauses at  an armed test point until the controlling session releases its advisory lock. */
 void maybe_pause(test_pause_point point) {
     if (g_shared == nullptr) {
         return;
@@ -6933,8 +6976,8 @@ void maybe_pause(test_pause_point point) {
     volatile bool lock_acquired = false;
     PG_TRY();
     {
-        /* A heavyweight advisory lock makes the pause visible to
-         * pg_isolation_regress's blocked-session detector. */
+        /* Use an advisory lock so isolation tests can detect that this session
+         * is blocked at the pause point. */
         static_cast<void>(
             DirectFunctionCall1(pg_advisory_lock_int8, Int64GetDatum(pause_lock_key(point))));
         lock_acquired = true;
@@ -6975,7 +7018,7 @@ inline void maybe_pause(test_pause_point) noexcept {}
 #endif
 
 #if defined(BIOSEQ_CACHE_TESTING)
-/** Route dependency-runtime race windows through the shared pause control. */
+/** Connects dependency visibility and transition test points to the shared pause controls. */
 void dependency_runtime_test_pause(
     void*, dependency_runtime::dependency_runtime_pause_point point) noexcept {
     switch (point) {
@@ -7011,7 +7054,7 @@ snapshot_current_reusable_generation(const reusable_generation_reference& refere
 void release_runtime_reusable_reference(reusable_reference_token& token) noexcept;
 [[nodiscard]] int exact_runtime_recipe_count(const CustomScan& scan) noexcept;
 
-/** ABA-safe identity of one exact producer while its generation is live. */
+/** Identifies the exact-result producer and write state that a waiter expects to remain unchanged. */
 struct exact_producer_wait_token {
     cache_entry_id entry_id{};
     reusable_producer_identity producer{};
@@ -7074,7 +7117,7 @@ exact_producer_identity(const cache_entry& entry) noexcept {
     return sequence == 0 ? 1 : sequence;
 }
 
-/** Collect every reusable claim owned by this backend without truncation. */
+/** Collects this backend's active reusable producer claims, rejecting a truncated registry snapshot. */
 [[nodiscard]] bool collect_local_reusable_claim_sequences(std::span<std::uint64_t> output,
                                                           std::size_t* output_count) noexcept {
     if (output_count == nullptr) {
@@ -7151,7 +7194,7 @@ exact_producer_identity(const cache_entry& entry) noexcept {
     return complete;
 }
 
-/** Snapshot all exact and reusable claims owned by this backend. */
+/** Collects this backend's active producer  claim numbers, grouping exact claims before reusable claims. */
 [[nodiscard]] bool collect_backend_owned_claim_sequences(std::span<std::uint64_t> output,
                                                          std::size_t* exact_count,
                                                          std::size_t* output_count) noexcept {
@@ -7403,14 +7446,14 @@ void reap_dead_registry_waiters_locked(
     return true;
 }
 
-/** Compare every key byte after the hash bucket shortcut. */
+/** Confirms a havh match by comparing the key length and all key bytes. */
 [[nodiscard]] bool
 entry_key_matches(const cache_entry& entry, std::uint64_t key_hash, const StringInfo key) noexcept {
     return entry.key_hash == key_hash && entry.key_size == static_cast<std::uint32_t>(key->len) &&
            std::memcmp(entry.key, key->data, key->len) == 0;
 }
 
-/** Complete entries are usable only in their captured database epoch. */
+/** Checks that a completed entry has a manifest, matches the write counter and has not expired. */
 [[nodiscard]] bool
 entry_is_current(const cache_entry& entry, std::uint64_t database_epoch, TimestampTz now) noexcept {
     return entry.state == shared_entry_state::complete &&
@@ -7418,7 +7461,7 @@ entry_is_current(const cache_entry& entry, std::uint64_t database_epoch, Timesta
            entry.expires_at > now;
 }
 
-/** Mark an abandoned producer failed while holding the registry lock. */
+/** Marks an abandoned producer failed and wakes its waiters. The caller holds the registry lock. */
 void fail_abandoned_producer(cache_entry& entry) noexcept {
     entry.state = shared_entry_state::failed;
     entry.producer_pid = 0;
@@ -7428,7 +7471,7 @@ void fail_abandoned_producer(cache_entry& entry) noexcept {
     ConditionVariableBroadcast(&entry.changed);
 }
 
-/** Make one unreferenced terminal slot reusable without resetting its ABA id. */
+/** Clears a registry slot for reuse while preserving its generation number. The caller must have released its references. */
 void recycle_registry_entry_locked(cache_entry& entry) noexcept {
     const std::uint64_t generation = entry.generation;
     entry.key_size = 0;
@@ -7478,7 +7521,12 @@ void recycle_registry_entry_locked(cache_entry& entry) noexcept {
     ConditionVariableBroadcast(&entry.changed);
 }
 
-/** Wait for a matching producer; pre-existing waiters may consume TTL-zero. */
+/**
+ * Waits for the expected exact-result producer while checking write
+ * visibility and producer identity A  registered waiter can consume the
+ * completed result even with zero TTL. Claim ordering prevents cycles
+ * between waiting producers.
+ */
 [[nodiscard]] registry_decision
 wait_for_producer(int index,
                   const exact_producer_wait_token& expected,
@@ -7587,7 +7635,7 @@ wait_for_producer(int index,
     return decision;
 }
 
-/** Evaluate producer and consumer TTLs from the registry's monotonic clocks. */
+/** Checks a completed result against producer and consumer TTLs, including a registered waiter's one-time use. */
 [[nodiscard]] ttl_decision exact_reusable_ttl_decision(const reusable_generation_snapshot& snapshot,
                                                        bool registered_inflight_waiter,
                                                        bool entitlement_already_consumed) noexcept {
@@ -7606,7 +7654,12 @@ wait_for_producer(int index,
         entitlement_already_consumed);
 }
 
-/** Wait on one unified exact generation with full ABA and owner rechecks. */
+/**
+ * Waits for an exact result in the shared reusable registry. Before
+ * returning it, the waiter becomes a reader, and rechecks the result's
+ * identity, expiry and dependencies. Failed or unsafe results select
+ * normal execution. PostgreSQL errors still propagate.
+ */
 [[nodiscard]] registry_decision wait_for_unified_exact_producer(
     reusable_generation_reference reference,
     reusable_reference_token waiter,
@@ -7725,7 +7778,7 @@ wait_for_producer(int index,
 
 using exact_dependency_evidence_result = planner::exact_dependency_evidence_result;
 
-/** Associate complete provider wrappers with one relation-bearing subtree. */
+/** Finds provider write-tracking evidence for a relation in the plan subtree. */
 [[nodiscard]] exact_dependency_evidence_result
 exact_dependency_evidence(const Plan* plan,
                           EState* estate,
@@ -7745,7 +7798,7 @@ struct exact_dependency_versions {
     bool valid = false;
 };
 
-/** Bounded canonical-set insertion; duplicate conflicts fail open. */
+/** Adds a dependency  onqe, rejecting conflicting versions of the same key or a full array. */
 [[nodiscard]] bool insert_exact_dependency_version(exact_dependency_versions& result,
                                                    const dependency_version& candidate) noexcept {
     for (std::uint32_t index = 0; index < result.count; ++index) {
@@ -7760,7 +7813,12 @@ struct exact_dependency_versions {
     return true;
 }
 
-/** Build the canonical relation/object vector and its conservative backstop. */
+/**
+ * Collects and sorts relation and catalog dependencies for an exact
+ * result. Relations with complete provider write tracking get precise
+ * dependencies. Other relations require an additional database-wide
+ * write check.
+ */
 [[nodiscard]] exact_dependency_versions
 collect_exact_dependency_versions(const CustomScan& scan,
                                   EState* estate,
@@ -7830,7 +7888,7 @@ collect_exact_dependency_versions(const CustomScan& scan,
                     .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
                     .class_oid = static_cast<std::uint32_t>(RelationRelationId),
                     .object_oid = static_cast<std::uint32_t>(relation_oid),
-                    /* -1 is adapter-reserved and cannot alias a PG attnum. */
+                    /* Use -1 for executor-observed writes and 0 for complete provider tracking. */
                     .object_sub_id = provider_complete ? 0 : -1,
                     .kind = topology ? dependency_kind::relation_topology
                                      : dependency_kind::relation_content,
@@ -7902,7 +7960,7 @@ collect_exact_dependency_versions(const CustomScan& scan,
     return result;
 }
 
-/** Frame dependency class/identity and the conservative completion oracle. */
+/** Adds dependency identities, write-tracking modes and the required database-wide check to the exact key. */
 [[nodiscard]] bool
 append_exact_dependency_key_frame(StringInfo key, const exact_dependency_versions& dependencies) {
     constexpr std::uint32_t frame_revision = 1;
@@ -8084,7 +8142,7 @@ acquire_registry_entry(const StringInfo key,
                                            locally_owned_reusable_claim_sequences);
 }
 
-/** Release a short reader pin after full preflight/materialization. */
+/** Releases a matching reader claim and optionally invalidates the result or counts the replay outcome. */
 void release_registry_reader(int index,
                              const cache_entry_id& expected,
                              const registry_reader_claim& reader_claim,
@@ -8136,7 +8194,7 @@ void release_registry_reader(int index,
     }
 }
 
-/** Invalidate one exact generation after a failed manifest preflight. */
+/** Invalidates an exact result after cached-data  validation fails and wakes its waiters. */
 void invalidate_unified_exact_generation(const reusable_generation_reference& reference) noexcept {
     if (!reference || !g_reusable_registry || g_reusable_membership_lock == nullptr) {
         return;
@@ -8175,7 +8233,7 @@ void invalidate_unified_exact_generation(const reusable_generation_reference& re
     }
 }
 
-/** Release one unified ReaderPin and account only a proven token release. */
+/** Releases a reader reference, then records the replay outcome and optionally invalidates a failed result. */
 void release_unified_exact_reader(reusable_reference_token& token,
                                   bool successful,
                                   bool invalidate_failure = true,
@@ -8223,7 +8281,7 @@ void release_storage_reader_claims(bioseq_cache_state& state) noexcept {
     }
 }
 
-/** Retire every execution lease only after all exact callbacks have ended. */
+/** Releases the provider leases held by this exact scan. Call after its provider callbacks finish */
 void release_exact_provider_leases(bioseq_cache_state& state) noexcept {
     for (std::uint32_t index = 0; index < state.provider_lease_count; ++index) {
         provider_registry::release_provider_lease(&state.provider_leases[index]);
@@ -8232,7 +8290,7 @@ void release_exact_provider_leases(bioseq_cache_state& state) noexcept {
     state.provider_lease_count = 0;
 }
 
-/** Fail a generation only when this backend still owns the producer token. */
+/** Fails an unfinished producer and releases its cache resources before switching to normal execution. */
 void fail_registry_producer(bioseq_cache_state& state) noexcept {
     storage::manifest_handle retired_manifest{};
     if (state.registry_reference) {
@@ -8267,7 +8325,7 @@ void fail_registry_producer(bioseq_cache_state& state) noexcept {
     state.execution_role = runtime_role::bypass;
 }
 
-/** PostgreSQL memory-context cleanup covers ERROR paths that skip EndCustomScan. */
+/** Releases scan resources when its memory context is deleted, including errors that skip EndCustomScan. */
 void cache_state_cleanup(void* argument) noexcept {
     auto* state = static_cast<bioseq_cache_state*>(argument);
     if (state == nullptr) {
@@ -8305,7 +8363,7 @@ void cache_state_cleanup(void* argument) noexcept {
     release_exact_provider_leases(*state);
 }
 
-/** Prepare one generation-private self-validating column-store capture. */
+/** Creates the column schema and storage writer used to capture an exact result. */
 [[nodiscard]] bool begin_producer_capture(bioseq_cache_state& state, TupleDesc descriptor) {
     try {
         state.send_functions =
@@ -8335,7 +8393,7 @@ void cache_state_cleanup(void* argument) noexcept {
     }
 }
 
-/** Capture one raw child row through PostgreSQL's lossless binary send ABI. */
+/** Encodes a child row with PostgreSQL binary send functions and appends it to the cached clumn store. */
 [[nodiscard]] bool capture_raw_child_row(bioseq_cache_state& state, TupleTableSlot* slot) {
     if (state.column_builder == nullptr || state.send_functions == nullptr) {
         return false;
@@ -8384,7 +8442,12 @@ void cache_state_cleanup(void* argument) noexcept {
     return success;
 }
 
-/** Seal storage first and make unified-registry COMPLETE visible last. */
+/**
+ * Finalizes the captured blocks and publishes their storage  manifest.
+ * It then rechecks dependencies before marking the registry entry
+ * complete, so readers cannot see a result whose inputs changed during
+ * production.
+ */
 [[nodiscard]] bool complete_registry_producer_with_cpp_owners(bioseq_cache_state& state,
                                                               TupleDesc descriptor) {
     if (descriptor == nullptr || !state.registry_reference || state.column_builder == nullptr ||
@@ -8433,8 +8496,8 @@ void cache_state_cleanup(void* argument) noexcept {
         .logical_bytes = state.logical_bytes,
         .row_count = state.row_count,
         .created_at_us = state.producer_started_at,
-        /* Registry retirement owns expiry; zero also preserves every waiter
-         * entitlement acquired before terminal publication. */
+        /* Let the registry control expiry. A storage expiry of zero keeps
+         * registered waiters able to acquire their reader pins. */
         .expires_at_us = 0,
     };
     storage::publish_manifest_result publication =
@@ -8508,7 +8571,7 @@ void cache_state_cleanup(void* argument) noexcept {
     return true;
 }
 
-/** Restore PostgreSQL ERROR only after producer-owned C++ blocks unwind. */
+/** Publishes the captured result, restoring PostgreSQL errors after, C++ cleanup has run. */
 [[nodiscard]] bool complete_registry_producer(bioseq_cache_state& state, TupleDesc descriptor) {
     ErrorData* postgres_error = nullptr;
     bool completed = false;
@@ -8566,7 +8629,11 @@ complete_result_load_failure_name(complete_result_load_failure failure) noexcept
     return "unknown";
 }
 
-/** Materialize and validate an entire shared result before exposing row one. */
+/**
+ * Reads and validates the entire cached result before making any row
+ * available. Column values are decoded into a private tuplestore. A
+ * checksum, schema or decoding failure rejects the result before replay.
+ */
 [[nodiscard]] Tuplestorestate* load_complete_result_with_cpp_owners(
     const storage::manifest_pin& pin,
     TupleDesc expected_descriptor,
@@ -8661,8 +8728,8 @@ complete_result_load_failure_name(complete_result_load_failure failure) noexcept
     bool valid = true;
     bool decode_started = false;
     MemoryContext caller_context = CurrentMemoryContext;
-    /* PostgreSQL context deletion, pfree, and tuplestore_end below are
-     * no-ERROR cleanup primitives; ERROR-capable work stays in leaf bridges. */
+    /* Keep PostgreSQL calls that can report errors inside invoke_pg_as_cpp
+     * so the surrounding  C++ state can be cleaned up. */
     const auto cleanup = [caller_context, &row_context, &values, &nulls, &view, &store] {
         MemoryContextSwitchTo(caller_context);
         if (row_context != nullptr) {
@@ -8783,7 +8850,7 @@ complete_result_load_failure_name(complete_result_load_failure failure) noexcept
     }
 }
 
-/** Restore exact PostgreSQL errors only after replay-owned C++ state unwinds. */
+/** Loads a cached result, restoring PostgreSQL errors after C++ replay state is cleaned up. */
 [[nodiscard]] Tuplestorestate*
 load_complete_result(const storage::manifest_pin& pin,
                      TupleDesc expected_descriptor,
@@ -8815,7 +8882,7 @@ load_complete_result(const storage::manifest_pin& pin,
     return result;
 }
 
-/** Initialize the retained child exactly once, releasing claims on error. */
+/** Initializes the child plan and reports an error if it has already been initialized. */
 void initialize_retained_child(bioseq_cache_state& state,
                                CustomScanState* node,
                                EState* estate,
@@ -8840,14 +8907,14 @@ void initialize_retained_child(bioseq_cache_state& state,
     return node->custom_ps == NIL ? nullptr : static_cast<PlanState*>(linitial(node->custom_ps));
 }
 
-/** The CustomScan scan slot implements custom_scan_tlist, including resjunk. */
+/** Returns the raw scan-slot descriptor used for cached and child rows. */
 [[nodiscard]] TupleDesc exact_raw_tuple_descriptor(CustomScanState* node) noexcept {
     return node != nullptr && node->ss.ss_ScanTupleSlot != nullptr
                ? node->ss.ss_ScanTupleSlot->tts_tupleDescriptor
                : nullptr;
 }
 
-/** Reproject a raw cached/child slot to the visible CustomScan descriptor. */
+/** Projects a raw cached or child row into the custom scan's visible output */
 [[nodiscard]] TupleTableSlot* project_exact_raw_slot(CustomScanState* node,
                                                      TupleTableSlot* raw_slot) {
     if (node == nullptr || raw_slot == nullptr || TupIsNull(raw_slot)) {
@@ -8858,7 +8925,12 @@ void initialize_retained_child(bioseq_cache_state& state,
     return node->ss.ps.ps_ProjInfo == nullptr ? raw_slot : ExecProject(node->ss.ps.ps_ProjInfo);
 }
 
-/** Decide producer/consumer/bypass before touching the retained child. */
+/**
+ * Chooses cached replay, result capture or normal execution before
+ * initializing the child pla. A cache hit is fully loaded and checked
+ * first, so replay can skip the child. Unsupported plans and failed cache
+ * checks fall back to the child plan.
+ */
 void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
     auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
@@ -9165,7 +9237,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     }
 }
 
-/** Execute the retained child and explicitly project its raw slot. */
+/** Returns a cached row or runs the child, capturing rows while producing a  cache entry. The result is published only after the child finishes. */
 TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
     if (state->execution_role == runtime_role::consumer) {
@@ -9248,7 +9320,7 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
     return project_exact_raw_slot(node, raw_slot);
 }
 
-/** End only the child this node initialized. */
+/** Releases cache resources and ends the child if this scan initialized it. */
 void cache_end_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
     if (state->execution_role == runtime_role::producer && !state->producer_completed) {
@@ -9262,7 +9334,7 @@ void cache_end_custom_scan(CustomScanState* node) {
     state->child_initialized = false;
 }
 
-/** Rewind the retained child for supported forward rescans. */
+/** Rewinds cached replay or the child. An unfinished producer is abandoned before rescanning. */
 void cache_rescan_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
     if (state->execution_role == runtime_role::consumer && state->replay_store != nullptr) {
@@ -9280,7 +9352,7 @@ void cache_rescan_custom_scan(CustomScanState* node) {
     }
 }
 
-/** Explain provisional and actual pass-through state without side effects. */
+/** Returns the display name of a cache-correctness level. */
 [[nodiscard]] const char* readiness_name(cache_correctness_readiness readiness) noexcept {
     switch (readiness) {
     case cache_correctness_readiness::passthrough_only:
@@ -9444,7 +9516,7 @@ const CustomExecMethods& cache_exec_methods() {
                                                         cache_explain_custom_scan>();
 }
 
-/** Allocate the standard-layout executor state. */
+/** Allocates an exact-cache executor state with caching initially bypassed. */
 Node* cache_create_custom_scan_state(CustomScan*) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(
         newNode(sizeof(bioseq_cache_state), T_CustomScanState));
@@ -9515,7 +9587,7 @@ struct exact_provider_recipe_collector {
     [[nodiscard]] bool collect_expression(Node* node) noexcept {
         return node == nullptr || !collect_exact_subplan_ids_walker(node, this);
     }
-    /** Collect every supported Plan field that can contain executable expressions. */
+    /** Finds referenced subplans in the expression fields of supported plan nodes. */
     [[nodiscard]] bool collect_plan_expressions(const Plan* plan) noexcept {
         if (plan == nullptr || !collect_expression(reinterpret_cast<Node*>(plan->targetlist)) ||
             !collect_expression(reinterpret_cast<Node*>(plan->qual)) ||
@@ -9720,7 +9792,7 @@ struct exact_provider_recipe_collector {
         }
     }
 #if PG_VERSION_NUM >= 180000
-    /** PG18 stores pruning records in the query root, then in PlannedStmt. */
+    /** Resolves a PostgreSQL 18 pruning index from the planner root or finalized statement. */
     [[nodiscard]] bool collect_partition_prune_index(int index) noexcept {
         if (index == -1) {
             return true;
@@ -9734,7 +9806,7 @@ struct exact_provider_recipe_collector {
             static_cast<const PartitionPruneInfo*>(list_nth(infos, index)));
     }
 #endif
-    /** Collect executor expressions hidden outside common Plan fields. */
+    /** Finds subplan references in initial and execution-time partition-pruning expressions. */
     [[nodiscard]] bool
     collect_partition_prune_expressions(const PartitionPruneInfo* prune_info) noexcept {
         if (prune_info == nullptr) {
@@ -9786,7 +9858,11 @@ struct exact_provider_recipe_collector {
         }
         return true;
     }
-    /** Append one provider recipe and recurse over the finalized Plan in preorder. */
+    /**
+     * Visits each plan node once  and records how its provider will check
+     * for source changes. Ambiguous provider matches, unsupported nodes
+     * and collection limits make the plan ineligible, for caching.
+     */
     [[nodiscard]] bool collect_plan(const Plan* plan) {
         if (!valid || plan == nullptr) {
             return valid;
@@ -9954,7 +10030,7 @@ struct exact_provider_recipe_collector {
     }
 };
 
-/** Capture main-tree recipes first, then referenced global plans by plan ID. */
+/** Collects provider change-chek recipes from the main plan, then follows its referenced subplans. */
 [[nodiscard]] bool collect_exact_provider_recipes(PlannerInfo* root,
                                                   const Plan* child,
                                                   List** recipes,
@@ -9974,7 +10050,7 @@ struct exact_provider_recipe_collector {
     if (!collector.collect_plan(child)) {
         return false;
     }
-    /* Top-level InitPlans are attached after this CustomPath is lowered. */
+    /* Include InitPlans that PostgreSQL will attach after creating this CustomScan. */
     if (!collector.collect_expression(reinterpret_cast<Node*>(root->init_plans))) {
         return false;
     }
@@ -9994,7 +10070,7 @@ struct exact_provider_recipe_collector {
             collector.visited_subplans[index] = true;
             progressed = true;
 #if PG_VERSION_NUM >= 180000
-            // Each pre-setrefs subplan uses its own query-local pruning IDs.
+            // Pruning indexes belong to the subplan's own planner root
             if (plan_id > list_length(root->glob->subroots)) {
                 return false;
             }
@@ -10019,10 +10095,10 @@ struct exact_provider_recipe_collector {
 }
 
 /**
- * Rebuild provider recipes from the post-setrefs plan owned by PlannedStmt.
- *
- * The provider callback receives a null PlannerInfo during this call;
- * every Plan and referenced subplan is already in its final executor shape.
+ * Rebuilds provider change-check recipes after PostgreSQL finalizes
+ * column references. This walks the child and all statement subplans.
+ * Provider callbacks receive  a null PlannerInfo because planning has
+ * already finished.
  */
 [[nodiscard]] bool collect_finalized_exact_provider_recipes(const Plan* child,
                                                             const PlannedStmt& statement,
@@ -10052,7 +10128,7 @@ struct exact_provider_recipe_collector {
     return true;
 }
 
-/** Convert one pre-setrefs outer CustomPath into a CustomScan. */
+/** Builds an exact-cache CustomScan around the selected child plan and records its provider change checks. */
 Plan* cache_plan_custom_path(PlannerInfo* root,
                              RelOptInfo* relation,
                              CustomPath* best_path,
@@ -10319,7 +10395,7 @@ collect_coverage_predicate_attnos(Node* expression, TupleDesc descriptor, Bitmap
     return true;
 }
 
-/** Build the deterministic dense cache-expression slot from boundary schema. */
+/** Creates the compact row layout used to evaluate reuse predicates, with columns ordered by source attribute number. */
 [[nodiscard]] bool initialize_coverage_predicate_slot(reusable_coverage_state& state,
                                                       EState* estate,
                                                       TupleDesc raw_descriptor) {
@@ -10385,7 +10461,7 @@ collect_coverage_predicate_attnos(Node* expression, TupleDesc descriptor, Bitmap
     return true;
 }
 
-/** Copy consumer-shaped values into the deterministic dense replay slot. */
+/** Maps a child-shaped row into the compact slot used to evaluate reuse predicates. */
 [[nodiscard]] bool populate_coverage_predicate_slot(reusable_coverage_state& state,
                                                     TupleTableSlot* raw) {
     if (raw == nullptr || raw->tts_tupleDescriptor == nullptr || state.predicate_slot == nullptr ||
@@ -10417,7 +10493,7 @@ struct coverage_setrefs_replay_context {
     bool valid = true;
 };
 
-/** Restore setrefs-mapped replay Vars to the executor's dense predicate slot. */
+/** Maps finalized column references back to the compact row layout used by reuse predicates. */
 Node* restore_dense_coverage_predicate_mutator(Node* node, void* opaque) {
     if (node == nullptr) {
         return nullptr;
@@ -10460,7 +10536,7 @@ Node* restore_dense_coverage_predicate_mutator(Node* node, void* opaque) {
     return reinterpret_cast<Node*>(restored);
 }
 
-/** Compile every frozen predicate only after setrefs produced consumer Vars. */
+/** Compiles the requested predicate and cached-source predicates after restoring their compact  column references. */
 [[nodiscard]] bool compile_coverage_predicates(reusable_coverage_state& state,
                                                const CustomScan& scan,
                                                TupleDesc predicate_descriptor) {
@@ -10556,7 +10632,7 @@ void set_coverage_selection_bit(coverage_runtime_source& source,
     }
 }
 
-/** Register a new CLAIMED producer for the enclosing ExecutorStart cleanup. */
+/** Track this producer so ExecutorStart can abandon its claim if initialization fails. */
 [[nodiscard]] bool register_executor_start_claim(reusable_coverage_state& state) noexcept {
     executor_start_claim_frame* frame = g_executor_start_claim_frame;
     if (frame == nullptr) {
@@ -10698,7 +10774,10 @@ coverage_contract_column(const bioseq_cache_path_domain& contract, std::uint32_t
     return true;
 }
 
-/** Hash explicit ABI scalars only; provider struct padding is never semantic. */
+/**
+ * Hash column meanings and mappings so reuse can jetect a changed provider contract.
+ * Append named ABI fields individually. Struct padding must not affect these hashes.
+ */
 [[nodiscard]] coverage_semantic_fingerprints
 compute_coverage_semantic_fingerprints(
     const bioseq_cache_path_domain& contract) noexcept {
@@ -10844,7 +10923,11 @@ compute_coverage_semantic_fingerprints(
     return result;
 }
 
-/** Build the deterministic provider boundary/lineage + occurrence schema. */
+/**
+ * Define stored rows with occurrence identity fields followed by required provider
+ * columns. Column order and names are repeatable, including the semantic digest
+ * used to detect changed column meanings.
+ */
 [[nodiscard]] bool build_coverage_stored_recipe(const bioseq_cache_path_domain& contract,
                                                 coverage_stored_recipe* output) {
     if (output == nullptr ||
@@ -11233,7 +11316,12 @@ older_reusable_identity_matches(const reusable_coverage_state& state,
                                 const coverage_current_plan_view& current_plan,
                                 const reusable_generation_snapshot& snapshot) noexcept;
 
-/** Acquire one ABA-bound reader or waiter while membership cannot change. */
+/**
+ * Hold registry membership stable while pinning a completed older result or
+ * registering a wait on another producer. Recheck  identity, visibility, and
+ * expiry before keeping the reference, so a replaced entry cannot, be mistaken
+ * for the planned source
+ */
 [[nodiscard]] bool
 acquire_older_reusable_reference(const reusable_coverage_state& state,
                                  coverage_runtime_source& source,
@@ -11437,7 +11525,10 @@ tuple_descriptor_matches_mapping_schema(TupleDesc descriptor,
     return true;
 }
 
-/** Decode the frozen mapping List and recompute all four fingerprints. */
+/**
+ * Decode the planned column mapping and check its source, consumer, decorated
+ * plan, and mapping hashes before transferring the maps to runtime state.
+ */
 [[nodiscard]] bool
 decode_and_validate_runtime_source_mapping(coverage_runtime_source& source,
                                            const bioseq_cache_path_domain& consumer,
@@ -11467,7 +11558,11 @@ decode_and_validate_runtime_source_mapping(coverage_runtime_source& source,
     return true;
 }
 
-/** Reprove immutable semantics and collision bytes for one completed source. */
+/**
+ * Check that an older source still has the planned provider, column meanings,
+ * capabilities, and security scope. Compare the stored key and descriptor bytes
+ * as well as their hashes, so hash equality alone cannot authorize reuse.
+ */
 [[nodiscard]] bool
 older_reusable_identity_matches(const reusable_coverage_state& state,
                                 const coverage_runtime_source& source,
@@ -11505,7 +11600,10 @@ older_reusable_identity_matches(const reusable_coverage_state& state,
                                 binary_node_payload(source.descriptor_node));
 }
 
-/** In-flight identity is proved by the stored canonical vector and guard. */
+/**
+ * Check an older source  still being built, including its planned identity and
+ * current relation dependencies under a refreshed visibility tiket.
+ */
 [[nodiscard]] bool
 older_reusable_inflight_identity_matches(const reusable_coverage_state& state,
                                          const coverage_runtime_source& source,
@@ -11525,7 +11623,7 @@ older_reusable_inflight_identity_matches(const reusable_coverage_state& state,
            validate_reusable_generation_dependencies_locked(snapshot, refreshed.completion_count);
 }
 
-/** A completed older source additionally requires one published manifest. */
+/** Require an older result to be COMPLETE, have a manifest, and match the planned identity. */
 [[nodiscard]] bool
 older_reusable_snapshot_matches(const reusable_coverage_state& state,
                                 const coverage_runtime_source& source,
@@ -11535,7 +11633,11 @@ older_reusable_snapshot_matches(const reusable_coverage_state& state,
            older_reusable_identity_matches(state, source, current_plan, snapshot);
 }
 
-/** Wait only on an older foreign token and reprove it after every timed wake. */
+/**
+ * Wait for a foreign producer with an older claim, checking identity and
+ * dependencies after each wake. Accept only a completed, readable result.
+ * A dead producer fails its generation. PostgreSQL cancellation is rethrown.
+ */
 [[nodiscard]] bool
 wait_for_older_reusable_generation(const reusable_coverage_state& state,
                                    coverage_runtime_source& source,
@@ -11621,7 +11723,11 @@ wait_for_older_reusable_generation(const reusable_coverage_state& state,
     return accepted;
 }
 
-/** Completed identity excludes liveness fields validated by the vector. */
+/**
+ * Compare the requested result's stable identity and stored key bytes.
+ * Dependency fingerprints and physical table identities are  checked
+ * separately when validating the generation's dependencies.
+ */
 [[nodiscard]] bool
 current_reusable_snapshot_matches(const reusable_generation_snapshot& snapshot,
                                   const coverage_current_plan_view& plan,
@@ -11644,7 +11750,7 @@ current_reusable_snapshot_matches(const reusable_generation_snapshot& snapshot,
            reusable_bytes_equal(snapshot.coverage_descriptor, plan.coverage_descriptor);
 }
 
-/** Provisional generations retain their captured liveness fingerprint. */
+/** Also require an unfinished result's captured dependency fingerprint and physical identity to match. */
 [[nodiscard]] bool current_reusable_inflight_snapshot_matches(
     const reusable_generation_snapshot& snapshot,
     const coverage_current_plan_view& plan,
@@ -11666,7 +11772,12 @@ current_dependency_ticket_matches(const reusable_coverage_state& state) noexcept
            pg_atomic_read_u32(&g_shared->coarse_transition_count) == 0;
 }
 
-/** Wake-driven, ABA-keyed wait; cancellation releases through query cleanup. */
+/**
+ * Wait for the requested result while checking its generation reference,
+ * producer, visibility, and dependencies. Claim ordering prevents cycles
+ * between waiting producers. Keep the waiter reference for query cleanup
+ * if cancellation interrupts the wait
+ */
 [[nodiscard]] bool
 wait_for_current_reusable_generation(reusable_coverage_state& state,
                                      const coverage_current_plan_view& plan,
@@ -11844,7 +11955,10 @@ void release_coverage_output_spool(reusable_coverage_state& state) noexcept {
     state.producer_spool_bytes = 0;
 }
 
-/** Allocate the optional rescan spool inside a cache-only ERROR boundary. */
+/**
+ * Create a tuplestore for rescanning producer output. Ordinary cache errors
+ * disable the spool and release partial  state. Interrupt errors still, propagate.
+ */
 [[nodiscard]] bool begin_coverage_output_spool(reusable_coverage_state& state,
                                                TupleDesc raw_descriptor) {
     if (raw_descriptor == nullptr || state.producer_output_store != nullptr ||
@@ -12014,7 +12128,11 @@ void release_current_coverage_consumer(reusable_coverage_state& state) noexcept 
                                      expected_ordinal);
 }
 
-/** Prove every stored row and semantic attno mapping before gate publication. */
+/**
+ * Check required column mappings and every stored row before enabling replay.
+ * Require the expected row cougt and valid occurrence metadata, then rewind
+ * the tuplestore for execution.
+ */
 [[nodiscard]] bool preflight_current_coverage_store(reusable_coverage_state& state,
                                                     TupleDesc raw_descriptor,
                                                     std::uint64_t expected_rows) {
@@ -12191,7 +12309,10 @@ void release_current_coverage_consumer(reusable_coverage_state& state) noexcept 
            mapped(source.lineage_map, source.lineage_map_count);
 }
 
-/** Reconstruct one consumer-shaped raw slot from the provider source maps. */
+/**
+ * Fill a consumer tuple slot from the stored source's boundary and lineage maps.
+ * Unmapped columns remain NULL. Values borrow the stored tuple's data.
+ */
 [[nodiscard]] bool populate_consumer_slot_from_source(const coverage_runtime_source& source,
                                                       TupleTableSlot* stored,
                                                       TupleTableSlot* raw) {
@@ -12247,7 +12368,11 @@ evaluate_coverage_predicate(ExprState* predicate, ExprContext* context, TupleTab
 
 inline constexpr std::size_t k_coverage_late_fetch_batch_rows = 256;
 
-/** Batch late-fetch missing consumer fields and evaluate both SQL predicates. */
+/**
+ * Fetch columns missing from stored rows in bounded batches, then evaluate
+ * the requested query predicate and this source's predicate. Mark a row only
+ * when both are TRUE under SQL rules. Rewind the  source when finished.
+ */
 [[nodiscard]] bool evaluate_older_source_rows(reusable_coverage_state& state,
                                               coverage_runtime_source& source,
                                               TupleTableSlot* raw,
@@ -12429,7 +12554,12 @@ void remove_source_occurrence_owners(reusable_coverage_state& state,
     ExecClearTuple(source.replay_slot);
 }
 
-/** Evaluate P and Pi for all materialized rows, then assign earliest owner. */
+/**
+ * Select rows that satisfy both predicates and assign each occurrence to its
+ * first selected source in plan order. Clear matches already owned by earlier
+ * sources. Duplicate occurrences within this source reject it and remove its
+ * newly assigned owners.
+ */
 [[nodiscard]] bool select_older_coverage_source(reusable_coverage_state& state,
                                                 coverage_runtime_source& source,
                                                 std::size_t source_index,
@@ -12551,7 +12681,11 @@ void remove_source_occurrence_owners(reusable_coverage_state& state,
     return row == source.row_count;
 }
 
-/** Pin, load, checksum, map, and revalidate one completed older generation. */
+/**
+ * Pin an older result's exact manifest and load its rows for replay. Check row
+ * metadata and column mappings, then recheck generation identity, expiry, and
+ * dependencies after  loading. Convert a successful waiter into a reader.
+ */
 [[nodiscard]] bool materialize_older_coverage_source(reusable_coverage_state& state,
                                                      coverage_runtime_source& source,
                                                      const coverage_current_plan_view& current_plan,
@@ -12755,7 +12889,11 @@ reusable_reference_precedes(const reusable_generation_reference& left,
     return left.slot_sequence < right.slot_sequence;
 }
 
-/** Decode one planned source in its own ERROR-isolated lifetime context. */
+/**
+ * Decode a planned older source into its own memory context Reject changed,
+ * duplicate, or current-generation identities and invalid column mappings.
+ * Ordinary PostgreSQL errors discard, this ource. Interrupts propagate.
+ */
 [[nodiscard]] bool
 decode_older_coverage_source_fail_open(reusable_coverage_state& state,
                                        coverage_runtime_source& runtime,
@@ -12837,7 +12975,11 @@ decode_older_coverage_source_fail_open(reusable_coverage_state& state,
     return decoded;
 }
 
-/** Recheck/pin/wait one source without allowing its ERROR to drop siblings. */
+/**
+ * Acquire or wait for one older source within its memory context. Catch ordinary
+ * PostgreSQL errors so the caller can discard this source and try the others.
+ * Release it and rethrow on interruption.
+ */
 [[nodiscard]] bool
 acquire_older_coverage_source_fail_open(reusable_coverage_state& state,
                                         coverage_runtime_source& source,
@@ -12882,7 +13024,11 @@ acquire_older_coverage_source_fail_open(reusable_coverage_state& state,
     return accepted;
 }
 
-/** Load and validate one source under its source-local ERROR boundary. */
+/**
+ * Load and check one older source while isolating  its PostgreSQL errors.
+ * Return false for ordinary failures so other sources remain usable.
+ * Interrupts release this source and propagate.
+ */
 [[nodiscard]] bool
 materialize_older_coverage_source_fail_open(reusable_coverage_state& state,
                                             coverage_runtime_source& source,
@@ -12916,7 +13062,11 @@ materialize_older_coverage_source_fail_open(reusable_coverage_state& state,
     return materialized;
 }
 
-/** Evaluate one source bitmap/provider batch without suppressing later sources. */
+/**
+ * Select rows from one source while isolating ordinary PostgreSQL errors.
+ * A failed selection lets the caller remove this source's occurrence owners
+ * and continue with later sources. Interrupts propagate.
+ */
 [[nodiscard]] bool select_older_coverage_source_fail_open(reusable_coverage_state& state,
                                                           coverage_runtime_source& source,
                                                           std::size_t source_index,
@@ -12947,7 +13097,12 @@ materialize_older_coverage_source_fail_open(reusable_coverage_state& state,
     return selected;
 }
 
-/** Decide every planned older source before any later gate publication. */
+/**
+ * Prepare all planned older sources before enabling cached output.
+ * Decode candidates, acquire references in claim order, wait when allowed,
+ * then load and select rows in plan order. Discard failed sources and keep
+ * those whose  identity, visibility, and row checks succeed.
+ */
 [[nodiscard]] bool prepare_older_coverage_sources(reusable_coverage_state& state,
                                                   const CustomScan& scan,
                                                   const coverage_current_plan_view& current_plan,
@@ -13093,7 +13248,11 @@ prepare_older_coverage_sources_fail_open(reusable_coverage_state& state,
     return prepared;
 }
 
-/** Validate and materialize all stored bytes before publishing one valid gate. */
+/**
+ * Load the requested completed result and check every stored row before using
+ * it as the current consumer. Recheck identity, expiry, and dependencies after
+ * loading, thn hold a reader pin for replay.
+ */
 [[nodiscard]] bool
 prepare_current_coverage_consumer(reusable_coverage_state& state,
                                   const coverage_current_plan_view& plan,
@@ -13326,7 +13485,11 @@ capture_cleanup:
            capture_coverage_row_with_occurrence(state, slot, occurrence);
 }
 
-/** Seal full merged output, publish storage, then make registry COMPLETE last. */
+/**
+ * Finalize the merged result and publish its storage manifest Recheck source
+ * dependencies while marking the registry entry COMPLETE, then wake waiters.
+ * A dependency change during publication makes the result unavailable.
+ */
 [[nodiscard]] bool complete_coverage_producer_with_cpp_owners(reusable_coverage_state& state) {
     const coverage_dependency_ticket dependency_ticket =
         mint_coverage_dependency_ticket(state.current_contract.domain, state.provider);
@@ -13446,7 +13609,10 @@ capture_cleanup:
     return true;
 }
 
-/** Restore PostgreSQL ERROR only after coverage-owned C++ blocks unwind. */
+/**
+ * Reraise captured PostgreSQL errors after  C++ result buffers unwind.
+ * Return false for unrelated C++ exceptions so cache production can stop.
+ */
 [[nodiscard]] bool complete_coverage_producer(reusable_coverage_state& state) {
     ErrorData* postgres_error = nullptr;
     bool completed = false;
@@ -13482,7 +13648,7 @@ inline constexpr int k_diagnostic_display_sql_truncated = 1 << 0;
 inline constexpr int k_diagnostic_canonical_plan_truncated = 1 << 1;
 inline constexpr int k_diagnostic_canonical_plan_unavailable = 1 << 2;
 
-/** Copy diagnostics into planner/query memory with an explicit byte bound. */
+/** Copy up to capacity bytes of diagnostic text and record whether it was truncated. */
 [[nodiscard]] bool copy_bounded_diagnostic_text(const char* source,
                                                 std::size_t capacity,
                                                 bounded_diagnostic_text* output) {
@@ -13498,7 +13664,7 @@ inline constexpr int k_diagnostic_canonical_plan_unavailable = 1 << 2;
     return output->available;
 }
 
-/** Reuse one resettable backend context for transient serialization trees. */
+/** Create or reuse backend memory for temporary plan serialization. Callers reset it after capture. */
 [[nodiscard]] MemoryContext reusable_plan_capture_context() {
     if (g_plan_capture_context == nullptr) {
         MemoryContext previous = MemoryContextSwitchTo(TopMemoryContext);
@@ -13509,7 +13675,7 @@ inline constexpr int k_diagnostic_canonical_plan_unavailable = 1 << 2;
     return g_plan_capture_context;
 }
 
-/** Publish status only; unavailable diagnostics never expose partial bytes. */
+/** Clear the captured-text reference and mark the plan diagnostic unavailable. */
 void set_plan_capture_unavailable(bounded_diagnostic_text* output) noexcept {
     if (output == nullptr) {
         return;
@@ -13518,7 +13684,11 @@ void set_plan_capture_unavailable(bounded_diagnostic_text* output) noexcept {
     output->status = reusable_plan_snapshot_status::unavailable;
 }
 
-/** Canonical child Plan text is diagnostics only and fails open. */
+/**
+ * Capture bounded nodeToString output for plan diagnostics. Reset temporary
+ * serialization  memory after, capture. Ordinary PostgreSQL errors leave the
+ * diagnostic unavailable, while interrupts still propagate.
+ */
 [[nodiscard]] bool capture_canonical_child_plan_fail_open(const Plan* child,
                                                           std::size_t capacity,
                                                           bounded_diagnostic_text* output) {
@@ -13569,7 +13739,11 @@ void set_plan_capture_unavailable(bounded_diagnostic_text* output) noexcept {
     return output->status == reusable_plan_snapshot_status::planned;
 }
 
-/** Render an initialized producer child without mutating the live QueryDesc. */
+/**
+ * Render the initialized child with EXPLAIN using a temporary QueryDesc view.
+ * Include execution measurements when analyze is requested. Bound the cipied
+ * text and discard ordinary diagnostic errors. Interrupts propagate.
+ */
 [[nodiscard]] bool capture_initialized_child_plan_fail_open(CustomScanState* node,
                                                             EState* estate,
                                                             const char* display_sql,
@@ -13679,8 +13853,8 @@ void initialize_coverage_child(reusable_coverage_state& state,
     state.child_initialized = true;
 }
 
-/** Claim exact-current work before any retained provider row can execute. */
-/** Coverage defaults to bypass until main-tree finalization clears its marker. */
+
+/** Bypass caching unless final plan checks explicitly enabled this coverage scan. */
 [[nodiscard]] bool coverage_force_bypass(const CustomScan* scan) noexcept {
     return scan == nullptr || scan->custom_private == NIL ||
            list_length(scan->custom_private) < 11 ||
@@ -14236,7 +14410,11 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
     return state.producer_output_slot;
 }
 
-/** Copy one visible raw tuple into a bounded optional rescan spool. */
+/**
+ * Copy an output tuple into the optional rescan store while it fits the row
+ * and byte limits. A  limit or ordinary PostgreSQL error discards the spool.
+ * Interrupt errors propagate.
+ */
 [[nodiscard]] bool spool_coverage_output(reusable_coverage_state& state, TupleTableSlot* raw) {
     if (state.producer_spool_failed || state.producer_output_store == nullptr || raw == nullptr ||
         TupIsNull(raw)) {
@@ -14734,7 +14912,7 @@ const CustomScanMethods& coverage_scan_methods() {
     return executor::exact_scan::coverage_scan_methods<coverage_create_custom_scan_state>();
 }
 
-/** Re-decode every mapping after the final decorated child Plan exists. */
+/** Check each selected source's column mapping again while building the coverage scan */
 [[nodiscard]] bool planned_source_mappings_valid(PlannerInfo* root, const CustomPath& best_path) {
     const auto current_bytes = binary_node_payload(list_nth(best_path.custom_private, 2));
     coverage_current_plan_view current_plan{};
@@ -14776,7 +14954,11 @@ const CustomScanMethods& coverage_scan_methods() {
     return true;
 }
 
-/** Register only selected cache gates after PostgreSQL identifies outer Params. */
+/**
+ * Register Boolean parameters that decide which cached sources can supply rows.
+ * Check their types and uniqueness, then add them to PostgreSQL's outer-parameter
+ * bookkeeping.
+ */
 [[nodiscard]] bool register_selected_gate_params(PlannerInfo* root,
                                                  const CustomPath& best_path) noexcept {
     if (root == nullptr || root->glob == nullptr || list_length(best_path.custom_private) < 6) {
@@ -14829,7 +15011,11 @@ const CustomScanMethods& coverage_scan_methods() {
     return finalize_selected_coverage_gates(*root);
 }
 
-/** Add a planner-only dense replay namespace after the provider raw tuple. */
+/**
+ * Append columns used by replay predicates to a copy of the child's target list
+ * so PostgreSQL can resolve their references. Order them by provider attribute
+ * number and mark them as  junk columns. The predicate slot evaluates them.
+ */
 [[nodiscard]] List*
 make_coverage_scan_tlist(PlannerInfo* root, const CustomPath& best_path, const Plan& child) {
     if (root == nullptr || root->planner_cxt == nullptr ||
@@ -14909,7 +15095,11 @@ make_coverage_scan_tlist(PlannerInfo* root, const CustomPath& best_path, const P
     return valid ? scan_tlist : NIL;
 }
 
-/** A selected CustomPath must always lower to a valid semantics-first Plan. */
+/**
+ * Build a coverage scan that always bypasses caching and executes its original
+ * chld. Preserve the projection and replay-expression layout needed by
+ * PostgreSQL even though cache reuse is disabled.
+ */
 [[nodiscard]] Plan* make_force_bypassed_coverage_plan(PlannerInfo& root,
                                                       RelOptInfo& relation,
                                                       const CustomPath& best_path,
@@ -14966,7 +15156,11 @@ make_coverage_scan_tlist(PlannerInfo* root, const CustomPath& best_path, const P
     return &scan->scan.plan;
 }
 
-/** Finalize the provider recipe only after the decorated child Plan exists. */
+/**
+ * Build a coverage scan around the selected child Plan. Check source mappings,
+ * ask the, provider for a recipe tied to that child, and keep the predicates
+ * and gate parameters needed for replay. Invalid path metadata uses a bypass  plan.
+ */
 Plan* coverage_plan_custom_path(PlannerInfo* root,
                                 RelOptInfo* relation,
                                 CustomPath* best_path,
@@ -15050,7 +15244,7 @@ Plan* coverage_plan_custom_path(PlannerInfo* root,
     auto* scan = makeNode(CustomScan);
     scan->methods = &coverage_scan_methods();
     scan->flags = best_path->flags;
-    /* Coverage decorates one base relation; preserve its distinct self-join RTI. */
+    /* Keep this relation's range-table index so self-join occurrences stay distinct. */
     scan->scan.scanrelid = relation->relid;
     scan->scan.plan.targetlist = target_list;
     scan->scan.plan.qual = NIL;
@@ -15093,13 +15287,13 @@ const CustomPathMethods& coverage_path_methods() {
     return planner::reuse::coverage_path_methods<coverage_plan_custom_path>();
 }
 
-/** Bounded, cycle-safe inspection of one selected Path tree. */
+/** Search a selected Path tree with a fixed visit limit and no repeated node visits. */
 struct reusable_coverage_path_probe {
     std::array<const Path*, k_maximum_exact_plan_walk_nodes> visited{};
     std::size_t visited_count = 0;
     bool valid = true;
 
-    /** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
+    /** Find a cache coverage path in this selected tree. */
     [[nodiscard]] bool contains(const Path* path) {
         if (!valid || path == nullptr) {
             return false;
@@ -15206,7 +15400,7 @@ struct reusable_coverage_path_probe {
         }
     }
 
-    /** Lists here are selected children, never relation path alternatives. */
+    /** Search child paths belonging to this selected tree. */
     [[nodiscard]] bool contains_list(const List* paths) {
         const ListCell* cell = nullptr;
         foreach (cell, paths) {
@@ -15227,7 +15421,7 @@ struct reusable_coverage_path_probe {
     return probe.valid && found;
 }
 
-/** Add one finalized relation dependency without losing topology roots. */
+/** Add a relation OID once, preserving existing dependencies and enforcing the count limit */
 [[nodiscard]] bool append_exact_relation_dependency(List** relation_oids, Oid relation_oid) {
     if (relation_oids == nullptr || !OidIsValid(relation_oid)) {
         return false;
@@ -15242,7 +15436,7 @@ struct reusable_coverage_path_probe {
     return true;
 }
 
-/** Walk only the selected Path tree, switching roots for subquery domains. */
+/** Collect relation dependencies from the selected Path tree, using each subquery's planner root. */
 struct exact_path_dependency_collector {
     List** relation_oids = nullptr;
 
@@ -15372,10 +15566,10 @@ struct exact_path_dependency_collector {
 };
 
 /**
- * Freeze the post-partition-expansion dependency closure before decoration.
- * Query-tree roots preserve topology identity; the selected Path contributes
- * candidate physical leaves while aggregate support items remain full
- * cacheId/hashValue identities collected from the analyzed expression tree.
+ * Complete  the relation dependency list before wrapping the selected path.
+ * Keep relations alread found in the query, add planner-expanded relations
+ * and selected physical scans, and enforce the shared relation/syscache limit.
+ * Existing syscache entries keep both their cache ID and hash value.
  */
 [[nodiscard]] bool finalize_exact_plan_dependencies(PlannerInfo& root,
                                                     const Path& selected_path,
@@ -15411,7 +15605,7 @@ struct exact_path_dependency_collector {
            static_cast<int>(k_maximum_dependencies_per_generation);
 }
 
-/** Create an exact-result wrapper around one final path. */
+/** Wrap a final path for exact-result caching, preserving its output and sort order. */
 [[nodiscard]] CustomPath*
 make_exact_cache_path(RelOptInfo& output_relation,
                       Path& input_path,
@@ -15447,7 +15641,11 @@ make_exact_cache_path(RelOptInfo& output_relation,
     return path;
 }
 
-/** Predecessor-first top-level FINAL path decoration before setrefs. */
+/**
+ * Call the preceding upper-path hook, then wrap eligible top-level FINAL paths.
+ * Keep paths containing coverage  reuse unchanged. Finalized dependencies are
+ * attached before PostgreSQL rewrites plan references with setrefs.
+ */
 void cache_create_upper_paths(PlannerInfo* root,
                               UpperRelationKind stage,
                               RelOptInfo* input_relation,
@@ -15483,12 +15681,11 @@ void cache_create_upper_paths(PlannerInfo* root,
                 exact_path_added = true;
             } else if (frame->nested_coverage_path_created) {
                 /*
-                 * A selected nested coverage Plan will export its private
-                 * Boolean gate through subplan extParam.  Retain one top
-                 * PlanCustomPath callback even when exact dependencies are
-                 * unavailable so those IDs can be re-unioned after
-                 * SS_identify_outer_params.  The wrapper is permanently
-                 * passthrough and can never touch the registry.
+                 * A nested coverage subplan exports private Boolean gate
+                 * parameters. Keep a top-level planning callback so those IDs
+                 * can be restored after SS_identify_outer_params, even when
+                 * exact-cache dependencies could not be collected. This
+                 * wrapper always passes through to its child.
                  */
                 replacements =
                     lappend(replacements,
@@ -15541,7 +15738,7 @@ exact_plan_range_entry(const exact_plan_verification& verification,
         list_nth(verification.statement->rtable, static_cast<int>(range_table_index - 1)));
 }
 
-/** Admit only PostgreSQL's built-in heap table AM. */
+/** Accept heap tables, whose reads this cache implementation supports. */
 [[nodiscard]] bool exact_table_access_method_safe(Oid relation_oid) {
 #if defined(BIOSEQ_CACHE_TESTING)
     if (g_test_exact_plan_fault == test_exact_plan_fault::unknown_table_access_method) {
@@ -15551,7 +15748,7 @@ exact_plan_range_entry(const exact_plan_verification& verification,
     return OidIsValid(relation_oid) && get_rel_relam(relation_oid) == HEAP_TABLE_AM_OID;
 }
 
-/** Admit the built-in index AMs whose executor paths are supported. */
+/** Accept the built-in B-tree, hash, GiST, GIN, SP-GiST, and BRIN index methods. */
 [[nodiscard]] bool exact_index_access_method_safe(Oid index_oid) {
 #if defined(BIOSEQ_CACHE_TESTING)
     if (g_test_exact_plan_fault == test_exact_plan_fault::unknown_index_access_method) {
@@ -15611,7 +15808,13 @@ exact_plan_range_entry(const exact_plan_verification& verification,
            !contain_mutable_functions(reinterpret_cast<Node*>(plan.initPlan));
 }
 
-/** Positive allowlist for finalized executor sources and structural nodes. */
+/**
+ * Check that every source and plan node can be reused as an exact, result.
+ *
+ * Mutable expressions, unsupported scans, and providers without permission  to
+ * skip execution rject the plan. Count accepted provider scans so the caller
+ * can check that each has a runtime recipe
+ */
 [[nodiscard]] bool exact_plan_tree_safe(exact_plan_verification& verification, const Plan* plan) {
 #if defined(BIOSEQ_CACHE_TESTING)
     if (g_test_exact_plan_fault == test_exact_plan_fault::unknown_custom_scan) {
@@ -15822,7 +16025,10 @@ exact_plan_range_entry(const exact_plan_verification& verification,
     return true;
 }
 
-/** Merge the planner's finalized invalidation closure into the exact node. */
+/**
+ * Add the finished plan's relation, catalog, and role dependencies to the exact
+ * cache entry. Keep caching disabled until the plan passes the final checks.
+ */
 [[nodiscard]] bool merge_finalized_exact_dependencies(PlannedStmt& statement) {
     if (statement.planTree == nullptr || !IsA(statement.planTree, CustomScan)) {
         return true;
@@ -15883,7 +16089,11 @@ exact_plan_range_entry(const exact_plan_verification& verification,
     return true;
 }
 
-/** Verify the exact retained tree after setrefs and flip only its marker. */
+/**
+ * Enable exact caching only after the finished main plan and subplans pass the
+ * source checks and every provider scan has a recipe. Ordinary check failures
+ * leave the original plan executable  with caching disabled.
+ */
 void verify_exact_cache_plan_fail_open(PlannedStmt& statement) {
     if (statement.planTree == nullptr || !IsA(statement.planTree, CustomScan)) {
         return;
@@ -15943,7 +16153,11 @@ void verify_exact_cache_plan_fail_open(PlannedStmt& statement) {
     }
 }
 
-/** Collect selected coverage markers before mutating any finalized Plan. */
+/**
+ * Collect coverage nodes' enable flags before changing them. Track visited
+ * plans and reject unsupported nodes or exhausted limits, so callers can avoid
+ * enabling only part of a plan.
+ */
 struct main_tree_coverage_marker_collector {
     std::array<const Plan*, k_maximum_exact_plan_walk_nodes> visited{};
     std::array<Integer*, static_cast<std::size_t>(k_maximum_coverage_nodes_per_plan)> markers{};
@@ -15952,7 +16166,10 @@ struct main_tree_coverage_marker_collector {
     bool include_enabled = false;
     bool valid = true;
 
-    /** Collect selected coverage markers before mutating any finalized Plan. */
+    /**
+ * Visit each plan once and collect provisional coverage flags. Include enabled
+ * flags when requested, while leaving permanent bypass flags untouched.
+ */
     [[nodiscard]] bool collect(Plan* plan) {
         if (!valid || plan == nullptr) {
             return valid;
@@ -16065,11 +16282,9 @@ struct main_tree_coverage_marker_collector {
 };
 
 /**
- * Replace every exact scan's provisional recipes with post-setrefs recipes.
- *
- * The traversal covers both the main tree and separately initialized subplans.
- * Every exact node is forced to bypass before callbacks run and is re-enabled
- * only by the ordinary finalized-plan verifier later in the planner hook.
+ * Rebuild exact-cache provider recipes from plans whose column references have
+ * been finalized by PostgreSQL. Visit the main tree and separate subplans.
+ * Keep  each exact node disabled until the final verifier accepts it.
  */
 [[nodiscard]] bool refresh_finalized_exact_provider_recipes(PlannedStmt& statement,
                                                             MemoryContext planner_context) {
@@ -16111,7 +16326,7 @@ struct main_tree_coverage_marker_collector {
     return recipes_complete;
 }
 
-/** Permanently bypass every separately initialized CTE/InitPlan/SubPlan root. */
+/** Permanently disable coverage caching hnside separately initialized subplans. */
 [[nodiscard]] bool mark_subplan_coverage_permanent_fail_open(PlannedStmt& statement) noexcept {
     main_tree_coverage_marker_collector collector{
         .include_enabled = true,
@@ -16125,7 +16340,7 @@ struct main_tree_coverage_marker_collector {
     return true;
 }
 
-/** Enable only provisional main-tree nodes; permanent bypass is sticky. */
+/** Enable provisional coverage nodes in the main tree after checking the whole tree. */
 void enable_main_tree_coverage_fail_open(PlannedStmt& statement) noexcept {
     main_tree_coverage_marker_collector collector{};
     if (!collector.collect(statement.planTree) || !collector.valid) {
@@ -16137,13 +16352,11 @@ void enable_main_tree_coverage_fail_open(PlannedStmt& statement) noexcept {
 }
 
 /**
- * Finalize all cache-owned plan metadata after the current outer provider has
- * completed its post-setrefs mutations.
+ * Finish cache metadata after PostgreSQL and provider hooks finish the plan.
  *
- * Repeating this operation is intentional: when cache is the inner planner
- * hook it first sees the post-setrefs tree before an outer provider mutates
- * it, and the provider bridge then authoritatively replaces those provisional
- * recipes.  Every refresh forces exact nodes to bypass before rebuilding.
+ * An outer provider hook can still change a plan after this hook returns. Its
+ * bridge calls this again to rebuild recipes from those changes and, verify
+ * exact caching again
  */
 void finalize_cache_planned_statement(PlannedStmt& statement, MemoryContext planner_context) {
     if (mark_subplan_coverage_permanent_fail_open(statement)) {
@@ -16155,7 +16368,7 @@ void finalize_cache_planned_statement(PlannedStmt& statement, MemoryContext plan
     }
 }
 
-/** Planner-bridge endpoint invoked only after provider Plan mutation. */
+/** Refresh cache metadata when a provider reports that its  plan changes are complete. */
 void observe_finalized_planned_statement(PlannedStmt* statement) noexcept {
     if (statement == nullptr) {
         return;
@@ -16163,15 +16376,18 @@ void observe_finalized_planned_statement(PlannedStmt* statement) noexcept {
     finalize_cache_planned_statement(*statement, CurrentMemoryContext);
     if (g_planner_frame != nullptr) {
         /*
-         * Cache is the outer hook in this load order.  The bridge refresh is
-         * authoritative; do not immediately rebuild the same recipes again
-         * after the provider returns.
+         * The provider finalized this plan while our planner hook was active.
+         * Remember it so cache_planner does not rebuild the same recipes again.
          */
         g_planner_frame->bridge_finalized_statement = statement;
     }
 }
 
-/** Reentrant planner wrapper that owns canonical bytes for upper-path hooks. */
+/**
+ * Prepare query identity and dependencies for the cache path hooks, call the
+ * next planner, and finish cache metadata on the returned plan. A separate
+ * frame for each call keeps nested planning from overwriting this state.
+ */
 PlannedStmt* cache_planner(Query* query,
                            const char* query_string,
                            int cursor_options,
@@ -16216,7 +16432,7 @@ PlannedStmt* cache_planner(Query* query,
             (debug_query_string == nullptr || query_string == debug_query_string ||
              std::strcmp(query_string, debug_query_string) == 0);
         if (frame.eligible && query->rtable == NIL && !current_statement_text) {
-            /* PL/pgSQL simple-expression plans must retain a Result root. */
+            /* PL/pgSQL simple-expression plans need a Result root. */
             frame.eligible = false;
         }
         if (frame.eligible) {
@@ -16277,7 +16493,11 @@ PlannedStmt* cache_planner(Query* query,
     return result;
 }
 
-/** Preserve write observability even when a writer session disables caching. */
+/**
+ * Record the plan's write targets for cache invalidation, even  when this session
+ * has caching disabled. Missing or invalid targets require database-wide
+ * invalidatiyn for the transaction.
+ */
 void mark_planned_result_relations(PlannedStmt& statement) {
     if (g_dirty_observations.coarse()) {
         return;
@@ -16315,7 +16535,10 @@ void mark_planned_result_relations(PlannedStmt& statement) {
     }
 }
 
-/** Planner metadata is a backstop; malformed/ERROR paths become coarse. */
+/**
+ * Record planned write targets. If inspection fails, require database-wide
+ * invalidation and let the write continue. Query interrupts still propagate.
+ */
 void mark_planned_result_relations_fail_open(PlannedStmt& statement) {
     MemoryContext caller_context = CurrentMemoryContext;
     PG_TRY();
@@ -16335,7 +16558,7 @@ void mark_planned_result_relations_fail_open(PlannedStmt& statement) {
     PG_END_TRY();
 }
 
-/** Observe one initialized ResultRelInfo without retaining executor pointers. */
+/** Record one executor write target by relation OID while its Relation is still open. */
 void mark_result_relation_info(ResultRelInfo* result_relation) {
     if (g_dirty_observations.coarse()) {
         return;
@@ -16353,9 +16576,10 @@ void mark_result_relation_info(ResultRelInfo* result_relation) {
 }
 
 /**
- * Capture opened, tuple-routed, and trigger-only targets while EState is live.
- * Ordinary observer failures switch this transaction to sticky coarse mode;
- * they never fail a successful source write.
+ * Record tables opened for writes, including partitions selected by tuple
+ * routing and tables reached through triggers, before EState is freed.
+ * Ordinary  inspection failures require database-wide invalidation. Query
+ * interrupts still propagate.
  */
 void mark_executor_result_relations_fail_open(QueryDesc* query_description) {
     EState* estate = query_description == nullptr ? nullptr : query_description->estate;
@@ -16405,7 +16629,7 @@ void mark_executor_result_relations_fail_open(QueryDesc* query_description) {
     PG_END_TRY();
 }
 
-/** Copy one bounded diagnostic into an exact shared record under its lock. */
+/** Copy diagnostic text and its status into fixed-size storage, recording truncation. */
 template <std::size_t p_destination_capacity>
 void assign_exact_plan_diagnostic(std::array<char, p_destination_capacity>& destination,
                                   std::uint32_t& destination_bytes,
@@ -16422,7 +16646,10 @@ void assign_exact_plan_diagnostic(std::array<char, p_destination_capacity>& dest
     destination_truncated = source.truncated || source.size > copied;
 }
 
-/** Publish exact BUILDING and its initialized-child diagnostics atomically. */
+/**
+ * Start exact-result capture and publish BUILDING with diagnostics from the
+ * initialized child plan Return false if capture or publication fails.
+ */
 [[nodiscard]] bool publish_planned_exact_diagnostics(bioseq_cache_state& state) {
     CustomScanState* node = &state.css;
     auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
@@ -16477,7 +16704,7 @@ void assign_exact_plan_diagnostic(std::array<char, p_destination_capacity>& dest
     return true;
 }
 
-/** Replace exact producer diagnostics from live Analyze instrumentation. */
+/** Replace exact-cache, plan diagnostics with live EXPLAIN ANALYZE results when instrumentation is available. */
 void refresh_analyzed_exact_diagnostics(bioseq_cache_state& state) {
     PlanState* child = retained_child(&state.css);
     EState* estate = state.css.ss.ps.state;
@@ -16545,7 +16772,7 @@ struct coverage_diagnostic_private_text {
            output->canonical_plan != nullptr;
 }
 
-/** Publish BUILDING only after the complete chained PlanState tree exists. */
+/** Publish the coverage  producer as BUILDING with diagnostics after the executor tree is initialized. */
 [[nodiscard]] bool publish_planned_coverage_diagnostics(reusable_coverage_state& state) {
     if (!state.current_producer_owned || state.producer_completed ||
         state.planned_diagnostics_published || !state.child_initialized ||
@@ -16594,7 +16821,7 @@ struct coverage_diagnostic_private_text {
     return true;
 }
 
-/** Upgrade Planned text only when EXPLAIN ANALYZE instrumentation is live. */
+/** Replace coverage plan iagnostics with live EXPLAIN ANALYZE results when instrumentation is available. */
 void refresh_analyzed_coverage_diagnostics(reusable_coverage_state& state) {
     PlanState* child = coverage_retained_child(&state.css);
     EState* estate = state.css.ss.ps.state;
@@ -16654,7 +16881,10 @@ struct producer_plan_walk_context {
     bool overflow = false;
 };
 
-/** Traverse init plans, subplans, and custom children without revisiting DAGs. */
+/**
+ * Publish or refresh cache-producer diagnostics throughout the executor tree.
+ * Visit shared child nodes once, including custom children and subplans.
+ */
 bool visit_reusable_producer_planstate(PlanState* planstate, void* opaque) {
     auto* context = static_cast<producer_plan_walk_context*>(opaque);
     if (planstate == nullptr || context == nullptr) {
@@ -16712,7 +16942,7 @@ void walk_reusable_producer_planstates_unchecked(QueryDesc* query_description,
     static_cast<void>(visit_reusable_producer_planstate(query_description->planstate, &context));
 }
 
-/** Diagnostic traversal never blocks the source query on ordinary errors. */
+/** Inspect producer plans without failing the query on ordinary diagnostic errors. Propagate interrupts. */
 [[nodiscard]] bool walk_reusable_producer_planstates_fail_open(QueryDesc* query_description,
                                                                producer_plan_walk_mode mode) {
     MemoryContext caller_context = CurrentMemoryContext;
@@ -16817,7 +17047,7 @@ void cache_executor_finish(QueryDesc* query_description) {
     }
 }
 
-/** Last-chance collection covers tuple routing and trigger targets from Run. */
+/** Record  write targets reached during execution before ExecutorEnd frees their state. */
 void cache_executor_end(QueryDesc* query_description) {
     if (query_description != nullptr && query_description->estate != nullptr &&
         (query_description->estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
@@ -16830,7 +17060,7 @@ void cache_executor_end(QueryDesc* query_description) {
     }
 }
 
-/** Exclude utility commands that cannot change a reusable SQL result. */
+/** Identify utility commands that need write tracking here. Executor hooks cover prepared DML and EXPLAIN ANALYZE. */
 [[nodiscard]] bool utility_may_change_database(const Node* statement) noexcept {
     if (statement == nullptr) {
         return false;
@@ -16867,7 +17097,7 @@ struct truncate_relation_replacement {
     dependency_version old_version{};
 };
 
-/** Fixed-stack utility handoff; PostgreSQL owns every retained relation lock. */
+/** Old table storage identities kept across TRUNCATE. PostgreSQL holds the relation locks. */
 struct truncate_replacement_capture {
     std::array<truncate_relation_replacement, k_maximum_truncate_replacement_targets> targets{};
     std::size_t count = 0;
@@ -16884,7 +17114,7 @@ struct truncate_replacement_capture {
                        });
 }
 
-/** Snapshot and own one pre-TRUNCATE logical-key/old-locator capability. */
+/** Save a table's dependency version before TRUNCATE replaces its storage, and mark the table dirty. */
 [[nodiscard]] bool capture_truncate_target(Oid relation_oid,
                                            truncate_replacement_capture& capture) {
     if (!OidIsValid(relation_oid)) {
@@ -16922,7 +17152,11 @@ struct truncate_replacement_capture {
     return identity_status != relation_physical_identity_status::unknown;
 }
 
-/** Expand inheritance before execution while old locators remain observable. */
+/**
+ * Lock TRUNCATE targets and save their old storage identities before execution.
+ * Include inherited tables and discovered foreign-key dependents. Return false
+ * when database-wide invalidation is also needed, including every CASCADE.
+ */
 [[nodiscard]] bool capture_truncate_replacements(const TruncateStmt& truncate,
                                                  truncate_replacement_capture& capture) {
     capture = {};
@@ -16993,13 +17227,15 @@ struct truncate_replacement_capture {
         list_free(relation_ids);
     }
     capture.closure_complete = complete && cascade_closure_complete;
-    /* CASCADE always carries a database guard in addition to the exact
-     * pre/post physical replacement set: extension-owned or otherwise
-     * undiscoverable targets must never retain a readable stale result. */
+    /* CASCADE also  needs database-wide invalidation because extensions may
+     * truncate tables that this foreign-key walk cannot discover. */
     return complete && truncate.behavior != DROP_CASCADE;
 }
 
-/** Stage each freshly swapped locator; transaction callbacks publish or abort. */
+/**
+ * Record each table's new storage identity after TRUNCATE succeeds. Transaction
+ * callbacks publish these replacements on commit or discard them on abort
+ */
 void stage_truncate_replacements_after_success(
     const truncate_replacement_capture& capture) noexcept {
     if (!capture.active || !IsTransactionState()) {
@@ -17033,7 +17269,7 @@ void stage_truncate_replacements_after_success(
     }
 }
 
-/** Resolve bounded utility targets while normal allocation/errors are legal. */
+/** Record COPY FROM targets while tracking indivioual tables. Other utility commands need database-wide invalidation. */
 [[nodiscard]] bool mark_precise_utility_targets(const Node* statement) {
     if (g_dirty_observations.coarse()) {
         return true;
@@ -17056,7 +17292,11 @@ void stage_truncate_replacements_after_success(
     return false;
 }
 
-/** Unknown utility classes remain conservatively coarse and fail open. */
+/**
+ * Track utility write targets when they can be identified. Use database-wide
+ * invalidation for unknown targets or ordinary  inspection errors, while letting
+ * query interrupts propagate.
+ */
 void mark_utility_write_fail_open(const Node* statement,
                                   truncate_replacement_capture* truncate_capture = nullptr) {
     MemoryContext caller_context = CurrentMemoryContext;
@@ -17085,7 +17325,12 @@ void mark_utility_write_fail_open(const Node* statement,
     }
 }
 
-/** Conservatively publish one database-wide epoch for utility writes. */
+/**
+ * Track, utility writes around the next ProcessUtility hook. Capture TRUNCATE
+ * storage changes across execution and invalidate the database for writes
+ * whose targets are unknown. Prepared-transaction resolution holds a cache
+ * transition open until its outcome is recorded.
+ */
 void cache_process_utility(PlannedStmt* statement,
                            const char* query_string,
                            bool read_only_tree,
@@ -17222,12 +17467,12 @@ void cache_process_utility(PlannedStmt* statement,
     }
 }
 
-/** Read one shared counter without exposing shared-memory pointers. */
+/** Read a shared counter atomically, or return zero before shared state is attached. */
 [[nodiscard]] std::uint64_t read_counter(pg_atomic_uint64& counter) noexcept {
     return g_shared == nullptr ? 0 : pg_atomic_read_u64(&counter);
 }
 
-/** Enforce the documented schema-USAGE plus function-EXECUTE boundary. */
+/** Require schema USAGE and  function EXECUTE privileges to read cache diagnostics. Superusers are allowed. */
 void require_cache_diagnostics_reader(Oid function_oid) {
     const Oid user_id = GetUserId();
     const Oid namespace_oid =
@@ -17245,7 +17490,7 @@ void require_cache_diagnostics_reader(Oid function_oid) {
     }
 }
 
-/** Apply the per-row producer/superuser/policy-monitor text rule. */
+/** Allow SQL and plan text for the producing role, superusers, and pg_read_all_stats members. */
 [[nodiscard]] cache_diagnostic_disclosure_level
 diagnostic_disclosure_for_role(Oid producer_role_oid) noexcept {
     const Oid user_id = GetUserId();
@@ -17303,7 +17548,7 @@ struct entry_snapshot {
     return "UNKNOWN";
 }
 
-/** Render one reusable core state without exposing registry internals. */
+/** Return the cache-entry state label used in diagnostics. */
 [[nodiscard]] const char* reusable_entry_state_name(cache_entry_state state) noexcept {
     switch (state) {
     case cache_entry_state::absent:
@@ -17324,7 +17569,7 @@ struct entry_snapshot {
     return "UNKNOWN";
 }
 
-/** Derive the current administrative action from durable reusable state. */
+/** Return the diagnostic action label associated with the entry's current state. */
 [[nodiscard]] const char* reusable_entry_action_name(cache_entry_state state) noexcept {
     switch (state) {
     case cache_entry_state::claimed:
@@ -17345,7 +17590,7 @@ struct entry_snapshot {
     return "unknown";
 }
 
-/** Render a stable failure label for redacted diagnostics JSON. */
+/** Return the diagnostic label for a cache failure code. */
 [[nodiscard]] const char* reusable_failure_name(cache_failure_code failure) noexcept {
     switch (failure) {
     case cache_failure_code::none:
@@ -17374,7 +17619,7 @@ struct entry_snapshot {
     return "Unknown";
 }
 
-/** Render the bounded write-observability class. */
+/** Return the diagnostic label for how writes to this entry's dependencies are observed. */
 [[nodiscard]] const char* reusable_observability_name(write_observability observability) noexcept {
     switch (observability) {
     case write_observability::none:
@@ -17389,7 +17634,7 @@ struct entry_snapshot {
     return "Unknown";
 }
 
-/** Render one bounded producer-plan capture status. */
+/** Return the diagnostc label for an unavailable, planned, or analyzed plan snapshot. */
 [[nodiscard]] const char*
 reusable_plan_snapshot_status_name(reusable_plan_snapshot_status status) noexcept {
     switch (status) {
@@ -17403,7 +17648,7 @@ reusable_plan_snapshot_status_name(reusable_plan_snapshot_status status) noexcep
     return "Unknown";
 }
 
-/** Format a collision-index digest without reading canonical identity bytes. */
+/** Format a 256-bit  digest as lowercase hexadecimal with a trailing null byte. */
 [[nodiscard]] std::array<char, 65> reusable_digest_hex(const cache_digest_256& digest) noexcept {
     constexpr char digits[] = "0123456789abcdef";
     std::array<char, 65> output{};
@@ -17414,7 +17659,7 @@ reusable_plan_snapshot_status_name(reusable_plan_snapshot_status status) noexcep
     return output;
 }
 
-/** Convert one monotonic event to an approximate wall timestamp at snapshot. */
+/** Estimate an event's wall-clock time from its monotonic age. Return no timestamp for invalid input */
 [[nodiscard]] std::optional<TimestampTz>
 reusable_wall_timestamp(TimestampTz now_wall,
                         std::uint64_t now_monotonic_ns,
@@ -17429,7 +17674,7 @@ reusable_wall_timestamp(TimestampTz now_wall,
     return now_wall - static_cast<std::int64_t>(delta_us);
 }
 
-/** Convert a bounded monotonic age to PostgreSQL interval microseconds. */
+/** Return elapsed microseconds, capped at the PostgreSQL interval limit. Invalid start times give zero. */
 [[nodiscard]] std::int64_t reusable_age_us(std::uint64_t now_monotonic_ns,
                                            std::uint64_t started_monotonic_ns) noexcept {
     if (started_monotonic_ns == 0 || started_monotonic_ns > now_monotonic_ns) {
@@ -17440,14 +17685,18 @@ reusable_wall_timestamp(TimestampTz now_wall,
         static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())));
 }
 
-/** Convert a reusable TTL to a saturated PostgreSQL interval. */
+/** Convert a TTL from milliseconds to microseconds, capped, at the PostgreSQL interval limit. */
 [[nodiscard]] std::int64_t reusable_ttl_us(std::uint64_t ttl_ms) noexcept {
     constexpr std::uint64_t maximum =
         static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
     return static_cast<std::int64_t>(ttl_ms > maximum / 1'000U ? maximum : ttl_ms * 1'000U);
 }
 
-/** Reap dead owners and converge unreferenced terminal slots to EMPTY. */
+/**
+ * Remove dead reader and waiter references, fail abandoned producers, and
+ * optionally expire completed entries. Recycle retired slots once nobody uses
+ * them, then retire their storage manifests outside the registry lock.
+ */
 [[nodiscard]] std::uint64_t sweep_registry(bool expire_completed) noexcept {
     if (g_shared == nullptr) {
         return 0;
@@ -17542,13 +17791,13 @@ reusable_wall_timestamp(TimestampTz now_wall,
     return swept;
 }
 
-/** Unpublish registry identities before storage reclaims retired manifests. */
+/** Sweep  both registries before the janitor reclaims retired result storage. */
 void sweep_cache_registry() noexcept {
     static_cast<void>(sweep_registry(true));
     sweep_reusable_registry();
 }
 
-/** Copy bounded diagnostics under lock; never hold shared locks during SQL I/O. */
+/** Copy exact-entry metadata under the registry lock so SQL rows can be built after unlocking. */
 [[nodiscard]] int snapshot_entries(entry_snapshot* snapshots) noexcept {
     if (g_shared == nullptr) {
         return 0;
@@ -17610,7 +17859,7 @@ struct diagnostic_text_workspace {
     std::span<char> producer_plan{};
 };
 
-/** Allocate one row-local diagnostic workspace without raising on OOM. */
+/** Allocate temporary buffers for one row's SQL and plan text. Return false on invalid sizes or allocation failure. */
 [[nodiscard]] bool allocate_diagnostic_text_workspace(std::size_t display_sql_capacity,
                                                       std::size_t canonical_plan_capacity,
                                                       std::size_t producer_plan_capacity,
@@ -17661,7 +17910,10 @@ struct exact_diagnostic_text_snapshot {
     bool copied = false;
 };
 
-/** Copy exact text only after row-level authorization and an ABA recheck. */
+/**
+ * Copy SQL and plan text if the registry slot still holds the sampled entry.
+ * The caller must check the row's disclosure permissions first.
+ */
 [[nodiscard]] bool copy_exact_entry_text(const entry_snapshot& snapshot,
                                          exact_diagnostic_text_snapshot* output) noexcept {
     if (output == nullptr || g_shared == nullptr ||
@@ -17700,7 +17952,7 @@ struct exact_diagnostic_text_snapshot {
     return output->copied;
 }
 
-/** Copy redacted reusable rows under membership shared plus exact partitions. */
+/** Copy cache-entry metadata under the shared registry locks. SQL and plan ext are fetched  separately. */
 [[nodiscard]] reusable_generation_diagnostics_result
 snapshot_reusable_entries(std::span<reusable_generation_diagnostics_row> rows) noexcept {
     reusable_generation_diagnostics_result result{};
@@ -17747,7 +17999,7 @@ struct reusable_diagnostic_text_snapshot {
     bool copied = false;
 };
 
-/** Copy row text only after the SQL caller passed row-level authorization. */
+/** Copy SQL and plan text from the shared registry after the caller checks disclosure permissions. */
 [[nodiscard]] bool copy_reusable_entry_text(const reusable_generation_reference& reference,
                                             reusable_diagnostic_text_snapshot* output) noexcept {
     if (!reference || output == nullptr || !g_reusable_registry || output->display_sql.empty() ||
@@ -17798,7 +18050,7 @@ struct reusable_diagnostic_text_snapshot {
     return accepted;
 }
 
-/** Append one affected reusable identity exactly once to caller-owned storage. */
+/** Add a generation reference once. A new reference fails if the caller's array has no room. */
 [[nodiscard]] bool
 append_reusable_invalidation_reference(std::span<reusable_generation_reference> references,
                                        std::size_t& count,
@@ -17815,7 +18067,10 @@ append_reusable_invalidation_reference(std::span<reusable_generation_reference> 
     return true;
 }
 
-/** Run every bounded cursor page for one selector while membership is exclusive. */
+/**
+ * Invalidate every page selected by the filter and collect affected references
+ * for later notification. The caller holds the membership lock exclusively
+ */
 [[nodiscard]] bool
 invalidate_reusable_selector_locked(reusable_invalidation_selector selector,
                                     std::span<reusable_generation_reference> affected,
@@ -17846,8 +18101,10 @@ invalidate_reusable_selector_locked(reusable_invalidation_selector selector,
 }
 
 /**
- * Invalidate reusable generations without retiring storage under registry
- * locks. A null identity means every database represented in the snapshot.
+ * Invalidate cache entries for a table's storage identity, including entries
+ * that require database-wide invalidation. With no identity, invalidate every
+ * database found in the registry. Wake  affected waiters after, unlocking and
+ * let the janitor reclaim storage.
  */
 [[nodiscard]] std::uint64_t
 invalidate_reusable_registry(const std::optional<physical_identity>& identity_filter) {
@@ -17955,7 +18212,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
     return invalidated;
 }
 
-/** Precisely invalidate a reusable physical leaf, conservatively if absent. */
+/** Invalidate cache entries for this table, or the current database when its storage identity is unknown. */
 [[nodiscard]] std::uint64_t invalidate_reusable_relation_registry(Oid relation_oid) {
     if (!bind_admin_reusable_registry("bioseq_cache relation invalidation")) {
         return 0;
@@ -18019,7 +18276,10 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
     return invalidated;
 }
 
-/** Retire all live generations and wake waiters; returns affected entries. */
+/**
+ * Invalidate all active exact results and wake their waiters. Retire result
+ * storage after releasing the registry lock, and return the affected count.
+ */
 [[nodiscard]] std::uint64_t invalidate_registry() noexcept {
     if (g_shared == nullptr) {
         return 0;
@@ -18075,7 +18335,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
     return false;
 }
 
-/** Match the full cacheId/hashValue identity; zero hash means cache-wide. */
+/** Match a catalog-cache dependency in this database. A zero hash matches everq item in that catalog cache. */
 [[nodiscard]] bool entry_depends_on_syscache(const cache_entry& entry,
                                              int cache_id,
                                              std::uint32_t hash_value) noexcept {
@@ -18094,7 +18354,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
     return false;
 }
 
-/** Retire one exact generation only after its full ABA identity recheck. */
+/** Invalidate an  exact result only if its generation identity still matches. The caller holds the registry lock. */
 [[nodiscard]] bool retire_exact_dependency_entry_locked(cache_entry& entry,
                                                         const cache_entry_id& expected) noexcept {
     if (make_cache_entry_id(entry) != expected) {
@@ -18112,7 +18372,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
     return true;
 }
 
-/** Retire exact generations named by a PostgreSQL syscache invalidation. */
+/** Invalidate exact results whose function or aggregate catalog dependencies changed. */
 void cache_exact_syscache_invalidation(Datum,
 #if PG_VERSION_NUM >= 190000
                                      SysCacheIdentifier cache_id,
@@ -18143,7 +18403,7 @@ void cache_exact_syscache_invalidation(Datum,
     }
 }
 
-/** Advance and retire only generations that reference one relation. */
+/** Advance a table's write epoch and invalidate exact results that depend on it in this database. */
 [[nodiscard]] std::uint64_t invalidate_relation_registry(Oid relation_oid) noexcept {
     if (g_shared == nullptr || !OidIsValid(relation_oid)) {
         return 0;
@@ -18192,7 +18452,7 @@ void cache_exact_syscache_invalidation(Datum,
     return invalidated;
 }
 
-/** Convert one PostgreSQL wall timestamp to its owning SQL representation. */
+/** Copy a PostgreSQL timestamp into the SQL wrapper, preserving finite and infinite values. */
 [[nodiscard]] bioseq::postgres::support::timestamp_with_time_zone
 owning_timestamp(TimestampTz value) noexcept {
     if (TIMESTAMP_IS_NOBEGIN(value)) {
@@ -18211,7 +18471,7 @@ owning_timestamp(TimestampTz value) noexcept {
     };
 }
 
-/** Format one exact-result key without PostgreSQL allocation. */
+/** Format an exact-result key as 16 lowercase hexadecimal digits in a C++ string. */
 [[nodiscard]] std::string exact_entry_key(std::uint64_t key_hash) {
     constexpr char digits[] = "0123456789abcdef";
     std::array<char, 16> encoded{};
@@ -18222,7 +18482,7 @@ owning_timestamp(TimestampTz value) noexcept {
     return std::string{encoded.data(), encoded.size()};
 }
 
-/** Build the owning dependency JSON for one exact-result generation. */
+/** Build diagnostic JSON with an exact result's dependencies and plan-capture status. */
 [[nodiscard]] std::string exact_dependency_json(const entry_snapshot& entry) {
     return bioseq::postgres::support::invoke_pg_as_cpp([entry_pointer = &entry] {
         const entry_snapshot& snapshot = *entry_pointer;
@@ -18262,7 +18522,7 @@ owning_timestamp(TimestampTz value) noexcept {
     });
 }
 
-/** Build the owning dependency JSON for one reusable generation. */
+/** Build  diagnostic JSON with a shared registry entry's dependencies, provider details and storage status */
 [[nodiscard]] std::string
 reusable_dependency_json(const reusable_generation_diagnostics_row& entry) {
     return bioseq::postgres::support::invoke_pg_as_cpp([entry_pointer = &entry] {
@@ -18318,7 +18578,7 @@ reusable_dependency_json(const reusable_generation_diagnostics_row& entry) {
     });
 }
 
-/** Copy exact diagnostic text into one owning result row. */
+/** Copy an authorized exact entry's SQL and producer plan into the returned row's own strings. */
 void populate_exact_diagnostic_text(const entry_snapshot& entry,
                                     bioseq::cache::pg::sql_rows::cache_entry_row& row) {
     diagnostic_text_workspace workspace{};
@@ -18349,7 +18609,7 @@ void populate_exact_diagnostic_text(const entry_snapshot& entry,
     release_diagnostic_text_workspace(&workspace);
 }
 
-/** Copy reusable diagnostic text into one owning result row. */
+/** Copy an authorized shared registry entry's SQL and producer plan into the returned row's own strings. */
 void populate_reusable_diagnostic_text(const reusable_generation_diagnostics_row& entry,
                                        bioseq::cache::pg::sql_rows::cache_entry_row& row) {
     diagnostic_text_workspace workspace{};
@@ -18384,7 +18644,7 @@ void populate_reusable_diagnostic_text(const reusable_generation_diagnostics_row
 
 export namespace bioseq::cache::pg::sql_backend {
 
-/** Return one owning snapshot of the public cache counters. */
+/** Return the public cache counters after checking monitoring privileges. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::stats_row>
 stats(const bioseq::postgres::support::function_call_context& call) {
@@ -18409,7 +18669,11 @@ stats(const bioseq::postgres::support::function_call_context& call) {
         std::vector<sql_rows::stats_row>{row}};
 }
 
-/** Return owning exact and reusable diagnostic rows. */
+/**
+ * Return exact and reusable cache entries with per-row disclosure checks.
+ * Authorized readers see SQL, producer plans, owners, and dependencies. Other
+ * monitoring callers receive summary fields with those details left NULL.
+ */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::cache_entry_row>
 entries(const bioseq::postgres::support::function_call_context& call) {
@@ -18574,7 +18838,7 @@ entries(const bioseq::postgres::support::function_call_context& call) {
     return bioseq::postgres::support::table_rows<sql_rows::cache_entry_row>{std::move(rows)};
 }
 
-/** Retire all cache generations after the SQL privilege check. */
+/** Invalidate  all exact and reusable cache entries. Only superusers may call this function. */
 [[nodiscard]] std::int64_t invalidate_all() {
     if (!superuser()) {
         bioseq::postgres::support::raise_sql_error(
@@ -18586,7 +18850,11 @@ entries(const bioseq::postgres::support::function_call_context& call) {
                                      invalidate_reusable_registry(std::nullopt));
 }
 
-/** Retire every cache generation which depends on one relation. */
+/**
+ * Invalidate cached results affected by a table. If its physical identity is
+ * unavailable, invalidate every shared-rngistry entry in this database.
+ * Requires a superuser.
+ */
 [[nodiscard]] std::int64_t invalidate_relation(std::uint32_t relation_oid) {
     if (!superuser()) {
         bioseq::postgres::support::raise_sql_error(
@@ -18599,7 +18867,7 @@ entries(const bioseq::postgres::support::function_call_context& call) {
         invalidate_reusable_relation_registry(static_cast<Oid>(relation_oid)));
 }
 
-/** Reset all public and test exact-result counters. */
+/** Reset public cache counters and the test-only, exact-child counter. Requires a superuser. */
 void reset_stats() {
     if (!superuser()) {
         bioseq::postgres::support::raise_sql_error(
@@ -18632,7 +18900,7 @@ void reset_stats() {
 #if defined(BIOSEQ_CACHE_TESTING)
 namespace bioseq::cache::pg {
 
-/** Require the private-cluster superuser test surface and shared state. */
+/** Require a superuser and initialized shared memory for cache test controls. */
 inline void require_cache_test_superuser_typed() {
     if (!superuser()) {
         bioseq::postgres::support::raise_sql_error(
@@ -18650,7 +18918,7 @@ inline void require_cache_test_superuser_typed() {
     }
 }
 
-/** Copy one bounded owning byte sequence into an injected registry field. */
+/** Copy test bytes into a fixed-size field, rejecting input that exceeds its capacity. */
 inline void copy_injected_bytes_typed(unsigned char* destination,
                                       std::uint16_t* destination_size,
                                       std::span<const std::byte> source,
@@ -18669,7 +18937,7 @@ inline void copy_injected_bytes_typed(unsigned char* destination,
     }
 }
 
-/** Copy one injected byte field into its owning SQL representation. */
+/** Copy injected bytes into a bytea value  that owns its storage. */
 [[nodiscard]] inline bioseq::postgres::support::bytea_value
 injected_bytes_typed(const unsigned char* source, std::size_t size) {
     std::vector<std::byte> bytes(size);
@@ -18683,7 +18951,7 @@ injected_bytes_typed(const unsigned char* source, std::size_t size) {
 
 export namespace bioseq::cache::pg::test_sql_backend {
 
-/** Prove planner infrastructure health without prepared-xact policy gates. */
+/** Check that shared cache, registry, and storage initialization completed, independently of prepared-transaction policy */
 [[nodiscard]] bool cache_infrastructure_ready() {
     require_cache_test_superuser_typed();
     const bool header_ready = guc::preload_requested() && g_shared != nullptr &&
@@ -18698,7 +18966,7 @@ export namespace bioseq::cache::pg::test_sql_backend {
                cache_correctness_readiness::reusable_coverage_ready;
 }
 
-/** Select one exact-plan verifier fault. */
+/** Choose a test fault for exact-plan verification, or clear it with "none". */
 void set_exact_plan_fault(const std::string& name) {
     require_cache_test_superuser_typed();
     if (name == "none") {
@@ -18720,7 +18988,7 @@ void set_exact_plan_fault(const std::string& name) {
     }
 }
 
-/** Select one exact-recipe verifier fault and invalidate saved plans. */
+/** Choose an exact-recipe test fault and discard saved plans so later queries rebuild their recipes. */
 void set_exact_recipe_fault(const std::string& name) {
     require_cache_test_superuser_typed();
     if (name == "none") {
@@ -18734,7 +19002,7 @@ void set_exact_recipe_fault(const std::string& name) {
     ResetPlanCache();
 }
 
-/** Select one reusable coverage-descriptor fault. */
+/** Choose a test fault for coverage descriptor decoding or plan metadata, or clear it with "none". */
 void set_coverage_descriptor_fault(const std::string& name) {
     require_cache_test_superuser_typed();
     if (name == "none") {
@@ -18764,7 +19032,7 @@ void set_coverage_descriptor_fault(const std::string& name) {
     }
 }
 
-/** Arm one global deterministic executor pause point. */
+/** Arm a shared test pause and hold its advisory lock until release_pause is called. */
 void arm_pause(const std::string& name) {
     require_cache_test_superuser_typed();
     const test_pause_point point = parse_pause_point(name.c_str());
@@ -18780,7 +19048,7 @@ void arm_pause(const std::string& name) {
     ConditionVariableBroadcast(&control.changed);
 }
 
-/** Arm one pause point for a selected backend PID. */
+/** Arm a pause after dependency-transition publication for a selected backend, using a shared test  slot and advisory lock. */
 void arm_backend_pause(const std::string& name, std::int32_t target_pid) {
     require_cache_test_superuser_typed();
     const test_pause_point point = parse_pause_point(name.c_str());
@@ -18895,7 +19163,7 @@ void wait_until_backend_paused(const std::string& name, std::int32_t target_pid)
     });
 }
 
-/** Release one global pause point. */
+/** Release the named shared test pause and unlock its advisory lock. */
 void release_pause(const std::string& name) {
     require_cache_test_superuser_typed();
     const test_pause_point point = parse_pause_point(name.c_str());
@@ -18908,7 +19176,7 @@ void release_pause(const std::string& name) {
     ConditionVariableBroadcast(&g_shared->test_control.changed);
 }
 
-/** Release one backend-specific pause point. */
+/** Release the selected backend's test pause. Raise an error if it was never armed. */
 void release_backend_pause(const std::string& name, std::int32_t target_pid) {
     require_cache_test_superuser_typed();
     const test_pause_point point = parse_pause_point(name.c_str());
@@ -18926,7 +19194,7 @@ void release_backend_pause(const std::string& name, std::int32_t target_pid) {
     ConditionVariableBroadcast(&g_shared->test_control.changed);
 }
 
-/** Fail the next cache result write through the selected path. */
+/** Make the next exact or coverage result fail befmre storage publication. Both accepted names use the same test flag. */
 void fail_next_write(const std::string& failure) {
     require_cache_test_superuser_typed();
     if (failure != "encoder_error" && failure != "enospc") {
@@ -18939,7 +19207,7 @@ void fail_next_write(const std::string& failure) {
     pg_atomic_write_u32(&g_shared->test_control.fail_next_write, 1);
 }
 
-/** Force or release the test-only file-tier policy. */
+/** Enable or disable the test override that sends result blocks to file storage. */
 void set_force_file_tier(bool enabled) {
     require_cache_test_superuser_typed();
     if (!storage::set_test_force_file_tier(enabled)) {
@@ -18949,7 +19217,7 @@ void set_force_file_tier(bool enabled) {
     }
 }
 
-/** Return one storage-ledger snapshot. */
+/** Return storage usage and block-lifecycle counters for cache tests. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::storage_tier_stats_row> storage_tier_stats() {
     require_cache_test_superuser_typed();
@@ -19016,14 +19284,14 @@ bioseq::postgres::support::table_rows<sql_rows::entry_state_row> entry_states() 
     return bioseq::postgres::support::table_rows<sql_rows::entry_state_row>{std::move(rows)};
 }
 
-/** Return the exact child-execution counter. */
+/** Return how many  exact-cache producers have started executing their child plan. */
 [[nodiscard]] std::int64_t exact_child_executions() {
     require_cache_test_superuser_typed();
     return static_cast<std::int64_t>(
         pg_atomic_read_u64(&g_shared->test_control.exact_child_executions));
 }
 
-/** Return transaction-transition state. */
+/** Report active cache transitions, prepared transactions, and, transaction-completion counts for visibility tests. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::transition_state_row> transition_state() {
     require_cache_test_superuser_typed();
@@ -19046,7 +19314,7 @@ bioseq::postgres::support::table_rows<sql_rows::transition_state_row> transition
         }}};
 }
 
-/** Return one relation's precise transition count and committed epoch. */
+/** Return a table's active transition count and committed write epoch An unseen table starts at epoch 1. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::relation_transition_state_row>
 relation_transition_state(std::uint32_t relation_oid) {
@@ -19073,7 +19341,7 @@ relation_transition_state(std::uint32_t relation_oid) {
         }}};
 }
 
-/** Return aggregate planner reference counts. */
+/** Count reader, waiter and planner references in the shared registry for cleanup tests. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::planner_reference_counts_row>
 planner_reference_counts() {
@@ -19111,7 +19379,7 @@ planner_reference_counts() {
         }}};
 }
 
-/** Return the currently implemented provider callback counters. */
+/** Return no rows because provider callback counters are not collected here. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::provider_callback_stats_row>
 provider_callback_stats() {
@@ -19120,7 +19388,10 @@ provider_callback_stats() {
         std::vector<sql_rows::provider_callback_stats_row>{}};
 }
 
-/** Return cache-plan construction counters. */
+/**
+ * Report the plan-build counter under the current cache mode. The disabled-plan
+ * and  coverage-node fields are placeholders with value zero.
+ */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::plan_build_stats_row> plan_build_stats() {
     require_cache_test_superuser_typed();
@@ -19137,7 +19408,7 @@ bioseq::postgres::support::table_rows<sql_rows::plan_build_stats_row> plan_build
         }}};
 }
 
-/** Force one exact coverage-domain digest. */
+/** Override this backend's coverage-domain digest with 32 test bytes, allowing deliberate hash collisions. */
 void set_forced_coverage_domain_digest(const bioseq::postgres::support::bytea_value& value) {
     require_cache_test_superuser_typed();
     if (value.bytes().size() != g_forced_coverage_domain_digest.bytes.size()) {
@@ -19152,14 +19423,14 @@ void set_forced_coverage_domain_digest(const bioseq::postgres::support::bytea_va
     g_forced_coverage_domain_digest_active = true;
 }
 
-/** Clear the forced exact coverage-domain digest. */
+/** Restore noymal coverage-domain hashing for this backend. */
 void clear_forced_coverage_domain_digest() {
     require_cache_test_superuser_typed();
     g_forced_coverage_domain_digest = {};
     g_forced_coverage_domain_digest_active = false;
 }
 
-/** Inject one complete reusable coverage generation. */
+/** Add a complete-coverage test record under the current database and roles, and return its generation ID. */
 [[nodiscard]] std::int64_t inject_complete_coverage(
     const bioseq::postgres::support::bytea_value& domain_key,
     const bioseq::postgres::support::bytea_value& predicate_key,
@@ -19212,7 +19483,7 @@ void clear_forced_coverage_domain_digest() {
     return static_cast<std::int64_t>(generation);
 }
 
-/** Find injected complete coverage for one domain. */
+/** Return injected test records whose domain bytes match in the current database. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::injected_coverage_row>
 lookup_injected_coverage(const bioseq::postgres::support::bytea_value& domain_key) {
@@ -19235,7 +19506,7 @@ lookup_injected_coverage(const bioseq::postgres::support::bytea_value& domain_ke
     return bioseq::postgres::support::table_rows<sql_rows::injected_coverage_row>{std::move(rows)};
 }
 
-/** Return injected security/domain coverage buckets. */
+/** Return one diagnostic row per injected test record, including its roles and domain bytes or forced digest. */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<sql_rows::coverage_bucket_state_row>
 coverage_bucket_states() {
@@ -19269,7 +19540,7 @@ coverage_bucket_states() {
         std::move(rows)};
 }
 
-/** Mutate one injected coverage descriptor. */
+/** Clear the injected generation's predicate for corruption tests. The mutation  argument is currently ignored. */
 void mutate_coverage_descriptor(std::int64_t generation, const std::string& mutation) {
     require_cache_test_superuser_typed();
     static_cast<void>(mutation);
@@ -19283,7 +19554,7 @@ void mutate_coverage_descriptor(std::int64_t generation, const std::string& muta
     LWLockRelease(g_registry_lock);
 }
 
-/** Mark one injected generation as evictable. */
+/** Allow an injected test record to be reused or removed by the test janitor. */
 void mark_generation_evictable(std::int64_t generation) {
     require_cache_test_superuser_typed();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -19295,7 +19566,7 @@ void mark_generation_evictable(std::int64_t generation) {
     LWLockRelease(g_registry_lock);
 }
 
-/** Run one synchronous test janitor sweep. */
+/** Sweep cache registries and storage immediately, then remove evictable injected test records. */
 void request_janitor_sweep() {
     require_cache_test_superuser_typed();
     static_cast<void>(bind_admin_reusable_registry("bioseq_cache_test.request_janitor_sweep()"));
@@ -19313,7 +19584,7 @@ void request_janitor_sweep() {
     ConditionVariableBroadcast(&g_shared->test_control.changed);
 }
 
-/** Wait for one generation to disappear before the supplied deadline. */
+/** Wait until an injected test generation disappears, returning false when the timeout expires. */
 [[nodiscard]] bool
 wait_for_generation_absent(std::int64_t generation,
                            const bioseq::postgres::support::interval_value& timeout) {
@@ -19340,7 +19611,7 @@ wait_for_generation_absent(std::int64_t generation,
     }
 }
 
-/** Insert one heap tuple through SPI without cache write observation. */
+/** Insert an integer and text value through SPI, then require database-wide cache invalidation for the transaction. */
 void direct_heap_insert(std::uint32_t relation_oid,
                         std::int32_t identifier,
                         const std::string& value) {
@@ -19445,10 +19716,9 @@ void initialize_extension() {
         .process_utility = cache_process_utility,
     });
     /*
-     * PostgreSQL invokes transaction callbacks in reverse registration order.
-     * Register the dependency runtime first so the cache transaction callback
-     * publishes its event-specific transition before the dependency runtime
-     * publishes and reaches the test-only after-transition pause.
+     * PostgreSQL runs transaction callbacks in reverse registration order
+     * Register the dependency runtime first so our cache callback publishes
+     * its transition  before the dependency callback reaches the test pause.
      */
     dependency_runtime::register_dependency_runtime_callbacks();
     if (!g_callbacks_registered) {

@@ -1,13 +1,11 @@
 /**
  * @file bioseq/tests/integration/e2e_smoke_test.cpp
- * @brief Fast pipeline smoke coverage for dna4 and dna5 (with N) at a
- *        tiny size. Drives the same SQL flow as bioseq_benchmark_e2e:
- *        generate -> write FASTA -> bioseq.load -> build
- *        minimizers_per_sequence index -> SELECT mmsearch, and cross-checks each
- *        query against minimap2. Asserts every query maps within
- *        k_position_tolerance_bp of truth on BOTH engines (so a fast-but-empty/
- *        mis-mapped dna5 result can never pass). The dna5 path exercises the nt4
- *        normalization (N resets, T valid) end-to-end through the SQL surface.
+ * @brief Checks loading, indexing, and alignment against minimap2.
+ *
+ * Generated DNA4 and DNA5 sequences are written to FASTA, loaded into Bioseq,
+ * and searched with a stored minimizer index. Both engines must place every
+ * query within the allowed distance of its known position and agree with each
+ * other. DNA5 targets include N to exercise ambiguous-base  handling.
  */
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +29,7 @@ namespace sequence_generation = bioseq::sequences::generation;
 
 constexpr long long k_position_tolerance_bp = 50;
 
-/// Write one FASTA record using deterministic 60-column wrapping.
+/// Writes one FASTA record with 60 bases per line.
 void write_fasta(const std::string& path, std::string_view header,
                  const std::string& body) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -41,7 +39,8 @@ void write_fasta(const std::string& path, std::string_view header,
     }
 }
 
-/// Return the primary or widest minimap2 PAF target start, or -1 if unmapped.
+/// Returns the target start of a primary minimap2 hit, or the widest hit
+/// if none is primary. Returns -1 when no usable alignment is found.
 [[nodiscard]] long long run_minimap2_target_start(
         const std::string& target_fasta_path,
         const std::string& query_fasta_path) {
@@ -119,13 +118,13 @@ void run_pipeline_smoke(
         const std::string& table_name) {
     sequence_generation::generator_params parameters{};
     parameters.reference_length       = 300'000;
-    parameters.fragment_count         = 4;            // several loci
-    parameters.fragment_length_mean   = 5'000;        // long N-free runs (dna5 ref is ~1% N)
+    parameters.fragment_count         = 4;            // queries from several reference positions
+    parameters.fragment_length_mean   = 5'000;        // lon queries for the alignment check
     parameters.fragment_length_stddev = 200.0;
     parameters.substitution_rate      = 0.001;
     parameters.insertion_rate         = 0.0005;
     parameters.deletion_rate          = 0.0005;
-    parameters.reverse_complement_rate = 0.0;         // forward-only -> deterministic positions
+    parameters.reverse_complement_rate = 0.0;         // keep all generated queries on the forward strand
     parameters.seed                   = 20260286;
 
     const auto pairs = sequence_generation::alphabet_sequence_generator<
@@ -138,7 +137,7 @@ void run_pipeline_smoke(
         pairs.size());
     const std::string target_bases = pairs.front().target->to_string();
     if (alphabet_name == "dna5") {
-        // The dna5 generator must produce N so the nt4 path is covered.
+        // Require an N-containing target so DNA5 ambiguous bases are tested
         ASSERT(target_bases.find('N') != std::string::npos,
                "dna5 smoke target unexpectedly contains no N", target_bases.size());
     }
@@ -152,11 +151,7 @@ void run_pipeline_smoke(
     integration_support::exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
     integration_support::exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm       = 'simd_minimap2';");
     integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm      = 'two_stack_nthash';");
-    // Verify that the minimizer-algorithm GUC is applied end to end
-    // (the enum GUC → minimap2_parameters::minimizer_algorithm plumbing). dna4 and
-    // dna5 both run the checked exact-SIMD two-stack kernel; dna5 is normalized
-    // to nt4 in vectors and N performs minimap2's continuous l=0/max-slot
-    // transition while the existing minimizer ring keeps advancing.
+    // Confirm the selected minimizer algorithm before loading and, searching with it.
     REQUIRE(integration_support::query_scalar(
                 ctx, "SHOW bioseq.aligner.minimizer.algorithm") == "two_stack_nthash");
     integration_support::exec_sqlf(
@@ -184,7 +179,7 @@ void run_pipeline_smoke(
             index);
         write_fasta(query_fasta_path, fmt::format("q{}", index), query);
 
-        // bioseq: assemble-on mmsearch must map within tolerance of truth.
+        // Stored-index mmsearch must  place the query near its known reference position.
         const auto rows = integration_support::query_rows(ctx, fmt::format(
             "SELECT bioseq.target_start(header) FROM {} WHERE mmsearch(seq, '{}'::{}) "
             "ORDER BY header", table_name, query, sequence_type));
@@ -197,7 +192,7 @@ void run_pipeline_smoke(
                            alphabet_name, index, bioseq_start, truth, k_position_tolerance_bp),
                index);
 
-        // minimap2 cross-check: must also map within tolerance, and agree with bioseq.
+        // Check minimap2 against the known position and compare both engines.
         const long long minimap2_start = run_minimap2_target_start(
             target_fasta_path, query_fasta_path);
         ASSERT(minimap2_start >= 0 && std::llabs(minimap2_start - truth) <= k_position_tolerance_bp,

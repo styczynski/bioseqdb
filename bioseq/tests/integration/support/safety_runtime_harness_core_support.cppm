@@ -1,6 +1,8 @@
 /**
  * @file safety_runtime_harness_core_support.cppm
- * @brief Provide generated bindings, JSON, libpq, and GUC authority support.
+ * @brief Shared JSON, file, and PostgreSQL helpers for runtime-safety tests.
+ *
+ * Also compares the server's Bioseq settings with their generated definitions.
  */
 
 module;
@@ -112,13 +114,13 @@ inline constexpr std::string_view k_authorization_marker =
 inline constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     "invoke_pg_as_cpp.vacuum_cleanup_restore";
 
-/// Raise a context-rich harness failure.
+/// Throw a harness error containing the failed operation and its message.
 [[noreturn]] void fail(std::string_view context, std::string_view message) {
     throw std::runtime_error{
         fmt::format("{}: {}", context, message)};
 }
 
-/// Read an entire bounded fixture or receipt file.
+/// Read the  whole file, or fail if it cannot be read completely.
 [[nodiscard]] std::string read_file(const fs::path& path) {
     std::ifstream input{path, std::ios::binary};
     if (!input) {
@@ -179,7 +181,7 @@ inline constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return sha256_bytes(read_file(path));
 }
 
-/// Return whether a string is one canonical lowercase SHA-256 digest.
+/// Check for a 64-digit lowercase hexadecimal SHA-256 representation.
 [[nodiscard]] bool lowercase_sha256(std::string_view value) noexcept {
     if (value.size() != 64) {
         return false;
@@ -252,13 +254,13 @@ inline constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return parse_json(read_file(path), context);
 }
 
-/// Serialize JSON using the harness's canonical compact representation.
+/// Serialize cmpact JSON with a final newline for repeatable file hashes.
 [[nodiscard]] std::string canonical_json(const json& value) {
     return value.dump(-1, ' ', false, json::error_handler_t::strict)
         + "\n";
 }
 
-/// Publish bytes through a randomized sibling and atomic rename.
+/// Write through a temporary file beside the destination, then rename it into place.
 void write_atomic(const fs::path& path, std::string_view bytes) {
     if (!path.is_absolute()) {
         fail(path.string(), "output path must be absolute");
@@ -300,7 +302,7 @@ void write_atomic(const fs::path& path, std::string_view bytes) {
     }
 }
 
-/// Return a required JSON field or fail with its owning context.
+/// Return a required JSON field, reporting its context if the field is missing.
 [[nodiscard]] const json& require_field(
         const json& object,
         std::string_view field,
@@ -353,7 +355,7 @@ void require_exact_fields(
             fmt::join(unknown, ",")));
 }
 
-/// Reject object fields outside the declared forward-compatible set.
+/// Reject fields outside the allowed set, while permitting allowed fields to be absent.
 void require_known_fields(
         const json& object,
         std::initializer_list<std::string_view> fields,
@@ -404,7 +406,7 @@ void require_known_fields(
         fmt::format("{}.{}", context, field));
 }
 
-/// Parse a canonical unsigned decimal integer with overflow checking.
+/// Parse an unsigned decimal integer and reject, invalid digits or  overflow.
 [[nodiscard]] std::uint64_t parse_unsigned(
         std::string_view value,
         std::string_view context) {
@@ -428,7 +430,7 @@ void require_known_fields(
     return result;
 }
 
-/// Generate a cryptographically random lowercase token.
+/// Generate a random 64-digit lowercase hexadecimal token with OpenSSL.
 [[nodiscard]] std::string random_token() {
     std::array<unsigned char, 32> bytes{};
     if (RAND_bytes(
@@ -438,7 +440,7 @@ void require_known_fields(
     return hex_digest(bytes.data(), bytes.size());
 }
 
-/// Own one libpq result and clear it on every exit path.
+/// Own a libpq result and clear it when its owner is destroyed.
 struct pg_result final {
     explicit pg_result(PGresult* value) noexcept
         : value_{value} {}
@@ -482,7 +484,7 @@ struct connection_parameters final {
     std::string password;
 };
 
-/// Parse validated private-cluster connection parameters.
+/// Read the required nonempty connection fields from the cluster configuration.
 [[nodiscard]] connection_parameters parse_connection(
         const json& config) {
     const json& value = require_field(
@@ -547,7 +549,7 @@ public:
         }
     }
 
-    /// Execute one SQL statement and return its owned result.
+    /// Execute SQL and return an owned libpq result.
     [[nodiscard]] pg_result execute(std::string_view sql) const {
         return pg_result{
             PQexec(value_, std::string{sql}.c_str())};
@@ -602,7 +604,7 @@ private:
             || PQresultStatus(result.get()) == PGRES_TUPLES_OK);
 }
 
-/// Require a successful libpq command and preserve its diagnostic.
+/// Fail on an unsuccessful result, including the libpq diagnostic in the error
 void require_success(
         const pg_result& result,
         std::string_view context) {
@@ -615,7 +617,7 @@ void require_success(
     }
 }
 
-/// Materialize every nullable text cell from a tuples result.
+/// Copy all query rows as text, preserving SQL NULL cells.
 [[nodiscard]] std::vector<std::vector<std::optional<std::string>>>
 rows(const pg_result& result, std::string_view context) {
     if (result.get() == nullptr
@@ -652,7 +654,7 @@ rows(const pg_result& result, std::string_view context) {
     return output;
 }
 
-/// Materialize exactly one nullable result row.
+/// Read exactly one result row, preserving SQL NULL cells.
 [[nodiscard]] std::vector<std::optional<std::string>> one_row(
         const pg_result& result,
         std::string_view context) {
@@ -674,13 +676,13 @@ rows(const pg_result& result, std::string_view context) {
     return *row[index];
 }
 
-/// Count the complete and test-only GUCs expected for a build profile.
+/// Expected total and test-only setting counts for a build profile.
 struct guc_profile_counts final {
     std::uint64_t total = 0;
     std::uint64_t test_only = 0;
 };
 
-/// Describe the generated GUC manifest bound to this executable.
+/// Generated definitions of the Bioseq settings for this executable's profile.
 struct guc_manifest_contract final {
     std::string profile;
     std::string registry_module;
@@ -690,7 +692,7 @@ struct guc_manifest_contract final {
     std::vector<json> registrations;
 };
 
-/// Capture the installed GUC projection and its canonical digest.
+/// Checked server settings, their counts, and  a hash of the recorded properties.
 struct installed_guc_profile final {
     guc_profile_counts counts;
     json properties;
@@ -717,7 +719,7 @@ struct installed_guc_profile final {
         fmt::format("unsupported profile '{}'", profile));
 }
 
-/// Map a manifest GUC kind to PostgreSQL's public kind spelling.
+/// Map a generated setting type to the name used by pg_settings.
 [[nodiscard]] std::string expected_pg_guc_kind(
         std::string_view manifest_kind) {
     if (manifest_kind == "bool") {
@@ -740,7 +742,7 @@ struct installed_guc_profile final {
         fmt::format("unknown GUC kind '{}'", manifest_kind));
 }
 
-/// Map a manifest GUC kind to its internal storage spelling.
+/// Map a generated setting type to its C++ storage-type label.
 [[nodiscard]] std::string expected_guc_storage_kind(
         std::string_view manifest_kind) {
     if (manifest_kind == "bool") {
@@ -763,7 +765,7 @@ struct installed_guc_profile final {
         fmt::format("unknown GUC kind '{}'", manifest_kind));
 }
 
-/// Map a manifest context to PostgreSQL's public context spelling.
+/// Map a generated setting context to the name used by pg_settings.
 [[nodiscard]] std::string expected_pg_guc_context(
         std::string_view manifest_context) {
     if (manifest_context == "sighup") {
@@ -781,7 +783,7 @@ struct installed_guc_profile final {
             "unknown GUC context '{}'", manifest_context));
 }
 
-/// Project the generated GUC authority into its sealed profile shape.
+/// Build the profile metadata stored alongside one owner's setting definitions.
 [[nodiscard]] json guc_profile_projection(
         const guc_manifest_contract& manifest,
         const json& owner_facet) {
@@ -795,7 +797,7 @@ struct installed_guc_profile final {
         {"owner_facet", owner_facet}};
 }
 
-/// Compare one generated GUC property with the live server projection.
+/// Require the recorded servez properties to match the generated setting definition.
 void validate_live_guc_property(
         const json& generated_live_authority,
         const json& live,
@@ -847,7 +849,7 @@ void validate_live_guc_property(
     }
 }
 
-/// Validate generated scalar, flag, enum, and hook authority for one GUC.
+/// Check that generated server properties agree with the setting's registration.
 void validate_generated_live_guc_authority(
         const json& registration,
         const json& generated,
@@ -955,10 +957,10 @@ void validate_generated_live_guc_authority(
     }
 }
 
-/// Quote one text value as a PostgreSQL SQL literal.
+/// Surround text with SQL quotes and double embedded single quotes.
 [[nodiscard]] std::string sql_literal(std::string_view value);
 
-/// Load the control DSO and create its temporary GUC contract binding.
+/// Load the control library and add a temporary SQL function  for inspecting settings.
 void create_guc_contract_binding(
         const pg_connection& connection,
         const fs::path& control_dso) {
@@ -985,7 +987,7 @@ void create_guc_contract_binding(
         "create GUC internal contract binding");
 }
 
-/// Capture internal flags and hook presence for one registered GUC.
+/// Internal flags and hook presence for one registered PostgreSQL setting.
 struct internal_guc_property final {
     std::uint64_t raw_flags{};
     bool check_hook_present{};
@@ -993,7 +995,7 @@ struct internal_guc_property final {
     bool show_hook_present{};
 };
 
-/// Parse the control DSO's closed internal GUC contract.
+/// Parse the control library's setting list, rejecting malformed or duplicate rows.
 [[nodiscard]] std::map<
     std::string,
     internal_guc_property,
@@ -1064,7 +1066,7 @@ parse_internal_guc_contract(std::string_view raw) {
     return result;
 }
 
-/// Verify the installed PostgreSQL GUC catalog against generated authority.
+/// Compare registered Bioseq settings with the generated manifest and record the result.
 [[nodiscard]] installed_guc_profile verify_installed_guc_profile(
         const pg_connection& connection,
         const guc_manifest_contract& manifest) {
@@ -1294,9 +1296,9 @@ parse_internal_guc_contract(std::string_view raw) {
                  (raw_flags & 0x000080U) == 0},
                 {"hooks", hooks}};
         } else {
-            // GUC_NO_SHOW_ALL removes the row from pg_settings.  The
-            // internal contract proves registration metadata while
-            // current_setting proves that the hidden live GUC exists.
+            // Hidden settings have no pg_settings row. Read their flags and hooks
+            // through the control library and their value through current_setting.
+            // Other properties come from the generated definition
             const auto current_row = one_row(
                 connection.execute(
                     "SELECT pg_catalog.current_setting("
@@ -1360,7 +1362,7 @@ parse_internal_guc_contract(std::string_view raw) {
     };
 }
 
-/// Validate a sealed GUC property receipt against its generated manifest.
+/// Verify a saved settings report against,  its SHA-256 and generated definitions.
 void validate_guc_property_receipt(
         const json& properties,
         std::string_view properties_sha256,
@@ -1437,7 +1439,7 @@ void validate_guc_property_receipt(
     }
 }
 
-/// Quote one text value as a PostgreSQL SQL literal.
+/// Surround text with SQL quotes and double embedded single quotes.
 [[nodiscard]] std::string sql_literal(std::string_view value) {
     std::string result{"'"};
     result.reserve(value.size() + 2);

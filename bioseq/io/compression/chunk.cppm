@@ -1,9 +1,9 @@
 /**
  * @file chunk.cppm
- * @brief Decoded chunk storage and ordered-drain state.
+ * @brief Store decompressed chunks and their decoding state
  *
- * A chunk owns either resolved bytes or marker lanes, its trailing 32 KiB
- * window, and one bounded diagnostic.
+ * A chunk keeps bytes or unresolved references to earlier output, the trailing
+ * 32 KiB used by the next chunk, and  an error message.
  */
 module;
 
@@ -26,7 +26,7 @@ export namespace bioseq::io::compression {
 
 inline constexpr std::size_t chunk_trailing_window_bytes = 32 * 1024;
 
-/// Readiness of a decoded chunk in the ordered consumer pipeline.
+/// Whether a chunk still needs earlier bytes, is ready, or failed to decode.
 enum class chunk_state : std::uint8_t {
     pending_resolution = 0,
     resolved = 1,
@@ -34,9 +34,7 @@ enum class chunk_state : std::uint8_t {
     decode_error = 3,
 };
 
-/// Inline error buffer — the chunk arena zero-inits N=16 instances at
-/// startup, so per-chunk allocation churn matters. 256-byte fixed
-/// array bounds the per-slot storage.
+/// Store a short error message insidz the chunk without a separate allocation.
 struct inline_error_message {
     static constexpr std::size_t capacity = 256;
     std::array<char, capacity> buffer{};
@@ -48,46 +46,40 @@ struct inline_error_message {
         std::memcpy(buffer.data(), message.data(), size);
         buffer[size] = '\0';
     }
-    /// Return the live message bytes without the trailing null byte.
+    /// Return the stored message without the terminating null byte.
     [[nodiscard]] std::string_view view() const noexcept {
         return {buffer.data(), size};
     }
-    /// Return whether no diagnostic bytes are stored.
+    /// Return true when no error message is stored.
     [[nodiscard]] bool empty() const noexcept {
         return size == 0;
     }
 };
 
-/// One bounded decompression result and its dependency window.
+/// Decompressed output and the earlier bytes needed to resolve its references.
 struct decoded_chunk {
     std::size_t encoded_start_bit_offset = 0;
     std::size_t encoded_end_bit_offset = 0;
     std::size_t decompressed_size_bytes = 0;
-    /// Marker-mode storage. Lanes with `value >= 0x8000` reference
-    /// `prior_window[value - 0x8000]`. Lanes with `value < 0x8000`
-    /// hold the resolved low byte. Used by the marker-mode decode
-    /// path.
+    /// Decoded values awaiting resolution. Values at or above 0x8000 refer to
+    /// prior_window[value - 0x8000]. Other values contain a literal byte.
     chunk_marker_buffer marker_storage;
-    /// Direct-decode storage. The chunk fetcher writes resolved bytes here. The
-    /// orchestrator drains via `std::memcpy` (no narrow needed).
+    /// Resolved output bytes, ready to copy to the  consumer.
     chunk_byte_buffer byte_storage;
     std::array<std::uint8_t, chunk_trailing_window_bytes> trailing_window{};
     std::size_t trailing_window_size = 0;
-    /// Snapshot of the previous chunk's last 32 KiB when this chunk's
-    /// trailing window was resolved. Workers use it to resolve the
-    /// remaining prefix independently. Sized to match `trailing_window`.
+    /// Saved history before this chunk, up to 32 KiB. A worker uses it to
+    /// resolve the prefix after the ordered pass has resolved the tail.
     std::array<std::uint8_t, chunk_trailing_window_bytes> prior_window_snapshot{};
     std::size_t prior_window_snapshot_size = 0;
     bool is_member_final = false;
-    /// `false` = byte_storage holds the resolved bytes. `true` =
-    /// marker_storage needs a `replace_markers_inplace` resolution
-    /// pass before the bytes can be drained.
+    /// True while marker_storage still needs to be converted into byte_storage.
     bool uses_marker_storage = false;
     chunk_state state = chunk_state::pending_resolution;
     inline_error_message error_message;
 };
 
-// The chunk producer loop writes resolved output into byte storage and keeps
-// marker storage for blocks that still depend on the preceding window.
+// Chunks can be decoded before earlier output is available. Their markers
+// keep those references until the ordered pass supplies the missing bytes.
 
 } // namespace bioseq::io::compression

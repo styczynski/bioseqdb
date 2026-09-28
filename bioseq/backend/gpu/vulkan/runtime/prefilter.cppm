@@ -1,6 +1,6 @@
 /**
  * @file prefilter.cppm
- * @brief Executes SneakySnake and GateKeeper rank-prefilter replay routes.
+ * @brief Runs SneakySnake and GateKeeper filters using reusable GPU commands.
  */
 module;
 
@@ -22,7 +22,8 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Validates and executes the SneakySnake recorded-command route.
+/// @brief Run SneakySnake on sequences encoded as symbol ranks.
+/// Use teams of GPU threads when a supported job has a large edit limit.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_batch_roundtrip(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
@@ -57,7 +58,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
     return results;
 }
 
-/// @brief Selects and executes the GateKeeper route for one homogeneous batch.
+/// @brief Runs GateKeeper, choosing a specialized shader when all jobs fit its fixed shape.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_batch_roundtrip(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
@@ -73,7 +74,9 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_ba
     return results;
 }
 
-/// @brief Reuses or records one rank-prefilter command and validates downloaded results.
+/// @brief Uploads prefilter jobs, runs their GPU commands, and checks the returned results.
+/// Reuses recorded commands when the pipeline and batch shape match.
+/// The caller holds the runtime lock.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_batch_roundtrip_locked(
     shader_kind kind,
     std::uint32_t push_mode,
@@ -296,9 +299,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
         }
     } catch (...) {
         if (prefilter_workspace_allocation_bytes_locked() > k_retained_workspace_bytes) {
-            // A submit may have succeeded before a wait failed. Do not destroy
-            // mapped buffers until the device is known idle (or lost, which
-            // also guarantees that no work can continue using them).
+            // A failed wait can leave submitted work  running. Keep its buffers until
+            // the device is idle or reports that it is lost.
             const VkResult idle_result = vkDeviceWaitIdle(device_);
             if (idle_result == VK_SUCCESS || idle_result == VK_ERROR_DEVICE_LOST) {
                 release_prefilter_workspace_locked();

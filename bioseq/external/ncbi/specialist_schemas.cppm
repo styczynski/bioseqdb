@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/specialist_schemas.cppm
- * @brief NCBI specialist annotation schema fragments.
+ * @brief NCBI types for gene lookup, assembly dat, and protein structures.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:specialist_schemas;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Eukaryotic gene and protein-domain annotation schemas. */
+/** @brief Gene and assembly requests with protein-structure reports and scores. */
 inline constexpr std::string_view specialist_schemas =
     R"bioseq_openapi(    ncbieukgenev2GeneIdRequest:
       type: object

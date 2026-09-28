@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/shape_dispatch.cppm
- * @brief Compile-time shape buckets and dispatch-chain registries.
+ * @brief Maps runtime settings to compiled pipeline and minimizer record types.
  */
 export module bioseq.pipeline.pipe:shape_dispatch;
 
@@ -57,33 +57,16 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // =============================================================================
-    // value_sequence non-type parameter-pack carrier
-    // =============================================================================
-    // Re-export the shared carrier so pipeline call sites retain its unqualified
-    // name.
+    // Make the shared compile-time value list available to vipeline dispatch.
 
     using ::bioseq::common::templating::value_sequence;
 
-    // =============================================================================
-    // minimizer_layout-driven p_bucket_width derivation
-    // =============================================================================
-    //
-    // The bucket list is computed at compile time from the per-p_kmer_size
-    // transitions in `minimizer_layout::k_storage_bits`,
-    // so adding a new p_kmer_size only requires editing `kmer_size_buckets` and the
-    // per-p_kmer_size clause in `storage_bits_for`.
+    // Choose position-width buckets where the minimizer record changes size.
+    // Add supported k values to kmer_size_buckets and storage_bits_for together.
 
-    /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
-    /// entry is the default for non-canonical kmer_size — see kmer_size_default.
-    ///
-    /// The array's size must
-    /// match its element count, not be hard-coded to 3. A `std::array<size_t, 3>`
-    /// with only `{15u}` initialised silently zeroes the trailing two slots, and
-    /// the consteval dispatch table then enumerates p_kmer_size=0, which instantiates
-    /// `minimizer_representation<63, 0>` whose `hash_shift` equals `sizeof(storage_type)*8` and
-    /// trips an undefined-shift constexpr error in `index.cppm:151`. `std::to_array`
-    /// deduces the array size from the initialiser so the two stay in lockstep.
+    /// K-mer sizes with compiled dispatch entries. The first is the template default.
+    /// Infer the array length from its entries so a smaller, build profile cannot
+    /// leave zero-filled slots that would instantiate an invalid k=0 layout.
     inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
         15u
@@ -92,15 +75,13 @@ export {
 #endif
     });
 
-    /// `bit_width(max(max_bp - 1, 1))` clamped into `[p_kmer_size, 63]` — the smallest
-    /// `p_bucket_width` such that `2^p_bucket_width > max_bp - 1`, lifted up to `p_kmer_size` so
-    /// the resulting `minimizer_layout<p_bucket_width, p_kmer_size>` keeps `pos_bits >= kmer_size`.
-    /// At p_bucket_width=63 every p_kmer_size resolves to a non-void storage_type (the 128-bit
-    /// specialisation handles the upper band), so a clamp on the upper end is sufficient.
+    /// Calculate the position-bit requirement  for max_bp bases, capped at 63
+    /// and raised to at least kmer_size for the layout's bucket range
+    /// Callers must supply a kmer_size no greater than 63.
     [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(std::size_t max_bp,
                                                               std::size_t kmer_size) noexcept {
-        // Preserve the legacy helper's saturating contract. New physical-layout
-        // selection checks the original extent before reaching this fallback.
+        // Saturate this legacy size helper. Registered-layout callers check the
+        // original sequence length before using a layout.
         const std::size_t lg = ::bioseq::minimizers::minimizer_position_requirement(
             std::min<std::uint64_t>(max_bp, std::uint64_t{1u} << 63u));
         return std::clamp<std::size_t>(lg, kmer_size, 63u);
@@ -114,13 +95,8 @@ export {
 
     namespace detail {
 
-    /// Pack-expansion builder for a per-p_kmer_size table of `k_storage_bits` values keyed
-    /// by p_bucket_width ∈ [0, 64).  The layout type takes (p_bucket_width, p_kmer_size) as
-    /// template parameters, so the only way to convert a runtime p_bucket_width into a template
-    /// argument is to pre-compute every value of `minimizer_layout<p_bucket_width,
-    /// p_kmer_size>::k_storage_bits` for p_bucket_width in the legal range and index into the
-    /// resulting `std::array`. All work happens at constant-evaluation time. The dispatcher path
-    /// never enters this helper.
+    /// Build a compile-time table of record sizes for one k-mer size and the
+    /// supplied position widths. Each entry instantiates its minimizer layout.
     template <std::size_t p_kmer_size, std::size_t... p_bucket_values>
     [[nodiscard]] consteval auto
     make_storage_bits_table_impl(std::index_sequence<p_bucket_values...>) noexcept {
@@ -134,11 +110,8 @@ export {
         return make_storage_bits_table_impl<p_kmer_size>(std::make_index_sequence<64u>{});
     }
 
-    /// Look up `minimizer_layout<p_bucket_width, p_kmer_size>::k_storage_bits` from the
-    /// per-p_kmer_size table.  The per-p_kmer_size clauses are a *dispatch table*, not a hand-tuned
-    /// ladder — they exist because the layout requires p_kmer_size as a *template* argument and the
-    /// consteval helper above can only enumerate p_bucket_width for a fixed compile-time
-    /// p_kmer_size.  Every p_kmer_size in `kmer_size_buckets` must have a matching clause here.
+    /// Return the record size for a supported k-mer size, or zero otherwise.
+    /// Keep  this list consistent with kmer_size_buckets.
     [[nodiscard]] consteval std::size_t storage_bits_for(std::size_t p_bucket_width,
                                                          std::size_t p_kmer_size) noexcept {
         if (p_kmer_size == 15u || p_kmer_size == 20u ||
@@ -149,15 +122,10 @@ export {
         return 0u;
     }
 
-    /// Compute the breakpoint p_bucket_width values for a given p_kmer_size.  For each
-    /// p_bucket_width in [p_kmer_size, 63]:
-    ///   - p_bucket_width is emitted if storage_bits_for(p_bucket_width, p_kmer_size) !=
-    ///   storage_bits_for(p_bucket_width-1, p_kmer_size),
-    ///     recorded as the largest p_bucket_width of the previous band (i.e. p_bucket_width-1).
-    ///   - p_bucket_width = p_kmer_size is emitted as the lower anchor.
-    ///   - p_bucket_width = 63 is always emitted as the terminal anchor.
-    /// Max 6 entries possible (initial + up to 3 storage transitions + terminal +
-    /// headroom).
+    /// Find poition-width buckets for one k-mer size. Keep the lower bound,
+    /// the last width before each increase in record size, and the final
+    /// 63-bit bound. These buckets cover the same storage choices with fewer
+    /// template instantiations.
     template <std::size_t p_kmer_size>
     [[nodiscard]] consteval auto compute_breakpoints_for() noexcept {
         std::array<std::size_t, 6u> out{};
@@ -178,13 +146,10 @@ export {
     static_assert(compute_breakpoints_for<7u>().second <= 6u);
     static_assert(compute_breakpoints_for<27u>().second <= 6u);
 
-    /// Work-buffer type for `compute_global_l_buckets`.  Sized 32 (≤ 6
-    /// breakpoints/p_kmer_size × ≤ 5 kmer sizes = 30, rounded up to a power of two for
-    /// headroom).
+    /// Scratch array for merging position-width buckets from the supported k values.
     using raw_buf = std::array<std::size_t, 32u>;
 
-    /// Free consteval helper — merges compute_breakpoints_for<p_kmer_size>()'s breakpoint
-    /// list into (raw, raw_n) using the lifted `append_unique_value` primitive.
+    /// Append this k-mer size's breakpoints, skipping values already present.
     template <std::size_t p_kmer_size>
     consteval void merge_breakpoints_into(raw_buf& raw, std::size_t& raw_n) noexcept {
         constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
@@ -193,10 +158,8 @@ export {
         }
     }
 
-    /// Pack-expanded union over `kmer_size_buckets` indices.  Threads the
-    /// accumulator state through `merge_breakpoints_into` without implicit captures.
-    /// and finishes with the lifted insertion-sort primitive — the
-    /// dispatcher's smallest-ge lookup needs sorted input.
+    /// Combine and sort the position-width buckets for all compiled k values.
+    /// Sorting lets runtime dispatch choose the smallest sufficient  bucket.
     template <std::size_t... p_indices>
     [[nodiscard]] consteval auto
     compute_global_l_buckets_impl(std::index_sequence<p_indices...>) noexcept {
@@ -213,9 +176,8 @@ export {
 
     } // namespace detail
 
-    /// Materialised dispatcher p_bucket_width bucket list — the union of per-p_kmer_size
-    /// breakpoints computed at compile time. The `_n` constant gives the live prefix size. The
-    /// array itself is sized 32 for headroom.
+    /// Combined position-width buckets and the number of populated entries.
+    /// The array has spare capacity, so use only its first _n entries.
     inline constexpr auto seq_len_log2_buckets_pair = detail::compute_global_l_buckets();
     inline constexpr auto seq_len_log2_buckets = seq_len_log2_buckets_pair.first;
     inline constexpr std::size_t seq_len_log2_buckets_n = seq_len_log2_buckets_pair.second;
@@ -223,8 +185,7 @@ export {
 
     namespace detail {
 
-    /// Materialise `seq_len_log2_buckets` as a `value_sequence` the chain can
-    /// pack-expand.  Used as the value-list of `seq_len_log2_registry`.
+    /// Turn the populated position-width buckets into template arguments.
     template <std::size_t... p_indices>
     [[nodiscard]] consteval auto
     make_seq_len_log2_buckets_seq(std::index_sequence<p_indices...>) noexcept {
@@ -234,8 +195,7 @@ export {
     using seq_len_log2_buckets_seq =
         decltype(make_seq_len_log2_buckets_seq(std::make_index_sequence<seq_len_log2_buckets_n>{}));
 
-    /// Materialise `kmer_size_buckets` similarly.  Used as the value-list of
-    /// `kmer_size_registry`.
+    /// Turn the compiled k-mer sizes into template arguments.
     template <std::size_t... p_indices>
     [[nodiscard]] consteval auto
     make_kmer_size_buckets_seq(std::index_sequence<p_indices...>) noexcept {
@@ -245,13 +205,8 @@ export {
     using kmer_size_buckets_seq =
         decltype(make_kmer_size_buckets_seq(std::make_index_sequence<kmer_size_buckets.size()>{}));
 
-    // Per-p_kmer-size sequence-length breakpoint sequence.
-    //
-    // Materialise the p_kmer_size-specific breakpoint list (from
-    // `compute_breakpoints_for<p_kmer_size>()`) as a `value_sequence<std::size_t, ...>`.  Used by
-    // `dependent_bucket_step`'s p_kmer_size-aware `value_list_for<p_kmer_size>` to iterate only the
-    // p_bucket_width breakpoints relevant for that p_kmer_size — rather than the global union shape
-    // `seq_len_log2_buckets_seq` (which causes the explosion).
+    // Build the position-width list for one selected k Dispatching only, its
+    // relevant widths avoids compiling every combination in the global list.
     template <std::size_t p_kmer_size, std::size_t... p_indices>
     [[nodiscard]] consteval auto
     make_per_k_breakpoints_seq_impl(std::index_sequence<p_indices...>) noexcept {
@@ -274,41 +229,22 @@ export {
 
     } // namespace detail
 
-    /// Canonical k-mer default for any non-canonical
-    /// `params.kmer_size` value.  The chain's `kmer_size_step` pins this when
-    /// the runtime field is outside `kmer_size_buckets`.
+    /// Template k value used when the requested k has no compiled entry.
+    /// The generic pipeline still reads the requested k  from runtime parameters.
     inline constexpr std::size_t kmer_size_default = 15u;
     static_assert(kmer_size_default == kmer_size_buckets[0],
                   "kmer_size_default must match the leading entry of kmer_size_buckets — "
                   "the chain's default-value path expects them in sync.");
 
-    // =============================================================================
-    // Low-level enum/value dispatch primitives
-    // =============================================================================
-    //
-    // The dispatch primitives live in `bioseq.common.templating` and are
-    // re-exported here for unqualified pipeline call sites.
+    // Reuse the shared exact-value and size-bucket dispazch helpers.
 
     using ::bioseq::common::templating::dispatch_exact_value_or_default;
     using ::bioseq::common::templating::dispatch_exact_value_or_default_void;
     using ::bioseq::common::templating::dispatch_smallest_not_less;
 
-    // =============================================================================
-    // algorithm_enum_values registry and per-dimension selectors
-    // =============================================================================
-    //
-    // Each registry exposes:
-    //   - `target_t`        — the NTTP type the dispatcher pins.
-    //   - `default_value`   — pinned when the runtime field is outside the pack.
-    //   - `value_list`      — `std::integer_sequence<target_t, ...>` of enum/size_t
-    //                         values the dispatcher iterates.
-    //   - `read_field(p, args...)` — extracts the target_t value from the runtime
-    //                         parameter pack (singular method name shared by every
-    //                         step adapter; the implementation may literally read a
-    //                         field or compute a derived value).
-    //
-    // Adding a new dispatched dimension is one new registry plus one `enum_step` /
-    // `bucket_step` alias.
+    // Each registry lists its compiled values and default, and reads the
+    // corresponding runtime setting. Dispatch steps use that information to
+    // choose a template instantiation.
 
     template <class p_enum> struct algorithm_enum_values;
 
@@ -392,11 +328,8 @@ export {
 
     namespace detail {
 
-    /// A type satisfies `has_bp_size` when it exposes a `bp_size()` member
-    /// returning an unsigned integer.  Constrains `seq_len_log2_registry::read_field`'s
-    /// first two args so a chain composing `seq_len_log2_step` into a call site
-    /// lacking query and target ranges in those slots produces a localized diagnostic
-    /// at the chain instantiation point.
+    /// Require a sequence length convertible to size_t. This catches dispatch
+    /// calls that omit the query or target range where length selection needs it.
     template <class p_type>
     concept has_bp_size = requires(const p_type& x) {
         { x.bp_size() } -> std::convertible_to<std::size_t>;
@@ -432,23 +365,13 @@ export {
         }
     };
 
-    /// Pinned-aware sequence-length registry.
-    ///
-    /// Exposes `value_list_for<p_kmer_size, …>` and `read_field_for<p_kmer_size, …>` so the chain's
-    /// `dependent_bucket_step` can iterate only the p_bucket_width breakpoints for the
-    /// previously-pinned p_kmer_size. This collapses the 21-cell (p_bucket_width, p_kmer_size)
-    /// Cartesian product (the global p_bucket_width union × p_kmer_size) into the per-p_kmer_size
-    /// breakpoint count: `3 + 4 + 2 = 9` cells (p_kmer_size=15: 3 buckets, p_kmer_size=7: 4,
-    /// p_kmer_size=27: 2).
-    ///
-    /// Place this step *after* `kmer_size_step` in the chain so `Pinned... = (p_kmer_size, …)`.
+    /// Select position-width buckets for the k value chosen by  an earlier step.
+    /// This reduces the number of compiled k/width combinations. Place this
+    /// registry's step after kmer_size_step so that k is already available.
     struct seq_len_log2_registry_per_k {
         using target_t = std::size_t;
 
-        /// Anchored to p_kmer_size=15's lower bucket boundary (`compute_breakpoints_for<15>()[0]`).
-        /// The chain only pins `default_value` when `active_v` is false. Every
-        /// `dependent_bucket_step` is unconditionally active, but the
-        /// chain primitive requires a value to thread through inactive steps.
+        /// Default required by the dispatch-step interface. This step is always active.
         static constexpr std::size_t default_value = 15u;
 
         template <std::size_t p_kmer_size, auto... p_rest_pinned>
@@ -470,15 +393,8 @@ export {
 
     } // namespace detail
 
-    // =============================================================================
-    // dispatch_chain primitive and step adapters
-    // =============================================================================
-    //
-    // The chain primitive and step adapters live in
-    // `bioseq.common.templating::dispatch_chain.cppm`.
-    // They are re-exported here so the pipeline body keeps unqualified
-    // names. The per-pipeline alias supplies the `minimap2_parameters` slot so
-    // chain call sites do not need to repeat it.
+    // Pipeline aliases reuse the shared dispatch chain and step adapters.
+    // They supply minimap2_parameters as the runtime settings type.
 
     namespace detail {
 
@@ -493,26 +409,19 @@ export {
     using kmer_size_step = enum_step<kmer_size_registry>;
     using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
 
-    /// The per-p_kmer_size seq_len_log2 step must follow `kmer_size_step`
-    /// in the chain so the pinned-p_kmer_size's per-p_kmer_size breakpoint list is iterated.
+    /// Place this after kmer_size_step to select length buckets for the chosen k.
     using seq_len_log2_step_per_k = dependent_bucket_step<seq_len_log2_registry_per_k>;
 
-    /// Per-pipeline chain alias for the request parameter type used here.
-    /// `p_result` and the leaf template stay as template
-    /// parameters because real call sites instantiate with different
-    /// return types (match_result_collection / pipeline_description / void).
+    /// A dispatch chain using minimap2_parameters. The caller supplies the final
+    /// operation, its result type, and the sequence of selection steps.
     template <class p_result, template <auto... p_values> class p_leaf, class... p_steps>
     using dispatch_chain = ::bioseq::common::templating::
         dispatch_chain<p_result, p_leaf, ::bioseq::simd::minimap2_parameters, p_steps...>;
 
     } // namespace detail
 
-    // =============================================================================
-    // Leaf types and traits aliases
-    // =============================================================================
-    // `pipeline_run_leaf` terminates the runtime cascade and selects the
-    // specialized or fallback parameter branch. `pipeline_run_traits::leaf`
-    // exposes it in the NTTP-only form required by `dispatch_chain`.
+    // pipeline_run_leaf and pipeline_run_traits in pipe.cppm connect  these
+    // choices to the specialized or generic pipeline implementation
 
     } // namespace bioseq::simd::pipe
 

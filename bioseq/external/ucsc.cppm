@@ -1,6 +1,6 @@
 /**
  * @file external/ucsc.cppm
- * @brief UCSC Genome Browser OpenAPI descriptor consumed by client codegen.
+ * @brief OpenAPI description used to generate the UCSC client.
  */
 module;
 
@@ -8,8 +8,7 @@ module;
 
 export module bioseq.external.ucsc;
 
-// The supplied ucsc.docs.yaml is an APIs catalog. Embed the OpenAPI
-// document referenced by its openapi/ucsc-genomic-data-openapi.yml property.
+// Embed the UCSC OpenAPI document here for client generation.
 constexpr static std::string_view spec = R"bioseq_openapi(
 openapi: 3.0.0
 info:
@@ -655,5 +654,5 @@ x-bioseq-integration:
         - GATCACAGGT
 )bioseq_openapi";
 
-/** @brief Code-generation anchor for the UCSC client. */
+/** @brief Generate the UCSC client from, spec. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

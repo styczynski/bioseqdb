@@ -372,9 +372,7 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
             "SELECT label FROM sequence_acceptance_total_key_hash "
             "WHERE value = 'A'::bioseq.seq;") == "ua");
 
-        // Building this expression index reads locator stubs through the
-        // standalone provider and promotion boundary.  A usable plan confirms
-        // that the post-catch error tail did not alter the success path.
+        // Check that an expression index can read a stored sequence and serve a length query
         const auto source_expression_plan = explain_text<false>(
             ctx,
             "SELECT id FROM sequence_acceptance_total_key_source "
@@ -399,9 +397,8 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
     REQUIRE(plan_contains(
         explain_text<false>(ctx, hash_join_query), "Hash Join"));
 
-    /* The two aliases below scan one physical relation through independent
-     * providers.  The probe also attests that relation-only lookup rejects
-     * this ambiguity while each provider generation remains exact. */
+    /* Each table alias needs its own source provider. Check that equality,
+     * ordering, and hashing read  the value belonging to the correct alias. */
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq_internal.sequence_source_route_alias_probe();")

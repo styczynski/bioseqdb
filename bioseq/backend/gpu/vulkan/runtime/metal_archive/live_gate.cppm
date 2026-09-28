@@ -1,6 +1,6 @@
 /**
  * @file live_gate.cppm
- * @brief Validates live immutable Metal policy and private archive snapshots.
+ * @brief Checks the installed Metal settings and tests temporary archive files.
  */
 module;
 
@@ -22,14 +22,14 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Fails when live interposition state diverges from immutable qualification.
+ * @brief Check that installed Metal archive and command-library wrappers remain valid.
  *
- * On Apple platforms, compares archive and command interposition state against
- * the installed configuration and process qualification. Non-Apple builds are a
- * no-op. Increments the slot live-gate counter on every call.
+ * On Apple, compare loaded archives and device details with the installation
+ * reord. Reject recorded failures or source-compilation fallback. Without
+ * installed settings, or on other platforms, only count the call.
  *
- * @param[in] operation_label Label included in the thrown diagnostic on failure.
- * @throws vulkan_runtime_error On Apple platforms when interposition state is stale or poisoned.
+ * @param[in] operation_label Operation name included in an error.
+ * @throws vulkan_runtime_error If installed Metal settings fail the checks.
  */
 void require_immutable_metal_policy_live(std::string_view operation_label) {
     runtime_metal_archive_configuration_slot_instance().live_gate_calls.fetch_add(
@@ -79,25 +79,21 @@ void require_immutable_metal_policy_live(std::string_view operation_label) {
 #endif
 }
 
-/**
- * @brief Executes the production live gate through the test-only public seam.
- *
- * Invokes @ref require_immutable_metal_policy_live with a fixed unit-test label.
- */
+/** @brief Runs the normal Metal settings check with a fixed unit-test  label */
 void probe_immutable_metal_policy_live_for_test() {
     require_immutable_metal_policy_live("unit-test live gate");
 }
 
 /**
- * @brief Creates, verifies, tampers with, and rejects one private archive snapshot.
+ * @brief Tests verification of a temporary Metal archive file on Apple.
  *
- * Writes a private snapshot, captures it against expected bytes, mutates the
- * on-disk file, and confirms the second capture fails. Apple-only.
+ * Writes the expected bytes, verifies them, then changes the first byte and
+ * checks that verification rejects the file.
  *
- * @param[in] artifact_filename Stable archive artifact filename for the spec.
- * @param[in] bytes Immutable expected archive bytes used for digest comparison.
- * @param[in] temp_parent Parent directory for the private validation snapshot.
- * @return Capture metrics and tamper-rejection flag, or a diagnostic on failure.
+ * @param[in] artifact_filename Filename recorded for the archive.
+ * @param[in] bytes Expected archive contents.
+ * @param[in] temp_parent Directory for the temporary file.
+ * @return Verification measurements and whether tampering was rejected, or an error.
  */
 [[nodiscard]] std::expected<runtime_private_archive_snapshot_test_result, std::string>
 verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filename,

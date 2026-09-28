@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares shared placeholder-lineage state without registration implementations.
+ * @brief Shares the output-column information used to bind match helpers in a join plan.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -14,7 +14,7 @@ export [[nodiscard]] bool batch_join_identity_list_contains(
     List* identities,
     Node* identity) noexcept;
 
-/** @brief Carries scan target and helper provenance through output setrefs rewriting. */
+/** @brief The scan output and inherited helper bindings used while PostgreSQL fixes output references. */
 export struct batch_join_output_setrefs_rewrite {
     List* scan_tlist = NIL;
     const bioseq_stub_oids* oids = nullptr;

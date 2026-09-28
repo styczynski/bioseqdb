@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa/transient_index.cppm
- * @brief Owns the transient minimizer hash table and fixed bucket codec.
+ * @brief Defines an in-memory minimizer lookup and its binary bucket format.
  */
 export module bioseq.indexing.minimizer_hashmap:grouped_soa_transient_index;
 
@@ -38,9 +38,9 @@ struct minimizer_hashmap_fragment_index_table;
 
 export namespace bioseq::indexing {
 
-/// Exact allocation bound for the transient flat hash table.
+/// Table capacity and bytes needed for a bounded number of distinct hashes.
 struct minimizer_hashmap_table_allocation_plan {
-    /// Maximum number of distinct hashes accepted by the plan.
+    /// Distinct-hash byund including the  extra space reserved by the planner.
     std::uint64_t distinct_upper_bound = 0u;
     /// Slot count requested before group rounding.
     std::uint64_t requested_slots = 0u;
@@ -48,13 +48,13 @@ struct minimizer_hashmap_table_allocation_plan {
     std::uint64_t group_count = 0u;
     /// Usable slot count after reserving the sentinel slot.
     std::uint64_t capacity = 0u;
-    /// Bytes retained by the planned groups.
+    /// Bytes allocated for the planned groups.
     std::uint64_t allocation_bytes = 0u;
-    /// Whether every intermediate and the final allocation fit.
+    /// True if the capacity and allocation calculations succeeded.
     bool valid = false;
 };
 
-/// Plan the table capacity and retained bytes for a distinct-hash upper bound.
+/// Plan table capacity and memory for the maximum expected number of distinct hashes.
 [[nodiscard]] constexpr minimizer_hashmap_table_allocation_plan
 plan_minimizer_hashmap_table_allocation(std::uint64_t possible_distinct) noexcept {
     using bioseq::common::saturating_add;
@@ -66,9 +66,7 @@ plan_minimizer_hashmap_table_allocation(std::uint64_t possible_distinct) noexcep
     constexpr std::uint64_t bytes_per_group = 256u;
     constexpr std::uint64_t max = (std::numeric_limits<std::uint64_t>::max)();
 
-    // An empty sketch builds no table at all.  Keep that real lifetime in the
-    // exact plan instead of charging the non-empty sentinel margin and then
-    // rejecting the builder's zero retained bytes at handoff validation.
+    // An empty sketch needs no table allocation. The memory plan must match that
     if (possible_distinct == 0u) {
         return minimizer_hashmap_table_allocation_plan{.valid = true};
     }
@@ -105,37 +103,30 @@ plan_minimizer_hashmap_table_allocation(std::uint64_t possible_distinct) noexcep
     };
 }
 
-/// Transient storage-free minimizer lookup used by in-memory seed routes.
+/// In-memory hash lookup that returns target positions for matching minimizers.
 struct minimizer_hashmap_fragment_index {
   private:
     std::unique_ptr<detail::minimizer_hashmap_fragment_index_table> table_;
 
-    /// Release the current flat hash table.
+    /// Remove all hash entries, creating the table owner if needed.
     void clear_table();
-    /// Reserve a table for the requested bucket count.
+    /// Reserve space for the requested number of hash buckets.
     void reserve_table(std::size_t bucket_count);
-    /// Reserve from a distinct-hash upper bound without a rehash overlap.
+    /// Allocate the  full planned table once. The table must have no existing allocation.
     void reserve_table_for_distinct_upper_bound(std::size_t distinct_count);
     /// Insert one packed offset and count for a minimizer hash.
     void emplace_table(std::uint64_t hash, std::uint64_t packed);
 
-    /// Sort minimizers by the narrowest exact radix key.
+    /// Sort minimizers by hash, using the smallest integer width that holds the hash.
     /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_minimizers_in_place_(std::span<p_minimizer_type> sorted_minimizers) {
         if (sorted_minimizers.empty())
             return;
-        // `MinimizerRepr::kmer()` deliberately exposes a uint64_t ABI even
-        // when the selected representation carries a much narrower hash.  Do
-        // not let that ABI choice force radix_sort through known-zero high
-        // bytes: XXL_HIFI uses MinimizerRepr<33, 15> with exactly 30 hash bits,
-        // so a uint64_t key performs four all-zero radix levels over the whole
-        // target before reaching a significant byte.  Returning the smallest
-        // unsigned key type that can represent the public kmer() domain
-        // preserves the ordering exactly while removing those scans.  The
-        // exported 128-bit representation can report a layout hash field
-        // wider than 64 bits while kmer() intentionally remains uint64_t; it
-        // therefore stays on the uint64_t radix key.
+        // kmer() returns uint64_t even, for short hashes. Sorting a 30-bit hash as
+        // uint32_t skips four radix passes over zero bytes. Choose the width from
+        // the layout while keeping the full range returned by kmer(). Layouts
+        // wider than 64 bits still use its uint64_t result.
         using minimizer_layout = typename p_minimizer_type::layout_type;
         using public_kmer = decltype(std::declval<const p_minimizer_type&>().kmer());
         static_assert(minimizer_layout::k_hash_bits > 0u);
@@ -148,7 +139,7 @@ struct minimizer_hashmap_fragment_index {
                                std::conditional_t<(minimizer_layout::k_hash_bits <= 32u),
                                                   std::uint32_t,
                                                   std::uint64_t>>>;
-        /// Narrows the public hash to its exact radix-sort width.
+        /// Converts the hash to the integer width used by the adix sorter.
         struct kmer_key {
             /// Return the hash key used by the radix sorter.
             [[nodiscard, gnu::always_inline]]
@@ -161,13 +152,13 @@ struct minimizer_hashmap_fragment_index {
                                     kmer_key{});
     }
 
-    /// Preserve the established vector sorting entry point through the span implementation.
+    /// Sort a  vector through the shared span implementation.
     template <class p_minimizer_type>
     static void sort_minimizers_in_place_(std::vector<p_minimizer_type>& sorted_minimizers) {
         sort_minimizers_in_place_(std::span<p_minimizer_type>{sorted_minimizers});
     }
 
-    /// Build lookup storage from an already sorted caller-owned span.
+    /// Build hash buckets and copy positions from minimizers already sorted by hash.
     /// @tparam p_minimizer_type Minimizer representation exposing hash and encoded position.
     template <class p_minimizer_type>
     void build_presorted_(std::span<const p_minimizer_type> sorted_minimizers,
@@ -228,11 +219,11 @@ struct minimizer_hashmap_fragment_index {
         try {
 #endif
         if (reserve_full_table_once) {
-            // The admitted Vulkan route reserves for the worst-case D=N once.
-            // A single allocation avoids half-size allocation/rehash overlap.
+            // Reserve for every minimizer having a different hash. This keeps a larger
+            // replacement table from overlapping the first allocation.
             reserve_table_for_distinct_upper_bound(total);
         } else {
-            // Apply the CPU allocation policy for every non-Vulkan caller.
+            // Other callers start with a smaller table and allow it to grow.
             reserve_table(total / 2u + 16u);
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
@@ -274,8 +265,8 @@ struct minimizer_hashmap_fragment_index {
         }
     }
 
-    /// Instrument sorting and lookup construction for one caller-owned vector.
-    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
+    /// Sort the caller's vector and build the lookup, recording the build time.
+    /// @tparam p_minimizer_type Minimizer  representation accepted by the transient lookup
     template <class p_minimizer_type>
     void build_sorted_in_place(std::vector<p_minimizer_type>& sorted_minimizers,
                                sequence_size_t target_length,
@@ -290,12 +281,12 @@ struct minimizer_hashmap_fragment_index {
     }
 
   public:
-    /** Tag for callers that pre-admit the private table-owner allocation. */
+    /** Selects construction without an allocation, so the caller can reserve memory first. */
     struct defer_table_allocation_t final {};
     static inline constexpr defer_table_allocation_t defer_table_allocation{};
 
-    /// Global `(position << 1) | strand` values in hash-bucket order.
-    std::vector<std::uint64_t> positions; // (last_pos<<1)|strand, full uint64
+    /// Encoded global end positions, grouped by hash: `(position << 1) | strand`.
+    std::vector<std::uint64_t> positions; // Includes the strand bit in the low bit.
     /// Full target length represented by this lookup.
     sequence_size_t target_len = 0;
 
@@ -321,16 +312,16 @@ struct minimizer_hashmap_fragment_index {
     /// Registry name for per-fragment minimizer indexes.
     static constexpr std::string_view index_name = k_minimizers_per_fragment_index_name;
 
-    /// Fixed little-endian transient index header fields.
+    /// Fields of the 32-byte little-endian index header.
     struct encoded_header {
         std::uint32_t magic;
         std::uint32_t layout_revision;
         std::uint64_t target_len; ///< Full 64-bit target length.
         std::uint32_t bucket_count;
-        std::uint32_t reserved; ///< Padding written as zero
+        std::uint32_t reserved; ///< Reserved field written as zero.
         std::uint64_t total_positions;
     };
-    /// Fixed little-endian hash bucket fields.
+    /// Hash and position range stored in each 16-byte little-endian bucket.
     struct encoded_bucket {
         std::uint64_t hash;
         std::uint32_t pos_offset;
@@ -350,19 +341,19 @@ struct minimizer_hashmap_fragment_index {
     [[nodiscard]] std::size_t table_size() const noexcept;
     /// Return whether the lookup has no hash buckets.
     [[nodiscard]] bool table_empty() const noexcept;
-    /// Return bytes currently retained by the hash table.
+    /// Return bytes currently allocated for the hash table's entries.
     [[nodiscard]] std::uint64_t table_allocation_bytes() const noexcept;
-    /// Return the pre-allocation requirement for the private table owner.
+    /// Return the memory to reserve before allocating the private table owner.
     [[nodiscard]] static std::uint64_t table_owner_allocation_requirement_bytes();
-    /// Return the allocator-reported private table-owner extent.
+    /// Return the table owner's allocation, size reported by the alloator.
     [[nodiscard]] std::uint64_t table_owner_allocation_bytes() const noexcept;
-    /// Return the peak hash-table bytes retained during this lifetime.
+    /// Return  the highest hash-table allocation total recorded by this owner.
     [[nodiscard]] std::uint64_t table_peak_allocation_bytes() const noexcept;
-    /// Visit every hash bucket through an erased callback.
+    /// Call emit for each hash bucket, passing its hash, packed range and caller context.
     void for_each_table_entry_erased(
         void* ctx, void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
 
-    /// Visit every hash bucket with a typed callable.
+    /// Call emit for each hash and its packed position range.
     /// @tparam p_function Callable accepting a hash and its packed offset/count value.
     template <class p_function> void for_each_table_entry(p_function&& emit) const {
         using fn = std::remove_reference_t<p_function>;
@@ -371,38 +362,33 @@ struct minimizer_hashmap_fragment_index {
         });
     }
 
-    /// Build from a caller-owned immutable minimizer sequence.
+    /// Build a lookup from a copy, leaving the caller's minimizers unchanged.
     /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build(const std::vector<p_minimizer_type>& target_minimizers,
                sequence_size_t target_length) {
-        // A call-local copy bounds scratch lifetime to this operation so later
-        // GPU stages do not retain the target-sized allocation in worker RSS.
+        // Release the sorting copy when the build ends, before  later GPU stages need memory.
         std::vector<p_minimizer_type> sorted_minimizers{target_minimizers.begin(),
                                                         target_minimizers.end()};
         build_sorted_in_place(sorted_minimizers, target_length);
     }
 
-    /// Sort one caller-owned minimizer source by its canonical hash without
-    /// constructing the FOA lookup table or a positions vector.  The direct
-    /// mapped Vulkan route uses this same production radix implementation,
-    /// then streams the sorted source into its final resident allocation.
+    /// Sort the caller's minimizers by hash. GPU builders can then read this order
+    /// directly into their final index allocation.
     /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_source_by_hash_in_place(std::vector<p_minimizer_type>& source) {
         sort_minimizers_in_place_(source);
     }
 
-    /// Sort one caller-owned contiguous minimizer source without allocating another container.
+    /// Sort a contiguous minimizer range by hash in place
     /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_source_by_hash_in_place(std::span<p_minimizer_type> source) {
         sort_minimizers_in_place_(source);
     }
 
-    /// Build a transient lookup index by consuming caller-owned minimizers.
-    /// Sorting happens in the caller's allocation and the vector is
-    /// deterministically deallocated before this function returns.
+    /// Sort and build from the caller's vector, then release its storage on success.
     /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_consuming(std::vector<p_minimizer_type>&& target_minimizers,
@@ -411,10 +397,10 @@ struct minimizer_hashmap_fragment_index {
         std::vector<p_minimizer_type>{}.swap(target_minimizers);
     }
 
-    /// Admitted Vulkan build: reserve one table for worst-case D=N so no FOA
-    /// growth allocation can overlap it. The caller must acquire positions +
-    /// planned-table admission before entering this method.
-    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
+    /// Build  with one table allocation large enough for every hash to be distinct.
+    /// The caler must first reserve memory for the positions and planned table.
+    /// The input vector is released after a successful build.
+    /// @tparam p_minimizer_type Minimizer representation, accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_consuming_full_table(std::vector<p_minimizer_type>&& target_minimizers,
                                     sequence_size_t target_length) {
@@ -424,8 +410,9 @@ struct minimizer_hashmap_fragment_index {
         std::vector<p_minimizer_type>{}.swap(target_minimizers);
     }
 
-    /// Build the one-shot table from an already authenticated hash-major source.
-    /// The caller retains the source allocation and may release it after return.
+    /// Build from minimizers already checked and sorted by hash. Requires a fresh
+    /// lookup constructed with defer_table_allocation. The caller keeps ownership
+    /// of the source and can release it after the build.
     template <class p_minimizer_type>
     void build_presorted_full_table(std::span<const p_minimizer_type> target_minimizers,
                                     sequence_size_t target_length) {
@@ -441,20 +428,20 @@ struct minimizer_hashmap_fragment_index {
                          /*reserve_full_table_once=*/true);
     }
 
-    /// Deallocate lookup storage after the final seed consumer.  This is for
-    /// an operation-owned transient index only. Borrowed persisted indexes
-    /// must never be passed to the post-seed lifetime coordinator.
+    /// Release the table  and positions after the last seed lookup. Only the operation
+    /// that owns a temporary index may do this. Borrowed indexes must stay alive
+    /// for their owner.
     void release_storage() noexcept;
 
-    /// Radix-bin pre-extracted global (kmer, encoded_position) pairs.
-    /// `pairs` is mutable and radix-sorted in place in caller-owned scratch without copying.
+    /// Build from global (hash, encoded_position) pairs. Sort the caller's range
+    /// by hash in place, then copy its positions into the lookup.
     void build_from_pairs(std::span<std::pair<std::uint64_t, std::uint64_t>> pairs,
                           sequence_size_t target_length);
 
-    /// Return all encoded positions for one minimizer hash.
+    /// Borrow all encoded positions for a hash. Return an empty span if it is absent.
     [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const;
 
-    /// Add a global base-pair offset to every stored position.
+    /// Shift every stored position by a base offset, preserving its strand bit
     void add_position_offset(sequence_size_t offset);
 
     /// Return the full target length represented by the lookup.
@@ -465,10 +452,10 @@ struct minimizer_hashmap_fragment_index {
     /// Return the exact serialized byte count.
     [[nodiscard]] std::size_t serialize_binary_size() const;
 
-    /// Serialize into an exact-size caller-owned buffer.
+    /// Write the index to the caller's buffer, which must  hold serialize_binary_size() bytes.
     void serialize_to_binary(char* output) const;
 
-    /// Decode and validate one fixed little-endian transient index image.
+    /// Read the index and check its header, byte size and buiket position ranges.
     [[nodiscard]] static minimizer_hashmap_fragment_index
     deserialize_from_binary(const char* input, std::size_t input_size);
 };
@@ -477,7 +464,7 @@ static_assert(minimizer_lookup_index<minimizer_hashmap_fragment_index>,
 static_assert(persistable_minimizer_index<minimizer_hashmap_fragment_index>,
               "minimizer_hashmap_fragment_index must model persistable_minimizer_index");
 
-/// Encode one sorted-dense control without persisting native struct layout.
+/// Encode a hash and its position range as a 16-byte little-endian bucket.
 [[nodiscard]] constexpr std::array<std::byte, 16> encode_minimizer_serialized_bucket(
     const minimizer_hashmap_fragment_index::encoded_bucket& bucket) noexcept {
     std::array<std::byte, 16> output{};
@@ -488,7 +475,7 @@ static_assert(persistable_minimizer_index<minimizer_hashmap_fragment_index>,
     return output;
 }
 
-/// Decode one exact sorted-dense control from fixed little-endian bytes.
+/// Decode a 16-byte little-endian bucket. Reject any other input length.
 [[nodiscard]] constexpr std::expected<minimizer_hashmap_fragment_index::encoded_bucket,
                                       minimizer_generation_encoding_error>
 decode_minimizer_serialized_bucket(std::span<const std::byte> input) noexcept {

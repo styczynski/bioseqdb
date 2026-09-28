@@ -1,6 +1,6 @@
 /**
  * @file admin/inspection_storage_support.cppm
- * @brief Owns physical index-shard inspection helpers.
+ * @brief Find physical index tables and count their stored rows.
  */
 module;
 
@@ -31,7 +31,7 @@ import bioseq.postgres.storage.indexing.index_relation_identity;
 
 export namespace bioseq::storage::indexing {
 
-/// Raise one fail-closed physical index audit error.
+/// Report a PostgreSQL error when a physical index  audit cannot complete.
 [[noreturn]] inline void index_audit_error(std::string_view message) {
     ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -70,7 +70,7 @@ inline void spi_connect_for_index_audit() {
     return result;
 }
 
-/// Derive every physical index-name prefix for a relation's sequence columns.
+/// Build index-table name prefixes for each live sequence column.
 [[nodiscard]] inline std::vector<std::string> seqidx_prefixes_for(Oid rel_oid,
                                                                   std::string_view name) {
     const relation_identity rid = index_relation_identity(rel_oid);
@@ -107,7 +107,7 @@ inline void spi_connect_for_index_audit() {
     return prefixes;
 }
 
-/// List physical index shard relations matching one escaped prefix.
+/// List index tables whose names start with this prefix.
 [[nodiscard]] inline std::vector<std::string>
 shard_relnames_with_prefix(const std::string& prefix) {
     std::vector<std::string> out;
@@ -147,7 +147,7 @@ shard_relnames_with_prefix(const std::string& prefix) {
                                               where_clause));
 }
 
-/// Check whether a shard has the complete grouped-generation key schema.
+/// Check that the shard has all four grouped-generation key columns and types.
 [[nodiscard]] inline bool shard_has_minimizer_generation_key(const std::string& relname) {
     const std::int64_t matching_attributes = index_audit_scalar_i64(
         fmt::format("SELECT count(*)::bigint FROM pg_attribute "
@@ -161,7 +161,9 @@ shard_relnames_with_prefix(const std::string& prefix) {
     return matching_attributes == 4;
 }
 
-/// Return the largest per-shard distinct published sub-key count.
+/// Return the largest distinct sub-key count in a shard for this query key.
+/// Exclude temporary-run keys. Skip shards when SPI cannot connect or returns
+/// an unexpected result status. PostgreSQL errors still propagate.
 [[nodiscard]] inline std::int64_t
 index_distinct_sub_keys_impl(Oid rel_oid, std::string_view name, std::int64_t query_key) {
     std::int64_t best = 0;
@@ -170,7 +172,7 @@ index_distinct_sub_keys_impl(Oid rel_oid, std::string_view name, std::int64_t qu
                                           (long long)k_temporary_run_sub_key_base);
     for (const std::string& pfx : seqidx_prefixes_for(rel_oid, name))
         for (const std::string& sh : shard_relnames_with_prefix(pfx)) {
-            // distinct sub_key in this shard for this query_key
+            // Count  this shard separotely so keys repeated across shards are not added together.
             if (SPI_connect() != SPI_OK_CONNECT)
                 continue;
             std::string sql =

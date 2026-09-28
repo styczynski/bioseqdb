@@ -14,7 +14,7 @@ import bioseq.common.logging;
 
 export namespace bioseq::io {
 
-/// Accepts ownership of one diagnostic string.
+/// Can be called with a diagnostic string passed as an rvalue.
 template <typename p_failure_function>
 concept failure_callback = std::invocable<p_failure_function, std::string&&>;
 

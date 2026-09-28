@@ -1,10 +1,9 @@
 /**
- * @file Tests for same-alphabet typmod coalescing and cross-alphabet rejection.
+ * @file Tests for matching sequence storage widths and rejecting different alphabets.
  *
- * Same-alphabet width mismatches re-encode at the column width without
- * changing results or sidecar eligibility. Cross-alphabet bindings fail with
- * SQLSTATE 42804 before recoding. Result rows remain the primary contract.
- * EXPLAIN assertions provide a secondary user-visible signal.
+ * DNA4 operands with different widths must give the same  alignment results
+ * after re-encoding. When DNA5 is enabled, DNA4/DNA5 pairs must fail with
+ * SQLSTATE 42804. EXPLAIN checks show when width conversion is needed.
  */
 
 #include <fmt/format.h>
@@ -19,8 +18,7 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-// Every case creates a fresh context for this relation; reset_extension
-// drops it before each run so state cannot leak between cases.
+// Drop this fixture table whenever a test creates a fresh context for it.
 constexpr std::string_view k_coalesce_table = "typmod_coalesce";
 
 }  // namespace
@@ -51,17 +49,12 @@ TEST_CASE("Typmod coalesce keeps equality and hash support representation-indepe
 TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
           "yields the same rows as a width-matched query",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
-    // The literal is re-encoded at the column's typmod through
-    // apply_typmod_coalesce, and alignment proceeds at the column width.
-    //
-    // We compare two queries that differ ONLY in the literal's
-    // typmod — the result rows MUST match. This is a strong
-    // property: if the coalesce path silently corrupts the
-    // literal, the row sets diverge.
+    // Compare the same probe encoded at two widths. Re-encoding the wider
+    // literal for the sarget column must preserve matches and coordinates.
     auto ctx = fresh_context({k_coalesce_table});
     seed_hoe_fixture(ctx, k_coalesce_table);
 
-    // p_width-matched (32, identical to column).
+    // Use the column's declared 32-bit width.
     const auto matched_width_rows = query_rows(
         ctx,
         fmt::format(
@@ -72,7 +65,7 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
             " ORDER BY pk;",
             k_coalesce_table));
 
-    // p_width-mismatched (64, requires coalesce).
+    // Use a 64-bit literal, which may need conversion for this build profile.
     const auto coalesced_width_rows = query_rows(
         ctx,
         fmt::format(
@@ -85,19 +78,16 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
 
     REQUIRE_FALSE(matched_width_rows.empty());
     REQUIRE_FALSE(coalesced_width_rows.empty());
-    // The user's headline expectation: "The query should return the
-    // same results". Strict equality.
+    // Width conversion must preserve every  returned field.
     REQUIRE(matched_width_rows == coalesced_width_rows);
 }
 
 TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "
           "profile",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
-    // Optimisation levels 0 and 1 deliberately normalise every accepted
-    // SQL width to uint64_t.  Under those profiles the nominal dna4/32
-    // column and dna4/64 literal have the same packed typmod, so there is
-    // no coalesce decision to surface. all_coordinates retains the requested
-    // widths and must expose the user-visible coalesce hint.
+    // Builds without all_coordinates store accepted sequence widths as uint64_t.
+    // The declared 32-bit column and 64-bit literal then need no conversion.
+    // all_coordinates keeps distinct widths, so EXPLAIN must show the conversion.
     auto ctx = fresh_context({k_coalesce_table});
     seed_hoe_fixture(ctx, k_coalesce_table);
 
@@ -135,21 +125,10 @@ TEST_CASE("Cross-alphabet mmsearch rejects before generic recoding",
 }
 #endif
 
-// Parameterised matrix: column at dna4/32 vs literal at every
-// supported (alphabet, width) typmod. The contract:
-//   - Same (alphabet, width) → direct dispatch, results identical
-//     to the canonical dna4/32 baseline.
-//   - Same alphabet (dna4) different width → coalesce; results
-//     identical to the baseline (literal is re-encoded at
-//     column's typmod, sidecar fast-path applies).
-//   - Different bound alphabet (dna5) → SQLSTATE 42804; no recoder or
-//     alignment pipeline is entered.
-//
-// The TEMPLATE_TEST_CASE_SIG matrix exercises every entry in the
-// column/literal typmod table.
-// dna4_entry and dna5_entry are sourced from
-// bioseq.tests.integration.support (re-exported there because this module
-// cannot transitively import bioseq_sequences).
+// Compare DNA4 literals at each declared width with the DNA4/32 baseline.
+// DNA5 literals must fail as mismatched operands when DNA5 is enabled, or
+// as unsupported literals in DNA4-only builds. Fixture alphabet tags come
+// from bioseq.tests.integration.support.
 
 TEMPLATE_TEST_CASE_SIG(
     "Typmod matrix: column dna4/32 against literal at (alphabet, width) — "
@@ -284,10 +263,8 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         "SET bioseq.aligner.chaining.minimum_score = 10;"
         "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
     auto canonical_rows = hoe_seed_rows();
-    // Keep this width/route fixture independent of the shared short probes.
-    // The original pk2 query is 12 bp and cannot seed with the statement's
-    // frozen k=15.  This 29 bp exact substring of pk2's target also exceeds
-    // k+w-1, so both persisted and recomputed routes select a minimizer.
+    // Replace pk2's 12 bp query with an exact substring long enough to produce
+    // a minimizer at k=15 and w=10. This keeps the test focused on storage width.
     canonical_rows.at(1).sequences.at(1) = std::string(k_hoe_probe_sequence);
     create_seq_table(
         ctx,
@@ -333,11 +310,10 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         "ON mmsearch(target.seq0[0:], query.seq1[0:]) "
         "ORDER BY target.pk, query.pk;";
 
-    /* Raw index reads consume persisted minimizers while transformed operands
-     * own an explicit require-absent recompute route.  Both routes retain the
-     * statement's frozen k/w and chain thresholds.  Storage width is the
-     * variable under test, so compare each cross-width result with an
-     * identical-width oracle that has the same ownership/read-index route. */
+    /* Compare each cross-width join with a same-width join using the same
+     * operand form  and index-read setting Plain columns can use stored
+     * minimizers, while sliced operands recompute them. Keep k, w, and the
+     * chaining limits fixed while changing storage width. */
     const auto require_canonical_diagonal = [](
             const auto& rows,
             const std::set<std::string>& expected_diagonal_pks) {

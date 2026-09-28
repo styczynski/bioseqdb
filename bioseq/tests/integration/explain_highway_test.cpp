@@ -18,7 +18,7 @@ namespace {
 #ifdef BIOSEQ_TEST_INDEXES
 std::mutex highway_target_force_mutex;
 
-/** Restore the process-local Highway target mask after a test scope. */
+/** Resets the Highway target override when the test scope ends. */
 class highway_target_force_reset final {
   public:
     explicit highway_target_force_reset(PGconn* connection) noexcept : connection_{connection} {}
@@ -35,8 +35,7 @@ class highway_target_force_reset final {
         if (result != nullptr)
             PQclear(result);
         if (!restored) {
-            // Terminating/replacing the backend also discards Highway's
-            // process-local target mask if SQL cleanup cannot run.
+            // Reconnecting discards the backend-local override if the reset query fails.
             PQreset(connection_);
         }
     }
@@ -153,8 +152,8 @@ TEST_CASE(
                     target);
     const auto per_row = explain_with_options(ctx, "VERBOSE, COSTS OFF", per_row_sql);
     REQUIRE(plan_contains(per_row, "Custom Scan (BioseqBatchJoin)"));
-    /* PostgreSQL may expose the same helper as a whole PHV or bare FuncExpr;
-     * both carrier sites are distinct but resolve to one MatchResult owner. */
+    /* PostgreSQL can represent the helper as a PlaceHolderVar or a function call.
+     * These two expression sites refer to the same alignment result. */
     REQUIRE(plan_contains(per_row, "Bioseq Match Placeholder Sites: 2"));
     REQUIRE(plan_contains(per_row, "Bioseq Mmsearch Ownership: per-row recipe"));
     require_complete_generic_highway_pipeline(per_row);

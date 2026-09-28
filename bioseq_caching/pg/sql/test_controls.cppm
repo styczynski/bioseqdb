@@ -1,12 +1,8 @@
-/*-------------------------------------------------------------------------
- *
- * Annotated private-cluster bioseq_cache test controls.
- *
- * This partition is present only in the test_support profile. Every backend
- * operation performs its own superuser check; the generated schema ACL is an
- * additional boundary.
- *
- *-------------------------------------------------------------------------
+/*
+ * SQL controls for tests running in a private PostgreSQL cluster
+ * These functions are included only in test builds. Generated permissions
+ * restrict access, and backend operations that change test settings or
+ * cache state also check for superuser access.
  */
 module;
 

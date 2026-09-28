@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns SliceProject and mmsearch source promotion and restoration.
+ * @brief Makes stored sequence locators usable by expressions and restores buffered rows.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,9 +39,12 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Promotes bound slice sources into the requested result memory context.
-     * @param allow_locator_passthrough Whether a locator-only parent may request promotion.
-     * @param layout Selects physical-relation or projected-child binding coordinates.
+     * @brief Replaces bound sequence locators with lazy values in @p result_context.
+     *
+     * Checks the slot against @p expected_descriptor and uses @p layout to find
+     * the physical source columns. A locator-only scan is skipped unless
+     * @p allow_locator_passthrough is true. When tracing is enabled, the values
+     * also carry their planned producer IDs.
      */
     void promote_slice_project_sources(scan_state* state,
                                        TupleTableSlot* slot,
@@ -134,12 +137,9 @@ export {
             }
             auto* value = reinterpret_cast<const bioseq::pg_types::seq*>(DatumGetPointer(source));
             if (!bioseq::storage::is_locator_stub(value)) {
-                /* A small inline sequence has no EOH metadata field on which to keep
-                 * the planned producer identity.  Under ANALYZE only, adopt that flat
-                 * value once into the row context and attach observation metadata before
-                 * the lazy expression runs.  The backing copy is a real source-adoption
-                 * allocation (and remains visible to the allocator probe); it is not a
-                 * SliceProject slot-publication materialization. */
+                /* Inline sequences need an expanded wrapper to carry their producer ID
+                 * during ANALYZE. Adopt the value in the row context before evaluating the
+                 * expression. This  allocation is counted as adopting a source value. */
                 if (producer_id == 0u || runtime.lazy_trace_attachment == nullptr ||
                     runtime.lazy_trace_attachment->runtime == nullptr ||
                     !runtime.lazy_trace_attachment->runtime->collection_enabled) {
@@ -205,10 +205,10 @@ export {
     }
 
     /**
-     * @brief Marks physical sequence Vars referenced by a finalized executor expression.
+     * @brief Marks the physical sequence columns used by an executor expression
      *
-     * This mirrors collect_needed_column_attributes' Var/whole-row rules, but records only
-     * sequence columns and keeps the lifetime role separate from read demand.
+     * Expands whole-row references to all sequence columns. These marks record
+     * when the values must remain usable, separately from the scan's read-column bitmap.
      */
     void mark_mmsearch_sequence_sources_from_expression(std::vector<std::uint8_t>& roles,
                                                         TupleDesc relation_descriptor,
@@ -228,13 +228,11 @@ export {
     }
 
     /**
-     * @brief Derives pre-evaluation and output source lifetimes from finalized executor trees.
+     * @brief Finds which sequence sources are needed before alignment and during output.
      *
-     * Derive timing from the final executor trees, not the broader provider
-     * tag.  newtargetlist is the exact per-match_result projection after helper
-     * injection; plan.qual is the executable residual frontier.  Operand lineage
-     * is added because evaluated submission executes both operand ExprStates even
-     * when only one side is syntactically transformed.
+     * Uses the rewritten output list for projection sources and plan.qual for
+     * pre-alignment filters. Evaluated operands add their source columns to the
+     * pre-alignment  set, so their expressions can read sequences safely.
      */
     void derive_mmsearch_source_lifetime_roles(bioseq_scan_runtime& runtime,
                                                Plan* plan,
@@ -281,7 +279,7 @@ export {
                         [](const std::uint8_t bound) { return bound != 0u; });
     }
 
-    /** @brief Checks whether one physical attribute participates in a capture role. */
+    /** @brief Checks whether a source column is needed at the seqected, evaluation step. */
     [[nodiscard]] bool
     mmsearch_source_matches_capture_role(const bioseq_scan_runtime& runtime,
                                          const AttrNumber attno,
@@ -294,14 +292,11 @@ export {
     }
 
     /**
-     * @brief Captures each source attribute required at a selected lifetime boundary.
+     * @brief Saves the original values of columns needed for evaluation or projection.
      *
-     * Capture each physical attribute at most once. Iterating the slot's attno
-     * namespace forms the exact union required by the role: evaluated operand
-     * leaves before ExprState execution, or finalized output-projection sources
-     * before per-match_result projection.
-     *
-     * @param restore_context Owns overflow entries when inline capacity is exceeded.
+     * Records each non-NULL column once, before temporary locator replacement.
+     * Returns an empty record when the source provider, slot or memory context
+     * is unavailable. @p restore_context owns storage beyond the inline capacity.
      */
     [[nodiscard]] mmsearch_source_restore
     capture_mmsearch_sources(bioseq_scan_runtime& runtime,
@@ -346,8 +341,10 @@ export {
     }
 
     /**
-     * @brief Promotes captured locator sources into the per-output memory context.
-     * @return The number of source datums replaced with promoted values.
+     * @brief Makes captured locators readable in the supplied evaluation context.
+     *
+     * Replaces only locator values and leaves expanded or  ordinary sequences as they are.
+     * @return The number of slot values replaced.
      */
     [[nodiscard]] std::size_t promote_mmsearch_sources(bioseq_scan_runtime& runtime,
                                                        TupleTableSlot* slot,
@@ -366,9 +363,9 @@ export {
             if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source)))
                 continue;
 
-            /* ExecCopySlotMinimalTuple may short-pack this STORAGE=extended value.
-             * Promotion and the locator ABI require the ordinary four-byte varlena
-             * header, so detoast in the output lifetime before inspecting it. */
+            /* Copying a minimal tuple can shorten a sequence's varlena header.
+             * Restore the four-byte header in this output context before reading
+             * the locator fields. */
             MemoryContext previous = MemoryContextSwitchTo(output_context);
             bioseq::pg_types::seq* flat = nullptr;
             try {
@@ -411,7 +408,7 @@ export {
         return promoted_count;
     }
 
-    /** @brief Restores source datums after temporary promotion or an error path. */
+    /** @brief Puts saved source values back into the slot after evaluation or an error. */
     void restore_mmsearch_sources(TupleTableSlot* slot,
                                   const mmsearch_source_restore& restore) noexcept {
         if (slot == nullptr)
@@ -424,7 +421,7 @@ export {
         }
     }
 
-    /** @brief Verifies that every captured source datum has been restored exactly. */
+    /** @brief Checks that each saved datum is back in its original slot column */
     [[nodiscard]] bool
     mmsearch_sources_restored_exactly(TupleTableSlot* slot,
                                       const mmsearch_source_restore& restore) noexcept {
@@ -443,7 +440,7 @@ export {
 
 } // export custom-scan partition declarations
 
-/** @brief Release lazy source resources after tuple-visible references are drained. */
+/** @brief Closes the source provider and drops tracing references after slots release their values. */
 void release_scan_runtime_lazy_resources(bioseq_scan_runtime& runtime,
                                          const bool is_commit) {
     if (runtime.lazy_source_provider != nullptr) {

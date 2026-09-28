@@ -1,6 +1,6 @@
 /**
  * @file sql_catalog.cppm
- * @brief PostgreSQL operator classes for letter and compact-sequence values.
+ * @brief Register default B-tree and hash support for letters and sequences.
  */
 export module bioseq.postgres.types.compact_sequence:sql_catalog;
 

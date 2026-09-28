@@ -1,6 +1,6 @@
 /**
  * @file fragment_handle.cppm
- * @brief Opens the PostgreSQL storage handle used by fragment index readers.
+ * @brief Create PostgreSQL storage handles for fragment, sequence and table indexes.
  */
 module;
 
@@ -22,33 +22,34 @@ import bioseq.storage.layout;
 
 export namespace bioseq::storage::indexing {
 
-/// Concrete PostgreSQL storage owner used by fragment-index readers and writers.
+/// PostgreSQL storage handle for reading and writing fragment indexes.
 using fragment_storage_handle = fragment_index_storage;
 
 /**
- * @brief Creates the child memory context owned by an index handle.
- *
- * @param[in] parent Parent context, or null to use the current context.
- * @return A newly allocated PostgreSQL memory context that the handle must
- * close or abandon before destruction.
+ * @brief Allocate a child memory context for an index handle.
+ * @param[in] parent Parent context, or null to, use CurrentMemoryContext.
+ * @return The new coltext. Its owner must delete it or leave cleanup to PostgreSQL after an error.
  */
 [[nodiscard]] MemoryContext make_handle_ctx(MemoryContext parent, const char* tag);
 
 /**
- * @brief Opens a fragment-scoped index storage handle for one locator.
+ * @brief Create a handle for one sequence's fragment index.
  *
- * @param[in] user_relid User relation whose index metadata is addressed.
- * @param[in] db Database OID in the physical storage identity.
- * @param[in] spc Tablespace OID in the physical storage identity.
- * @param[in] relfn Main relation relfilenode in the storage identity.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
- * @param[in] loc Locator that selects the fragment bucket and shard.
- * @param[in] sequence_rowno Logical sequence row number used as the query key.
- * @param[in] caches Borrowed relation cache state, which must outlive the handle.
- * @param[in] mctx Parent for the handle-owned child memory context.
- * @return A handle that requires checked close on success or explicit
- * abandonment after a PostgreSQL error.
+ * The handle owns a child memory  context, so call close_checked() when finished,
+ * or abandon_after_pg_error_noexcept() after a PostgreSQL error, and keep its
+ * borrowed index name and caches alive until then.
+ *
+ * @param[in] user_relid User table OID.
+ * @param[in] db Database OID.
+ * @param[in] spc Tablespace OID.
+ * @param[in] relfn Main table file number.
+ * @param[in] attno One-based sequence column number.
+ * @param[in] index_name Index policy name.
+ * @param[in] loc Sequence locator selecting the bucket and shard.
+ * @param[in] sequence_rowno Sequence row number used to find its index rows.
+ * @param[in] caches Borrowed relation caches.
+ * @param[in] mctx Parent memory context, or null for CurrentMemoryContext.
+ * @return A handle ready to read or write index chunks.
  */
 [[nodiscard]] fragment_storage_handle open_fragment_storage(Oid user_relid,
                                                             Oid db,
@@ -61,7 +62,7 @@ using fragment_storage_handle = fragment_index_storage;
                                                             seq_caches* caches,
                                                             MemoryContext mctx);
 
-/** @brief Opens a sequence-scoped index storage handle for one locator. */
+/** @brief Create a handle for the index of one  sequence identified by its locator and row number. */
 [[nodiscard]] sequence_index_storage open_sequence_storage_handle(
     Oid user_relid,
     Oid db,
@@ -74,7 +75,7 @@ using fragment_storage_handle = fragment_index_storage;
     seq_caches* caches,
     MemoryContext mctx);
 
-/** @brief Opens a table-scoped index storage handle. */
+/** @brief Create a handle for an index covering the sequence column of a table */
 [[nodiscard]] table_index_storage open_table_storage_handle(Oid user_relid,
                                                             Oid db,
                                                             Oid spc,

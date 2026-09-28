@@ -3,8 +3,8 @@
  * @brief Renders Bioseq scan and pipeline execution details for EXPLAIN.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway before the module declaration so its target definitions
+// share the global module context across imports.
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 
@@ -61,17 +61,11 @@ using namespace bioseq::postgres::support;
 export {
 
     /**
-     * @brief Renders prefilter counters when the completed pipeline recorded them.
+     * @brief Shows the prefilter algorithm, dispatch counts and  filtering results.
      *
-     * Returns immediately with no EXPLAIN output when
-     * @p operational.prefilter_execution_stats_available is false. Otherwise emits
-     * resolved algorithm and backend names, per-route dispatch counts (SneakySnake,
-     * GateKeeper, scalar, SIMD, Vulkan), job tallies by length class, rejection and
-     * survival region counts, mask and exact-guard counters, and boolean saturation
-     * and internal-consistency flags.
-     *
-     * @param operational Operational slice from @c pipeline_execution_stats.
-     * @param es PostgreSQL EXPLAIN state. Must outlive this call.
+     * Emits output only when the pipeline recorded prefilter statistics.
+     * The counters include rejected regions and exact-distance checks, with flags
+     * for counter overflow and inconsistent totals.
      */
     void explain_prefilter_execution_stats(
         const bioseq::pipeline_stats::pipeline_operational_stats& operational, ExplainState* es) {
@@ -114,14 +108,10 @@ export {
     }
 
     /**
-     * @brief Appends comma-separated Highway ISA names for every bit set in @p mask.
+     * @brief Appends the names of the Highway targets selected by @p mask.
      *
-     * When @p mask selects no targets, assigns @c "none" to @p destination and returns.
-     * Otherwise appends after any existing @p destination content, inserting @c ", " between
-     * names.
-     *
-     * @param destination String receiving the formatted list.
-     * @param mask Bitmask of Highway dispatch targets from @c simd_dispatch.
+     * Separates names and existing destination jext with commas. If the mask
+     * selects no targets, replaces @p destination with "none".
      */
     void append_highway_target_names(std::string& destination, const std::int64_t mask) {
         const auto names = bioseq::simd_dispatch::highway_target_names(mask);
@@ -136,24 +126,14 @@ export {
         }
     }
 
-    /**
-     * @brief Returns comma-separated Highway ISA names for every bit in @p mask.
-     *
-     * @return @c "none" when @p mask selects no targets, otherwise the joined name list.
-     */
+    /** @brief Returns comma-separated Highway target names, or "none" for an empty mask. */
     [[nodiscard]] std::string highway_target_names(const std::int64_t mask) {
         std::string names;
         append_highway_target_names(names, mask);
         return names.empty() ? std::string{"none"} : names;
     }
 
-    /**
-     * @brief Returns the first Highway ISA name for a single-target bitmask.
-     *
-     * @param target One-bit or multi-bit mask. Zero is treated as absent.
-     * @return @c "none" when @p target is zero or resolves to no names, otherwise the
-     *         first matching name.
-     */
+    /** @brief Returns the first Highway target name in the mask, or "none" if none match. */
     [[nodiscard]] std::string highway_target_name(const std::int64_t target) {
         if (target == 0)
             return "none";
@@ -162,16 +142,10 @@ export {
     }
 
     /**
-     * @brief Resolves the Highway kernel mask for the planned query-sketch minimizer route.
+     * @brief Finds the query-sketch kernels when the pipeline has no QuerySketchStage.
      *
-     * Used when no structured @c QuerySketchStage owns the query-sketch stage in the
-     * pipeline description. Resolution depends on frozen aligner parameters and
-     * @p query_sketch_route.
-     *
-     * @param params Frozen minimap2 parameters captured at plan or scan begin. Must not be null.
-     * @param query_sketch_route Planned query-sketch dispatch route.
-     * @return Kernel bitmask for the resolved query minimizer implementation.
-     * @throws ERROR (@c ERRCODE_INTERNAL_ERROR) when @p params is null or route resolution fails.
+     * Uses the saved aligner parameters and the planned query-sketch route.
+     * Raises a PostgreSQL error if @p params is null or the  route has no kernel mapping.
      */
     [[nodiscard]] bioseq::simd_dispatch::highway_kernel_mask
     planned_query_minimizer_highway_kernels(
@@ -199,13 +173,7 @@ export {
         return *resolved;
     }
 
-    /**
-     * @brief Returns the Highway kernel mask attached to one pipeline stage description.
-     *
-     * @param stage Stage from a structured @c pipeline_description.
-     * @return @p stage.algorithm->highway_kernels when an algorithm is present, otherwise an
-     *         empty mask.
-     */
+    /** @brief Returns the Highway kernels for this stage, or an empty mask if it has no algorithm. */
     [[nodiscard]] bioseq::simd_dispatch::highway_kernel_mask
     highway_kernels_for_explain_stage(const bioseq::simd::pipe::stage_description& stage) {
         return stage.algorithm.has_value() ? stage.algorithm->highway_kernels
@@ -213,18 +181,11 @@ export {
     }
 
     /**
-     * @brief Invokes @p visitor for each planned Highway kernel and owning stage name.
+     * @brief Calls @p visitor(kernel, stage_name) for each planned Highway function
      *
-     * Always visits kernels in @p top_level_query_kernels under the label @c "query sketch".
-     * When @p pipeline_desc is non-null, also visits each stage that carries an algorithm,
-     * using that stage's @c stage_name. Stages without an algorithm are skipped. A kernel
-     * shared across stages may be visited more than once with different stage labels.
-     *
-     * @tparam p_visitor Callable invoked as @c visitor(kernel, stage_name_cstr).
-     * @param top_level_query_kernels Cold-fallback query-sketch kernels when no structured
-     *                                stage owns query sketch.
-     * @param pipeline_desc Structured pipeline from scan begin, or null to skip stage walk.
-     * @param visitor Receiver for each set bit in the kernel masks.
+     * Labels the fallback, query kernels "query sketch", then visits the algorithms
+     * in @p pipeline_desc when present. A kernel used by several stages produces
+     * one call for each stage, so EXPLAIN can show where it runs.
      */
     template <class p_visitor>
     void visit_planned_highway_functions(
@@ -256,19 +217,12 @@ export {
     }
 
     /**
-     * @brief Renders every enabled stage in an owned structured pipeline description.
+     * @brief Prints enabled pipeline stages in text or structured EXPLAIN output.
      *
-     * Text output preserves the existing @c "| stage: algorithm" tree, parameters,
-     * computed properties, optional per-stage Highway functions, and reserved batch sizes.
-     * Structured output preserves the matching @c Pipeline @c Stages array and property names.
-     * The caller owns null-description fallback behavior and must invoke this function only when
-     * a description is present.
-     *
-     * @param pipeline_desc Structured pipeline captured from the frozen execution plan.
-     * @param highway_planned_architecture Planned Highway target rendered for stage functions.
-     * @param es PostgreSQL EXPLAIN state. Must outlive this call.
-     * @param stage_highway_functions_already_rendered True when the surrounding Highway group
-     *        already emitted every stage-owned function; suppresses only the nested duplicate.
+     * Uses the saved stage descriptions for algorithm settings, computed properties
+     * and reserved batch sizes. When @p stage_highway_functions_already_rendered
+     * is true, omits Highway functions already printed by the caller.
+     * The caller handles a missing pipeline description.
      */
     void explain_pipeline_stage_descriptions(
         const bioseq::simd::pipe::pipeline_description& pipeline_desc,
@@ -397,39 +351,13 @@ export {
     }
 
     /**
-     * @brief Renders completed-pipeline execution statistics for EXPLAIN.
+     * @brief Shows recorded alignment  work and the plan settings needed to interpret it.
      *
-     * Emits requested versus actual backend and target-index-source names, alignment job
-     * attestation counts, index outcome tallies, GPU dispatch counters, host wall-time and
-     * call counts for query sketch and target index build, and prefilter stats via
-     * @c explain_prefilter_execution_stats.
-     *
-     * When @p highway_dispatch_already_rendered is false, also renders the Highway SIMD
-     * Dispatch group and an owned structured pipeline description when present. The group
-     * contains planned, CPU-supported, compiled, and runnable target names, planned kernel
-     * functions per stage, and executed architecture when recorded. Every current caller that
-     * passes true is a ColumnScan branch that has already rendered both the Highway group and
-     * the full pipeline-stage tree.
-     *
-     * Text format prints compact headline lines plus selected @c ExplainPropertyUInteger
-     * duplicates for GPU chain counters. Structured formats open a @c Bioseq Execution
-     * Statistics group with the same fields as individual properties.
-     *
-     * @param stats Completed @c pipeline_execution_stats from the scan buffer.
-     * @param es PostgreSQL EXPLAIN state. Must outlive this call.
-     * @param aligner_params Frozen aligner parameters for query-sketch kernel resolution.
-     *                       Required when Highway dispatch is rendered and no structured
-     *                       query-sketch stage owns kernels.
-     * @param pipeline_desc Structured stage list from scan begin, or null when absent.
-     * @param query_sketch_route Planned query-sketch route paired with @p aligner_params.
-     * @param highway_dispatch_already_rendered When true, skips the Highway SIMD Dispatch and
-     *        pipeline-stage sections; current true callers have rendered both immediately before
-     *        reporting execution statistics.
-     * @throws ERROR (@c ERRCODE_INTERNAL_ERROR) when the pipeline description lists more
-     *         than one query-sketch stage owner while rendering Highway dispatch.
-     * @note Plan-time string construction for Highway properties runs only after all
-     *       fail-closed checks because @c ereport(ERROR) longjmps without unwinding C++
-     *       locals.
+     * Reports actual backend and index use, job counts and GPU dispatches, lus host
+     * timing and prefilter results. If @p highway_dispatch_already_rendered is false,
+     * also prints planned Highway functions and available stage descriptions.
+     * That path requires saved aligner parameters when no QuerySketchStage is present
+     * and rejects duplicate query-sketch stages.
      */
     void explain_pipeline_execution_stats(
         const bioseq::pipeline_stats::pipeline_execution_stats& stats,
@@ -454,9 +382,8 @@ export {
                 bioseq::pipeline_stats::pipeline_stage::target_index_build)];
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Batch/per-row owners already supply their frozen parameters here.
-        // Expose the existing ColumnScan plan summary for detached E2E EXPLAIN
-        // validation too; ordinary execution and its EXPLAIN are unchanged.
+        // Give structured EXPLAIN the saved algorithm settings for batch and per-row
+        // scans. ColumnScan prints this group in its own pipeline renderer.
         if (es->format != EXPLAIN_FORMAT_TEXT
             && !highway_dispatch_already_rendered && aligner_params != nullptr) {
             const auto pipeline_scheduler = bioseq::postgres::scheduler::snapshot();
@@ -478,13 +405,8 @@ export {
         }
 #endif
 
-        /*
-         * BatchJoin and per-row owners pass their frozen structured pipeline
-         * descriptions here, so this combined group advertises the exact kernels
-         * selected by every stage. ColumnScan passes
-         * `highway_dispatch_already_rendered=true` because its richer pipeline-tree
-         * renderer owns the same plan/runtime dispatch group.
-         */
+        /* Batch and per-row scans print their planned kernels here. ColumnScan
+         * has already printed them with its pipeline tree. */
         if (!highway_dispatch_already_rendered) {
             const std::size_t query_sketch_stage_owners =
                 pipeline_desc == nullptr
@@ -500,9 +422,8 @@ export {
                 query_sketch_stage_owners == 1u
                     ? bioseq::simd_dispatch::highway_kernel_mask{}
                     : planned_query_minimizer_highway_kernels(aligner_params, query_sketch_route);
-            /* This union controls only whether the structured array is empty.
-             * Rendering still visits every stage so a shared kernel keeps each of
-             * its semantically distinct stage owners. */
+            /* Use  the union to decide whether to open the array. Visit each stage
+             * separately so shared kernels still appear under every stage that uses them. */
             auto all_planned_kernels = top_level_query_kernels;
             if (pipeline_desc != nullptr) {
                 for (const auto& stage : pipeline_desc->stages) {
@@ -511,8 +432,8 @@ export {
                     }
                 }
             }
-            /* Complete every fail-closed plan check before constructing strings:
-             * ereport(ERROR) longjmps and cannot unwind nontrivial C++ locals. */
+            /* Validate the plan before allocating C++ strings. PostgreSQL ERROR
+             * skips C++ destructors when it jumps out of this call */
             const auto highway_plan = bioseq::scheduler::highway_dispatch_plan_for_plan();
             const std::string planned = highway_target_name(highway_plan.planned_target);
             const std::string supported = highway_target_names(highway_plan.cpu_supported_targets);
@@ -649,12 +570,8 @@ export {
                 static_cast<unsigned long long>(operational.gpu_extend_dispatches),
                 static_cast<unsigned long long>(operational.backend_declines),
                 static_cast<unsigned long long>(operational.backend_fallbacks));
-            /*
-             * Keep the compact headline above for human scans, and also expose the
-             * algorithm-identity counters as ordinary textual EXPLAIN properties.
-             * These values come from the same completed pipeline_execution_stats
-             * aggregate as the headline. Selection flags never populate them.
-             */
+            /* Print these GPU counts as individual EXPLAIN properties as well.
+             * They count recorded dispatches, so selecting an algorithm alone leaves them zero. */
             ExplainPropertyUInteger(
                 "GPU Chain Dispatches", nullptr, operational.gpu_chain_dispatches, es);
             ExplainPropertyUInteger("GPU Chain Backtrack Dispatches",
@@ -758,37 +675,13 @@ export {
     }
 
     /**
-     * @brief EXPLAIN hook for Bioseq column custom scans.
+     * @brief Explains the column scan using its plan and available runtime state.
      *
-     * Reads plan and optional runtime state from @p node without executing the scan. Output
-     * is gated by detected features, EXPLAIN format, and whether BeginCustomScan captured an
-     * aligner snapshot.
-     *
-     * Always when applicable: projected column list, chunk-group filter pushdown clauses and
-     * filtered group count, vectorized WHERE qualifiers, and @c symbol_count metadata sites
-     * re-derived from the plan target list (so EXPLAIN without ANALYZE still lists meta
-     * lookups that ExecScan would resolve lazily).
-     *
-     * When mmsearch is part of the plan: index read requirement, match-operand evaluation
-     * mode for evaluated logical views, plan-time typmod-coalesce hint, sidecar index
-     * presence estimate (fetched versus recomputed minimizer percentages), and supervisor
-     * snapshot. Runtime coalesce detail is appended to the fetched line only after ANALYZE
-     * when the buffer reports an active coalesce.
-     *
-     * When an aligner snapshot with mmsearch was captured at BeginCustomScan: full one-to-many
-     * pipeline tree (Highway dispatch, per-stage parameters, optional execution stats and
-     * profiling summary). Structured formats mirror the text tree via EXPLAIN groups.
-     *
-     * When column cache is enabled: global cache hit, miss, eviction, and size counters.
-     *
-     * @param node Active custom-scan executor node. Plan fields come from @c node->ss.ps.plan.
-     *             Runtime fields come from @c scan_state when BeginCustomScan ran.
-     * @param ancestors Planner ancestor list for deparsing context.
-     * @param es PostgreSQL EXPLAIN state. Must outlive this call.
-     * @throws ERROR (@c ERRCODE_INTERNAL_ERROR) on duplicate query-sketch stage owners in the
-     *         pipeline description during Highway EXPLAIN rendering.
-     * @note Detoasted single-byte letter datums for symbol_count sites are freed when
-     *       detoast allocated a copy. @c pfree is not used on plan-owned letter constants.
+     * Shows projected columns, filters and symbol_count metadata lookups. For mmsearch,
+     * adds estimated indeg use, and sequence-width conversion, then the saved pipeline
+     * and recorded execution  statistics when available. Reads the plan for information
+     * that must also appear before execution. Cache counters are global.
+     * @p ancestors supplies the context for printing plan expressions.
      */
     void bioseq_column_scan_explain_custom_scan(CustomScanState* node,
                                                 List* ancestors,
@@ -830,20 +723,8 @@ export {
             ExplainPropertyText("Bioseq Vectorized Filter", vectorized_where_clauses, es);
         }
 
-        /*
-         * List every per-column metadata lookup the scan resolves without
-         * touching the base relation's varlena. Today this is just the
-         * symbol_count fast path — each rewritten call-site shows up as
-         * "<column>.symbol_count('<letter>', rank=<n>)". The list is
-         * recomputed here by walking the plan's target list instead of
-         * inspecting `placeholder_consts.symbol_count_sites` directly: the
-         * latter is populated lazily on first ExecScan, but EXPLAIN (without
-         * ANALYZE) never runs ExecScan and would therefore show an empty
-         * line. Re-deriving from the plan keeps EXPLAIN output useful for
-         * planners inspecting queries that have not yet executed. When
-         * future metadata is surfaced via the same pattern (min_qual,
-         * gc_ratio, …) they should extend this walker accordingly.
-         */
+        /* Read symbol_count calls from the plan so plain EXPLAIN lists metadata
+         * lookups too. The executor fills symbol_count_sites only on its first scan. */
         {
             StringInfoData meta_buf;
             initStringInfo(&meta_buf);
@@ -914,26 +795,9 @@ export {
             pfree(meta_buf.data);
         }
 
-        /*
-         * Two-tier EXPLAIN:
-         *   1. A "Bioseq Fetched From Sequence Index" / "Bioseq Recomputed"
-         *      summary line — surfaces only when the plan actually runs the
-         *      minimap2 pipeline (i.e. mmsearch is part of the plan).
-         *   2. A full One-to-many alignment breakdown showing each pipeline
-         *      stage and the minimap2_parameters values that drive it. The stage
-         *      list is gated by params.do_cigar / compute_divergence /
-         *      compute_mapq so users see exactly what will (or will not) run.
-         *
-         * The sidecar/recomputed line never prints for a pass-through scan. Plans
-         * that only use symbol_count/meta projections still show the "Fetched
-         * From Meta" line above but never a minimizer-index line — because
-         * they never consult index_sidecar.
-         */
-        /*
-         * Per-scan aligner snapshot captured at BeginCustomScan. Hoisted to
-         * the outer scope so the pipeline-step breakdown block below can
-         * reuse it without a second runtime lookup.
-         */
+        /* Show index-use estimates and the alignment pipeline only for mmsearch.
+         * A scan that only reads symbol_count metadata does not use the minimizer index. */
+        /* Reuse the scan snapshot for the index summary and  pipeline details. */
         scan_state* explain_scan_state = scan_state::from_custom_scan_state(node);
         const bioseq_scan_runtime* explain_runtime =
             (explain_scan_state != nullptr && explain_scan_state->runtime_state != nullptr)
@@ -958,13 +822,8 @@ export {
                                       : bioseq::indexing::index_read_requirement::allow;
 
         {
-            /*
-             * Use the feature flags captured on BeginCustomScan when
-             * available (executor ran). For EXPLAIN without ANALYZE the
-             * BeginCustomScan may not have fired — recompute locally using
-             * the plan targetlist/qual so the printed output is still
-             * accurate.
-             */
+            /* Use saved feature flags when available. Otherwise inspect the plan,
+             * including mmsearch calls kept separately from ordinary scan filters. */
             const bioseq_stub_oids& explain_oids = get_cached_stub_oids();
             List* explain_owned_mmsearch =
                 cscan != nullptr && list_length(cscan->custom_exprs) >= 4
@@ -992,11 +851,7 @@ export {
                 }
             }
 
-            /*
-             * Only the WHERE mmsearch(...) pipeline consults the minimizer
-             * index. A bare SELECT with only symbol_count/metadata projections
-             * stays on the meta-sidecar side and does not emit a minimizer line.
-             */
+            /* Only mmsearch needs the minimizer-index summary. */
             if (features.has_mmsearch) {
                 ExplainPropertyText(
                     "Bioseq Index Read Requirement",
@@ -1009,13 +864,8 @@ export {
                         "base-local ExprState (target then query; persisted target index absent)",
                         es);
                 }
-                /*
-                 * Plan-time typmod-coalesce hint. `EXPLAIN` without
-                 * `ANALYZE` never populates the runtime coalesce buffer, so the
-                 * runtime-gated "...coalesce to..." sub-clause further below cannot
-                 * fire for a plain `EXPLAIN`. Re-derive the decision from the plan
-                 * qual here so the coalesce is always visible in the plan.
-                 */
+                /* Infer query-width conversion from the plan so it is visible before
+                 * execution has filled the runtime conversion buffer. */
                 {
                     const explain_typmod_coalesce coalesce_hint = explain_detect_typmod_coalesce(
                         explain_owned_mmsearch != NIL ? explain_owned_mmsearch
@@ -1062,18 +912,9 @@ export {
                             ReleaseSysCache(cls_tup);
                         }
                     }
-                    /*
-                     * Index-presence estimate is the plan-time view of how
-                     * many rows have a prebuilt sidecar blob. With
-                     * read_sequence_index off we always recompute — surface
-                     * that explicitly. With it on we display both the
-                     * "fetched from sidecar" and "recomputed" halves so the
-                     * user can see exactly what the pipeline did (or will
-                     * do): fetched = min(presence, 1), recomputed = 1 -
-                     * fetched. The two lines sum to 100%. Different bound
-                     * alphabets are rejected before a scan reaches EXPLAIN runtime
-                     * state, so there is no alphabet-specific recompute branch.
-                     */
+                    /* Estimate how many rows can reuse stored minimizers. Evaluated targets
+                     * and disabled index reads report full recooputation. These percentages
+                     * describe expected index use, while  execution counters record completed work */
                     const float index_presence = bioseq::storage::indexing::estimate_index_presence(
                         user_relid, rel_tuples, bioseq::indexing::k_default_active_read_index);
                     float fetched_pct = 0.0f;
@@ -1095,24 +936,14 @@ export {
                                              "minimizers (index presence: %.0f%%",
                                              static_cast<double>(fetched_pct));
                             if (runtime_coalesce_active && explain_runtime != nullptr) {
-                                /*
-                                 * Surface the typmod-coalesce decision next to
-                                 * the index-presence percentage so users can
-                                 * see "we re-encoded your literal at the
-                                 * column's typmod, then used the prebuilt
-                                 * minimizer index". Without this line the user
-                                 * sees a successful scan and has no idea their
-                                 * literal was silently re-encoded.
-                                 */
+                                /* Include the query conversion used at runtime beside the estimate
+                                 * of rows with stored minimizers. */
                                 const auto col_alpha =
                                     explain_runtime->buffer.mmsearch_alphabet_code();
                                 const auto col_width =
                                     explain_runtime->buffer.mmsearch_storage_unit_byte_width();
-                                // mmsearch_storage_unit_byte_width() returns the
-                                // storage unit width in BYTES (1/2/4/8), so the
-                                // typmod width in bits is byte_width * 8 (e.g. 4
-                                // bytes -> seq('dna4', 32)); the byte count is not
-                                // a log2-encoded width.
+                                // The buffer reports storage-unit width in bytes. SQL seq typmods use
+                                // bits, so four bytes must print as 32.
                                 const auto width_to_bits = [](uint8_t byte_width) {
                                     return static_cast<unsigned>(byte_width) * 8u;
                                 };
@@ -1139,7 +970,7 @@ export {
                             pfree(recompute_buf.data);
                         }
                     } else {
-                        /* 100% recomputed because the GUC is off. */
+                        /* Index reads are disabled in this scan. */
                         ExplainPropertyText("Bioseq Recomputed",
                                             "minimizers 100% (read_sequence_index disabled)",
                                             es);
@@ -1176,13 +1007,8 @@ export {
             }
         }
 
-        /*
-         * Rich pipeline-step breakdown. Only shown when mmsearch is present
-         * (without mmsearch the minimap2 pipeline never runs). Uses the
-         * per-scan params captured at BeginCustomScan so every printed value
-         * is the one actually fed to the batch processor — not a recomputation
-         * off GUCs that might have changed since.
-         */
+        /* Show the mmsearch pipeline from this scan's saved parameters, so later
+         * setting changes cannot alter the explanation, of its algorithm choices. */
         if (aligner_snapshot != nullptr && aligner_snapshot->execution_plan &&
             aligner_snapshot->features.has_mmsearch) {
             using bioseq::simd::base_alignment_algorithm;
@@ -1200,17 +1026,8 @@ export {
                 highway_target_names(highway_plan.compiled_targets);
             const std::string highway_runnable_architectures =
                 highway_target_names(highway_plan.runnable_targets);
-            /*
-             * Renderer driven by the structured `pipeline_description` populated at
-             * `BeginCustomScan`. The structured description maps parameters to stages,
-             * and algorithm traits surface automatically once they appear in
-             * `pipeline_description::stages`.
-             *
-             * When the describe path did not populate a description (e.g. a
-             * cold-path branch that bypassed BeginCustomScan), `pipeline_desc` is
-             * `std::nullopt`. In that case we emit a minimal placeholder line so
-             * EXPLAIN still surfaces the algorithm choice the executor will run.
-             */
+            /* Print stages from the saved pipeline description. Without it, text
+             * EXPLAIN can still show the chosen chaining and base-alignment algorithms. */
             const bool has_pipeline_desc = aligner_snapshot->pipeline_desc.has_value();
             const std::size_t query_sketch_stage_owners =
                 has_pipeline_desc ? bioseq::simd::pipe::query_sketch_stage_owner_count(
@@ -1222,11 +1039,8 @@ export {
                          errmsg("Highway EXPLAIN has duplicate query-sketch stage owners"),
                          errdetail("owners=%zu", query_sketch_stage_owners)));
             }
-            /*
-             * A structured QuerySketchStage owns its exact function set. The
-             * top-level list is solely the cold fallback for descriptions
-             * that could not represent that semantic stage.
-             */
+            /* QuerySketchStage supplies its own kernels. Resolve a fallback list
+             * only  when that stage is absent from the description. */
             const auto top_level_query_highway_kernels =
                 query_sketch_stage_owners == 1u
                     ? bioseq::simd_dispatch::highway_kernel_mask{}
@@ -1304,13 +1118,8 @@ export {
                     }
                 }
 
-                /*
-                 * Sidecar-divergence warning: when the prebuilt-index path is
-                 * active for some fraction of the batch, those rows pin
-                 * k=15/w=10 regardless of the user's GUC (see
-                 * dispatch_buffer.cppm).  Surfaced as a header line above the
-                 * pipeline tree so it is not visually attached to any one stage.
-                 */
+                /* Warn when index reads are enabled and the requested k-mer or window
+                 * size differs from the fixed 15/10 values reported for stored indexes. */
                 const bool sidecar_path_active = explain_read_sequence_index;
                 const bool user_kw_differs =
                     sidecar_path_active && (params.kmer_size != 15 || params.window_size != 10);
@@ -1335,11 +1144,8 @@ export {
                         base_alignment_algorithm_name(params.base_alignment_algorithm));
                 }
 
-                /*
-                 * Surface canonical pipeline stats. Only meaningful after ANALYZE has
-                 * actually run the scan (target_rows is zero before the first
-                 * completed batch).
-                 */
+                /* Add row and index-use counts to the submission line once the buffer
+                 * reports completed targets. Before then, print the submission label alone. */
                 auto print_submit = [es](const char* label) {
                     appendStringInfoSpaces(es->str, es->indent * 2);
                     appendStringInfo(es->str, "* %s\n", label);
@@ -1402,13 +1208,9 @@ export {
                 }
 
                 es->indent -= 2;
-                (void)features; // currently only has_mmsearch is load-bearing
+                (void)features; // The mmsearch flag controls this pipeline section.
             } else {
-                /*
-                 * Structured formats: emit the same per-stage information via
-                 * `ExplainOpenGroup` + `ExplainPropertyText` so EXPLAIN (FORMAT
-                 * JSON / YAML / XML) consumes the same metadata as the TEXT renderer.
-                 */
+                /* Use the sme stage descriptions for JSON, YAML and XML output. */
                 ExplainOpenGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
                 ExplainPropertyText(
                     "Chaining Algorithm", chaining_algorithm_name(params.chaining_algorithm), es);

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies transformed helpers, reparameterization, and method tables.
+ * @brief Checks helper ownership after planning and translates scan paths for partition joins.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -40,7 +40,7 @@ export import :custom_scan_match_analysis_transformed_verification_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Records the first unowned-helper audit failure with plan-boundary context. */
+    /** @brief Records the first helper-ownership  failure, including its plan node and query boundary. */
     void
     record_batch_join_plan_helper_audit_failure(batch_join_plan_helper_audit_first_failure& failure,
                                                 Plan* plan,
@@ -114,14 +114,13 @@ export {
     }
 
     /**
-     * @brief Detects match helpers that remain executable without a finalized owner.
+     * @brief Finds helper calls that could execute without a valid match binding.
      *
-     * Final setrefs must replace every propagated helper identity in an
-     * executable Plan expression with the descendant owner's scan-slot Var.
-     * A non-projecting node may retain the whole identity in its dummy targetlist,
-     * but only when exactly one finalized descendant or current PerRow owner site
-     * supplies that column.  Mixed parent/descendant ownership remains ambiguous.
-     * Descriptor-only custom_scan_tlist/custom_private fields remain excluded.
+     * Base-scan helpers need their own saved bindings. A whole helper in a dummy
+     * outpt column needs one parent or descendant owner. Reject helpers left in
+     * filters and, other checked executable expressions. Inspect subqueries with
+     * separate bindings. custom_scan_tlist and custom_private describe the plan
+     * and are excluded from this check.
      */
     [[nodiscard]] bool batch_join_plan_has_unowned_executable_match_helper(
         Plan* plan,
@@ -274,15 +273,14 @@ export {
     }
 
     /**
-     * @brief Rewrites parent Vars and copied restrictions for a partition child.
+     * @brief Changes parent relation references to the selected partition child.
      *
-     * Changes all varnos referencing the topmost parent
-     * of child_rel to instead reference child_rel directly. Both the Var and the
-     * RestrictInfo are deep copied before being written (copy-before-write), and
-     * a RestrictInfo's clause is recursively rewritten via the cursor.
+     * Copy each changed Var and  each visited RestrictInfo before rewriting it.
+     * Only the relation number changes here. This mutator leaves column numbers
+     * unchanged.
      */
     struct reparameterize_mutator {
-        /** @brief Copy-on-write rewrites one Var or RestrictInfo node. */
+        /** @brief Copies changed column references and rewrites restriction clauses for the child relation. */
         [[nodiscard]] pg_node_mutation operator()(pg_expression_mutation_cursor cursor,
                                                   pg_node_view node,
                                                   RelOptInfo& child_rel) const {
@@ -307,22 +305,11 @@ export {
     };
 
     /**
-     * @brief Rewrites base-scan private expressions for direct child parameterization.
+     * @brief Updates pushed-down filters when a scan is parameterized by a partition child
      *
-     * This method is called when a
-     * path is reparameterized directly to a child relation, rather than the
-     * top-level parent.
-     *
-     * For instance, let there be a join of two partitioned columnar relations PX
-     * and PY. A path for a BioseqColumnScan of PY3 might be parameterized by PX so
-     * that the join qual "PY3.a = PX.a" (referencing the parent PX) can be pushed
-     * down. But if the planner decides on a partition-wise join, then the path
-     * will be reparameterized on the child table PX3 directly.
-     *
-     * When that happens, we need to update all Vars in the pushed-down quals to
-     * reference PX3, not PX, to match the child parameterization. This method
-     * notifies us that it needs to be done, and allows us to update the
-     * information in custom_private.
+     * For a partition-wise join, a scan of PY3 may receive a filter referring to PX
+     * that must instead refer to PX3. Rewrite those relation references in the
+     * scan's private expressions before PostgreSQL builds the child plan.
      */
     List* bioseq_column_scan_path_reparameterize_custom_path_by_child(PlannerInfo* root,
                                                                       List* custom_private,
@@ -332,7 +319,14 @@ export {
             mutate_pg_expression(reinterpret_cast<Node*>(custom_private), *child_rel, mutator));
     }
 
-    /** @brief Rewrites the complete per-row path ABI for a partition child relation. */
+    /**
+     * @brief Translates a per-row join path to a partition  child.
+     *
+     * Use PostgreSQL's partition mapping for its expressions. If the match target
+     * belongs to the parent, also update the saved relation OID and physical
+     * sequence column. Reject a child that is not a Bioseq relation or has an
+     * invalmd sequence-column mapping.
+     */
     List* bioseq_per_row_join_path_reparameterize_custom_path_by_child(PlannerInfo* root,
                                                                        List* custom_private,
                                                                        RelOptInfo* child_rel) {
@@ -365,8 +359,8 @@ export {
         const AttrNumber target_storage_attno =
             static_cast<AttrNumber>(intVal(list_nth(custom_private, 3)));
         const Oid target_relation_oid = static_cast<Oid>(intVal(list_nth(custom_private, 1)));
-        /* Use PostgreSQL's multilevel appendrel translator, not a varno-only
-         * rewrite: attached partitions may have a distinct physical attno map. */
+        /* Attached partitions may store columns in a different order. Use
+         * PostgreSQL's partition mapping to translate their column numbers too. */
         List* rewritten = reinterpret_cast<List*>(adjust_appendrel_attrs_multilevel(
             root, reinterpret_cast<Node*>(custom_private), child_rel, child_rel->top_parent));
         if (!bioseq_is_concrete_rte_varno(target_varno)) {
@@ -425,7 +419,7 @@ export {
         return rewritten;
     }
 
-    /** @brief Returns the stable PostgreSQL path callbacks for base Bioseq scans. */
+    /** @brief Returns PostgreSQL's planning and partition-translation callbacks for BioseqScan. */
     [[nodiscard]] const CustomPathMethods* bioseq_column_scan_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqScan",
@@ -436,7 +430,7 @@ export {
         return &methods;
     }
 
-    /** @brief Returns the stable PostgreSQL path callbacks for per-row joins. */
+    /** @brief Returns PostgreSQL's planning and partition-translation callbacks for per-row joins. */
     [[nodiscard]] const CustomPathMethods* bioseq_per_row_join_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqBatchJoin",

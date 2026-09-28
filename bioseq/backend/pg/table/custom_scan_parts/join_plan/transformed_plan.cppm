@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Constructs per-row transformed plans and the stable path methods.
+ * @brief Builds plans that run mmsearch on each joined row and exposes the BatchJoin path callback.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -44,9 +44,11 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Builds the one-child per-row join plan and its serialized executor contract.
+     * @brief Builds a PerRow search plan above one child that supplies joined rows.
      *
-     * Plan-only helper and Var carriers remain resjunk and do not widen the visible owner target.
+     * Save the operand columns and sequence types for execation. Add helper
+     * results and input Vars needed by setrefs as hidden resjunk columns,
+     * leaving the visible join output unchanged.
      */
     Plan* bioseq_per_row_join_plan_custom_path(PlannerInfo* root,
                                                RelOptInfo* rel,
@@ -61,7 +63,7 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch planner state is incomplete")));
         }
-        /** @brief Reads one Integer field from the path private list by index and errors on an invalid slot. */
+        /** @brief Reads an, Integer  from the path's saved settings and reports a malformed field. */
         auto private_integer = [best_path](const int index) -> int {
             Node* node = reinterpret_cast<Node*>(list_nth(best_path->custom_private, index));
             if (node == nullptr || !IsA(node, Integer)) {
@@ -232,15 +234,13 @@ export {
                                static_cast<int>(target_source_tableoid_resno),
                                child_targetlist_length)));
         }
-        /* required_target promised each raw carrier below SliceProject.  Validate
-         * that contract before taking the child scan-tuple snapshot, then add only
-         * missing owner outputs as resjunk.  The public owner target remains at its
-         * construction-time join shape: helper identities and deferred passthrough
-         * Vars are plan-only support, added after core can no longer replace the
-         * path's sortgroupref storage. */
-        /* build_path_tlist replaces lateral Vars with PARAM_EXEC nodes.  The exact
-         * no-widening validation belongs to path construction; here validate only the
-         * callback target's ordinal and SQL type shape. */
+        /* Check that the child still supplies every input expected below
+         * SliceProject. Add missing owner outputs as resjunk columns only
+         * now, after PostgreSQL has finished assigning the path's sort and
+         * group references. Keep the visible join output unchanged */
+        /* build_path_tlist replaces lateral Vars with PARAM_EXEC. Path
+         * construction already checked the expressions, so compare column
+         * positions and SQL types here. */
         bool callback_target_consistent =
             best_path->path.pathtarget != nullptr &&
             list_length(tlist) == list_length(best_path->path.pathtarget->exprs);
@@ -269,7 +269,7 @@ export {
         List* requested_tlist = list_copy(tlist);
         List* plan_only_passthrough_support = NIL;
         List* plan_only_helper_support = NIL;
-        // Couples a Plan-only target entry with the authoritative helper identity it carries.
+        // Links a hidden helper output to its match-result column and original expression.
         struct per_row_plan_only_helper_binding {
             AttrNumber output_resno = InvalidAttrNumber;
             AttrNumber site_resno = InvalidAttrNumber;
@@ -300,10 +300,10 @@ export {
             const bool base_lineage =
                 helper != nullptr &&
                 batch_join_match_helper_names_base_lineage(helper, target_expression, oids);
-            /* A helper that names only the shared base lineage deliberately belongs
-             * to both this transformed owner and the validated descendant base owner.
-             * Register the current site and let finalized semantic binding reject the
-             * two candidates with 42702.  Exact-recipe carrier loss is corruption. */
+            /* A helper naming a shared source  column can match this search and
+             * a descendant search. Keep both candidates so final binding reports
+             * ambiguity with SQLSTATE 42702. Losing a helper that names the exact
+             * target expression is a corrupt plan. */
             const bool deliberate_lineage_ambiguity = base_lineage && !names_recipe;
             if ((!exposed_by_child || !classified_inherited) && !deliberate_lineage_ambiguity) {
                 ereport(ERROR,
@@ -531,16 +531,15 @@ export {
                      errmsg("BioseqPerRowMmsearch plan-only helper binding count is invalid")));
         }
         validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
-        /* custom_restrictinfo is planner-lifetime join metadata, primarily used by
-         * core for pseudoconstant gating; PostgreSQL may legitimately pass NIL in
-         * `clauses` here.  Executable ownership is instead established by the
-         * validated versioned mmsearch recipe above plus the recursive child-plan audit, which
-         * rejects every surviving duplicate below this sole owner. */
+        /* PostgreSQL uses custom_restrictinfo while planning, including
+         * filters that do not depend on a row, and may pass NIL clauses here.
+         * The checked mmsearch expression and child-plan audit establish
+         * execution ownership and catch duplicate searches below this node. */
         (void)clauses;
         auto* cscan = makeNode(CustomScan);
-        /* Post-join-recipe mode is a versioned BioseqBatchJoin shape.  Reuse the
-         * registered scan/executor method set so copied, cached, and deserialized
-         * plans retain the same public owner identity as the raw-Var mode. */
+        /* PerRow execution uses a versioned BioseqBatchJoin plan. Share its
+         * registered scan  and execgtor methods so copied or cached plans
+         * resolve to the same custom-scan implementation. */
         cscan->methods = bioseq_batch_join_scan_methods();
         cscan->flags = best_path->flags;
         cscan->scan.scanrelid = 0;
@@ -593,7 +592,7 @@ export {
         return reinterpret_cast<Plan*>(cscan);
     }
 
-    /** @brief Returns the stable PostgreSQL path callbacks for two-child batched joins. */
+    /** @brief Returns the static PostgreSQL path callbacks for a two-child BatchJoin. */
     [[nodiscard]] const CustomPathMethods* bioseq_batch_join_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqBatchJoin",

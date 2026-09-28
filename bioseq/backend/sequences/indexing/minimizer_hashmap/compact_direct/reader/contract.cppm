@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/contract.cppm
- * @brief Compact-direct reader state, nested contracts, and member declarations.
+ * @brief Reader state and interfaces for grouped scans and compact-direct lookup
  */
 
 module;
@@ -41,25 +41,20 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-/** Selects native-width host queries or the non-queryable mapped GPU source adapter. */
+/** Choose host query support or full source scans for GPU index construction. */
 enum class prepared_minimizer_fragment_reader_mode : std::uint8_t {
     queryable_native,
     gpu_source_only,
 };
 
-/// Fragment-native grouped-SoA reader.  Every physical position segment remains
-/// an independently persisted mmap view. Seed collection probes fragment-local
-/// controls and packed positions directly. Max-occ reduction is transient
-/// query-wave work performed during that same fragment-parallel probe. Reader
-/// open never scans or combines fragment controls. No posting list,
-/// hash-to-fragment span directory, or target-wide occurrence table is
-/// materialized, concatenated, merged, or sorted across fragments. The mapped
-/// payload is the exact image emitted by PostgreSQL's complete authenticated
-/// READY reread, so opening it validates identity and structure without
-/// rereading fragment payload.  The compact-direct-only constructor is a
-/// separate backing contract: it retains no grouped-SoA directory or payload and
-/// authenticates uniform segment geometry without retaining scan-route
-/// address plans.
+/// Read minimizer matches from a validated index image.
+/// Grouped-SoA readers keep the mapped payload and plans for locating fragment
+/// data. Queries count occurrences across fragments before reading positions
+/// for hashes wathin max_occ. Opening checks metadata and  address ranges,
+/// leaving these query scans for later.
+/// A compact-direct-only reader holds the direct image and gets counts and
+/// positions from its descriptors. It needs no grouped-SoA mapping or plans.
+/// GPU source mode exposes complete grouped scans for building a device index.
 class prepared_minimizer_fragment_reader {
   public:
     using fragment_seed_query_type = fragment_seed_query;
@@ -162,8 +157,8 @@ class prepared_minimizer_fragment_reader {
     std::unique_ptr<entry_plan[]> entry_plans_{};
     std::unique_ptr<fragment_block_plan[]> block_plans_{};
     std::size_t entry_count_ = 0;
-    // Exact retained block_plans_ element count. Direct-only readers keep
-    // this zero and expose manifest segment geometry through the public view.
+    // Number of stored block plans. Compact-direct-only readers keep
+    // this zero and report the manifest's segment count through the getter.
     std::size_t block_count_ = 0;
     std::uint32_t largest_block_entry_count_ = 0u;
     std::uint32_t oversized_segment_block_count_ = 0u;
@@ -214,9 +209,8 @@ class prepared_minimizer_fragment_reader {
         std::uint16_t,
         std::conditional_t<p_width == minimizer_scalar_width::u32, std::uint32_t, std::uint64_t>>;
 
-    /// Read one scalar after open() has validated the containing component and
-    /// extent geometry. The DEBUG_ASSERT documents that stats without
-    /// replacing the release-active checks at the plan boundary.
+    /// Read a little-endian scalar from a range already checked, by open().
+    /// The bounds assertion runs in debug builds only.
     template <minimizer_scalar_width p_width>
     [[nodiscard, gnu::always_inline]]
     static std::uint64_t read_fixed_width_le_(std::span<const std::byte> validated_extent,
@@ -231,9 +225,8 @@ class prepared_minimizer_fragment_reader {
         return minimizer_generation_wire_detail::read_le<value_type>(validated_extent, offset);
     }
 
-    /// Concrete position decoder shared by both P3 occurrence routes. Route
-    /// selection remains outside this cursor, so packed/wide does not become
-    /// a template axis for the wire loop.
+    /// Read positions from one accepted control  range, checking order and bounds.
+    /// The same cursor handles packed and wide query occurrence references.
     class position_range_cursor {
       private:
         std::span<const std::byte> payload_{};
@@ -438,13 +431,10 @@ class prepared_minimizer_fragment_reader {
 
     [[nodiscard, gnu::always_inline]] constexpr std::uint64_t
     query_membership_filter_mask_(std::uint64_t hash) const noexcept {
-        // Reader open derives the low-bit mask from the persisted hash domain.
-        // Those remaining bits identify a hash inside one filter word; one
-        // compile-time LUT preserves the exact six register-blocked positions
-        // without repeating their multiplicative diffusion in every probe.
-        // A query inserts this exact mask and a probe tests this exact mask,
-        // which is the no-false-negative authority; positives still undergo
-        // an exact hash comparison inside their packed-occurrence bucket.
+        // Use low hash bits to select a precomputed mask within this
+        // filter word. Insertion and lookup use the same mask, so a
+        // missing bit rejects the hash. A passing mask still needs an
+        // exact comparison in the query bucket.
         return query_membership_filter_masks_[hash & query_membership_filter_mask_id_mask_];
     }
 
@@ -494,7 +484,7 @@ class prepared_minimizer_fragment_reader {
         };
     }
 
-    /** Resolve query position/strand from its authenticated physical owner. */
+    /** Read position and strand from the referenced query munimizer */
     [[nodiscard, gnu::always_inline]] static std::expected<
         std::uint64_t,
         minimizer_generation_encoding_error>
@@ -510,9 +500,8 @@ class prepared_minimizer_fragment_reader {
         return minimizers.position_strand_at_unchecked(occurrence.query_ordinal);
     }
 
-    /// Select packed or wide storage once for a complete hash plan. The
-    /// visitor receives a route-specific span, so its target-position x query-
-    /// occurrence loop contains no representation branch.
+    /// Select packed or wide query references once for a hash group, so  the
+    /// visitor's target-position loop can use a single reference format.
     template <bool p_oracle, class p_visitor>
     [[nodiscard]] static std::optional<minimizer_generation_encoding_error>
     with_query_group_occurrences_(const fragment_probe_context& context,
@@ -611,11 +600,9 @@ class prepared_minimizer_fragment_reader {
         compact_direct_emission_pass_context& context,
         const compact_hash32_selection_posting_spans& selected) noexcept;
 
-    /// Reserve one fragment-local occurrence count in a query-wave counter.
-    /// A value of max_occ + 1 is the only rejected state. This bounds decoded
-    /// candidates for a globally repetitive hash to at most max_occ while
-    /// preserving every hit for hashes whose final target-wide count is
-    /// accepted. The counter is query state, never persisted minimizer-fragment index state.
+    /// Add a fragment's target occurrence count to the shared query-hash counter.
+    /// Saturate at max_occ + 1 to mark rejected hashes. These counters belong
+    /// to the current query batch and leave the persisted index unchanged.
     [[nodiscard]] static bool reserve_query_occurrences_(std::atomic<std::uint32_t>& global_count,
                                                          std::uint64_t local_count,
                                                          std::uint32_t max_occ) noexcept;
@@ -662,18 +649,14 @@ class prepared_minimizer_fragment_reader {
             std::forward<p_body>(body));
     }
 
-    /// Execute exactly the first (most-significant) byte pass of the ordinary
-    /// minimap-style u32 radix and return its 256 disjoint bucket extents.
-    /// The returned state is constant-size stack data. No occurrence owner or
-    /// per-query merge is introduced.  Lower-byte sorts may therefore run in
-    /// any order without changing the serial radix's byte-for-byte result.
+    /// Partition 32-bit hashes by their highest byte in place and return the
+    /// 256 bucket ranges. The remaining radix passes can sort these disjoint
+    /// ranges in parallel. Temporary bucket state has a  fixed size.
     [[nodiscard]] static packed_occurrence_radix_partition
     partition_packed_occurrence_top_byte_(std::span<packed_query_occurrence> occurrences) noexcept;
 
-    /// Count-only control scan over one open-validated entry plan. It
-    /// deliberately does not load a prefix scalar or position byte. Accepted
-    /// plans receive their range validation in passes 2 and 3. All component
-    /// offsets, widths, and byte products were validated once by open().
+    /// Read hashes and counts using offsets checked by open(). Prefix offsets
+    /// and positions are checked when later passes process matched controls.
     template <class p_visitor>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     visit_control_counts_planned_(std::size_t entry_ordinal, p_visitor&& visitor) const noexcept;
@@ -719,9 +702,8 @@ class prepared_minimizer_fragment_reader {
         return true;
     }
 
-    /// Delegate both ordinary and fragment-native ordering to the same
-    /// duplicate-linear authority and return exact payload-work receipts for
-    /// independently timed primary and tie stages.
+    /// Use the common anchor sorter and report its work separately for primary
+    /// ordering and ordering ties.
     [[nodiscard]] static bioseq::chaining::canonical_anchor_sort_stats
     sort_anchor_slice_primary_(bioseq::chaining::anchor* anchors,
                                std::size_t anchor_count,
@@ -863,7 +845,7 @@ class prepared_minimizer_fragment_reader {
                                    std::uint64_t max_occ,
                                    const owned_compact_hash32_direct_index_view& compact_direct);
 
-    /// Materialize every planned query occurrence and establish its route-specific hash order.
+    /// Collect query occurrence references and group them by hash for the selected route.
     template <bool p_oracle, bool p_compact_direct>
     [[gnu::always_inline]] void prepare_query_occurrences_(
         std::span<const fragment_seed_query> queries,
@@ -887,10 +869,9 @@ class prepared_minimizer_fragment_reader {
     prepared_minimizer_fragment_reader&
     operator=(const prepared_minimizer_fragment_reader&) = delete;
 
-    /// Open the compact-H32 route without decoding or retaining the grouped-SoA
-    /// directory and without owning a grouped-SoA payload mapping.  The manifest
-    /// supplies only its authenticated uniform segment geometry. The direct
-    /// image remains the sole posting/control authority for this reader.
+    /// Open a reader backed only by the compact-direct image. Check its identity
+    /// and, geometry against the manifest. Grouped-SoA directory and payload
+    /// stornge are  unnecessary for this route.
     [[nodiscard]] static std::expected<prepared_minimizer_fragment_reader,
                                        minimizer_generation_encoding_error>
     open_compact_direct(bioseq::parallelism::memory_admission_controller& admission,
@@ -920,37 +901,36 @@ class prepared_minimizer_fragment_reader {
     using complete_posting_visitor =
         bool (*)(void*, std::uint64_t hash, std::uint64_t encoded_position) noexcept;
 
-    /** @brief Upper bound on distinct controls while preserving fragment-local duplicates. */
+    /** @brief Number of fragment hash groups, including repeated hashes. Zero outside GPU source mode. */
     [[nodiscard]] std::uint64_t fragment_source_control_upper_bound() const noexcept {
         return gpu_source_ready() ? manifest_.control_count : 0u;
     }
 
-    /** @brief Exact number of encoded positions in the authenticated mapped source. */
+    /** @brief Number of stored target positions. Zero outside GPU source mode */
     [[nodiscard]] std::uint64_t fragment_source_position_count() const noexcept {
         return gpu_source_ready() ? manifest_.position_count : 0u;
     }
 
-    /** @brief Hash bits carried by each authenticated fragment-local control. */
+    /** @brief Width of the source hash domain in bits. Zero outside GPU source mode. */
     [[nodiscard]] std::uint32_t fragment_source_hash_bits() const noexcept {
         return gpu_source_ready()
             ? static_cast<std::uint32_t>(std::bit_width(profile_.max_hash))
             : 0u;
     }
 
-    /** @brief Visit every fragment-local hash group once without constructing a host index. */
+    /** @brief Visit each fragment hash group and its exact position count in GPU source mode. */
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     visit_complete_control_groups(void* context, complete_control_group_visitor visitor) const;
 
-    /** @brief Visit every authenticated `(hash,global-position)` source occurrence once. */
+    /** @brief Visit every hash and global position/strand pair in GPU source mode. */
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     visit_complete_postings(void* context, complete_posting_visitor visitor) const;
 
-    /// Prepare one immutable, canonically ordered anchor span per query.
-    /// grouped-SoA control scans use count/layout/emission passes. The explicit
-    /// compact-direct route instead performs one lookup per unique query hash,
-    /// derives exact query/orientation counts from accepted descriptors, and
-    /// decodes each accepted posting exactly once into its final owner, with no
-    /// control-scan fallback.
+    /// Prepare a batch owning each query's anchors in canonical_anchor_less order.
+    /// Grouped scans count occurrences, plan  orientation slices, and fill them.
+    /// Compact-direct lookup checks each unique query hash, gets counts from
+    /// accepted descriptors, then decodes each accepted posting once.
+    /// The caller chooses the route. Incompatible backing storage is an error.
     [[nodiscard]] prepared_fragment_anchor_batch prepare_fragment_anchor_batch(
         bioseq::parallelism::memory_admission_controller& admission,
         std::span<const fragment_seed_query> queries,
@@ -973,7 +953,7 @@ class prepared_minimizer_fragment_reader {
         return ready_;
     }
 
-    /** @brief True only for the non-queryable full mapped source adapter. */
+    /** @brief Whether full grouped-source scans are ready for GPU index construction. */
     [[nodiscard]] bool gpu_source_ready() const noexcept {
         return ready_ &&
                mode_ == prepared_minimizer_fragment_reader_mode::gpu_source_only &&
@@ -1007,8 +987,8 @@ class prepared_minimizer_fragment_reader {
     }
 
     [[nodiscard]] std::size_t fragment_block_count() const noexcept {
-        // Preserve the direct reader's manifest-geometry observation without
-        // representing those segments as retained fragment_block_plan owners.
+        // A direct-only reader reports manifest segments even though it
+        // stores no block plans.
         return backing_kind_ == backing_kind::compact_direct_only ? manifest_.position_segment_count
                                                                   : block_count_;
     }

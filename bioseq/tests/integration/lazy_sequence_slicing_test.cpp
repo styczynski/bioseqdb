@@ -1,4 +1,7 @@
-/** @file SQL slicing, algebra, bridge, and durable-boundary integration tests. */
+/**
+ * @file lazy_sequence_slicing_test.cpp
+ * @brief Tests SQL slicing, letter types, and storing sliced sequences.
+ */
 
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -132,10 +135,8 @@ TEST_CASE("letter validation hook walks nested queries without reentry",
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     const auto simple_after = query_scalar_int(
         ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
-    // The second diagnostic query contributes one call itself.  The other
-    // delta entry is the probe SELECT, confirming bioseq is reached exactly once
-    // through the installed preload hook rather than skipped or recursively
-    // re-entered.
+    // The  probe SELECT and the second counter query each call the hook once.
+    // A delta of two checks that the installed hook runs once per statement.
     REQUIRE(simple_after - simple_before == 2);
 
     const auto nested_before = query_scalar_int(
@@ -184,8 +185,8 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
         "SELECT ((ARRAY['A'::bioseq.letter('dna4'), "
         "               'C'::bioseq.letter('dna4')])[2])::text;") == "C");
 
-    // Element expressions lose their declared typmod, but the two physical
-    // bytes remain authoritative and must stay usable without relabeling.
+    // A sequence element keeps its alphabet in the value even when the
+    // expression has no declared typmod.
     REQUIRE(query_scalar(
         ctx,
         "SELECT (('AC'::bioseq.seq('dna4',32))[1])::text;") == "C");
@@ -199,8 +200,8 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
     REQUIRE(mismatched_typmod.contains(
         "cannot relabel bioseq.letter to a different alphabet"));
 #else
-    // The opt0 build registers only dna4, so it must report that configuration
-    // boundary rather than silently skipping the query.
+    // The opt0 build supports only dna4. Asking for dna5 must, report that
+    // the alphabet is unavailable.
     const auto unavailable_dna5 = sql_error(
         ctx, "SELECT 'A'::bioseq.letter('dna5');");
     REQUIRE(unavailable_dna5.sqlstate == "22023");
@@ -218,10 +219,8 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
     REQUIRE(typmodless_values.contains(
         "bioseq.letter input requires an alphabet typmod"));
 
-    // Unknown literals enter the base input function before PostgreSQL applies
-    // the same-type typmod cast.  The analyzed-tree guard consumes that token
-    // only under a positive typmod cast and rejects it before a typmodless heap
-    // target can persist it.  An already-bound physical letter remains valid.
+    // A letter literal needs an alphabet before it can be stored. A value
+    // already created with dna4 remains valid in a typmodless column
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_typmodless_letter "
         " (value bioseq.letter);");
@@ -438,8 +437,8 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
             == "1");
     }
 
-    /* Keep a separate destination so the instrumented INSERT and its durable
-     * row can both be verified independently of the plain INSERT above. */
+    /* Use another  table to check both EXPLAIN ANALYZE for the INSERT and the
+     * row it stores. */
     const auto concat_insert_plan = explain_text(
         ctx,
         "INSERT INTO sequence_slicing_slice_plan_dst "
@@ -526,9 +525,8 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
     REQUIRE(durable_plan_rows.front()[2]
         == std::optional<std::string>{expected_concat});
 
-    /* A cast-shaped but unrelated function remains an opaque producer.  The
-     * INSERT repair must recognize the exact registered implicit cast OID and
-     * shape, never unwrap arbitrary sequence-returning FuncExprs. */
+    /* A function with the same arguments as the cast is still an ordinary
+     * function call. The plan must keep its result as a separate source. */
     const auto unrelated_cast_plan = explain_text<false>(
         ctx,
         "SELECT pg_temp.sequence_slicing_unrelated_seq_cast("
@@ -553,9 +551,8 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
             "Producer Value") == "3");
     }
 
-    /* Even the exact registered OID is transparent only for PostgreSQL's
-     * implicit assignment-cast shape.  Direct SQL calls (including explicit
-     * and typmodless variants) remain opaque leaves. */
+    /* Direct SQL calls to seq_cast rmain separate sources. Only the cast
+     * expression PostgreSQL inserts for assignment can be folded into a slice. */
     const std::array<std::string_view, 3> explicit_cast_sql{
         "SELECT bioseq.seq_cast(s[500000:500064], 3, false) "
         "FROM sequence_slicing_slice_src;",

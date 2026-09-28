@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares TableAM callbacks without importing their implementation partitions.
+ * @brief Declarations for Bioseq's PostgreSQL table-ajcess callbacks.
  */
 module;
 
@@ -12,7 +12,7 @@ export module bioseq.postgres.table:access_method_contract;
 import bioseq.postgres.storage.metadata;
 export import bioseq.postgres.table.types;
 
-/** Begin a table scan using PostgreSQL's standard projection policy. */
+/** Begin a table scan that reads all columns. */
 TableScanDesc bioseq_beginscan(Relation relation,
                                Snapshot snapshot,
                                int key_count,
@@ -20,7 +20,7 @@ TableScanDesc bioseq_beginscan(Relation relation,
                                ParallelTableScanDesc parallel_table_scan,
                                std::uint32_t flags);
 
-/** Begin a projected table scan with eager sequence hydration. */
+/** Begin  a scan of selected columns, loading full sequences when returning individual rows. */
 export TableScanDesc bioseq_beginscan_extended(
     Relation relation,
     Snapshot snapshot,
@@ -33,7 +33,7 @@ export TableScanDesc bioseq_beginscan_extended(
     parallel_column_scan_handle parallel_column_scan,
     bool returns_vectorized_tuples);
 
-/** Begin a projected table scan that defers sequence hydration. */
+/** Begin a scan of selected columns, leaving sequence locators for the caller to read. */
 export TableScanDesc bioseq_beginscan_deferred(
     Relation relation,
     Snapshot snapshot,
@@ -46,7 +46,7 @@ export TableScanDesc bioseq_beginscan_deferred(
     parallel_column_scan_handle parallel_column_scan,
     bool returns_vectorized_tuples);
 
-/** C ABI entry point for a projected scan with eager sequence hydration. */
+/** C entry point for a scan that loads full sequences when returning individual rows. */
 export extern "C" TableScanDesc bioseq_beginscan_extended_c(
     Relation relation,
     Snapshot snapshot,
@@ -59,7 +59,7 @@ export extern "C" TableScanDesc bioseq_beginscan_extended_c(
     parallel_column_scan_handle parallel_column_scan,
     bool returns_vectorized_tuples);
 
-/** C ABI entry point for a projected scan with deferred sequence hydration. */
+/** C entry point for a scan that leaves sequence locators for the caller to read. */
 export extern "C" TableScanDesc bioseq_beginscan_deferred_c(
     Relation relation,
     Snapshot snapshot,
@@ -75,7 +75,7 @@ export extern "C" TableScanDesc bioseq_beginscan_deferred_c(
 /** End a table scan and release its owned reader state. */
 void bioseq_endscan(TableScanDesc scan);
 
-/** Reinitialize a table scan with new scan keys. */
+/** Restart an initialized reader with the qualifier list passed through key. */
 void bioseq_rescan(TableScanDesc scan,
                    ScanKey key,
                    bool set_params,
@@ -83,13 +83,13 @@ void bioseq_rescan(TableScanDesc scan,
                    bool allow_sync,
                    bool allow_pagemode);
 
-/** Report the shared-memory size required by a parallel table scan. */
+/** Reject PostgreSQL's unsupported parallel table-scan size  request. */
 Size bioseq_parallelscan_estimate(Relation relation);
 
-/** Initialize shared state for a parallel table scan. */
+/** Reject PostgreSQL's unsupported parallel table-scan initialization. */
 Size bioseq_parallelscan_initialize(Relation relation, ParallelTableScanDesc scan);
 
-/** Reset shared state for a parallel table scan. */
+/** Reject PostgreSQL's unsupported parallel table-scan reset. */
 void bioseq_parallelscan_reinitialize(Relation relation, ParallelTableScanDesc scan);
 
 /** Begin an exact-row fetch for an index scan. */
@@ -99,12 +99,12 @@ column_index_fetch_base* bioseq_index_fetch_begin(Relation relation
 #endif
 );
 
-/** Begin an exact-row fetch with an explicit projected-attribute bitmap. */
+/** Begin index fetches restricted to the selected columns. */
 export column_index_fetch_base* bioseq_index_fetch_begin_extended(
     Relation relation,
     Bitmapset* attributes_needed);
 
-/** Reset an exact-row fetch before it is reused. */
+/** Keep the index-fetch reader and caches for reuse This callback does nothing. */
 void bioseq_index_fetch_reset(column_index_fetch_base* scan);
 
 /** End an exact-row fetch and release its owned state. */
@@ -119,43 +119,43 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* scan,
                               bool* all_dead);
 
 #if PG_VERSION_NUM >= 200000
-/** Attach the existing column reader to PostgreSQL's index scan descriptor. */
+/** Create a column reader for a PostgreSQL index scan. */
 void bioseq_index_scan_begin(IndexScanDesc scan, std::uint32_t flags);
 
-/** Attach a column reader while retaining a custom scan's projected columns. */
+/** Create an index-scan reader restricted to the selected columns. */
 export void bioseq_index_scan_begin_projected(IndexScanDesc scan,
                                              std::uint32_t flags,
                                              Bitmapset* attributes_needed);
 
-/** Reset the descriptor-owned column reader before index reuse. */
+/** Keep the index-scan reader and caches for reuse. */
 void bioseq_index_scan_reset(IndexScanDesc scan);
 
 /** Release the descriptor-owned column reader and its memory context. */
 void bioseq_index_scan_end(IndexScanDesc scan);
 
-/** Check a virtual TID through the existing snapshot-aware row reader. */
+/** Check  whether an index-selected row can be fetchpd under the supplied snapshot. */
 bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
                       Snapshot snapshot, bool* all_dead);
 #endif
 
-/** Fetch one visible row version into a tuple slot. */
+/** Read a row version and its sequence values into a tuple slot. */
 bool bioseq_fetch_row_version(Relation relation,
                               ItemPointer tuple_id,
                               Snapshot snapshot,
                               TupleTableSlot* slot);
 
-/** Resolve the latest virtual tuple identifier for a scan. */
+/** Reject the, unsupported request to follow a row to its latest tuple identifier. */
 void bioseq_get_latest_tid(TableScanDesc scan, ItemPointer tuple_id);
 
-/** Check whether a virtual tuple identifier is valid for a scan. */
+/** Reject the unsupported tuple-identifier validity check. */
 bool bioseq_tuple_tid_valid(TableScanDesc scan, ItemPointer tuple_id);
 
-/** Check whether a tuple slot is visible under a snapshot. */
+/** Check whether the slot's row number belongs to a stripe visible under the snapshot. */
 bool bioseq_tuple_satisfies_snapshot(Relation relation,
                                      TupleTableSlot* slot,
                                      Snapshot snapshot);
 
-/** Apply PostgreSQL's index-deletion request to virtual row identities. */
+/** Report no removable rows for bottom-up index cleanup and reject  simple deletion. */
 TransactionId bioseq_index_delete_tuples(Relation relation,
                                          TM_IndexDeleteOp* delete_state);
 
@@ -170,7 +170,7 @@ void bioseq_tuple_insert(Relation relation,
 #endif
                          BulkInsertState bulk_state);
 
-/** Insert one row while retaining speculative source authorities. */
+/** Insert a speculative row and keep its sequence writes pending until confirmation. */
 void bioseq_tuple_insert_speculative(Relation relation,
                                      TupleTableSlot* slot,
                                      CommandId command_id,
@@ -182,7 +182,7 @@ void bioseq_tuple_insert_speculative(Relation relation,
                                      BulkInsertState bulk_state,
                                      std::uint32_t speculative_token);
 
-/** Complete or abort one speculative row insertion. */
+/** Publish or invalidate the sequence sources of a speculative insert. */
 void bioseq_tuple_complete_speculative(Relation relation,
                                        TupleTableSlot* slot,
                                        std::uint32_t speculative_token,
@@ -200,7 +200,7 @@ void bioseq_multi_insert(Relation relation,
 #endif
                          BulkInsertState bulk_state);
 
-/** Delete one row by masking its virtual identity. */
+/** Hide a row in the row mask and invalidate its sequence sources. */
 TM_Result bioseq_tuple_delete(Relation relation,
                               ItemPointer tuple_id,
                               CommandId command_id,
@@ -216,7 +216,7 @@ TM_Result bioseq_tuple_delete(Relation relation,
 #endif
 );
 
-/** Replace one row and report whether indexes require updates. */
+/** Hide the old row and insert a replacement with new sequence sources. */
 TM_Result bioseq_tuple_update(Relation relation,
                               ItemPointer old_tuple_id,
                               TupleTableSlot* slot,
@@ -242,7 +242,7 @@ TM_Result bioseq_tuple_lock(Relation relation,
                             std::uint8_t flags,
                             TM_FailureData* failure_data);
 
-/** Finish a bulk insert while retaining transaction-owned write state. */
+/** Leave bulk-insert writes open for flushing at transaction end. */
 void bioseq_finish_bulk_insert(Relation relation,
 #if PG_VERSION_NUM >= 190000
                               std::uint32_t options
@@ -264,7 +264,7 @@ double bioseq_index_build_range_scan(Relation relation,
                                      void* callback_state,
                                      TableScanDesc scan);
 
-/** Validate an index against every visible row. */
+/** Insert visible rows missing  from an index during concurrent index validation */
 void bioseq_index_validate_scan(Relation relation,
                                 Relation index_relation,
                                 IndexInfo* index_info,
@@ -281,11 +281,11 @@ void bioseq_relation_set_new_filenode(Relation relation,
 /** Reinitialize a relation after nontransactional truncation. */
 void bioseq_relation_nontransactional_truncate(Relation relation);
 
-/** Copy a relation's physical forks to a new locator. */
+/** Copy physical storage to a new relation locator. */
 void bioseq_relation_copy_data(Relation relation,
                                const RelFileLocator* new_locator);
 
-/** Copy visible rows while rewriting a relation. */
+/** Copy visible rows and their sequences during VACUUM FULL. Indexed CLUSTER is unsupported. */
 void bioseq_relation_copy_for_cluster(Relation old_relation,
                                       Relation new_relation,
                                       Relation old_index,
@@ -309,7 +309,7 @@ void bioseq_vacuum_rel(Relation relation,
 #endif
                        BufferAccessStrategy buffer_strategy);
 
-/** Select the next logical block for ANALYZE. */
+/** Present the wole table to ANALYZE as one logical block. */
 bool bioseq_scan_analyze_next_block(TableScanDesc scan, ReadStream* stream);
 
 /** Feed the next visible row to ANALYZE. */
@@ -321,10 +321,10 @@ bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
                                     double* dead_rows,
                                     TupleTableSlot* slot);
 
-/** Return bytes used by one relation fork or all forks. */
+/** Return the stored byte count for a requested fork or combined forks. */
 uint64 bioseq_relation_size(Relation relation, ForkNumber fork_number);
 
-/** Report whether the relation requires a TOAST table. */
+/** Return false because Bioseq tables do not use a heap TOAST table. */
 bool bioseq_relation_needs_toast_table(Relation relation);
 
 /** Populate planner size and visibility estimates. */
@@ -334,29 +334,29 @@ void bioseq_estimate_rel_size(Relation relation,
                               double* tuples,
                               double* all_visible_fraction);
 
-/** Select the next TABLESAMPLE block. */
+/** Reject, unsupported TABLESAMPLE block selection. */
 bool bioseq_scan_sample_next_block(TableScanDesc scan,
                                    SampleScanState* sample_state);
 
-/** Select the next TABLESAMPLE tuple. */
+/** Reject  unsupported TABLESAMPLE row selection. */
 bool bioseq_scan_sample_next_tuple(TableScanDesc scan,
                                    SampleScanState* sample_state,
                                    TupleTableSlot* slot);
 
-/** Apply table state transitions at a transaction boundary. */
+/** Flush writes before commit and discard table state on abort. */
 void column_transaction_callback(XactEvent event, void* argument);
 
-/** Apply table state transitions at a subtransaction boundary. */
+/** Flush or discard subtransaction writes and update pending speculative inserts. */
 void column_subtransaction_callback(SubXactEvent event,
                                     SubTransactionId subtransaction_id,
                                     SubTransactionId parent_id,
                                     void* argument);
 
-/** Flush pending writes through the storage hook boundary. */
+/** Flush column writes and cached sequence-fragment writes. */
 void bioseq_flush_pending_writes_adapter(column_write_state* write_state);
 
-/** Close an opaque sequence-cache owner through the storage hook boundary. */
+/** Close and destroy a sequence cache passed through the storage hook. */
 void bioseq_seq_caches_close_adapter(void* cache, bool commit);
 
-/** Return the number of chunk groups pruned by an initialized scan. */
+/** Return the number of skipped chunk groups, or zero before the reader starts. */
 export std::int64_t filtered_chunk_group_count(column_scan_handle scan);

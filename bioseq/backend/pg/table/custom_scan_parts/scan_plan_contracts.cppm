@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares base BioseqScan plan construction without implementation fanout.
+ * @brief Declares helper registration for base BioseqScan plans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -17,7 +17,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Accumulates match-helper bindings for one base-scan target list. */
+    /** @brief Collects match-helper bindings while visiting one scan's output expressions. */
     struct base_match_helper_registration {
         const bioseq_stub_oids* oids = nullptr;
         Node* target_recipe = nullptr;
@@ -28,15 +28,15 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Checks whether a helper identity is already bound to a target-list position. */
+    /** @brief Checks whether this helper call is already recorded at the output position. */
     [[nodiscard]] bool base_match_helper_site_already_registered(
         List* sites,
         FuncExpr* helper,
         AttrNumber resno) noexcept;
 
-    /** @brief Registers valid match helpers that name the owned target recipe or lineage. */
+    /** @brief Records helpers that name this scan's target or its single base  source. */
     struct base_match_helper_registration_visitor {
-        /** @brief Validates and serializes one match-helper call in the current target entry. */
+        /** @brief Checks a helper call and records its output position and target argument. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               base_match_helper_registration& registration) const {
@@ -55,9 +55,9 @@ export {
                 batch_join_match_helper_names_recipe(helper, registration.target_recipe);
             const bool names_lineage = batch_join_match_helper_names_base_lineage(
                 helper, registration.target_recipe, *registration.oids);
-            /* Exact transformed recipes and their unique canonical base lineage are
-             * both valid spellings for one base owner.  Resolution across multiple
-             * owners remains query-scope fail-closed in the common finalizer. */
+            /* A helper can name the full target expression or its unique base source.
+             * The common finalizer later rejects matches that are ambiguous across scans
+             * in the same query. */
             if (!names_recipe && !names_lineage) {
                 return pg_walk_step::skip_subtree;
             }
@@ -94,7 +94,7 @@ export {
         }
     };
 
-    /** @brief Orders lineage Vars by stable planner identity fields. */
+    /** @brief Gives source columns a repeatable order for match-owner records. */
     [[nodiscard]] int canonical_match_lineage_var_compare(
         const ListCell* left_cell,
         const ListCell* right_cell) noexcept;

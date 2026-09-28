@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Validates the complete SliceProject private codec payload.
+ * @brief Checks SliceProject plan records, dependencies and output bindings before execution.
  */
 module;
 #include <bioseq/pg_compat.h>

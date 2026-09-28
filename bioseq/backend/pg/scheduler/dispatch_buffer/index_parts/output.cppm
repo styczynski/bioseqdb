@@ -1,6 +1,6 @@
 /**
  * @file index_parts/output.cppm
- * @brief Defines validated replay of the next buffered scheduler result.
+ * @brief Return buffered scan and join matches to the executor.
  */
 module;
 
@@ -25,14 +25,8 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// Input rows and matches remain  in the buffer while the executor reads
+// output cursors.
 module bioseq.postgres.scheduler.dispatch_buffer:output;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -40,9 +34,9 @@ import bioseq.postgres.scheduler.dispatch_buffer;
 namespace bioseq::scheduler {
 
 /**
- * @brief Replays the next validated scan or join match from the buffered batch.
- * @return Borrowed input and match pointers, or no value at the exact end of output.
- * @note Corrupt cursors cross the PostgreSQL error boundary instead of producing partial rows.
+ * @brief Return the next scan or join match with its copied input row.
+ * @return Borrowed pointers, or nullopt after the last output
+ * @note An invalid cursor or missing match raises a PostgreSQL error.
  */
 [[nodiscard]] std::optional<tuple_dispatch_buffer::next_output>
 tuple_dispatch_buffer::read_next_output() {

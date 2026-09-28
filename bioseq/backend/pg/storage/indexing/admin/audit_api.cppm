@@ -1,6 +1,6 @@
 /**
  * @file admin/audit_api.cppm
- * @brief Declares the public PostgreSQL index audit and policy commands.
+ * @brief Commands for inspecting stored indexes and changing index policies.
  */
 module;
 
@@ -22,7 +22,7 @@ export import :hash_major;
 
 export namespace bioseq::storage::indexing {
 
-/** Inspect and validate one published minimizer generation. */
+/** Check a published grouped-SoA generation and return its source and metadata. */
 [[nodiscard]] ready_minimizer_generation_inspection
 inspect_ready_minimizer_generation_impl(Oid rel_oid,
                                         std::string_view index_name,
@@ -31,11 +31,11 @@ inspect_ready_minimizer_generation_impl(Oid rel_oid,
 /** Count persisted rows across the physical shards of one logical index. */
 [[nodiscard]] std::int64_t index_table_row_count_impl(Oid rel_oid, std::string_view name);
 
-/** Validate that a no-index policy has no persisted payload. */
+/** Return source and index counts so a caller can check that no index data remains. */
 [[nodiscard]] cold_no_index_absence_audit
 cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name);
 
-/** Drop every physical index relation through the shared cleanup boundary. */
+/** Drop all physical index tables, reporting failures after C++ cleanup. */
 void drop_all_index_tables_impl();
 
 /** Enable a registered index and configure insertion-time maintenance. */

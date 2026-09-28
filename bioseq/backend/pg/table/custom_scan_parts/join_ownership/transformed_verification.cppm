@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Reconstructs and retains only verified transformed mmsearch join paths.
+ * @brief Keeps or rebuilds join paths where, a custom scan owns each mmsearch evaluation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -43,13 +43,12 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Reconstructs the exact parameterized base owner required by a higher join.
+     * @brief Rebuilds the parameterized BioseqScan needed as the inner side of a join
      *
-     * Core may discard a parameterized CustomPath before the higher join frontier
-     * is formed.  Rebuild only the exact baserel recipe needed by that frontier;
-     * AddBioseqColumnScanPath performs the normal selectivity/alignment costing
-     * and does not add the result to RelOptInfo::pathlist.  The returned path is
-     * private to the constructed NestPath below.
+     * PostgreSQL may discard that CustomPath before building the higher join.
+     * Use add_bioseq_column_scan_path() to rebuild and cost the exact target
+     * search. Keep the result private to the new NestPath, outside the base
+     * relation's pathlist.
      */
     [[nodiscard]] Path*
     reconstruct_exact_parameterized_bmo_inner(PlannerInfo* root,
@@ -168,8 +167,8 @@ export {
         }
         Path* candidate =
             add_bioseq_column_scan_path(root, target_input, target_rte, required_outer);
-        /* get_baserel_parampathinfo may retain required_outer in the planner's PPI;
-         * it therefore remains planner-owned after the constructor call. */
+        /* get_baserel_parampathinfo may store required_outer in its  parameter
+         * information. Leave the bitmap owned by the planner after this call. */
         auto* custom = candidate != nullptr && IsA(candidate, CustomPath)
                            ? reinterpret_cast<CustomPath*>(candidate)
                            : nullptr;
@@ -362,7 +361,7 @@ export {
         return candidate;
     }
 
-    /** @brief Bit flags for custom-owner ABI mismatches found by the retainer. */
+    /** @brief Problems with the stored mmsearch owner or its restriction identity. */
     enum exact_parameterized_bmo_retainer_abi_mismatch : std::uint32_t {
         k_exact_bmo_retainer_invalid_owner_tag = 1u << 0,
         k_exact_bmo_retainer_missing_custom_restriction = 1u << 1,
@@ -372,7 +371,7 @@ export {
         k_exact_bmo_retainer_multiple_custom_identities = 1u << 5,
     };
 
-    /** @brief Bit flags for parameterized-path identity mismatches found by the retainer. */
+    /** @brief Problems matching the mmsearch restriction to the path's parameter clauses. */
     enum exact_parameterized_bmo_retainer_ppi_mismatch : std::uint32_t {
         k_exact_bmo_retainer_missing_param_info = 1u << 0,
         k_exact_bmo_retainer_empty_ppi_clauses = 1u << 1,
@@ -382,7 +381,7 @@ export {
         k_exact_bmo_retainer_multiple_ppi_identities = 1u << 5,
     };
 
-    /** @brief Bit flags for candidate path-shape failures found by the retainer. */
+    /** @brief Reasons a candidate scan cannot supply the inner side of the join. */
     enum exact_parameterized_bmo_retainer_validation_mismatch : std::uint32_t {
         k_exact_bmo_retainer_candidate_parent = 1u << 0,
         k_exact_bmo_retainer_candidate_owner_analysis = 1u << 1,
@@ -396,8 +395,8 @@ export {
     };
 
     /**
-     * @brief Retains or reconstructs exact join paths for a custom-owned mmsearch restriction.
-     * @return True when at least one safe path is installed for the current join pair.
+     * @brief Keeps valid join paths or builds one with a custom scan owning mmsearch.
+     * @return True after installing at least one checked path in the join relation.
      */
     [[nodiscard]] bool retain_join_paths_with_custom_restriction_owner(
         PlannerInfo* root,
@@ -461,8 +460,9 @@ export {
                     if (calls != 1u)
                         foreign_root_mmsearch = true;
                 } else if (calls != 0u) {
-                    /* A copied/equivalent rendezvous clause cannot be removed by the
-                     * exact pointer identity, and would remain an executable SQL stub. */
+                    /* This mmsearch belongs to a different planner restrictin. Removing
+                     * the selected restriction would leave  this SQL stub in the join
+                     * filter, where it cannot execute. */
                     foreign_root_mmsearch = true;
                 }
             }
@@ -571,11 +571,10 @@ export {
             if (exact_root_copies == 0u) {
                 retained.append(path);
             } else {
-                /* Core retains the parameter clause in JoinPath::joinrestrictinfo even
-                 * when the parameterized BMO inner path owns it.  Clone only the root
-                 * NestPath and remove that exact pointer so create_nestloop_plan cannot
-                 * emit the rendezvous SQL function as a Join Filter.  Costs stay
-                 * conservative because the original qual charge is retained. */
+                /* PostgreSQL can keep the join filter even when the inner BioseqScan
+                 * already owns it. Copy the root NestPath and remove that restriction so
+                 * create_nestloop_plan cannot emit an mmsearch SQL stub as a Join Filter.
+                 * Keep the original cost estimate. */
                 auto* clone = makeNode(NestPath);
                 *clone = *nest;
                 postgres_list<RestrictInfo> residual;
@@ -588,10 +587,9 @@ export {
                 retained.append(reinterpret_cast<Path*>(clone));
             }
         }
-        /* Core does not necessarily form a NestPath from a custom parameterized
-         * baserel path.  If no incumbent validates ownership, construct that exact
-         * normal-cost shape from the target input's BMO path and the other input's
-         * cheapest compatible path. */
+        /* PostgreSQL may leave a parameterized BioseqScan without a NestPath
+         * using it If no existing join is valid, combine the target scan
+         * with the cheapest compatible outer path and use normal join  costing. */
         if (retained.is_empty()) {
             postgres_list<Node> operands(mmsearch->args);
             Var* target_var = try_cast_pg_node<Var>(operands.get_first());

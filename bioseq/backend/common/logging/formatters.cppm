@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines fmt adapters for reflected enums and diagnostic string values.
+ * @brief fmt support for enum names and to_debug_string() values.
  */
 module;
 
@@ -15,11 +15,7 @@ import std;
 namespace bioseq::common::formatting_detail {
 
 /**
- * @brief Produces a stable textual representation of an enum value.
- *
- * @tparam p_enum_type Reflected enum type.
- * @param[in] value Enum value to format.
- * @return Reflected name, reflected bit-flag expression, or the underlying integer.
+ * @brief Returns an enum name or bit-flag names, falling back to its integer value.
  */
 template<enchantum::Enum p_enum_type>
 std::string enum_to_string(p_enum_type value)
@@ -52,12 +48,8 @@ template<typename p_value_type>
     requires enchantum::Enum<p_value_type>
 struct formatter<p_value_type> : formatter<std::string> {
     /**
-     * @brief Writes the reflected enum representation to a fmt context.
-     *
-     * @tparam p_format_context Destination fmt context type.
-     * @param[in] value Enum value to format.
-     * @param[in,out] context Destination formatting context.
-     * @return Iterator immediately after the formatted value.
+     * @brief Writes the enum name or numeric fallback using fmt's string formatter.
+     * @return Iterator after the formatted value
      */
     template<typename p_format_context>
     auto format(const p_value_type& value, p_format_context& context) const
@@ -69,9 +61,7 @@ struct formatter<p_value_type> : formatter<std::string> {
 };
 
 /**
- * @brief Formats values that expose a string-valued diagnostic representation.
- *
- * @tparam p_value_type Type exposing to_debug_string().
+ * @brief Lets fmt print a type  through its to_debug_string() method.
  */
 template<typename p_value_type>
     requires requires(const p_value_type& value) {
@@ -79,12 +69,8 @@ template<typename p_value_type>
     }
 struct formatter<p_value_type> : formatter<std::string> {
     /**
-     * @brief Writes the value's diagnostic representation to a fmt context.
-     *
-     * @tparam p_format_context Destination fmt context type.
-     * @param[in] value Value to format.
-     * @param[in,out] context Destination formatting context.
-     * @return Iterator immediately after the formatted value.
+     * @brief Formats the string returned by value.to_debug_string().
+     * @return Iterator after the formatted value.
      */
     template<typename p_format_context>
     auto format(const p_value_type& value, p_format_context& context) const

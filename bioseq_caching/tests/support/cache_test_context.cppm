@@ -21,7 +21,7 @@ export namespace bioseq::cache_test {
 
 using namespace std::chrono_literals;
 
-/// @brief Build artifacts and watchdogs supplied by the native Catch2 runner.
+/// Runner-supplied file paths, report destination and per-case timeout.
 struct runner_configuration {
     std::filesystem::path postgres_bin_dir;
     std::filesystem::path postgres_stage_root;
@@ -40,7 +40,7 @@ struct runner_configuration {
     std::chrono::seconds case_timeout{480};
 };
 
-/// @brief Supported sibling-DSO preload orders for coexistence tests.
+/// Extension preload choices for Bioseq and cache coexistence tests.
 enum class preload_order {
     none,
     cache_only,
@@ -48,13 +48,13 @@ enum class preload_order {
     bioseq_then_cache,
 };
 
-/// @brief Chooses whether the fixture or the case owns lazy cache bootstrap.
+/// Choose whether the fixture or the test waits for cache initialization.
 enum class bootstrap_readiness {
     fixture_managed,
     caller_managed,
 };
 
-/// @brief Public cache diagnostics sampled without affecting a data session.
+/// Public cache counters copied from bioseq_cache.stats().
 struct cache_stats {
     std::int64_t produced{};
     std::int64_t completed_hits{};
@@ -99,7 +99,7 @@ inline constexpr std::string_view k_cache_bootstrap_readiness_sql{
     "AND bioseq_cache_test.cache_infrastructure_ready() "
     "FROM q"};
 
-/// @brief Returns the process-owned command-line configuration.
+/// Return the configuration stored for this test process.
 [[nodiscard]] inline runner_configuration& configuration_storage() {
     static runner_configuration value;
     return value;
@@ -115,7 +115,7 @@ inline constexpr std::string_view k_cache_bootstrap_readiness_sql{
     return value;
 }
 
-/// @brief Validates one required artifact path from the runner.
+/// Require a non-empty path from the runner.
 inline void require_artifact(const std::filesystem::path& path, std::string_view label) {
     if (path.empty()) {
         throw std::invalid_argument(std::string(label) + " was not supplied");
@@ -126,7 +126,10 @@ inline void require_artifact(const std::filesystem::path& path, std::string_view
 
 export namespace bioseq::cache_test {
 
-/// @brief Installs the immutable runner configuration before Catch starts.
+/**
+ * Check required paths, complete groups of optional paths and a positive
+ * case timeout, then store the runner configuration for  the tests.
+ */
 inline void set_runner_configuration(runner_configuration configuration) {
     detail::require_artifact(configuration.postgres_bin_dir, "PostgreSQL bin directory");
     detail::require_artifact(configuration.postgres_stage_root, "PostgreSQL stage root");
@@ -176,14 +179,14 @@ inline void set_runner_configuration(runner_configuration configuration) {
     return detail::configuration_storage();
 }
 
-/// @brief Returns true when the runner supplied a complete Bioseq artifact.
+/// Return whether all Bioseq source-file options were supplied.
 [[nodiscard]] inline bool has_bioseq_artifact() {
     const runner_configuration& value = configuration();
     return value.bioseq_control.has_value() && value.bioseq_install_sql.has_value() &&
            value.bioseq_dso.has_value();
 }
 
-/// @brief Returns true when a complete Bioseq-only PostgreSQL stage was supplied.
+/// Return whether all Bioseq-only PostgreSQL stage options vere supplied.
 [[nodiscard]] inline bool has_bioseq_only_postgres_stage() {
     const runner_configuration& value = configuration();
     return value.bioseq_only_postgres_bin_dir.has_value() &&
@@ -191,7 +194,7 @@ inline void set_runner_configuration(runner_configuration configuration) {
            value.bioseq_only_postgres_stage_manifest.has_value();
 }
 
-/// @brief Selects only the shipping Bioseq artifact from its cache-free stage.
+/// Configure a test cluster that installs and preloads only Bioseq.
 [[nodiscard]] inline postgres_test::private_cluster_options bioseq_only_cluster_options() {
     const runner_configuration& value = configuration();
     if (!has_bioseq_artifact() || !has_bioseq_only_postgres_stage()) {
@@ -215,7 +218,7 @@ inline void set_runner_configuration(runner_configuration configuration) {
         .stop_timeout = 30s};
 }
 
-/// @brief Returns canonical cache artifact paths in an attested stage.
+/// Build the expected cache control, install SQL and library paths within a stage.
 [[nodiscard]] inline std::array<std::filesystem::path, 3>
 canonical_cache_stage_artifact_paths(const postgres_test::extension_stage_layout& stage) {
     return {stage.control_directory / "bioseq_cache.control",
@@ -223,7 +226,11 @@ canonical_cache_stage_artifact_paths(const postgres_test::extension_stage_layout
             stage.library_directory / configuration().cache_dso.filename()};
 }
 
-/// @brief Constructs a private-cluster configuration for one scenario.
+/**
+ * Configure a private cache test cluster.
+ * Choose extension creation and preload order, add startup settings, and
+ * optionally let the fixture wait for cache initialization.
+ */
 [[nodiscard]] inline postgres_test::private_cluster_options
 cluster_options(bool include_bioseq,
                 preload_order order = preload_order::cache_only,
@@ -345,7 +352,7 @@ integer(libpq::client_connection& connection,
     return detail::parse_i64(scalar(connection, sql, deadline, policy));
 }
 
-/// @brief Samples all public cache counters through a diagnostics session.
+/// Read the nine public cache counters through the supplied connection
 [[nodiscard]] inline cache_stats read_cache_stats(libpq::client_connection& admin,
                                                   std::chrono::milliseconds deadline = 10s) {
     const libpq::command_result result =
@@ -372,7 +379,7 @@ integer(libpq::client_connection& connection,
                        .stored_bytes = detail::parse_i64(result.text_value(0, 8))};
 }
 
-/// @brief Computes a nonnegative counter delta and rejects reset/wrap races.
+/// Subtract counter snapshots, rejecting any  counter that moved backward.
 [[nodiscard]] inline cache_stats operator-(const cache_stats& after, const cache_stats& before) {
     const auto delta = [](std::int64_t newer, std::int64_t older, std::string_view name) {
         if (newer < older) {

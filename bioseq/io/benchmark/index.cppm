@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Orchestrates the configured sequence I/O benchmark blocks.
+ * @brief Set up and run the configured sequence IO benchmarks.
  */
 module;
 

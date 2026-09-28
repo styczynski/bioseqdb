@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_unlink.cppm
- * @brief PostgreSQL executor-hook alignment-frame unlink helpers.
+ * @brief Remove query frames from  the executor-hook registries.
  */
 module;
 
@@ -21,8 +21,8 @@ import bioseq.postgres.table.alignment_execution;
 namespace bioseq::pg::detail {
 
 /**
- * @brief Removes a frame from every backend-local registry and lifecycle stack.
- * @param[in] frame Frame to unlink, or null when registration never completed.
+ * @brief Remove every registry and stack reference to a frame.
+ * Accept null or a partly registered frame. The caller still owns deletion.
  */
 void unlink_alignment_frame(alignment_executor_frame* frame) noexcept
 {

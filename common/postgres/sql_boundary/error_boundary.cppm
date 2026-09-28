@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/error_boundary.cppm
- *
- * SQL-boundary view of the source-neutral PostgreSQL ERROR/C++ exception
- * bridge.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/error_boundary.cppm
+ * @brief Export the shared PostgreSQL error and C++ exception helpers to SQL wrappers.
  */
 export module bioseq.postgres.sql_boundary:error_boundary;
 

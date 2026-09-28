@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/arena.cppm
- * @brief Scoped allocation attribution and allocator tracker hook.
+ * @brief Count allocations under the current memory category.
  *
- * `arena_scope` records a category in the active thread profiler. Disabled
- * configurations discard the tracking path at compile time.
+ * An arena_scope selects the category in the active thread profiler.
+ * The configuration  can disable this tracking at compile time.
  */
 module;
 
@@ -16,12 +16,12 @@ import bioseq.instrumentation.profiler_state;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Temporarily attribute allocations to one arena category. */
+/** @brief Count allocations under this category for the lifetime of the scope. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] arena_scope {
     arena_kind previous_arena = arena_kind::none;
 
-    /** @brief Install an arena category and retain the previous category. */
+    /** @brief Select a ctegory and remember the previous one. */
     [[gnu::always_inline]]
     explicit arena_scope(arena_kind kind) noexcept {
         if constexpr (p_configuration_type::enable_arena_tracking) {
@@ -49,20 +49,19 @@ struct [[nodiscard]] arena_scope {
     arena_scope& operator=(arena_scope&&) = delete;
 };
 
-/** @brief Create an allocation-attribution scope for an arena category. */
+/** @brief Start a scope that assigns allocations to a memory category. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
 inline arena_scope<p_configuration_type> arena(arena_kind kind) noexcept {
     return arena_scope<p_configuration_type>(kind);
 }
 
-/// foonathan/memory-compatible tracker. Wire by composing into a memory
-/// arena (`memory::tracked_allocator<profile_tracker, ...>`) — bytes
-/// passed through this tracker are attributed to the currently-active
-/// arena_kind on the per-thread profiler block.
+/// Allocation callbacks for foonathan/memory tracked allocators.
+/// Each callback updates the category active at that moment, so allocation
+/// and deallocation should run under the same category.
 template<profiling_configuration p_configuration_type>
 struct profile_tracker {
-    /** @brief Attribute one node allocation to the active arena. */
+    /** @brief Count one allocation under the active category. */
     [[gnu::always_inline]]
     void on_node_allocation(void*, std::size_t bytes, std::size_t) noexcept {
         if constexpr (!p_configuration_type::enable_arena_tracking) return;
@@ -79,7 +78,7 @@ struct profile_tracker {
         }
     }
 
-    /** @brief Remove one node allocation from the active arena's live bytes. */
+    /** @brief Subtract freed bytes from the active  category, stopping at zero. */
     [[gnu::always_inline]]
     void on_node_deallocation(void*, std::size_t bytes, std::size_t) noexcept {
         if constexpr (!p_configuration_type::enable_arena_tracking) return;
@@ -92,14 +91,14 @@ struct profile_tracker {
         else counter.bytes_live = 0;
     }
 
-    /** @brief Attribute an array allocation using its total byte count. */
+    /** @brief Count the total bytes allocated for an array. */
     [[gnu::always_inline]]
     void on_array_allocation(void* ptr, std::size_t count,
                              std::size_t size, std::size_t align) noexcept {
         on_node_allocation(ptr, count * size, align);
     }
 
-    /** @brief Remove an array allocation using its total byte count. */
+    /** @brief Subtract the total bytes freed for an array. */
     [[gnu::always_inline]]
     void on_array_deallocation(void* ptr, std::size_t count,
                                std::size_t size, std::size_t align) noexcept {

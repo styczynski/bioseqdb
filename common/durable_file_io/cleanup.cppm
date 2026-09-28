@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/cleanup.cppm
- * @brief Internal POSIX cleanup with inode-conditional removal.
+ * @brief Remove, temporary file names after checking which file they refer to.
  */
 module;
 
@@ -56,11 +56,10 @@ namespace bioseq::common::durable_file_io::detail {
 }
 
 /**
- * Remove a staging entry only while it still names the inode we created.
- *
- * The deterministic hook runs before the final identity snapshot. POSIX has
- * no inode-conditional unlink syscall, so callers must serialize uncooperative
- * writers to the same directory across the final fstatat/unlinkat pair.
+ * Remove a temporary name if it still refers to the expected inode.
+ * The test hook runs before the last  identity check. Callers must keep other
+ * writers from changing the name between fstatat and unlinkat, since those
+ * checks and removal are separate operations.
  */
 [[nodiscard]] inline std::expected<
     conditional_remove_disposition,
@@ -120,7 +119,7 @@ remove_name_if_same_inode_at(
     }
     return conditional_remove_disposition::removed;
 }
-/** Preserve the primary failure unless safe staging cleanup fails. */
+/** Keep the original error only if the temporary name was successfully removed. */
 [[nodiscard]] inline file_error staging_cleanup_error(
     int directory_descriptor,
     const std::string& name,

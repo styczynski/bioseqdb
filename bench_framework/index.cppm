@@ -1,19 +1,15 @@
 /**
  * @file bench_framework/index.cppm
- * @brief Generic, algorithm-agnostic benchmark orchestration framework.
+ * @brief Run configured benchmarks, compare their results and write reports.
  *
- * Public surface lives in `bioseq::bench::framework`. Users describe a
- * benchmark with `create_benchmark<Input, Output>(...)` (three lambdas:
- * input builder, algorithm runner, output evaluator). They then pass any
- * number of those benchmark handles to `run(...)`. The framework parses
- * the JSON config, expands the parameter matrix, drives the iteration
- * loop in parallel via TBB while showing an ftxui progress dashboard,
- * collects three flavours of metric (built-in `wall_clock_ns`, named
- * counter snapshots, evaluation-handler outputs), evaluates rules from
- * the config, and writes a single `report.json`.
+ * Create benchmarks with callbacks that estimate memory, build inputs, run
+ * algorithms and  evaluate outputs. Pass their handles to run(). The JSON
+ * configuration selects test cases, parameter combinations and comparisons.
+ * Each batch shares its input across sequential runs. Separate batches can
+ * run on TBB workers.
  *
- * Configuration, scheduling, measurement, and report production are owned by
- * this module; interactive rendering is supplied by its implementation unit.
+ * This module collects metrics, displays progress and writes report_<N>.json.
+ * interactive.cppm provides the report browser
  */
 module;
 
@@ -81,34 +77,27 @@ import bioseq.common.logging;
 import bioseq.common.memory_budget;
 import bioseq.instrumentation;
 
-// ---------------------------------------------------------------------------
-//  Public surface
-// ---------------------------------------------------------------------------
+// Public API
 
 export namespace bioseq::bench::framework {
 
-/// Source-owned benchmark wire revision, also read by the Python consumer.
+/// Version of the raw E2E benchmark record format shared with the Python reader.
 inline constexpr std::uint64_t e2e_raw_payload_schema_version = 12;
 
 /**
- * @brief Variant-like wrapper for JSON-derived configuration values.
+ * @brief An owned configuration value with its JSON type attached.
  *
- * Holds one of (string, int64, double, bool). Constructed from a simdjson
- * element via `from_simdjson` or directly from a typed source via the
- * templated `from<T>` factory. String content is owned (`std::string`)
- * so the value survives the simdjson parser's lifetime.
+ * Store strings, integers, floating-point numbers or booleans. from_simdjson()
+ * also marks arrays, objects and null as non_scalar and keeps their JSON text
+ * for error messages. Strings survive destruction of  the simdjson parser.
  *
- * Comparison operators compare against the active kind only — a string
- * value never compares equal to an integer, even if the integer's
- * decimal spelling matches the string.
+ * Equality requires matching types. For example, the string "1" and integer
+ * 1 are different parameter values.
  */
 struct config_value {
-    /// Recognised scalar kinds plus a sentinel for arrays, objects, and
-    /// nulls. The framework refuses to treat non-scalar values as
-    /// matching any declared parameter type, so semantic validation surfaces
-    /// `value_type_mismatch` for nested structures used where a scalar was
-    /// expected. `string_value` carries the source JSON spelling for
-    /// nested data so error messages can show what the user wrote.
+    /// Scalar parameter types and a marker for arrays, objects and null.
+    /// Validation rejects non_scalar where a scalar is required. Its JSON text
+    /// stays in string_value so the error can show the rejected value.
     enum class value_kind : std::uint8_t {
         string,
         integer,
@@ -175,7 +164,7 @@ struct config_value {
         return false;
     }
 
-    /// Templated factory replacing four near-identical `from_T` helpers.
+    /// Copy a supported C++ string, boolean or number into a configuration value.
     template<typename p_value_type>
     [[nodiscard]] static config_value from(p_value_type raw_value) noexcept {
         config_value out{};
@@ -199,85 +188,67 @@ struct config_value {
         return out;
     }
 
-    /// Parse a simdjson element. Arrays and objects are not first-class
-    /// configuration values; callers that want to accept them must walk
-    /// the simdjson element directly. For exotic input we fall back to a
-    /// stringified form so the value is preserved end-to-end.
+    /// Copy a JSON value. Arrays, objects and null become non_scalar values
+    /// witd their JSON text saved for diagnostics.
     [[nodiscard]] static config_value from_simdjson(
         simdjson::dom::element element) noexcept;
 };
 
-/// Per-algorithm parameter map: param_name -> value (with defaults filled in).
+/// Named parameter values used by algorithm tuples and  rule selectors.
 using parameter_map = std::map<std::string, config_value>;
 
-/// Framework-resolved execution tuple exposed read-only to `on_input` through
-/// run_constraints after matrix expansion and `cases=` pruning.
+/// An, algorithm and its resolved parameters that will run in this batch.
+/// on_input receives these through run_constraints after matrix expansion
+/// and the cases filter have selected the work.
 struct resolved_execution_tuple {
     std::string algorithm_name{};
     parameter_map params{};
 };
 
 /**
- * @brief Resource budget hints returned by the user's resource estimator.
+ * @brief Estimated memory needed by one test-case group.
  *
- * The framework uses this to schedule batches inside a hardcoded 5 GiB
- * memory budget. `base_memory` covers the lifetime of the cached `Input`
- * (allocated by `on_input`, released after `on_cleanup`); `extra_memory`
- * covers only the iteration loop (acquired before the first iteration of
- * a batch, released as soon as the last iteration of that batch returns
- * from `on_run`). Both default to zero, which means "this batch has no
- * memory constraints" — the framework will schedule it whenever a TBB
- * worker is free.
+ * base_memory covers the input. extra_memory covers algorithm working space.
+ * The scheduler reserves their sum for the whole batch, including cleanup,
+ * using a memory cap based on system RAM and the configured buffer percentage
  *
- * The estimator is called exactly once per batch (per `(test_case,
- * group)` pair); the framework records that one answer on the batch
- * and uses it for both the budget reservation and the `on_input` /
- * `on_cleanup` lifecycle. RNG inside the estimator is therefore
- * harmless — the second call that would yield a different value never
- * happens.
+ * The estimator runs once per batch. on_input receives that result with
+ * execution_tuples filled from the selected work. Zero estimates reserve no
+ * memory, though concurrency limits still apply.
  */
 struct run_constraints {
-    /// Bytes that must remain reserved between `on_input` and
-    /// `on_cleanup` (i.e. for the lifetime of the cached `Input`).
-    /// Default 0 = no reservation.
+    /// Estimated bytes for  the cached input. The scheduler reserves this
+    /// together with extra_memory for the whole batch. Zero adds no reservation.
     std::size_t base_memory  = 0;
-    /// Bytes additionally reserved while the iteration loop is in
-    /// flight on this batch. Released as soon as the loop exits.
-    /// Default 0 = no reservation.
+    /// Estimated working memory in addition to the inpug. It is part of the
+    /// whole-batch reservation. Zero adds no reservation.
     std::size_t extra_memory = 0;
-    /// Framework-owned, stable-order execution tuples that will actually run
-    /// against this batch's cached Input. The framework fills this after
-    /// matrix expansion and `cases=` pruning, replacing any estimator-provided
-    /// contents before `on_input` observes the value. Input builders may use
-    /// it to avoid preparing algorithm/policy-specific untimed fixtures for
-    /// rows that cannot run in this batch.
+    /// Algorithms and resolved parameters selected for this batch, in stable
+    /// tuple order. The framework replaces any estimator-provided list before
+    /// on_input. Input builders can use it to prepare only the fixtures these
+    /// algorithms need outside the measured loop.
     std::vector<resolved_execution_tuple> execution_tuples{};
 };
 
 /**
- * @brief Type-erased benchmark handle returned by `create_benchmark`.
- *
- * Public so the variadic `run(...)` parameter pack can be deduced. Users
- * never construct this directly.
+ * @brief A benchmark handle that hides its  input and output C++ types.
+ * Create it with create_benchmark() and pass it to run().
  */
 struct erased_benchmark {
     std::string title;
     std::string benchmark_key;
-    /// Stable report/provenance identity for the configuration.
+    /// Configuration identity written to reports.
     std::string config_path;
-    /// File-open path; equal to config_path unless a validated launcher
-    /// supplies a separate absolute read path.
+    /// Path used to read the configuration file. Defaults to config_path.
     std::string config_open_path;
     bool raw_samples_enabled = false;
-    /// Owns the typed lambdas + iteration loop. The first call prepares and
-    /// enqueues this benchmark without blocking a oneTBB worker; the returned
-    /// closure joins its batches and publishes the completed report state.
+    /// Prepare and enqueue the benchmark using its typed callbacks.
+    /// Return, a function that waits for its batches and publishes their results.
     std::function<std::function<void()>(struct benchmark_context&)> execute;
 };
 
-/// Test-only process-local fault seam for the durable raw-evidence syscalls.
-/// Production callers leave this at `none`, so inherited process state cannot
-/// enable it. Tests must reset the seam after each injected run.
+/// Inject failures in raw-record writes for tests in this process.
+/// Normal runs use none. Each test must reset the setting after its run.
 enum class raw_evidence_io_fault : std::uint8_t {
     none,
     short_write,
@@ -288,9 +259,8 @@ enum class raw_evidence_io_fault : std::uint8_t {
 void set_raw_evidence_io_fault_for_testing(
     raw_evidence_io_fault fault) noexcept;
 
-/// Test-only corruption seam for proving paired schedule evidence fails
-/// closed. It changes only the retained evidence coordinates after the real
-/// scheduler has selected the correct execution order.
+/// Corrupt recorded schedule coordinates in tests to check that paired-rule
+/// validation detects them The scheduler still runs the  correct order.
 enum class paired_schedule_evidence_fault : std::uint8_t {
     none,
     wrong_shuffle_seed,
@@ -310,78 +280,12 @@ namespace detail {
 }  // namespace detail
 
 /**
- * @brief Build a benchmark spec.
+ * @brief Borrow one algorithm's utput while finalizing a logical repeat.
  *
- * **Thread-safety contract (important).** When a benchmark's
- * `concurrency.concurrency == true` (the default), the framework runs many
- * iterations of `on_run` and `on_evaluate` concurrently on TBB worker
- * threads — but only across different `(test_case, group)` batches. Within
- * one batch, items run sequentially against one cached `Input`. The
- * captured callable objects must be safe to invoke concurrently across
- * batches (typically pure functions of their arguments).
- *
- * `on_estimate_resources` MUST NOT throw because it also runs on the driver
- * during enqueue. Worker-side callback failures are caught at the scheduler
- * boundary: independent batches drain, the original exception is rethrown at
- * the explicit join, and `run()` writes completed samples as a failed partial
- * report instead of allowing `~batch_scheduler() noexcept` to terminate.
- *
- * @param title             Human-readable label echoed in the report's `title` field.
- * @param benchmark_key     Unique key used (a) to look up the matching block in
- *                          `config_path`, and (b) as the report's
- *                          `benchmarks.<benchmark_key>` entry. One config file may
- *                          hold multiple benchmark blocks; the key disambiguates
- *                          which block this `create_benchmark` call describes.
- * @param config_path       Stable identity reported for the bench configuration
- *                          JSON (validated against a built-in JSON schema before
- *                          use).
- * @param on_estimate_resources  Returns a `run_constraints` describing the memory
- *                          this batch will need. Called at most once per
- *                          `(test_case, group)` batch, before `on_input`. The
- *                          framework reserves `base_memory` from a shared 5 GiB
- *                          pool before calling `on_input` and `extra_memory` for
- *                          the iteration loop only. Called exactly once per
- *                          batch; RNG inside is harmless because the
- *                          framework only invokes the lambda once per
- *                          `(test_case, group)` pair. Must not throw.
- * @param on_input          Builds the test-case `Input` from the parsed JSON data
- *                          and the framework-determined `run_constraints`. Called
- *                          exactly once per `(test_case, group)` batch — when a
- *                          test_case is split into N parallel groups, the framework
- *                          calls `on_input` once per group, each with its own
- *                          `Input` instance. Must not throw.
- * @param on_run            Runs the algorithm. Wraps the timing window for the
- *                          built-in `wall_clock_ns` metric. Called sequentially
- *                          inside one batch, concurrently across batches. An
- *                          escaped exception aborts the current batch and is
- *                          owned by the scheduler until the explicit join;
- *                          it never first emerges from scheduler destruction.
- * @param on_evaluate       Returns evaluation metrics computed from the algorithm
- *                          output. Receives the same `Input` that was fed to
- *                          `on_run` so the evaluator can run an independent
- *                          reference pass without polluting the timing window.
- *                          Each map entry is a `(metric_name, metric_value)` pair
- *                          appended to the `all_regions` bucket. Names that
- *                          don't match any `metrics` key declared with
- *                          `type: "evaluation"` are silently dropped.
- *                          Declared-but-not-returned metrics fail the run via
- *                          `missing_evaluation_metric`. Called like `on_run`.
- * @param on_cleanup        Optional teardown callback. Defaults to an empty
- *                          `std::function` (no-op). When non-empty, runs
- *                          once per `(test_case, group)` batch after every
- *                          iteration on that batch's cached `Input` has
- *                          finished. Same first three parameters as
- *                          `on_input` plus the cached `Input&`. Note: when a
- *                          test case is split into N groups, `on_cleanup` is
- *                          called N times (once per group). Runs on the
- *                          batch's TBB worker, so cleanup must not assume
- *                          single-thread serialisation across cleanups —
- *                          but it is single-threaded *within* one batch.
- *                          **Must not throw**, same contract as `on_input`.
- * @param config_open_path  Optional path used only to open/read configuration
- *                          bytes. Empty preserves the historical behavior of
- *                          reading config_path directly; config_path remains
- *                          the report/provenance identity in either case.
+ * The framework keeps all outputs from that repeat alive until finalize_repeat
+ * returns and their metrics are recorded. The callback can inspect the
+ * algorithm name and parameters, then update the output before evaluation.
+ * These references belong to the framework and must not be kept by the callback.
  */
 template<typename p_output>
 struct repeat_output_reference {
@@ -391,15 +295,15 @@ struct repeat_output_reference {
 };
 
 /**
- * @brief Opt-in logical-repeat finalization for paired benchmark evidence.
+ * @brief Finalize a complete repeat before recording any of its results.
  *
- * The empty default preserves the historical immediate-commit path.  When
- * `enabled(input)` is true, an interleaved repeat is measured completely,
- * `finalize_repeat` receives every mutable output before any evaluation/raw
- * append, and `published_wall_clock_ns` may select a previously measured
- * algorithm-only duration inside the framework envelope.  The framework
- * retains the unmodified envelope in `outer_e2e_ns` and rejects an override
- * which exceeds it.
+ * When enabled(input) is true, keep every output from the interleaved repeat
+ * until finalize_repeat can inspect  and update them together. Evaluation and
+ * raw-record writes happen afterwards.
+ *
+ * published_wall_clock_ns may choose an algorithm duration measured inside
+ * the framework's timing window. A value exceeding that window fails the run.
+ * Raw records save the full duration as outer_e2e_ns.
  */
 template<typename p_input, typename p_output>
 struct repeat_finalization_callbacks {
@@ -416,7 +320,7 @@ struct repeat_finalization_callbacks {
         finalize_repeat{};
 };
 
-/// Exact framework-owned clock envelope for one measured iteration body.
+/// Start, end and elapsed nanoseconds of the measured iteration body.
 struct iteration_measurement_window {
     std::int64_t  begin_ns = 0;
     std::int64_t  end_ns = 0;
@@ -424,14 +328,12 @@ struct iteration_measurement_window {
 };
 
 /**
- * @brief Opt-in per-iteration preparation and post-measurement mutation.
+ * @brief Prepare and finish an iteration outside its measurement window.
  *
- * `enabled` is evaluated outside the measurement window.  When it returns
- * true, `before_iteration` constructs iteration-local preparation on the
- * worker stack, `measured_iteration` alone occupies the framework clock and
- * counter/profiler envelope, and `after_iteration` runs after that envelope
- * but before evaluation or raw-sample publication.  A false result preserves
- * the benchmark's ordinary `on_run` path.
+ * If enabled returns true, before_iteration creates worker-local  preparation,
+ * measured_iteration runs with timing and instrumentation enabled, and
+ * after_iteration can update the outut before evaluation and raw-record writes.
+ * Otherwise the framework calls on_run in the usual measurement window.
  */
 template<typename p_input, typename p_preparation, typename p_output>
 struct iteration_boundary_callbacks {
@@ -527,11 +429,10 @@ template<typename p_input, typename p_preparation, typename p_output>
         repeat_finalization = {});
 
 /**
- * @brief Run all benchmarks. Returns 0 on success, 1 if any rule violated
- *        or any config failed to parse / validate.
- *
- * Variadic for syntax fidelity with the user's `main.cpp` example;
- * collects the pack into `vector<erased_benchmark>` and delegates.
+ * @brief Run, the supplied benchmarks and return their exit status
+ * Return zero on success. Blocking rule failures and configuration or execution
+ * errors produce a nonzero status. The same entry point handles CLI modes such
+ * as the report browser.
  */
 template<typename... p_benchmark_types>
 [[nodiscard]] int run(int argc, char** argv,
@@ -550,9 +451,7 @@ template<typename... p_benchmark_types>
 
 }  // namespace bioseq::bench::framework
 
-// ---------------------------------------------------------------------------
-//  Internals
-// ---------------------------------------------------------------------------
+// Framework  internals
 
 namespace bioseq::bench::framework {
 
@@ -577,15 +476,15 @@ void set_paired_schedule_evidence_fault_for_testing(
         fault, std::memory_order_release);
 }
 
-/// Canonical compile-time profiler args used by the framework. Timing-only
-/// is enough for `wall_clock_ns`; the framework does not need PMU counters
-/// or sampling.
+/// Use the benchmark profiler configuration for measured iterations.
+/// It enables region and loop measurements, counters and tracing according
+/// to bioseq.instrumentation.configuration.
 using profiler_configuration =
     bioseq::instrumentation::benchmark_profiling_configuration;
 
 namespace detail {
 
-// ----------------- shared types -----------------
+// Shared types
 
 enum class comparison_operator : std::uint8_t {
     less_than,
@@ -593,27 +492,20 @@ enum class comparison_operator : std::uint8_t {
     equal,
 };
 
-/// Aggregation function applied to a sample vector when reducing it to a
-/// single value before a comparator runs. Used by both per-rule
-/// comparators (the LHS / RHS aggregates of a `benchmark_rule`) and regression
-/// rules (the `aggregate` field on a `regression_rule`). Matches the six
-/// values allowed by the JSON enum: sum / min / max / p01 / p50 / p99.
+/// Reduce a sample vector to one value for a benchmark or regression rule.
+/// JSON accepts sum, min, max, p01, p50 and p99.
 enum class sample_aggregate : std::uint8_t { sum, min, max, p01, p50, p99 };
 
-/// One row of the aggregate registry. `percentile_fraction` is meaningful
-/// only for the three percentile entries; the other three carry NaN to
-/// signal "not a percentile". Adding a new percentile just means adding a
-/// row — `aggregate_samples` reads the fraction from here.
+/// JSON name, enum value and optional percentile for one aggregation method.
+/// Non-percentile methods use NaN in percentile_fraction.
 struct sample_aggregate_entry {
     std::string_view    name;
     sample_aggregate           kind;
     double              percentile_fraction;     // NaN for non-percentile aggregates
 };
 
-/// Compile-time table linking the JSON spelling to the enumerator. Single
-/// source of truth for parsers, validators, the `aggregate_samples`
-/// dispatch, and the report writer; mirrors the
-/// `k_builtin_metric_registry` pattern.
+/// Share aggregation names and percentile fractions between configuration
+/// parsing, sample reduction and reports.
 inline constexpr std::array<sample_aggregate_entry, 6> k_aggregate_registry{ {
     { "sum", sample_aggregate::sum, std::numeric_limits<double>::quiet_NaN() },
     { "min", sample_aggregate::min, std::numeric_limits<double>::quiet_NaN() },
@@ -639,9 +531,7 @@ aggregate_name(sample_aggregate aggregate) noexcept {
     return "?";
 }
 
-/// Returns the percentile fraction (0.01, 0.50, 0.99) for percentile
-/// aggregates, or NaN for the additive Sum / Min / Max kinds. The NaN
-/// sentinel keeps `aggregate_samples`' percentile branch table-driven.
+/// Return the percentile fraction, or NaN for  sum, min and max.
 [[nodiscard]] inline constexpr double
 aggregate_percentile(sample_aggregate aggregate) noexcept {
     for (const auto& entry : k_aggregate_registry) {
@@ -650,10 +540,8 @@ aggregate_percentile(sample_aggregate aggregate) noexcept {
     return std::numeric_limits<double>::quiet_NaN();
 }
 
-/// Every recognised metric flavour. The first batch are produced by the
-/// framework from the iteration-local `profiler_state<Args>` aggregates;
-/// Counter and evaluation metrics route through the user's instrumentation
-/// counters / evaluation lambda.
+/// Metrics fom the outer clock, instrumented regions and loops, counters,
+/// or the benchmark's evaluation callback.
 enum class metric_kind : std::uint8_t {
     wall_clock_ns,
     region_total_ns,
@@ -681,8 +569,7 @@ enum class metric_kind : std::uint8_t {
     evaluation,
 };
 
-/// Source family (drives schema validation, parsing, and which descriptor
-/// table to walk).
+/// Where a metric gets its samples. Used for validation and collection.
 enum class metric_source : std::uint8_t {
     outer_clock,
     region,
@@ -691,9 +578,7 @@ enum class metric_source : std::uint8_t {
     evaluation,
 };
 
-/// Cross-descriptor combiner (only meaningful for Region / Loop). Drives
-/// the per-iteration "fold every visited descriptor's value into one
-/// number" step in `append_iteration_samples`.
+/// How to combine region or loop measurements into one iteration sample.
 enum class metric_combiner : std::uint8_t {
     sum,
     histogram_sum,
@@ -704,18 +589,17 @@ enum class metric_combiner : std::uint8_t {
     requires_region,
 };
 
-/// Static registry of every framework-built-in metric. Schema validation,
-/// metric parsing, semantic checks, and the iteration extraction step all
-/// consume this single source of truth.
+/// Name, source and collection method for a built-in metric.
+/// Configuration checks and sample collection use the same registry entries.
 struct builtin_metric_entry {
     std::string_view name;
     metric_kind       kind;
     metric_source     source;
     metric_combiner   combiner;
-    /// True iff the metric reads any PMU-derived field. Used by the
-    /// `pmu_unavailable` runtime warning.
+    /// Whether this metric needs hardware performance counters. Used to
+    /// report pmu_unavailable when  those counters cannot be read.
     bool             needs_pmu = false;
-    /// p-fraction for HistogramSum-combined metrics; ignored otherwise.
+    /// Percentile fraction for histogram_sum metrics Unused by other combiners.
     double           percentile = 0.0;
 };
 
@@ -766,10 +650,7 @@ inline constexpr std::array<builtin_metric_entry, 22> k_builtin_metric_registry{
     return "?";
 }
 
-/// Parse the JSON `"type"` string into a source family. Returns
-/// `std::nullopt` for unrecognised strings; the caller distinguishes
-/// "counter" / "evaluation" from registry-driven sources by inspecting
-/// the source enumerator.
+/// Parse a metric's JSON type. Return nullopt for an unknown spelling.
 [[nodiscard]] inline std::optional<metric_source> parse_metric_type(std::string_view type_text) noexcept {
     if (type_text == "builtin")    return metric_source::outer_clock;
     if (type_text == "region")     return metric_source::region;
@@ -779,10 +660,7 @@ inline constexpr std::array<builtin_metric_entry, 22> k_builtin_metric_registry{
     return std::nullopt;
 }
 
-/// Inverse of `parse_metric_type`. Renders a `metric_source` as its
-/// JSON-side spelling (`"region"`, `"loop"`, `"builtin"`, `"counter"`,
-/// `"evaluation"`). Used by diagnostic messages — the strings round-trip
-/// with `parse_metric_type`.
+/// Return the JSON spelling of a metric source for reports and diagnostics.
 [[nodiscard]] inline constexpr std::string_view metric_source_name(metric_source source) noexcept {
     switch (source) {
         case metric_source::outer_clock: return "builtin";
@@ -801,13 +679,11 @@ inline constexpr std::array<builtin_metric_entry, 22> k_builtin_metric_registry{
     return std::nullopt;
 }
 
-/// Match expression — picks a subset of execution tuples by algorithm key,
-/// partial parameter assignment, and optional source coordinates. Empty
-/// `match` means "any tuple for this algorithm"; empty `test_case` and
-/// `region` mean every configured test case and `all_regions`, respectively.
-/// Keeping the source coordinates on each side lets one within-run rule
-/// compare two differently named instrumentation regions without deriving or
-/// replacing either raw metric in the report.
+/// Select algorithm tuples by name and any supplied parameter values.
+/// An, empty parameter map matches all tuples for that algorithm. Empty
+/// test_case and region fields select all test cases and all_regions.
+/// Each side of a rule can select its own instruentation region. A
+/// test-case  filter restricts comparisons to that case.
 struct rule_selector {
     std::string algorithm_key;
     parameter_map    match{};
@@ -825,25 +701,20 @@ struct rule_comparator {
     comparison_operator op = comparison_operator::equal;
     double    threshold_pct = 0.0;
     double    tolerance_pct = 0.0;
-    /// Reduction applied to each side's sample vector before the
-    /// comparator runs. Defaults to the framework's p50 percentile.
+    /// How to reduce samples for an aggregate or ratio comparison. Defaults to p50.
     sample_aggregate aggregate = sample_aggregate::p50;
-    /// Independent pairing reduces LHS and RHS separately.
-    /// Ratio-paired rules build one LHS/RHS ratio for each logical repeat and
-    /// reduce that vector. Exact-paired rules compare the finite IEEE-754 value
-    /// of every aligned repeat without reducing either source vector.
+    /// Compare separately reduced sample vectors, reduced per-repeat ratios,
+    /// or exact finite values from each matching repeat. Exact comparisons
+    /// preserve the IEEE-754 bit pattern, including the sign of zero.
     pairing_mode pairing = pairing_mode::independent_aggregates;
-    /// Reference ratio used as the ratio-paired comparator's RHS. Keeping this
-    /// separate from `tolerance_pct` makes a rule state "report_76 ratio R
-    /// with N% relative noise" directly, including baselines greater than 1.
+    /// Expected ratio for a paired comparison. tolerance_pct allows relative
+    /// variation around this value.
     double paired_baseline = 1.0;
     bool paired_baseline_explicit = false;
-    /// Diagnostic rules still emit findings/evidence but do not fail the
-    /// process. Blocking is the default.
+    /// Whether a failed rule makes the run fail. False still records its findings.
     bool blocking = true;
-    /// Number of leading logical repeats excluded from a ratio-paired rule. The
-    /// raw samples remain intact, so repeat zero can be reported separately
-    /// as first-repeat evidence while steady-state comparison starts at one.
+    /// Leading repeats to omit from a ratio  comparison. Their raw samples
+    /// remain in the report, so first-run costs can be examined separately.
     std::size_t warmup_repetitions = 0;
 };
 
@@ -873,46 +744,31 @@ struct benchmark_rule {
 struct metric_specification {
     std::string  name;
     metric_kind   kind = metric_kind::wall_clock_ns;
-    /// `"type"` string the user declared (or the implicit "builtin"
-    /// default). Stored separately from `kind` so semantic validation can
-    /// detect cross-source typos like `"type": "loop"` with key
-    /// `region_total_ns` — the registry resolves the kind from the name
-    /// regardless of `type`, but a mismatch is still a config error.
+    /// Source declared by the metric's JSON type, defaulting to builtin.
+    /// Keep it separate from kind so validation can catch a loop type paired
+    /// with a region metric name, for example
     metric_source declared_source = metric_source::outer_clock;
-    /// For `kind == Counter`: canonical name of the instrumentation counter
-    /// to snapshot. Defaults to `name` when the config omits the explicit
-    /// `"counter"` field.
+    /// Instrumentation counter to read for a counter metric. Defaults to the
+    /// metric's name when the configuration omits counter.
     std::string  counter_name{};
-    /// For `metric_source::region` / `metric_source::loop` metrics: when
-    /// non-empty, restrict the metric to descriptors whose name equals
-    /// this string. When empty, every visited descriptor contributes via
-    /// the registry's combiner (Sum, HistogramSum, PmuRatio, etc.).
-    /// Mandatory for metrics whose combiner is `RequiresRegion`
-    /// (region_min_ns, region_max_ns, loop_min_per_iter_ns,
-    /// loop_max_per_iter_ns) — semantic_validate_config rejects those if
-    /// `region` is empty.
+    /// Restrict a  region or loop metric to this descriptor name. Empty allows
+    /// every visited descriptor to contribute. Metrics that need a minmum
+    /// or maximum from one descriptor require an explicit name.
     std::string  region{};
-    /// Optional exact execution-row applicability for evaluation metrics.
-    /// Empty preserves the legacy report-global emission check. A non-empty
-    /// list opts into fail-closed per-accepted-iteration validation for the
-    /// named algorithm rows without changing ordinary benchmark semantics.
+    /// Algorithm rows that must emit this evaluation metric on every accepted
+    /// iteration. Empty only requires the metric to appear somewhere in the run.
     std::vector<std::string> applicable_algorithms{};
     std::vector<benchmark_rule> rules{};
 };
 
 struct concurrency_options {
-    /// If true, this benchmark runs alone (every item-iteration loop
-    /// acquires the cross-bench unique lock; siblings queue behind it).
+    /// Run each batch alone across, all benchmarks, including sibling batches.
     bool bench_lock  = false;
-    /// If true (default), batches of this benchmark fan out across TBB
-    /// workers. False forces every item to take the per-benchmark
-    /// serial mutex, so all iterations of all items run on whichever
-    /// worker happens to pick them up next, but never two at once.
+    /// Allow batches from this benchmark to run together on TBB workers.
+    /// False lets the scheduler start  only one of its batches at a time.
     bool concurrency = true;
 
-    // batched scheduler runs at most one tuple at a time per
-    // (test_case, group), so the contention this flag was guarding
-    // against is impossible by construction.
+    // Each (test_case, group) batch runs its algorithm tuples sequentially.
 };
 
 struct parameter_schema {
@@ -929,9 +785,8 @@ struct algorithm_schema {
     std::vector<parameter_schema> params{};
 };
 
-/// Default per-test-case concurrency: max(1, hw_concurrency-1). Cached
-/// once per process so `parse_test_cases` does not re-query the OS for
-/// every entry.
+/// Use one fewer than the reported hardware threads, with a minimum of one.
+/// Cache the result so parsing several test cases reuses the same value.
 [[nodiscard]] inline std::size_t default_test_case_concurrency() noexcept {
     static const std::size_t cached = [] {
         const auto hw = std::thread::hardware_concurrency();
@@ -943,12 +798,9 @@ struct algorithm_schema {
 struct test_case_specification {
     std::string name;
     std::string description;
-    /// Maximum number of parallel groups this test case may be split
-    /// across. The framework caps the actual group count at the total
-    /// iteration count across all tuples sharing this test_case (a
-    /// group with zero iterations is meaningless, so we never create
-    /// one). Read from `test_cases.<name>.concurrency`; defaults to
-    /// `default_test_case_concurrency()` when the key is omitted.
+    /// Maximum parallel groups for this test case. The actual count is capped
+    /// at its iterations per algorithm, so every group has work. Read from
+    /// test_cases.<name>.concurrency, with the default chosen from hardware threads.
     std::size_t concurrency = 0;
     /// View into the parser pool of the owning `benchmark_execution_state`.
     simdjson::dom::element data{};
@@ -967,26 +819,22 @@ struct benchmark_configuration {
     bool by_regions = false;
     iteration_order_mode iteration_order = iteration_order_mode::item_major;
     std::uint64_t iteration_order_seed = 0;
-    /// Tag labels for `--filter tags=...` selection. REQUIRED in the config
-    /// JSON (may be an empty array). Order preserved as declared; duplicates
-    /// allowed but meaningless. A benchmark with an empty `tags` list can
-    /// never be selected by a `tags=` filter (only by `benchmark=` / no filter).
+    /// Labels used by --filter tags=.... JSON must provide the array, which may
+    /// be empty. Keep declaration order. An empty list cannot match a tags filter.
     std::vector<std::string> tags{};
     /// (test_case_name, iterations) pairs declared in `matrix.for`.
     std::vector<std::pair<std::string, std::size_t>> for_each{};
-    /// algorithm_name -> param_name -> declared values list (one cross-product axis).
+    /// Values to try for each algorithm  parameter when expanding the matrix
     std::map<std::string, std::map<std::string, std::vector<config_value>>> matrix_over{};
-    /// Schemas for every algorithm registered in top-level `params`. Cloned
-    /// into the per-benchmark config so matrix expansion can fill defaults.
+    /// Parameter definitions from the top-level params object, including defaults
+    /// needed when expanding the algorithm matrix.
     std::map<std::string, algorithm_schema> algorithm_schemas{};
-    /// Metrics declared by this benchmark. Iteration order preserved.
+    /// Metrics in their configumation order.
     std::vector<metric_specification> metrics{};
 
-    /// Optional fail-closed acceptance contract for benchmarks whose result is
-    /// only meaningful when the complete declared comparison matrix ran.  The
-    /// algorithm list names exact report rows (one expanded tuple per name),
-    /// while the test-case map fixes the exact iteration count for each row.
-    /// An empty algorithm list disables the acceptance contract.
+    /// Require a complete comparison matrix before accepting the benchmark.
+    /// Name the exact algorithm rows and iteration counts for each test case.
+    /// An empty algorithm list disables these checks.
     struct acceptance_contract {
         struct named_region_sample_multiplicity {
             std::string algorithm{};
@@ -1003,9 +851,9 @@ struct benchmark_configuration {
         std::vector<std::string> exact_algorithm_rows{};
         std::map<std::string, std::size_t> exact_test_case_iterations{};
         bool require_named_region_iteration_coverage = false;
-        /// Configured descriptor-weighted total. For every coordinate the
-        /// total must divide by its accepted iteration count; that quotient is
-        /// the exact raw descriptor count required in each logical iteration.
+        /// Required total samples for each algorithm/case/region/metric combination.
+        /// Divide by the required iteration  count to get the descriptor samples
+        /// that must be present in every iteration.
         std::vector<named_region_sample_multiplicity>
             exact_named_region_sample_multiplicities{};
 
@@ -1017,22 +865,21 @@ struct benchmark_configuration {
 
 struct execution_tuple {
     std::string algorithm_name;
-    parameter_map    params{};      // every parameter resolved (declared or defaulted)
+    parameter_map    params{};      // All parameters supplied explicitly or filled from defaults.
 };
 
-/// Exact scheduler coordinates observed by one completed measurement_cell iteration.
-/// Paired-rule evidence records these values rather than reconstructing the
-/// configured shuffle after the run, so a malformed execution order cannot be
-/// presented as if it followed the requested interleaved schedule.
+/// Record the repeat, order position and shuffle seed observed during execution.
+/// Paired-rule checks use these observations to detect a run that did not
+/// follow its configured schedule.
 struct iteration_schedule_sample {
     std::size_t repeat = 0;
     std::size_t order_position = 0;
     std::uint64_t shuffle_seed = 0;
 };
 
-/// Fully resolved source route for one side of a ratio-paired rule.
-/// The tuple index and complete parameter map distinguish two expanded tuples
-/// that happen to share an algorithm name.
+/// Identify the algorithm tuple and sample source for one side of a paired rule.
+/// Keep the tuple index and parameters because several tuples can use the
+/// same, algorithm name.
 struct paired_rule_route_evidence {
     std::string algorithm{};
     parameter_map params{};
@@ -1042,9 +889,9 @@ struct paired_rule_route_evidence {
     std::string metric{};
 };
 
-/// Lossless inputs used to form one logical repeat ratio. Named regions may
-/// contain multiple same-name descriptors, so the descriptor samples are
-/// retained beside the reduced logical values used by the comparator.
+/// Keep the source samples and  calculated ratio for one logical repeat.
+/// Several descriptors can share a region name. Save their individual
+/// samples alongsipe the reduced value so the comparison can be checked later.
 struct paired_rule_repeat_evidence {
     std::size_t repeat = 0;
     bool included_after_warmup = false;
@@ -1063,9 +910,9 @@ struct paired_rule_repeat_evidence {
     bool schedule_identity_matches = false;
 };
 
-/// Reconstructable result of one resolved ratio-paired gate. This is the
-/// single evidence object shared by the final report and the crash-resilient
-/// debug JSONL stream; neither writer derives its own ratios or identities.
+/// Store a paired rule's sources, repeat ratios and final decision
+/// The report and debug JSONL writer share this result so both contain the
+/// same calculations and schedule observations.
 struct paired_rule_evidence {
     std::string config_path{};
     std::string benchmark_key{};
@@ -1087,37 +934,15 @@ struct paired_rule_evidence {
     bool accepted = false;
 };
 
-/// One (test_case × group × execution_tuple) cell holding iteration
-/// metrics for a single group's slice of iterations.
-///
-/// `measurement_cell` is owned via `std::unique_ptr<measurement_cell>` (see `benchmark_execution_state`)
-/// because the framework hands out stable `measurement_cell*` to TBB workers and the
-/// smart pointers exist here because the per-benchmark state owns every
-/// cell for the lifetime of the run; the alternative would be a
-/// stable-iterator container like `std::list` plus manual lookup, which
-/// is strictly worse.
-///
-/// Groups are an implementation detail driven by
-/// `test_cases.<name>.concurrency` and the per-group iteration split
-/// (see `split_iterations`). The user-visible report contains one
-/// entry per `(test_case, tuple)` with samples concatenated across
-/// every group of the same `(test_case, tuple)` pair — see
-/// `merge_group_samples` in the writer / rule evaluator.
-///
-/// items inside a batch run sequentially. A `measurement_cell` is therefore never
-/// touched by two threads at once, so `samples` does not need any
-/// flat work-unit list let two threads race the same cell across
-/// Raw descriptor emission counts for one completed logical iteration:
-/// region name -> metric name -> number of same-name descriptor samples.
-/// Unlike the aggregate `samples` vectors this retains iteration boundaries,
-/// which strict acceptance needs to reject skewed descriptor-weighted P50s.
+/// Count raw descriptor samples for one completed iteration, grouped by
+/// region name and metric name. Keeping  iteration boundaries lets acceptance
+/// checks detect uneven contributions from descriptors that share a name.
 using named_region_iteration_sample_counts =
     std::map<std::string, std::map<std::string, std::size_t>>;
 
-/// Completion evidence retained independently of numeric sample vectors.
-/// E2E raw records can be diagnostic/history-eligible while their rejected
-/// timing is deliberately absent; this per-repeat evidence lets validation
-/// distinguish that disposition from an accidentally missing accepted sample.
+/// Record completion separately from metric samples. An E2E iteration may
+/// keep its raw result while its timing is rejected. These flags distinguish
+/// that case from an accepted iteration whose samples are missing.
 struct iteration_completion_evidence {
     bool completed = false;
     bool framework_timing_eligible = true;
@@ -1127,49 +952,40 @@ struct iteration_completion_evidence {
 struct measurement_cell {
     const test_case_specification*  test_case = nullptr;
     const execution_tuple* tuple = nullptr;
-    /// Iterations *for this group* (= `split_iterations(total, group_count)[group_index]`).
+    /// Number of iterations assigned to this group.
     std::size_t          iterations = 0;
-    /// Stable index into the test_cases vector. Lets the per-batch
-    /// input cache key inputs by index without pointer arithmetic.
+    /// Index of the test case used to find this batch's cached input.
     std::size_t          test_case_index = 0;
     /// Index of this group within its test_case's split. Always < group_count.
     std::size_t          group_index = 0;
-    /// Total number of groups for this test_case (the group_index
-    /// upper-bound + 1). Cached on every cell so the writer does not
-    /// have to re-derive it from the global state.
+    /// Number of groups sharing this est case's iterations.
     std::size_t          group_count = 1;
-    /// Stable index in benchmark_execution_state::execution_tuples. Required
-    /// because distinct parameter tuples may share one algorithm name.
+    /// Index in execution_tuples. Distinguishes parameter combinations that
+    /// use  the same algorithm name.
     std::size_t          tuple_index = 0;
 
-    /// region_name -> metric_name -> sample values. "all_regions" is a
-    /// synthetic bucket holding every counter / evaluation metric and the
-    /// iteration-level wall_clock_ns for timing-eligible iterations.
-    /// Per-region buckets only appear when
-    /// `benchmark_configuration::by_regions == true`.
+    /// Samples grouped by region and metric. all_regions holds counters,
+    /// evaluation values and eligible iteration timings. Named region buckets
+    /// are collected when by_regions is enabled.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
-    /// Named instrumentation buckets may contain more than one descriptor
-    /// with the same name. Keep their raw samples unchanged for ratio
-    /// evaluation, but separately count at most one contribution per
-    /// (iteration, region name, metric).  Strict acceptance can therefore
-    /// prove all scheduled iterations contributed without assuming raw sample
-    /// count == iteration count.
+    /// Count iterations that contributed each named region/metric pair.
+    /// Count at most once per iteration even when several descriptors share
+    /// the name, so coverage checks can detect missing iterations.
     std::map<std::string, std::map<std::string, std::size_t>>
         named_region_iteration_contributions{};
-    /// One entry per completed local iteration when strict named-region
-    /// acceptance is active. The outer vector supplies collision-free local
-    /// ordinals; group merging rebases them by concatenating in group-index
-    /// order instead of treating each group's local repeat 0 as the same run.
+    /// Descriptor counts for each completed local iteration when named-region
+    /// checks are enabled. Merge groups in group-index order to keep each
+    /// group's local, iteration numbers separate
     std::vector<named_region_iteration_sample_counts>
         named_region_iteration_sample_counts{};
-    /// Actual scheduler coordinates for every completed iteration when this
-    /// benchmark contains at least one paired ratio rule.
+    /// Observed schedule coordinates for completed iterations used  by paired
+    /// ratio rules.
     std::vector<iteration_schedule_sample> iteration_schedule_samples{};
-    /// Lossless benchmark-specific JSON objects, one per completed
-    /// iteration. Written only by this cell's single batch worker.
+    /// Benchmark-specific JSON records for completed iterations. This cell's
+    /// batch worker is their only writer.
     std::vector<std::string> raw_samples{};
-    /// Indexed by logical repeat. Populated only after any durable raw append
-    /// succeeds, in the same commit step as the aggregate sample vectors.
+    /// Completion records indexed by repeat. Update them with the metric
+    /// samples only after any required durable raw write succeeds.
     std::vector<iteration_completion_evidence> iteration_evidence{};
 
     measurement_cell() = default;
@@ -1179,24 +995,21 @@ struct measurement_cell {
     measurement_cell& operator=(measurement_cell&&) = delete;
 };
 
-/// Per-case (per matrix.over key) debug progress. Populated once, single-
-/// threaded, before batches are enqueued; thereafter only the atomics mutate,
-/// concurrently across TBB workers (the map structure is read-only). Present
-/// only when --debug is active (empty otherwise).
+/// Track debug progress for one algorithm name from matrix.over.
+/// Create these records before scheduling batches. Workers update only the
+/// atomic fields, and the owning map keeps its structure unchanged.
 struct case_debug_progress {
     std::atomic<std::size_t> remaining_cells{0};  // cells not yet finished
     std::atomic<bool>        started{false};       // CASE_STARTED already emitted?
-    std::atomic<bool>        emitted{false};       // CASE_RESULTS already emitted? (exactly-once)
+    std::atomic<bool>        emitted{false};       // Whether CASE_RESULTS has already been emitted.
 };
 
-/// Pinned (move + copy deleted) — `simdjson::dom::element` views handed to
-/// the user reference `parser`, and any move would invalidate them. The
-/// owning slot is `std::shared_ptr<benchmark_execution_state>` inside
-/// `benchmark_context::reports`; the shared_ptr lets the non-blocking prepare
-/// phase and its later finalizer retain the same stable heap allocation.
+/// Own parsed configuration and results for the benchmark's whole run.
+/// Keep  this object at a fixed address because callbacks receive views into
+/// its simdjson parser. Shared onership keeps it alive from preparation
+/// through the final wait and report generation.
 struct benchmark_execution_state {
-    /// User-facing title from `create_benchmark`, copied here so the report
-    /// writer doesn't need a separate channel.
+    /// Benchmark title copied from create_benchmark for the report.
     std::string                         title{};
     simdjson::dom::parser              parser{};
     std::string                         config_body{};
@@ -1204,20 +1017,17 @@ struct benchmark_execution_state {
     std::vector<test_case_specification>           test_cases{};
     std::vector<execution_tuple>         execution_tuples{};
     std::vector<std::unique_ptr<measurement_cell>>  cells{};
-    /// Every resolved paired ratio gate, including accepted gates. The
-    /// report writer emits this vector and the debug sink streams the same
-    /// objects as soon as post-run evaluation completes.
+    /// Results for every resolved paired ratio rule, including passing rules.
+    /// The report and debug stream both write these records.
     std::vector<paired_rule_evidence>     paired_rule_evidence_records{};
     bool                                raw_samples_enabled = false;
     std::size_t                         driver_benchmark_index = 0;
-    /// Per-case (per matrix.over key) debug progress for `--debug`. Keyed by
-    /// execution_tuple::algorithm_name (== case name). std::map keeps stable
-    /// references; populated before the parallel run, read-only structure
-    /// after (only the per-node atomics mutate). Empty unless --debug is on.
+    /// Debug progress by algorithm name. Build the map before workers start.
+    /// Afterwards only its atomic counters change. Empty when --debug is off.
     std::map<std::string, case_debug_progress> debug_progress_by_case{};
 
-    // `concurrency.concurrency: false` by admitting at most one batch
-    // per benchmark at a time (see batch_scheduler::concurrency_admissible_locked).
+    // With concurrency.concurrency false, the scheduler admits at most
+    // one batch from  this benchmark at a time.
 
     benchmark_execution_state() = default;
     benchmark_execution_state(benchmark_execution_state&&) = delete;
@@ -1226,16 +1036,16 @@ struct benchmark_execution_state {
     benchmark_execution_state& operator=(const benchmark_execution_state&) = delete;
 };
 
-/// One axis of the `--filter` selector. Each axis may be set at most once.
+/// A filter category Each category may be specified only once on the CLI.
 enum class filter_dimension : std::uint8_t { tags, benchmark, cases };
 
-/// Whole-run filter assembled from every `--filter key=v,v` occurrence.
-/// An absent (nullopt) axis means "do not constrain on this axis". A present
-/// axis is a non-empty OR-set. `empty()` is true iff no axis is constrained.
+/// Selection from all --filter arguments. Values within a category are
+/// alternatives, and different categories must all match. nullopt leaves a
+/// category unrestricted. empty() means no filters were supplied.
 struct filter_specification {
     std::optional<std::vector<std::string>> tags{};
-    std::optional<std::vector<std::string>> benchmark{};   // benchmark KEYS (singular CLI spelling)
-    std::optional<std::vector<std::string>> cases{};       // matrix.over keys
+    std::optional<std::vector<std::string>> benchmark{};   // Benchmark keys selected by --filter benchmark=....
+    std::optional<std::vector<std::string>> cases{};       // Algorithm keys from matrix.over.
 
     [[nodiscard]] bool empty() const noexcept {
         return !tags && !benchmark && !cases;
@@ -1244,50 +1054,40 @@ struct filter_specification {
 
 struct parsed_cli {
     bool                       fast_filter = false;
-    /// `--fast` / `--threads` (warn-and-ignore on collision).
+    /// Open the report browser with --ui. Benchmark-running options are ignored.
     bool                       ui_mode = false;
-    /// Useful when the terminal locale is `C` or DejaVu / JetBrains
-    /// Mono is unavailable.
+    /// Use ASCII drawing when the terminal cannot display the UI glyphs.
     bool                       ui_ascii_fallback = false;
-    /// animation and the periodic 30-s reload tick, and emits a
-    /// `\x1b]666;render-N\x07` OSC sentinel after every render so a
-    /// PTY-driven Python harness can synchronise on completed frames
+    /// Freeze the countdown and slow automatic reloads for UI tests. Emit
+    /// a marker so the terminal test  harness can recognize render activity.
     bool                       ui_test_mode = false;
-    /// `--debug`: stream a crash-resilient `report_debug_<N>.jsonl` event
-    /// log alongside the normal report. Requires a non-empty `filter`.
+    /// Write debug events to report_debug_<N>.jsonl alongside the report.
+    /// --debug requires a filher selecting part, of the benchmark suite.
     bool                       debug = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
-    /// much headroom to leave above peak system usage when computing
-    /// the dynamic memory cap. See `benchmark_memory_budget::cap_for`.
+    /// Percentage of total system RAM left outside the benchmark process cap.
     double                     memory_buffer_pct = 40.0;
     /// Subset selection assembled from every `--filter key=v,v` occurrence.
     filter_specification                 filter{};
-    /// Hard launch errors found while parsing (e.g. duplicate dimension,
-    /// malformed value). Each becomes a `validation_diagnostic` Error in run_impl
-    /// with code carried as the first ':'-separated token.
+    /// CLI errors that prevent launch, such as repeated filter categories or
+    /// malformed values. Each string starts with a diagnostic code and a colon.
     std::vector<std::string>   cli_errors{};
 };
 
-/// Identity card for one report. Captured once in `run_impl` and
-/// emitted as the first key of the output JSON. `commit` is the SHA of
-/// the working-tree HEAD (or empty if not a git repo); `dirty` is
-/// `true` whenever `git status --porcelain` reports any uncommitted
-/// changes — distinguishing a pristine SHA from a dirty-tree run is
-/// essential for `regression_since_commit` cross-reference. `created`
-/// is an ISO 8601 UTC string built from `gmtime_r` + `strftime`;
-/// `timestamp` is unix seconds for machine consumers.
+/// Identify the code and time used for this report.
+/// commit is HEAD's SHA, or empty outside a Git repository. dirty records
+/// whether there are uncommitted changes. created is UTC text and timestamp
+/// is Unix seconds.
 struct report_metadata {
     std::string  commit{};
     bool         dirty = false;
     std::int64_t timestamp = 0;
     std::string  created{};
     bool         fast = false;
-    /// True only when this completed report is safe to use as a future
-    /// regression baseline. Blocking findings and evaluation/configuration
-    /// errors make the whole capture ineligible; nonblocking diagnostics do
-    /// not. Persisted false first, then promoted only after the report passes
-    /// its own schema validation.
+    /// Whether this report can  serve as a regression baseline. Write false
+    /// first, then publish true only after all blocking checks and report
+    /// validation pass. Nonblocking findings do not disqualify it.
     bool         history_eligible = false;
 };
 
@@ -1301,66 +1101,56 @@ struct violation {
     parameter_map    lhs_full_params{};
     std::string rhs_algorithm;
     parameter_map    rhs_full_params{};
-    /// Index 0 = LHS aggregate; index 1 = RHS aggregate. Mirrors the spec's
-    /// `"args": [...]` field on the output.
+    /// Values used by the comparison, in left/right order The meaning depends
+    /// on comparison_mode.
     std::array<double, 2> args{0.0, 0.0};
-    /// False marks a selected source that is missing, explicitly not measured,
-    /// or contains a non-finite sample. Unavailable rule inputs are themselves
-    /// violations, preventing hardware skips, NaNs, or a renamed/bypassed
-    /// instrumented stage from silently disabling its gate.
+    /// Whether each comparison input is available and finite. Missing,
+    /// unmeasured or non-finite inputs produce a finding instead of letting
+    /// the rule pass without checking its selected data.
     std::array<bool, 2> args_present{true, true};
-    /// Independent rules report [lhs aggregate, rhs aggregate]. Ratio-paired
-    /// rules report [aggregate(lhs[i] / rhs[i]), configured paired baseline].
-    /// Exact-paired rules report the first unequal [lhs[i], rhs[i]] witnesses.
-    /// Keep the mode explicit so report consumers do not conflate these shapes.
+    /// Independent comparisons store the two aggregates. Ratio comparisons
+    /// store the reduced  per-replat ratios and their expected baseline.
+    /// Exact comparisons store the first pair of unequal samples.
     rule_comparator::pairing_mode comparison_mode =
         rule_comparator::pairing_mode::independent_aggregates;
     std::size_t warmup_repetitions = 0;
     bool blocking = true;
 };
 
-/// Comparator payload for a regression rule. `threshold%` is forbidden by
-/// the schema, so we only carry `tolerance%` — the underlying compare op
-/// reuses the existing `comparison_operator` family.
+/// Comparison operator and allowed percentage variation for a regression
+/// rule. Regression configuration accepts tolerance%, with no threshold% field.
 struct regression_operator {
     comparison_operator op = comparison_operator::equal;
     double    tolerance_pct = 0.0;
 };
 
-/// Parsed `regression_rules[*]` entry. `regions` is normalised at parse
-/// time so the evaluator never has to special-case the
-/// `"all_regions"` shorthand: the literal string lands in the vector as
-/// the single element.
+/// One parsed regression rule. Normalize region selection to a vector,
+/// including the single all_regions entry, so evaluation uses one format.
 struct regression_rule {
     std::string config_path;
     std::string name;
     /// Empty means "applies to every benchmark in the same config file".
     std::vector<std::string> benchmarks{};
-    /// Benchmarks removed from the include/default-all set. This keeps a
-    /// config-global policy authoritative while permitting one benchmark to
-    /// carry a more suitable, separately named policy.
+    /// Benchmarks to remove from this rule's selection. This lets a benchmark
+    /// use, a separate rule without  also receiving the shared rule.
     std::vector<std::string> exclude_benchmarks{};
     /// Always non-empty after parse. Defaults to `{"all_regions"}`.
     std::vector<std::string> regions{};
     std::string metric;
     sample_aggregate aggregate = sample_aggregate::sum;
     regression_operator  op{};
-    /// Test cases excluded from this rule. Schema requires non-empty if
-    /// the array is present at all.
+    /// Test cases to omit. A configured exclusion array must contain an entry.
     std::vector<std::string> exclude_cases{};
-    /// Algorithms excluded after benchmark selection. This is intentionally
-    /// a deny-list: newly added algorithms remain covered by blocking rules
-    /// unless they are explicitly classified otherwise.
+    /// Algorithms to omit after selecting benchmarks. New algorithms remain
+    /// covered until they are explicitly excluded.
     std::vector<std::string> exclude_algorithms{};
-    /// Diagnostic regressions remain in the report and stderr but do not
-    /// affect process success. Blocking is the default.
+    /// Whether a regression makes the run fail. False still reports the finding.
     bool blocking = true;
 };
 
-/// Unfiltered declaration metadata for one registered benchmark. Regression
-/// rule references must be validated against this universe rather than the
-/// post-CLI-filter report map; otherwise a valid rule scoped to a filtered-out
-/// benchmark is misdiagnosed as a typo.
+/// Names declared by a benchmark before CLI filtering.
+/// Validate regression-rule references against these declarations so a valid
+/// reference to a filtered-out benchmark is still recognized.
 struct regression_benchmark_declaration {
     std::string benchmark_key;
     std::vector<std::string> config_algorithms{};
@@ -1373,10 +1163,9 @@ struct regression_benchmark_declaration {
 using regression_validation_universe =
     std::map<std::string, std::vector<regression_benchmark_declaration>>;
 
-/// One detected regression. Mirrors the user-visible JSON shape: arrays of
-/// size 1 for `violating_tuples` / `test_cases` so the writer doesn't need
-/// to special-case singletons. `regression_since` is empty-string when
-/// the rule wants `null` in the output.
+/// A regression for one algorithm tuple, test case and metric
+/// Store its previous and current values together with the  report where the
+/// regression began, when that history is available.
 struct regression_entry {
     std::string config_path;
     std::string benchmark;
@@ -1390,48 +1179,35 @@ struct regression_entry {
     bool        blocking = true;
     double      previously = 0.0;
     double      now = 0.0;
-    /// Empty string ⇒ JSON `null`. Otherwise the file basename like
-    /// `"report_3.json"`.
+    /// Basename of the veport where the regression began, such as report_3.json.
+    /// Empty becomes JSON null.
     std::string regression_since{};
-    /// Commit SHA captured by the historical report identified by
-    /// `regression_since`. Empty string ⇒ JSON `null` when
-    /// `regression_since` itself is null or that report's commit is empty.
+    /// Commit from regression_since. Empty becomes JSON null when the report
+    /// or its commit is unavailable.
     std::string regression_since_commit{};
 };
 
-/// Registry mapping `config_path` → list of regression rules parsed from
-/// that file. Populated lazily by the per-benchmark closure under
-/// `regression_rules_mu`; consumed by the global validator and the
-/// regression evaluator after the parallel benchmark loop has joined.
+/// Regression rules by configuration path. Save the first parsed copy
+/// under regression_rules_mu for later validation and comparison.
 using regression_rules_by_configuration = std::map<std::string, std::vector<regression_rule>>;
 
-/// One sanity-warning finding emitted at end-of-run. Sanity checks
-/// catch suspicious uniformity that no other validation pass could
-/// have flagged (e.g. an `add_counter(0)` pattern, an evaluator that
-/// always returns the same hardcoded value, or a frozen clock). They
-/// are hardcoded, cannot be disabled, and never affect the exit code,
-/// but are surfaced both in `report.json` (under `sanity_warnings`)
-/// and on stderr at the very end of the run.
+/// A warning about suspicious metric samples, such as a value that stays
+/// constant across the run. These checks always run and appear in the  report
+/// and stderr, but they do not change the exit status.
 ///
-/// Currently the only emitted `type` is `"metric_looks_constant"`;
-/// the field is a free-form string so additional checks can land
-/// without touching consumers' parsers.
+/// metric_looks_constant is the current check type.
 struct sanity_warning {
-    /// Stable identifier for the check kind. `"metric_looks_constant"`
+    /// Check identifier, currently metric_looks_constant.
     std::string type;
-    /// Metric name whose data tripped the check.
+    /// Metric whose samples triggered the warning.
     std::string metric;
-    /// Human-readable explanation including, where applicable, the
-    /// stringified offending value (e.g. "always produces '0'").
+    /// Explanation of the warning, including the constant value when relevant.
     std::string message;
-    /// Basename of the oldest report on disk that already exhibited
-    /// this warning when joined with the current run's data, e.g.
-    /// `"report_3.json"`. Empty string ⇒ JSON `null` (history walk
-    /// hit a missing report).
+    /// Oldest report in the continuous history with this same warning.
+    /// A gap in that history, leaves this empty, written  as JSON null.
     std::string warning_since;
-    /// `meta.commit` of the historical report identified by
-    /// `warning_since`. Empty string ⇒ JSON `null` when `warning_since`
-    /// is null or the commit is unavailable or empty.
+    /// Commit from warning_since. Empty becomes JSON null if the originating
+    /// rfport or its commit is unavailable.
     std::string warning_since_commit;
 };
 
@@ -1446,63 +1222,50 @@ class  durable_raw_evidence_sink;
 }  // namespace detail
 
 /**
- * @brief Per-benchmark context passed to the `execute` closure.
+ * @brief Shared run services passed to a benchmark's execute callback.
  *
- * The closure does not see this directly — the type is forward-declared
- * publicly so the public `erased_benchmark` struct can carry a
- * `function<void(benchmark_context&)>` member without exposing the full
- * private layout.
+ * Each benchmark receives its index and pointers to the scheduler, reports
+ * and diagnostics The public API needs only a forward declaration of this
+ * type to store execute in erased_benchmark.
  */
 struct benchmark_context {
     std::string                                    data_dir;
     std::string                                    report_dir;
     bool                                            fast_filter = false;
-    // the scheduler's admission predicates (see
-    // batch_scheduler::bench_lock_admissible_locked).
+    // Dashboard state for this benchmark.
     detail::progress_state*                          progress = nullptr;
     std::size_t                                     benchmark_index = 0;
     std::mutex*                                     violations_mu = nullptr;
     std::vector<detail::violation>*                 violations = nullptr;
     std::mutex*                                     reports_mu = nullptr;
-    /// Map from benchmark_key to the per-benchmark execution state. The
-    /// value is `shared_ptr` because `benchmark_execution_state` is pinned
-    /// (the simdjson parser inside is non-movable) and must remain alive from
-    /// the non-blocking prepare phase through the later finalizer.
+    /// Results by benchmark key. Shared ownership keeps each parser and its
+    /// borrowed views alive through preparation, execution and finalization.
     std::map<std::string, std::shared_ptr<detail::benchmark_execution_state>>* reports = nullptr;
-    /// Aggregated validation diagnostics across all benchmarks. Each
-    /// benchmark's closure appends its schema + semantic findings under
-    /// `diagnostics_mu`; `run_impl` prints them and uses the error count
-    /// to drive the exit code.
+    /// Protect the shared diagnostic list while benchmarks add their findings.
+    /// run_impl reports errors and uses them to  determine the exit status.
     std::mutex*                                     diagnostics_mu = nullptr;
     std::vector<detail::validation_diagnostic>*            diagnostics = nullptr;
-    /// Shared registry of regression rules keyed by config_path. The
-    /// closure inserts under `regression_rules_mu` the first time it sees
-    /// each unique config; subsequent benchmarks sharing the same config
-    /// skip parsing.
+    /// Protect the shared regression-rule registry. Keep the first parsed
+    /// copy of each configuration file's rules.
     std::mutex*                                     regression_rules_mu = nullptr;
     detail::regression_rules_by_configuration*                regression_rules_by_config = nullptr;
-    /// enqueues batches into this scheduler; its returned finalizer drains
-    /// them before publishing results, so captured state (`measurement_cell::samples`,
-    /// `benchmark_execution_state`, etc.) outlives the bodies. The
-    /// scheduler also owns a non-owning reference to the host's
-    /// `benchmark_memory_budget` — callers that need budget metadata go through
-    /// the scheduler instead of duplicating the pointer here.
+    /// Enqueue batches here and wait through the returned benchmark finalizer.
+    /// The scheduler keeps memory reservations and concurrency limits for all
+    /// benchmarks. Budget information is available through the same scheduler.
     detail::batch_scheduler*                         scheduler = nullptr;
-    /// Case allow-list from `--filter cases=...`. nullptr == run all cases.
-    /// Points at run_impl's `case_allow_list` (outlives every closure).
+    /// Algorithm names selected by --filter cases=.... Null allows every case.
+    /// run_impl owns the set until all benchmark callbacks finish.
     const std::set<std::string>*                    filter_cases = nullptr;
-    /// Crash-resilient JSONL event sink for `--debug`. nullptr == no debug
-    /// stream. Points at run_impl's `debug_report_sink` (outlives every closure).
+    /// Debug JSONL writer owned by run_impl. Null disables debug events.
     detail::debug_report_sink*                        debug_sink = nullptr;
-    /// Durable raw sidecar sink. A raw-enabled iteration is incomplete until
-    /// its append and fsync succeed.
+    /// Raw-record writer. With raw output enabled, an iteration  becomes
+    /// complete only after its record is appended and synchronized to disk.
     detail::durable_raw_evidence_sink*                 raw_evidence_sink = nullptr;
 };
 
-// ----------------- config_value::from_simdjson -----------------
+// JSON configuration values
 
-// config_value helpers must be visible to translation units that import the module,
-// so the body sits in the public namespace block.
+// Define this exported helper where modue importers can use it.
 [[nodiscard]] inline config_value config_value::from_simdjson(simdjson::dom::element element) noexcept {
     using element_type = simdjson::dom::element_type;
     config_value out{};
@@ -1548,10 +1311,8 @@ struct benchmark_context {
             return out;
         }
         default:
-            // Object / array / null: not a scalar configuration value.
-            // Mark with the non-scalar sentinel so semantic validation can
-            // refuse it against any declared parameter type. We still keep
-            // the JSON text in `string_value` for diagnostic messages.
+            // Keep arrays, objects and null marked as non_scalar so parameter
+            // validation can reject them. Save the JSON for the error message.
             out.kind  = value_kind::non_scalar;
             out.string_value = simdjson::to_string(element);
             return out;
@@ -1561,40 +1322,32 @@ struct benchmark_context {
 namespace detail {
 
 
-/// Hardcoded ceiling on the number of consecutive failed attempts at
-/// `on_input` (G2) and `on_cleanup` (G3) before the framework declares
-/// the batch unrecoverable. Set to 5 per spec; not exposed via CLI.
+/// Maximum attempts to build or clean up an input. Exhausting input
+/// attempts aborts the batch. Exhausting cleanup attempts produces a warning.
 inline constexpr std::size_t k_max_task_input_handler_error_count = 5;
 
-/// Maximum number of stack-trace frames to render in the dashboard
-/// per failure. Anything past this is dropped with an "elided" marker.
+/// Maximum stack-trace frames shown for a failure Mark any omitted tail.
 inline constexpr std::size_t k_max_stack_trace_lines = 30;
 
-/// Minimum time the retry-failure row stays in the dashboard before
-/// the next attempt is taken. Without this, a fast-failing user
-/// lambda (e.g. a `throw` immediately after entry) burns through all
-/// 5 retries in microseconds — the dashboard repaints at ~5 Hz, so
-/// `retry_attempt > 0` is never observed and the operator sees no UI
-/// for the retry sequence at all. 300 ms is slightly longer than the
-/// 200 ms render cadence so every attempt's failure state is
-/// guaranteed to show up in at least one frame.
+/// Pause  after a failed callback so its retry, message can be drawn.
+/// Fast failures would otherwise finish before the dashboard's next refresh.
+/// This delay is longer than one normal render interval.
 inline constexpr std::chrono::milliseconds k_retry_failure_min_display_time{300};
 
-// ----------------- benchmark_memory_budget -----------------
+// Benchmark memory budget
 
-// Forward declaration kept so the renderer can store a pointer.
+// Declare the progress row used by the scheduler and renderer.
 struct progress_group;
 
-/// Applies the benchmark process cap to snapshots from the common memory
-/// budget service. Reservation ownership remains in `batch_scheduler`.
+/// Calculate the benchmark process cap from system memory snapshots.
+/// batch_scheduler owns the reservations made under this cap.
 class benchmark_memory_budget {
 public:
-    /// Cache platform probes so concurrent scheduler and renderer reads
-    /// collapse to one sample per window.
+    /// Reuse memory probes for this long across scheduler and renderer reads.
     static constexpr std::chrono::milliseconds k_budget_snapshot_ttl{200};
 
-    /// Constructed once in `run_impl`. `memory_buffer_pct` is already
-    /// validated to `[0, 50]` by `parse_cli`.
+    /// Construct the run's budget  after CLI validation of memory_buffer_pct
+    /// in the range [0, 50].
     explicit benchmark_memory_budget(double memory_buffer_pct) noexcept
         : memory_buffer_pct_(memory_buffer_pct)
     {
@@ -1602,18 +1355,16 @@ public:
             "benchmark_memory_budget memory_buffer_pct must be in [0, 50]");
     }
 
-    /// Compute the cap (`C = T·(1 − buffer/100)`) for an arbitrary `T`.
+    /// Leave buffer_pct percent of total RAM outside the process cap.
     [[nodiscard]] static constexpr std::uint64_t
     cap_for(std::uint64_t total, double buffer_pct) noexcept {
         return static_cast<std::uint64_t>(
             static_cast<double>(total) * (100.0 - buffer_pct) / 100.0);
     }
 
-    /// Scheduler admission room under the process-footprint cap. The live
-    /// system-available value is still surfaced in logs/UI, but admission must not
-    /// subtract every other process and reclaimable page from this benchmark's
-    /// cap: that can make a large serial batch unschedulable even
-    /// when the benchmark process itself stayed below the configured cap.
+    /// Remaining room after this process's footprint and aending reservations.
+    /// Other processes' memory use is reported separately. Subtracting it here
+    /// could prevent a serial batch from starting even below its own cap.
     [[nodiscard]] static constexpr std::uint64_t
     process_room_for(const bioseq::common::memory::memory_snapshot& system_snapshot,
                      double buffer_pct,
@@ -1629,10 +1380,8 @@ public:
 
     [[nodiscard]] double memory_buffer_pct() const noexcept { return memory_buffer_pct_; }
 
-    /// Live system-memory snapshot. Reads through a 200 ms cache so
-    /// many concurrent callers (scheduler + renderer) collapse to one
-    /// syscall per cache window. `const` because the cache fields are
-    /// `mutable`; observable state of the budget is unchanged.
+    /// Read system and process memory use through the shared probe cache.
+    /// A mutex lets concurrent scheduler and UI reads reuse a recent snapshot.
     [[nodiscard]] bioseq::common::memory::memory_snapshot
     current_system_snapshot() const noexcept {
         std::lock_guard<std::mutex> guard(cache_mu_);
@@ -1667,97 +1416,62 @@ private:
     double                                        memory_buffer_pct_;
 };
 
-// ----------------- progress_state -----------------
+// Dashboard progress
 
-/// One group of one test_case. Hot-path counter is `done`; the
-/// scheduler updates `label` only at item boundaries (cold path).
-///
-/// Failure / wait state observed by the renderer:
-///   - `input_retry_attempt`  — current `on_input` retry index (0 = clear).
-///   - `cleanup_retry_attempt`— current `on_cleanup` retry index (0 = clear).
-///                               `mirror_idle_to_ui` while a batch is
-///                               pending and starves. The renderer
-///                               shows a "🕑 waiting Ns / 30s" row
-///                               when this batch is the sole holdout.
-///   - `aborted`              — true after a hard error has aborted the
-///                               batch; renderer renders an `❌` row
-///                               with the diagnostic message.
-/// All four are atomic so the renderer thread can read them while the
-/// batch worker thread mutates them. The four failure-string fields
-/// (`input_failure_message` / `_trace`, `cleanup_failure_message` /
-/// `_trace`) are guarded by a separate `failure_mu` rather than the
-/// hot-path `label_mu` — the latter sits inside the iteration loop and
-/// must not be widened.
+/// Dashboard progress for one  test-case group.
+/// Workers update atomic counts and status flags while the renderer reads
+/// them. label_mu protects the algorithm label. A separate failure_mu protects
+/// error messages and traces so drawing a failure does not hold the label lock
 struct progress_group {
     std::size_t                group_index = 0;
     std::atomic<std::uint64_t> done{0};
     std::uint64_t              total = 0;
-    /// Scheduler sets this true when the batch starts, false when the
-    /// batch's iteration loop exits. Renderer uses it to decide whether
-    /// to draw the row (collapsed test cases hide all groups).
+    /// True while the group is running its iterations or cleanup. Cleared on
+    /// completion or abort. The renderer uses it to choose visible rows.
     std::atomic<bool>          active{false};
-    /// Brief label `algo=<>, bench=<>` updated at item boundaries.
-    /// Held under `label_mu` (one short string copy) — never blocks
-    /// the iteration loop.
+    /// Algorithm and benchmark label, updated between items under label_mu.
     std::string                label{};
     std::mutex                 label_mu{};
 
-    /// Input retry status. 0 = clear; 1..k_max_task_input_handler_error_count
-    /// = current attempt (1-based).
+    /// Failed input attempt, numbered from one. Zero clears the retry display.
     std::atomic<std::uint8_t>  input_retry_attempt{0};
-    /// Cleanup retry status. Same shape as input_retry_attempt.
+    /// Failed cleanup attempt, numbered from one. Zero clears the  retry display.
     std::atomic<std::uint8_t>  cleanup_retry_attempt{0};
-    /// Nanoseconds since `bioseq::instrumentation::clock::now_ns()` epoch at
-    /// which the batch entered the idle-wait state. Written by the
-    /// scheduler via `mirror_idle_to_ui`. 0 = not waiting on memory.
+    /// Start of the scheduler's idle wait in clock::now_ns() units.
+    /// Zero means no wait. mirror_idle_to_ui updates it for the renderer.
     std::atomic<std::int64_t>  idle_start_ns{0};
     /// Set true when a hard error aborts the batch.
     std::atomic<bool>          aborted{false};
 
-    /// Failure-message + clipped stack trace surfaces. The renderer
-    /// only consults these when the corresponding atomic counter
-    /// (`input_retry_attempt` / `cleanup_retry_attempt`) is non-zero,
-    /// so the lock is taken at most once per failed attempt + once
-    /// per render at most. Keeping it separate from `label_mu`
-    /// prevents blocking the iteration hot path on a slow reader.
+    /// Protect failure messages and, clipped traces while workers and the UI
+    /// access them. Keep this lock separate from the frequently updated label.
     std::mutex                 failure_mu{};
     std::string                input_failure_message{};
     std::string                input_failure_trace{};
     std::string                cleanup_failure_message{};
     std::string                cleanup_failure_trace{};
-    /// Diagnostic blurb when `aborted == true` (e.g. "memory budget
-    /// constraint timeout"). Read under `failure_mu`.
+    /// Reason qhown when aborted is true. Read and write under failure_mu.
     std::string                aborted_reason{};
 };
 
-/// One test_case row in the dashboard. Aggregates progress across all
-/// of its groups. `start_ns` / `finish_ns` measure wall-clock duration
-/// from "first group started" to "last group done". `tuple_total` is
-/// atomic so the renderer thread (started in `run_impl` before the
-/// per-benchmark closures populate this struct) sees a consistent
-/// value on weakly-ordered hardware.
+/// Dashboard totals for one test case across its groups.
+/// Timing starts with the first group. A group finishing after all algorithm
+/// items are done records finish_ns. Atomic totals let  the renderer observe
+/// worker progress safely.
 struct progress_test_case {
     std::string                                test_case_name{};
-    std::atomic<std::uint64_t>                 tuple_done{0};       // cumulative items finished
+    std::atomic<std::uint64_t>                 tuple_done{0};       // Completed algorithm items across all groups.
     std::atomic<std::uint64_t>                 tuple_total{0};
     std::vector<std::unique_ptr<progress_group>> groups{};
     std::atomic<std::int64_t>                  start_ns{0};
     std::atomic<std::int64_t>                  finish_ns{0};
 };
 
-/// Full progress model. The renderer reads everything; the scheduler
-/// writes via three helpers below.
-///
-/// Per-benchmark `test_cases` is populated by the closure that drives a
-/// single `erased_benchmark` (running on some TBB worker) AFTER the
-/// renderer thread has already started polling. To avoid a data race
-/// on the vector's structural state, the writer signals completion via
-/// `setup_done.store(true, release)` and readers gate every traversal
-/// on `setup_done.load(acquire)`. After the writer signals, the
-/// vector and every `unique_ptr` it holds are stable for the rest of
-/// the run.
-// Forward-declared so progress_state can carry a non-owning pointer to it
-// even though the class body lives further down in the module.
+/// The renderer reads progress while benchmark setup and workers update it.
+/// Setup fills each test-case vector before publishing setup_done with release
+/// ordering. Readers use acquire ordering before traversing that vector, which
+/// keeps its structure and owned rows stable for the rest of the run.
+// Forward declaration for the scheduler pointer in progress_state.
 class batch_scheduler;
 
 struct progress_state {
@@ -1770,64 +1484,50 @@ struct progress_state {
     std::vector<std::unique_ptr<per_benchmark_state>> per_benchmark;
     std::atomic<bool> running{true};
     std::atomic<bool> tty_render{false};   // set true if stderr is a TTY at startup
-    /// totals consumed by the dashboard header. nullptr = no scheduler
-    /// installed (e.g. in `--ui` review mode). Memory-budget access is
-    /// routed through the scheduler too, so there's a single owner.
+    /// Scheduler totals and memory information for the dashboard header
+    /// Null means no scheduler is installed, as  in report-browser mode.
     batch_scheduler*  scheduler     = nullptr;
 };
 
-// ----------------- batch_scheduler -----------------
+// Batch scheduler
 
-/// One pending or running batch, type-erased. Owned by the scheduler.
-/// The body is constructed by `prepare_typed_benchmark` and captures
-/// references back into the per-benchmark `benchmark_execution_state` —
-/// so the scheduler must guarantee the body has run to completion
-/// before the returned finalizer releases that state.
-/// `wait_for_benchmark` enforces that contract.
+/// A pending or running batch owned by the scheduler.
+/// Its body refers to benchmark state kept alive by the returned finalizer.
+/// wait_for_benchmark ensures the body finishes before that state can be released.
 struct scheduled_batch {
     std::size_t      scheduler_id      = 0;
     std::size_t      benchmark_index   = 0;
-    /// `concurrency.bench_lock` from the parsed config — true ⇒
-    /// scheduler treats the owning benchmark as exclusive across
-    /// benchmarks (other benchmarks' batches do not run until every
-    /// bench-locked batch from this benchmark has drained).
+    /// Require this batc to run alone across all benchmarks.
     bool             bench_lock        = false;
-    /// `!concurrency.concurrency` — true ⇒ scheduler admits at most
-    /// "Strict latency-sensitive run" semantics).
+    /// Admit at most one batch from this benchmark at a time.
     bool             concurrency_serial = false;
-    /// Memory reservation requested by `on_estimate_resources`.
+    /// Input and working-memory estimates returned by on_estimate_resources.
     std::size_t      base_bytes        = 0;
     std::size_t      extra_bytes       = 0;
-    /// Checked once on the enqueueing thread from `base_bytes + extra_bytes`.
-    /// Keeping the canonical total here prevents the scheduler's sort,
-    /// admission, finish, and diagnostic paths from independently repeating
-    /// potentially-overflowing arithmetic.  Enqueue rejects any value that
-    /// cannot be represented by this signed accounting type.
+    /// Sum of base_bytes and extra_bytes, checked before enqueueing.
+    /// Reuse this value for sorting and reservation accounting  so later paths
+    /// cannot overflow by recomputing the sum.
     std::int64_t     total_bytes       = 0;
-    /// Body executed by the TBB task pool. Wrapped at admission time
-    /// by an enclosing lambda that owns a `scoped_scheduler_finish` so
-    /// the reservation always releases on every return path.
+    /// Work, to run on TBB. The worker wrapper releases its reservation
+    /// after success, early return or an exception.
     std::function<void()> body{};
-    /// UI mirror — the renderer reads `idle_start_ns` to colour the
-    /// "🕑 waiting Ns / 30s" row when this batch is the sole holdout.
-    /// May be nullptr (no progress dashboard installed).
+    /// Progress row receiving this batch's idle-wait time. Null when no row
+    /// is installed.
     progress_group*   group_for_ui      = nullptr;
-    /// Per-batch idle clock (ns). 0 = "not idle yet". Mutated only by
-    /// the scheduler thread under `mu_`.
+    /// Idle-wait start in nanoseconds. Zero means no wait. The scheduler
+    /// updates it while holding mu_.
     std::int64_t     last_idle_start_ns = 0;
-    /// Captured at enqueue so `emit_idle_timeout_locked` can mark the
-    /// progress UI without re-resolving every chain of indices.
+    /// Diagnostic location saved at enqueue time for reporting a timeout.
     std::string      location_str{};
     std::string      test_case_name{};
     std::size_t      test_case_index   = 0;
     std::size_t      group_index       = 0;
-    /// Non-owning pointer to the benchmark_context used to push
-    /// diagnostics + UI updates. Lifetime is the same as `run_impl`.
+    /// Context for diagnostics and UI updates. The run owns it until all
+    /// scheduled batches finish.
     benchmark_context* context           = nullptr;
 };
 
-/// Free helper used inside the scheduler when mirroring the idle clock
-/// `benchmark_memory_budget::mirror_idle_to_ui`.
+/// Publish  the batch's idle-wait time to its dashboard row, if present
 inline void mirror_idle_to_ui(const scheduled_batch& batch,
                                std::int64_t idle_start_ns) noexcept {
     if (batch.group_for_ui != nullptr) {
@@ -1836,37 +1536,29 @@ inline void mirror_idle_to_ui(const scheduled_batch& batch,
     }
 }
 
-/// Forward declaration so `scoped_scheduler_finish` can refer to the
-/// scheduler before its body is defined.
+/// Declare the scheduler used by scoped_scheduler_finish.
 class batch_scheduler;
 
-/// RAII guard installed by the scheduler around every enqueued body.
-/// `~scoped_scheduler_finish` calls `batch_scheduler::notify_batch_finished`
-/// so any return path (normal, diagnostic-emit, exception inside
-/// `cpptrace::try_catch` catchers, or an escaped worker exception captured by
-/// the scheduler wrapper) decrements reservations exactly once.
+/// Release a batch's reservation and mark it finished when its worker
+/// wrapper exits. The destructor runs once on normal return or after a
+/// caught worker exception.
 struct scoped_scheduler_finish {
     batch_scheduler* scheduler;
     std::size_t     scheduler_id;
     ~scoped_scheduler_finish() noexcept;
 };
 
-/// `tbb::parallel_for_each(batches…)` model.
-///
-/// Memory reservations live exclusively here — bodies never block on
-/// `benchmark_memory_budget` directly. Bench-lock + serial-concurrency rules are
-/// also enforced by admission predicates instead of process-global
+/// Start batches whea their memory and concurrency requirements fit.
+/// A dedicated scheduler thread holds reservations and dispatches work to TBB.
+/// Workers spend their time running admitted batches, while pending work stays
+/// in the scheduler's queue.
 class batch_scheduler {
 public:
-    /// Scheduler tick cadence. Wakeups also fire on every batch
-    /// completion, so the wall-clock latency between "a slot opens"
-    /// and "the next batch is admitted" is dominated by
-    /// `notify_batch_finished` rather than the tick (the tick exists
-    /// only to refresh memory probes and re-check idle timeouts).
+    /// Refresh memory probes and idle timeouts at this  interval.
+    /// Batch completion also wakes the scheduler, so new work can start sooner.
     static constexpr std::chrono::seconds k_scheduler_tick_interval{1};
-    /// A pending batch whose constraints don't fit AND whose peers
-    /// are all idle for this long aborts with
-    /// `memory_budget_constraint_timeout`.
+    /// Abort a pending batch after this much waiting with no batches running.
+    /// Report memory_budget_constraint_timeout.
     static constexpr std::chrono::seconds k_max_idle_waiting_time{30};
 
     batch_scheduler(benchmark_memory_budget& budget,
@@ -1877,19 +1569,13 @@ public:
     }
 
     ~batch_scheduler() noexcept {
-        // 1. Stop the scheduler thread.
-        // 2. Drain any TBB tasks already enqueued.
-        // 3. Members destruct.
+        // Stop scheduling, wait for enqueued tasks, then release the members.
         running_.store(false, std::memory_order_release);
         cv_.notify_all();
         if (thread_.joinable()) thread_.join();
-        // The normal owner calls wait_for_completion(), whose non-noexcept
-        // boundary is the one and only place allowed to publish a worker
-        // exception. Keep the defensive destructor drain (TBB requires a
-        // wait before task_group destruction), but never let an unexpected
-        // task-group exception turn noexcept destruction into std::terminate.
-        // Worker bodies themselves are caught and stored by the admission
-        // wrapper below, so this is only a last-resort TBB guard.
+        // wait_for_completion reports worker failures before destruction.
+        // TBB still needs its final wait here. Catch unexpected task-group
+        // exceptions so this noexcept destructor cannot terminate the process.
         try {
             (void)tg_.wait();
         } catch (const std::exception& error) {
@@ -1914,8 +1600,7 @@ public:
     batch_scheduler& operator=(const batch_scheduler&) = delete;
     batch_scheduler& operator=(batch_scheduler&&) = delete;
 
-    /// Add a batch to the pending queue. Thread-safe — called from
-    /// every per-benchmark closure during the enqueue phase.
+    /// Add a pending batch and wake the scheduler. Safe for concurrent callers.
     void enqueue_batch(scheduled_batch batch) noexcept {
         {
             std::lock_guard<std::mutex> guard(mu_);
@@ -1927,10 +1612,8 @@ public:
         cv_.notify_all();
     }
 
-    /// Block until every batch belonging to `benchmark_index` has
-    /// either completed or been aborted. Called by the per-benchmark
-    /// closure before it returns, so the body's captured references
-    /// stay valid.
+    /// Wait until this benchmark's batches finish  or abort. The finalizer
+    /// calls this before releasing the state borrowed by their bodies.
     void wait_for_benchmark(std::size_t benchmark_index) noexcept {
         std::unique_lock<std::mutex> guard(mu_);
         cv_.wait(guard, [this, benchmark_index] {
@@ -1939,12 +1622,8 @@ public:
         });
     }
 
-    /// Block until every enqueued batch has either completed or been
-    /// aborted, join the TBB task group, then rethrow the first captured
-    /// worker exception. Called once by `run_impl` after the outer benchmark
-    /// loop joins (which, given `wait_for_benchmark` is also called
-    /// per-closure, should already be a no-op for lifetime purposes). This is
-    /// intentionally non-noexcept: it is the worker-error ownership boundary.
+    /// Wait for all batches, join their TBB tasks and rethrow the first, worker
+    /// exception. run_impl calls this afte the per-benchmark finalizers.
     void wait_for_completion() {
         {
             std::unique_lock<std::mutex> guard(mu_);
@@ -1953,12 +1632,9 @@ public:
             });
         }
 
-        // `notify_batch_finished` runs from a scope guard just before its TBB
-        // wrapper returns. Waiting on the counters alone can therefore beat
-        // the wrapper by a few instructions. Join the task group here, at a
-        // deliberately non-noexcept boundary, before observing the captured
-        // worker error. Because every worker body is caught below, TBB has no
-        // user exception of its own to defer into batch_scheduler's destructor.
+        // scoped_scheduler_finish updates the counters just before its task returns.
+        // Join TBB as well, so every wrapper has exited before we report a
+        // stored worker exception
         (void)tg_.wait();
 
         std::exception_ptr worker_exception;
@@ -1971,21 +1647,18 @@ public:
         }
     }
 
-    /// Number of worker bodies that escaped through the user callback seam.
-    /// The explicit join rethrows the first exception; this count lets the
-    /// report diagnostic disclose whether further failures were captured
-    /// while the scheduler drained the remaining independent batches.
+    /// Number of worker exceptions caught while batches drained. The final
+    /// wait rethrows the first, and this count reports any additional failures.
     [[nodiscard]] std::size_t worker_exception_count() const noexcept {
         std::lock_guard<std::mutex> guard(mu_);
         return worker_exception_count_;
     }
 
-    /// Called from the body's `scoped_scheduler_finish` destructor.
+    /// Release one finished batch's reservation and wake waiting work.
     void notify_batch_finished(std::size_t scheduler_id) noexcept {
-        // Splice the finished node into a local list so its destructor
-        // (which destroys `body`'s captures — potentially a chain of
-        // std::function copies) runs OUTSIDE `mu_`. Keeps lock-hold
-        // duration bounded by counter updates only.
+        // Move the  finished batch out of the shared list, then destroy its
+        // callback captures after releasing mu_. Captured objects may take
+        // time to destroy.
         std::list<scheduled_batch> to_drop;
         {
             std::lock_guard<std::mutex> guard(mu_);
@@ -2012,12 +1685,10 @@ public:
             ++total_finished_;
         }
         cv_.notify_all();
-        // ~to_drop runs here; the body's captures (potentially heavy)
-        // are destroyed without holding the scheduler mutex.
+        // Destroy the callback captures after releasing the scheduler lock.
     }
 
-    /// Snapshot exposed to the renderer header. Recomputes from a
-    /// fresh platform probe (cached by `benchmark_memory_budget`).
+    /// Memory and queue totals shown in the dashboard header.
     struct live_snapshot {
         std::uint64_t total_bytes;
         std::uint64_t cap_bytes;
@@ -2059,12 +1730,9 @@ public:
     }
 
 private:
-    /// Scheduler thread body — admits whatever fits, then sleeps until
-    /// either a notify or the next tick. The platform snapshot is taken
-    /// OUTSIDE `mu_` so the only path that takes both `mu_` and
-    /// `cache_mu_` is `capture_live_snapshot()`/`scheduler_loop`, both in the
-    /// `mu_`-released → `cache_mu_`-acquired order. Keeps the lock
-    /// hierarchy single-direction and deadlock-free.
+    /// Start pending batches that fit, then wait for a notification or tick.
+    /// Read system memory with mu_ released because that read takes the
+    /// budget's cache mutex. Keeping those locks separate avoids deadlock.
     void scheduler_loop() noexcept {
         std::unique_lock<std::mutex> guard(mu_);
         while (running_.load(std::memory_order_acquire)) {
@@ -2077,9 +1745,9 @@ private:
         }
     }
 
-    /// Greedy admission. The system memory snapshot is provided by
-    /// `scheduler_loop` so this body
-    /// never re-enters `current_system_snapshot()` while holding `mu_`.
+    /// Start batches that fit the memory budget and concurrency rules.
+    /// The caller holds mu_ and supplies a  memory snapshot so this function
+    /// does not take the budget cache mutex while holding the scheduler lock.
     void admit_locked(
         const bioseq::common::memory::memory_snapshot& system_snapshot) noexcept {
         if (pending_.empty()) return;
@@ -2089,10 +1757,8 @@ private:
             budget_.memory_buffer_pct(),
             static_cast<std::uint64_t>(std::max<std::int64_t>(reserved_bytes_, 0)));
 
-        // Smallest-first greedy: a small batch admits even if the next
-        // larger one would push us over `available`. With closed-set
-        // enqueue (no streaming), starvation is impossible (see plan
-        // §4.17).
+        // Try smaller memnry requests first so a large waiting batch does not
+        // prevent smaller batches from using the available memory.
         std::stable_sort(pending_.begin(), pending_.end(),
             [](const scheduled_batch& lhs, const scheduled_batch& rhs) noexcept {
                 return lhs.total_bytes < rhs.total_bytes;
@@ -2130,12 +1796,8 @@ private:
                 running_batches_.push_back(std::move(*pending_iter));
                 pending_iter = pending_.erase(pending_iter);
 
-                // The enqueued lambda is an enclosing wrapper that
-                // owns the scoped_scheduler_finish on its own stack. The
-                // wrapper lives in TBB's task_handle storage, the
-                // inner body lives in the std::list node. Erasing the
-                // node from notify_batch_finished only destroys the
-                // inner body (which has already returned by then).
+                // Keep scoped_scheduler_finish in the TBB wrapper. Its destructor removes
+                // the list node only after the body stored in that node returns.
                 auto* running_ptr = std::addressof(running_batches_.back());
                 const auto running_id = running_ptr->scheduler_id;
                 arena_.enqueue([this, running_ptr, running_id] {
@@ -2147,11 +1809,8 @@ private:
                     }
                 }, tg_);
             } else {
-                // Update idle clock for the rejected batch. While
-                // peers are running we RESET the timer to "now" (it
-                // never crosses k_max_idle_waiting_time). When this is
-                // the sole holdout we LATCH the timer at the first
-                // observation.
+                // Count idle time only while no batch is running Running work may
+                // release memory, so give pending batches a fresh timeout then.
                 const auto now_ns = static_cast<std::int64_t>(
                                          bioseq::instrumentation::clock::now_ns());
                 if (!running_batches_.empty()) {
@@ -2166,8 +1825,8 @@ private:
         }
     }
 
-    /// Walk pending and abort any batch that has been the sole
-    /// holdout for longer than `k_max_idle_waiting_time`.
+    /// Abort  pending batches whose idle timeout has expired while no batch
+    /// is running. This prevents an unfulfillable, request from waiting forever.
     void check_idle_timeouts_locked() noexcept {
         if (!running_batches_.empty()) return;
         const auto now_ns = static_cast<std::int64_t>(
@@ -2199,19 +1858,15 @@ private:
         if (aborted_any) cv_.notify_all();
     }
 
-    /// Forward declaration: defined out-of-line below the
-    /// `progress_mark_batch_aborted` / `push_runtime_diagnostic`
-    /// helpers (which the scheduler depends on but which appear
-    /// later in this module).
+    /// Report a batch's idle timeout and mark its progress as aborted.
+    /// The caller holds mu_. Defined below the progress and diagnostic helpers.
     void emit_idle_timeout_locked(const scheduled_batch& batch) noexcept;
 
     [[nodiscard]] bool bench_lock_admissible_locked(
         const scheduled_batch& batch) const noexcept
     {
         if (!active_bench_lock_holder_.empty()) {
-            // A lock holder is one globally exclusive batch. No second locked
-            // or unlocked batch may join it, including work from the same
-            // benchmark.
+            // A locked batch runs alone, including within its own benchmark.
             return false;
         }
 
@@ -2234,14 +1889,12 @@ private:
             : (std::numeric_limits<std::size_t>::max)();
 
         if (batch.bench_lock) {
-            // Only the oldest lock may acquire, and it must wait until every
-            // previously admitted unlocked batch has drained.
+            // The oldest pending locked batch can start once all running work ends.
             return batch.scheduler_id == lock_id
                 && running_batches_.empty();
         }
-        // Pending-lock barrier: older unlocked work may drain/admit, but work
-        // enqueued after the oldest lock cannot leapfrog it due to the
-        // scheduler's size-based sort.
+        // Let older unlocked work start, but  hold newer work behind the first
+        // pending lock even when its memory request is smaller.
         return !has_pending_lock || batch.scheduler_id < lock_id;
     }
 
@@ -2253,11 +1906,9 @@ private:
         return it == running_per_benchmark_.end() || it->second == 0;
     }
 
-    /// Capture every escaped worker failure before the TBB task returns.
-    /// `std::exception_ptr` keeps the original dynamic exception (including
-    /// typed memory-admission diagnostics) alive without translating it on a
-    /// worker thread. The first failure is rethrown by wait_for_completion;
-    /// the count records additional failures without replacing root cause.
+    /// Save the first worker exceptjon for wait_for_completion to rethrow.
+    /// exception_ptr preserves its type and message. Count later failures
+    /// without replacing the first one.
     void capture_worker_exception(std::exception_ptr failure) noexcept {
         std::lock_guard<std::mutex> guard(mu_);
         ++worker_exception_count_;
@@ -2266,10 +1917,9 @@ private:
         }
     }
 
-    /// Helper used by `notify_batch_finished` to decrement-or-erase a
-    /// `benchmark_index → count` map, with `[[present]]` guarding the
-    /// `active_bench_lock_holder_` case where only `bench_lock=true`
-    /// batches contribute. Caller holds `mu_`.
+    /// Decrease a benchmark's count and remove the entry when it reaches zero.
+    /// The caller holds mu_. present is false when this batch does not
+    /// contribute to the map, as with an unlocked batch in the lock-holder map.
     template <typename p_map>
     static void decrement_or_erase_locked(
         p_map& map, typename p_map::key_type key, bool present) noexcept
@@ -2292,10 +1942,8 @@ private:
     std::atomic<bool>            running_{true};
 
     std::vector<scheduled_batch>  pending_{};
-    /// `std::list` (not vector) so iterator/pointer stability holds
-    /// across subsequent pushes. The lambda enqueued into TBB
-    /// captures `&running_batches_.back()`; a vector reallocation
-    /// would invalidate the pointer.
+    /// Running batches need stable addresses because TBB tasks keep pointers
+    /// to  their list nodes until the batch finishes.
     std::list<scheduled_batch>    running_batches_{};
     std::size_t                  next_id_         = 0;
     std::size_t                  total_enqueued_  = 0;
@@ -2304,16 +1952,12 @@ private:
     std::exception_ptr           first_worker_exception_{};
     std::size_t                  worker_exception_count_ = 0;
 
-    /// `benchmark_index → count of running bench_lock=true batches`.
-    /// Empty ⇒ no benchmark holds the bench-lock. Non-empty ⇒ exactly
-    /// one key (the holder) — `bench_lock_admissible_locked` rejects
-    /// anyone else.
+    /// The benchmark holding the exclusive batch lock Empty when unlocked,
+    /// otherwise it has one entry with count one.
     std::map<std::size_t, std::size_t> active_bench_lock_holder_{};
-    /// `benchmark_index → count of running batches` — used to honour
-    /// `concurrency.concurrency: false`.
+    /// Running batch count per benchmark, used to enforce serial execution.
     std::map<std::size_t, std::size_t> running_per_benchmark_{};
-    /// `benchmark_index → enqueued − finished` count. Drained by
-    /// `wait_for_benchmark`.
+    /// Unfinished batch count per benchmark, observed by wait_for_benchmark.
     std::map<std::size_t, std::size_t> outstanding_per_benchmark_{};
 };
 
@@ -2321,32 +1965,24 @@ inline scoped_scheduler_finish::~scoped_scheduler_finish() noexcept {
     scheduler->notify_batch_finished(scheduler_id);
 }
 
-// ----------------- Diagnostics -----------------
-//
-// Validation produces a flat list of `validation_diagnostic` records. Both
-// schema-driven errors (from the JSON schema validator) and post-parse
-// semantic checks share this type so `report_diagnostics` can pretty-print
-// them uniformly. `Severity::Error` aborts; `Severity::Warning` is logged
-// but does not stop the run.
+// Diagnostics from JSON schema validation and configuration checks share
+// one record type. Errors stop the run. Warnings are reported without
+// making the run fail.
 
-/// One validation finding — schema or semantic.
+/// One error or warning  from validating the configuration or run.
 struct validation_diagnostic {
     enum class diagnostic_severity : std::uint8_t { error, warning };
     diagnostic_severity severity = diagnostic_severity::error;
-    /// Short machine-readable token (e.g. "unknown_algorithm",
-    /// "value_type_mismatch", "schema").
+    /// Stable error or warning identifier, such as "unknown_algorithm".
     std::string code;
-    /// Human-readable origin string. For schema errors this contains the
-    /// JSON Pointer into the offending document; for semantic errors it
-    /// names the config path + benchmark key + relative location.
+    /// Where the problem occurred, such as a file and JSON pointer or a
+    /// configuration path, benchmark name and field.
     std::string location;
     std::string message;
 };
 
-/// Custom error handler that captures every validation error (vs. the
-/// default `basic_error_handler` that throws on the first). One instance
-/// per validation pass; collected entries are converted to `validation_diagnostic`
-/// records by `validate_against_schema`.
+/// Collect JSON schema errors so the caller can report them together.
+/// validate_against_schema converts ech entry to validation_diagnostic.
 class collecting_error_handler : public nlohmann::json_schema::basic_error_handler {
 public:
     void error(const nlohmann::json::json_pointer& pointer,
@@ -2364,24 +2000,12 @@ private:
     std::vector<entry> captured_;
 };
 
-// ----------------- Schema definitions (built-in) -----------------
+// Embedded schemas for benchmark configurations and reports. Keeping them
+// here lets validation run, without reading separate schema files.
 //
-// Both schemas are inlined as raw string literals so the framework has no
-// external dependency at runtime. They double as documentation: every
-// nontrivial property carries a `description` and many carry `examples`.
-//
-// Conventions inside the schemas:
-//   * `propertyNames: { minLength: 1 }` rejects empty identifiers (empty
-//     benchmark keys, empty algorithm names, empty rule names, etc.).
-//   * `oneOf` is used to make alternatives readable to a human (the metric
-//     spec's three flavours, the comparator's `<`/`>`/`=` split).
-//   * `additionalProperties: false` is preferred over open-ended objects
-//     except where the data is genuinely free-form (e.g. test_case `data`
-//     blob, rule selector partial matches, parameter values).
-//
-// Anything the schema cannot express (cross-references between
-// `matrix.over.<algo>` and `params.<algo>`, value-vs-declared-type checks,
-// per-rule duplicate-name checks) is enforced by `semantic_validate_config`.
+// The schemas check JSON structure, allowed fields and  identifier names.
+// semantic_validate_config checks relationships between declarations, such
+// as whether a matrix parameter belongs to the named algorithm.
 
 inline constexpr std::string_view k_bench_config_schema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -3601,11 +3225,10 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
   }
 })json";
 
-// ----------------- Validation utilities -----------------
+// Validation helpers.
 
-/// Format a list of `validation_diagnostic` to stderr. Returns true iff any
-/// diagnostic has Severity::Error (caller can use this to drive the exit
-/// code / abort flag).
+/// Print diagnostics to stderr and return whether any is an error.
+/// Callers use the result to stop the run or choose a failure exit code.
 [[nodiscard]] inline bool report_diagnostics(
     std::span<const validation_diagnostic> diagnostics,
     std::string_view phase_label) noexcept
@@ -3638,10 +3261,9 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
     return error_count > 0;
 }
 
-/// Move every diagnostic from `source` into the shared `*context.diagnostics`
-/// list under `context.diagnostics_mu`. Empty / nullptr inputs are no-ops
-/// so the call site doesn't have to guard. The source vector is cleared
-/// after the move so callers can reuse it without leaking stale entries.
+/// Move diagnostics into the shared list while holding its mutex.
+/// Clear source after the move If either shared pointer is null or source
+/// is empty, leave source alone.
 inline void drain_diagnostics_to_context(
     benchmark_context& context,
     std::vector<validation_diagnostic>& source) noexcept
@@ -3656,10 +3278,9 @@ inline void drain_diagnostics_to_context(
     source.clear();
 }
 
-/// Run a JSON document through one of the framework's hardcoded schemas
-/// and convert any findings to `validation_diagnostic` records. Catches thrown
-/// `std::exception`s from the underlying nlohmann library so the framework
-/// itself stays exception-free.
+/// Validate a JSON document against a supplied framework schema.
+/// Return  schema errors as diagnostics, including std::exception failures
+/// raised woile parsing or validating the document.
 [[nodiscard]] inline std::vector<validation_diagnostic> validate_against_schema(
     const std::string& json_text,
     std::string_view schema_text,
@@ -3674,13 +3295,8 @@ inline void drain_diagnostics_to_context(
         collecting_error_handler handler;
         validator.validate(target_document, handler);
         for (const auto& entry : handler.entries()) {
-            // The validator's error callback delivers a JSON pointer to the
-            // failing instance. Many of nlohmann_json_schema_validator's
-            // composite errors (oneOf branch failures, propertyNames checks)
-            // report the parent pointer and embed the inner path inside the
-            // message text — so we always render the file label and append
-            // the pointer only when it adds new information beyond the
-            // message body.
+            // Include the file label and any JSON pointer from the validator so
+            // the user can find the field, including errors on a parent object.
             std::string location_text = std::string{source_label};
             if (!entry.pointer.empty()) {
                 location_text += " (";
@@ -3705,15 +3321,13 @@ inline void drain_diagnostics_to_context(
     return diagnostics;
 }
 
-// `validate_against_schema` is the single entry point: callers pass either
-// `k_bench_config_schema` or `k_bench_report_schema` directly.
+// Pass either k_bench_config_schema or k_bench_report_schema to
+// validate_against_schema.
 
-// ----------------- Config parsing helpers -----------------
+// Configuration parsing helpers.
 
-/// Read the entire contents of `path` into a `std::string`. Returns an empty
-/// string if the file cannot be opened (e.g. missing or permission denied);
-/// callers must distinguish "missing" from "legitimately empty" by stat-ing
-/// the path first if that matters.
+/// Read a file into a string. An empty result can mean an empty file or
+/// a file that could not be opened.
 [[nodiscard]] inline std::string slurp_file(const std::filesystem::path& path) noexcept {
     std::ifstream file(path, std::ios::binary);
     if (!file) return {};
@@ -3722,12 +3336,9 @@ inline void drain_diagnostics_to_context(
     return buffer.str();
 }
 
-/// Parse the top-level `params` block (`{ algo_name: { param_name:
-/// json-schema-entry, ... } }`) into a per-algorithm schema map. The schema
-/// is what matrix expansion later consults to fill in defaults for any
-/// parameter not explicitly listed in `matrix.over`. Sets `parse_ok = false`
-/// on any malformed entry but keeps walking the rest of the document so the
-/// user sees as many errors as possible per build.
+/// Read each algorithm's parameter types, allowed values and defaults.
+/// Matrix expansion uses these defaults for omitted parameters. Malformed
+/// entries set parse_ok to false while parsing continues through  the block.
 [[nodiscard]] inline std::map<std::string, algorithm_schema> parse_top_level_params(
     simdjson::dom::object params_object,
     bool& parse_ok)
@@ -3791,10 +3402,8 @@ inline void drain_diagnostics_to_context(
     return result;
 }
 
-/// Parse the top-level `test_cases` block. Each entry produces a
-/// `test_case_specification` whose `data` element is a non-owning view into the parser
-/// pool — the parser must outlive the returned vector, which is true because
-/// both live as members on `benchmark_execution_state`.
+/// Read the test cases and keep their data as views into the JSON parser.
+/// The parser must outlive these views. benchmark_execution_state owns both.
 [[nodiscard]] inline std::vector<test_case_specification> parse_test_cases(
     simdjson::dom::object test_cases_object,
     bool& parse_ok)
@@ -3815,7 +3424,7 @@ inline void drain_diagnostics_to_context(
             spec.description = std::string{description_text};
         }
 
-        // Default is the cached `default_test_case_concurrency()`.
+        // Use default_test_case_concurrency() when no concurrency is specified.
         std::int64_t concurrency_raw = 0;
         if (inner_obj["concurrency"].get(concurrency_raw) == simdjson::SUCCESS
             && concurrency_raw > 0) {
@@ -3837,11 +3446,9 @@ inline void drain_diagnostics_to_context(
     return result;
 }
 
-/// Parse a rule's LHS or RHS selector. Selectors look like
-/// `{ "key": "<algo>", "<param>": <value>, ... }` — the `key` field is
-/// mandatory and names the algorithm; every other field is treated as a
-/// (param_name, expected_value) match constraint. Empty constraint set
-/// matches every tuple of that algorithm.
+/// Read one side of a rule. key names the algorithm. test_case and region
+/// optionally restrict where samples come from. Other fields match parameter
+/// values, with an empty set matching every tuple of that algorithm.
 [[nodiscard]] inline rule_selector parse_rule_selector(
     simdjson::dom::object selector_obj,
     bool& parse_ok)
@@ -3884,11 +3491,9 @@ inline void drain_diagnostics_to_context(
     return selector;
 }
 
-/// Parse the `compare` op and `tolerance%` slot shared by every
-/// comparator object in the framework (per-rule and regression). Returns
-/// nullopt + flips `parse_ok` on missing / unknown `compare`. `tolerance%`
-/// defaults to 0 silently — the JSON schema enforces both bounds and
-/// presence rules upstream, so omission means "use the default".
+/// Read a comparison operator and tolerance. A missing or unknown, compare
+/// value returns nullopt and sets parse_ok to false. Tolerance defaults to
+/// zero The JSON schema checks its  range.
 [[nodiscard]] inline std::optional<std::pair<comparison_operator, double>>
 parse_compare_and_tolerance(
     simdjson::dom::object op_obj,
@@ -3912,10 +3517,9 @@ parse_compare_and_tolerance(
     return std::pair{*parsed_op, tolerance_pct};
 }
 
-/// Parse a rule's comparator object. `compare` is mandatory; the two `%`
-/// fields and `warmup_repetitions` default to zero, and `aggregate` defaults
-/// to `"p50"`. See `comparator_passes` for the pass/fail decision and
-/// `aggregate_samples` for the reduction.
+/// Read how a rule compares its two sample sets.
+/// Defaults are p50, zero threshold and tolerance, no warmup, independent
+/// aggregates, and a blocking result. Paired ratios use a baseline of one.
 [[nodiscard]] inline rule_comparator parse_rule_comparator(
     simdjson::dom::object cmp_obj,
     bool& parse_ok)
@@ -3983,9 +3587,9 @@ parse_compare_and_tolerance(
     return out;
 }
 
-/// Parse one rule entry. Rules are 4-element JSON arrays:
-/// `[name, lhs_selector, comparator, rhs_selector]`. Returns nullopt and
-/// flips `parse_ok` to false on any structural problem.
+/// Read [nale, lhs_selector, comparator, rhs_selector].
+/// An invalid outer array returns nullopt. Invalid fields set parse_ok to
+/// false, so callers must check it even when a rule is returned.
 [[nodiscard]] inline std::optional<benchmark_rule> parse_one_rule(
     simdjson::dom::array rule_array,
     const std::string& metric_name,
@@ -4040,11 +3644,8 @@ parse_compare_and_tolerance(
     return rule;
 }
 
-/// Parse a regression rule's `operator` block. Shares the `compare` /
-/// `tolerance%` parsing path with `parse_rule_comparator` via the
-/// `parse_compare_and_tolerance` helper. The schema's
-/// `additionalProperties: false` rejects any explicit `threshold%` field
-/// before we get here, so we don't read it.
+/// Read a regression comparison's operator and tolerance.
+/// Regression operators have no threshold% field. The schema rejects it.
 [[nodiscard]] inline std::optional<regression_operator> parse_regression_operator(
     simdjson::dom::object op_obj, bool& parse_ok)
 {
@@ -4057,12 +3658,9 @@ parse_compare_and_tolerance(
     };
 }
 
-/// Parse the top-level `regression_rules` array. The result vector is
-/// populated even when individual entries fail; callers report the
-/// `parse_ok` flip as a hard error after walking the rest of the
-/// document. `regions` is normalised here: the literal `"all_regions"`
-/// shorthand and an array form both end up as a non-empty vector of
-/// region names.
+/// Read regression rules, recording  malformed entries through parse_ok.
+/// Keep parsing after an error so callers can report problems together.
+/// Normalize regions to a list, defaulting to all_regions.
 [[nodiscard]] inline std::vector<regression_rule> parse_regression_rules(
     simdjson::dom::array rules_array,
     const std::string& config_path,
@@ -4141,9 +3739,7 @@ parse_compare_and_tolerance(
             }
         }
         if (rule.regions.empty()) {
-            // Default per spec: "all_regions". Schema oneOf only emits the
-            // array form when the user wrote one; the implicit default
-            // (or omitted field) lands here.
+            // Use all_regions when no region names were supplied.
             rule.regions.emplace_back("all_regions");
         }
 
@@ -4219,9 +3815,9 @@ parse_compare_and_tolerance(
     return result;
 }
 
-/// Parse the `matrix.metrics` block. Each entry contributes a `metric_specification`
-/// with optional `type`, optional `counter`, and a list of rules. Defaults:
-/// `type="builtin"`, `counter=metric_name`.
+/// Read metric sources, filters and comparison rules from matrix.metrics.
+/// The source defaults to builtin. A counter without an explicit counter
+/// field uses the metric name.
 [[nodiscard]] inline std::vector<metric_specification> parse_metrics(
     simdjson::dom::object metrics_obj,
     bool& parse_ok)
@@ -4251,11 +3847,9 @@ parse_compare_and_tolerance(
         }
         metric.declared_source = *parsed_source;
 
-        // Map (source, metric_name) → metric_kind. Counter and Evaluation
-        // bypass the registry — their metric_kind is fixed. Builtin /
-        // Region / Loop look up the canonical entry; mismatches between
-        // the declared `type` and the entry's source are deferred to
-        // semantic_validate_config so all errors collect in one pass.
+        // Counter and evaluation metrics have fixed kinds and user-chosen names.
+        // Other sources use the builtin registry. Validate source mismatches
+        // later with the other cofiguration errors.
         switch (*parsed_source) {
             case metric_source::counter:
                 metric.kind = metric_kind::counter;
@@ -4270,9 +3864,8 @@ parse_compare_and_tolerance(
                 if (entry != nullptr) {
                     metric.kind = entry->kind;
                 } else {
-                    // Unknown name — fall back to a placeholder that
-                    // semantic_validate_config rejects with a precise
-                    // message based on the declared `type`.
+                    // Keep parsing with a placeholder. Configuration  validation will
+                    // report this unknown metric name.
                     metric.kind = metric_kind::wall_clock_ns;
                 }
                 break;
@@ -4326,10 +3919,9 @@ parse_compare_and_tolerance(
     return result;
 }
 
-/// Walk one benchmark block (`bench1`, `bench2`, etc.) inside the top-level
-/// config and fill the `benchmark_configuration`. The benchmark's identity, schema,
-/// and test_cases are populated separately by the caller. Returns false on
-/// any structural problem (missing `matrix`, missing `for`/`over`, etc.).
+/// Read one benchmark's settings and matrix into config.
+/// The caller supplies its identity, parameter schemas and test cases.
+/// Return false when required fields or their structure are invalid
 [[nodiscard]] inline bool parse_benchmark_block(
     simdjson::dom::object benchmark_obj,
     benchmark_configuration& benchmark)
@@ -4345,8 +3937,7 @@ parse_compare_and_tolerance(
         benchmark.fast = fast_flag;
     }
 
-    // tags: required array of non-empty strings (schema already enforced the
-    // shape; this is the structural walk). An empty array is legal.
+    // tags is required, but an empty list is allowed.
     simdjson::dom::array tags_array;
     if (benchmark_obj["tags"].get(tags_array) == simdjson::SUCCESS) {
         for (auto entry : tags_array) {
@@ -4360,7 +3951,7 @@ parse_compare_and_tolerance(
             benchmark.tags.emplace_back(tag_text);
         }
     } else {
-        // Schema makes this unreachable, but fail loudly if a caller bypassed it.
+        // Also reject missing tags when called without schema validation.
         bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' missing required 'tags' array",
                         benchmark.benchmark_key);
         parse_ok = false;
@@ -4568,25 +4159,14 @@ parse_compare_and_tolerance(
     return parse_ok;
 }
 
-/// Top-level config parser. Slurps `config_path`, validates against the
-/// built-in JSON schema, parses with simdjson into `state.parser`, then walks
-/// `params`, `test_cases`, and the requested `benchmark_key` block. The
-/// resulting `benchmark_execution_state` owns the parser and config body so
-/// the simdjson `dom::element` views handed to the user remain valid for
-/// the entire run.
-/// Outcome of `parse_config_file`. `ok=true` means the parser walked the
-/// document; `diagnostics` carries every issue found (schema violations
-/// from the JSON-schema pass plus structural problems from the simdjson
-/// walk). On parse failure `ok=false` and the caller must abort *before*
-/// reading anything else from the state — the partial parse is undefined.
+/// Result of reading and validating one benchmark configuration.
+/// ok is false on any schema or parsing error. The state may then, contain
+/// partial data, so the caller must stop before using it for  execution.
 struct config_parse_outcome {
     bool ok = true;
     std::vector<validation_diagnostic> diagnostics{};
-    /// Top-level `regression_rules` array, parsed and normalised. The
-    /// closure registers these into the global `regression_rules_by_configuration`
-    /// registry the first time it sees a given `config_path` (subsequent
-    /// benchmarks sharing the file see the entry already present and
-    /// skip).
+    /// Parsed regression rules from this configuration file. The shared
+    /// registry keeps the first copy when several benchmarks use that file.
     std::vector<regression_rule> regression_rules{};
 };
 
@@ -4611,11 +4191,8 @@ struct config_parse_outcome {
         return outcome;
     }
 
-    // 1. JSON schema pass — validates structure (required fields, types,
-    //    ranges, propertyNames, oneOf branches). Schema errors do not stop
-    //    the walk: we still try to populate as much of the state as
-    //    possible so semantic_validate_config can layer further checks
-    //    on top.
+    // Check the JSON schema, then continue parsing even after schema errors
+    // so structural problems can be reported in the jame result.
     auto schema_diagnostics = validate_against_schema(
         state.config_body, k_bench_config_schema, config_path);
     for (auto& diag : schema_diagnostics) {
@@ -4623,10 +4200,8 @@ struct config_parse_outcome {
         outcome.diagnostics.push_back(std::move(diag));
     }
 
-    // 2. simdjson walk. If the top-level structure is unrecognisable we
-    //    bail; less catastrophic problems (missing benchmark key, etc.)
-    //    surface as additional diagnostics so the user sees one
-    //    consolidated report.
+    // Read the configuration with simdjson and collect parsing errors.
+    // An invalid top-level document prevents further parsing.
     auto root_result = state.parser.parse(state.config_body);
     simdjson::dom::element root_element;
     if (root_result.get(root_element) != simdjson::SUCCESS) {
@@ -4706,11 +4281,8 @@ struct config_parse_outcome {
         parse_ok = false;
     }
 
-    // 3. Optional top-level regression_rules array. Empty / absent are
-    //    both legal. Parse here so we always return a fresh copy in
-    //    `outcome.regression_rules`; the closure decides whether to
-    //    register them (only the first benchmark per config_path
-    //    succeeds; subsequent ones discard their copy via dedup).
+    // Each parse returns its own regression rules. Registration keeps one
+    // copy per configuration file shared by all its benchmarks.
     simdjson::dom::array regression_rules_array;
     if (root_obj["regression_rules"].get(regression_rules_array) == simdjson::SUCCESS) {
         outcome.regression_rules = parse_regression_rules(
@@ -4737,26 +4309,12 @@ struct config_parse_outcome {
     return outcome;
 }
 
-// ----------------- Semantic config validation -----------------
-//
-// Once the JSON schema and the simdjson walk have populated
-// `benchmark_execution_state`, the framework runs cross-field checks the
-// schema cannot express:
-//   - matrix.over.<algorithm> references an algorithm declared in 'params'
-//   - matrix.over.<algorithm>.<parameter> references a declared parameter
-//   - every value in matrix.over.<algorithm>.<parameter> matches the
-//     parameter's declared type (and 'enum', if present)
-//   - matrix.for.<test_case> references a declared test case
-//   - rule selectors point at a declared algorithm/test case and only mention
-//     declared parameters with type-correct values; named source regions are
-//     used only with by-regions region/loop metrics
-//   - rule names are unique within a benchmark
-//   - threshold% / tolerance% of exactly 100 raises a warning ("rule will
-//     always pass")
-//   - test_cases declared with zero iterations raise a warning
+// Check references and values that  depend on other configuration fields,
+// including parameter types, rule selectors and the expected result matrix.
 
-/// True iff `value` matches the declared `param`. Type promotion: a
-/// `number`-typed parameter accepts both Integer and Double values.
+/// Check a value against its declared type and allowed enum values.
+/// A number parameter accepts both integers and floating-point values,
+/// though enum entries must also match the value's stored type.
 [[nodiscard]] inline bool value_matches_param_schema(
     const config_value& value, const parameter_schema& param) noexcept
 {
@@ -4788,8 +4346,7 @@ struct config_parse_outcome {
     return nullptr;
 }
 
-/// Helper for building human-readable diagnostic locations. Returns
-/// `<config_path>:<benchmark_key>/<sub_path>`.
+/// Format a diagnostic location as <config_path>:<benchmark_key>/<sub_path>.
 [[nodiscard]] inline std::string semantic_location(
     const benchmark_execution_state& state, std::string_view sub_path) noexcept
 {
@@ -4801,9 +4358,7 @@ struct config_parse_outcome {
     return out;
 }
 
-/// Render a config_value's *kind* as a JSON-Schema-style type name, used by
-/// `value_type_mismatch` diagnostics so the user sees what was passed vs.
-/// what was declared.
+/// Name a configuration value's type for error messages.
 [[nodiscard]] inline std::string_view config_value_kind_name(const config_value& value) noexcept {
     switch (value.kind) {
         case config_value::value_kind::string:    return "string";
@@ -4815,10 +4370,9 @@ struct config_parse_outcome {
     return "?";
 }
 
-/// Walk every cross-reference inside a parsed `benchmark_execution_state`
-/// and emit `validation_diagnostic` records for anything inconsistent. Returns a
-/// flat vector covering every benchmark-level concern (no early-exit so
-/// the user sees every issue in one pass).
+/// Check relationships between a benchmark's configuration fields.
+/// Collect all discovered errors and warnings so the user can fix several
+/// problems before running the benchmark again
 [[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_config(
     const benchmark_execution_state& state) noexcept
 {
@@ -4846,9 +4400,7 @@ struct config_parse_outcome {
              std::move(sub_path), std::move(message));
     };
 
-    // 1. Cross-check `matrix.over.<algo>.<param> = [values]` against
-    //    `params.<algo>.<param>`. Every algorithm must be declared, every
-    //    parameter must be declared, every value must be type-correct.
+    // Check  matrix algorithms, parameter names and values against params.
     for (const auto& [algorithm_name, params_axes] : config.matrix_over) {
         if (schemas.find(algorithm_name) == schemas.end()) {
             error("unknown_algorithm",
@@ -4884,8 +4436,7 @@ struct config_parse_outcome {
         }
     }
 
-    // 2. Cross-check `matrix.for.<test_case>` against top-level
-    //    `test_cases`, and warn on zero iterations.
+    // Check test-case names and warn about zero iterations.
     std::set<std::string> declared_test_cases;
     for (const auto& spec : state.test_cases) declared_test_cases.insert(spec.name);
     for (const auto& [test_case_name, iterations] : config.for_each) {
@@ -4903,10 +4454,8 @@ struct config_parse_outcome {
         }
     }
 
-    // 2a. A complete-matrix acceptance contract is deliberately redundant
-    // with matrix.for/matrix.over: the second declaration freezes the exact
-    // acceptance shape so an accidental config edit cannot silently redefine
-    // what a "complete" report means.
+    // Acceptance repeats the expected matrix so an accidental edit to for
+    // or over cannot silently change which results count as complete.
     if (config.acceptance.enabled()) {
         const std::set<std::string> expected_algorithms{
             config.acceptance.exact_algorithm_rows.begin(),
@@ -5043,8 +4592,7 @@ struct config_parse_outcome {
         }
     }
 
-    // 3. Walk every rule. Selector validation, rule name uniqueness,
-    //    threshold/tolerance always-pass warnings.
+    // Check rule names, selectors and comparison settings.
     std::set<std::string> seen_rule_names;
     auto validate_selector = [&schemas, &config, &error](const rule_selector& selector,
                                   const metric_specification& metric,
@@ -5142,13 +4690,8 @@ struct config_parse_outcome {
             }
         }
 
-        // 4a. Builtin metric name + source compatibility. Counter and
-        //     Evaluation metrics carry user-chosen names; Region / Loop /
-        //     OuterClock metric keys must match a registry entry whose
-        //     source matches the declared `type`.
-        // (Counter / Evaluation flavours skip these checks — their metric
-        // names are user-chosen and the schema's `additionalProperties:
-        // false` already rejects a `region` field on those branches.)
+        // Check builtin metric names against the registry. Counter and
+        // evaluatvon metric names are chosen by the user.
         if (metric.kind != metric_kind::counter && metric.kind != metric_kind::evaluation) {
             const auto* entry = lookup_builtin_metric(metric.name);
             if (entry == nullptr) {
@@ -5158,10 +4701,8 @@ struct config_parse_outcome {
                                   metric.name));
                 continue;
             }
-            // 4b. Cross-source typo check. `type: "region"` with key
-            //     `loop_total_iterations` (or vice versa) gets rejected
-            //     before run-time so the user sees a precise message
-            //     instead of getting silently-empty samples.
+            // Catch a metric assigned to the wrong source, such as a loop metric
+            // declared with type region.
             if (entry->source != metric.declared_source) {
                 error("metric_source_mismatch",
                       fmt::format("matrix.metrics.{}", metric.name),
@@ -5171,9 +4712,7 @@ struct config_parse_outcome {
                                   metric_source_name(entry->source)));
                 continue;
             }
-            // 4c. Min / Max metrics require an explicit `region` filter —
-            //     cross-region "min of mins" / "max of maxes" would lose
-            //     meaning.
+            // Min and max metrics must name  the region being, measured.
             if (entry->combiner == metric_combiner::requires_region && metric.region.empty()) {
                 error("min_max_metric_requires_region",
                       fmt::format("matrix.metrics.{}", metric.name),
@@ -5309,7 +4848,7 @@ struct config_parse_outcome {
                 }
             }
 
-            // Always-pass warnings.
+            // Warn when threshold or tolerance is set to the maximum of 100%.
             if (rule.cmp.threshold_pct == 100.0) {
                 warning("threshold_max",
                         fmt::format("matrix.metrics.{}.rules.{}.comparator", metric.name, rule.name),
@@ -5326,18 +4865,16 @@ struct config_parse_outcome {
     return diagnostics;
 }
 
-/// Post-run validation. Checks evaluation-metric emission and, when present,
-/// the exact complete-matrix acceptance contract. These checks require the
-/// final merged iteration state and therefore cannot run during config parse.
+/// Check the collected results for missing metrics and incomplete runs.
+/// When acceptance is enabled, require the configured algorithm rows,
+/// iteration counts and named-region sample counts to match exactly.
 [[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_post_run(
     const benchmark_execution_state& state) noexcept
 {
     std::vector<validation_diagnostic> diagnostics;
 
-    // Single-pass walk: invoke `body(samples)` for every cell that has
-    // collected `metric_name` in `all_regions`, and stop early when
-    // `body` returns true. Replaces three near-identical
-    // for-loops-over-cells with a single shared traversal.
+    // Visit cells with this metric in all_regions. Stop when body returns
+    // true, allowing callers to check whether any matching sample exists.
     const auto for_each_all_regions_metric = [&](
         const std::string& metric_name,
         auto&& body) noexcept -> bool
@@ -5352,10 +4889,9 @@ struct config_parse_outcome {
         return false;
     };
 
-    // If no cell ran (every test_case had 0 iterations, or no test_cases were
-    // declared at all), the missing-metric check would false-positive on
-    // every evaluation metric. Skip the check entirely and emit a single
-    // warning so the situation is still surfaced.
+    // Missing-metric checks need collected samples. If every cell is empty,
+    // report  that the benchmark produced no results and skip those checks.
+    // Acceptance treats this as an error. Other runs receive a warning.
     bool any_iteration_ran = false;
     for (const auto& cell_ptr : state.cells) {
         if (!cell_ptr->samples.empty()) { any_iteration_ran = true; break; }
@@ -5454,12 +4990,9 @@ struct config_parse_outcome {
             std::tuple<std::string, std::string, std::string, std::string>;
         std::map<named_source_coordinate, std::size_t> raw_named_sample_counts;
 
-        // Preserve each logical iteration's same-name descriptor count.
-        // `repeat` is local to a group, so merging by that numeric ID would
-        // collide (every group has a repeat zero). Instead concatenate each
-        // cell's already ordered local vector in explicit group-index order;
-        // the resulting vector positions are fresh global ordinals for this
-        // accepted (tuple, test-case) pair.
+        // Repeat numbers restart in each group Join each group's ordered
+        // sample-count vector in group-indeo order to give iterations distinct
+        // positions when checking counts for this tuple and test case.
         using iteration_multiplicity_pair =
             std::pair<const execution_tuple*, std::string>;
         std::map<iteration_multiplicity_pair, std::vector<const measurement_cell*>>
@@ -5555,9 +5088,8 @@ struct config_parse_outcome {
                 || iterations_it->second == 0
                 || multiplicity.exact_samples % iterations_it->second != 0
                 || tuple_it == unique_tuple_by_algorithm.end()) {
-                // Pre-run semantic validation already reports malformed
-                // contracts/tuple multiplicity. Avoid manufacturing a second
-                // distribution diagnosis from an undefined quotient.
+                // Earlier checks report invalid iteration counts or duplicate tuples.
+                // Skip the distribution check when its expected count is undefined.
                 continue;
             }
 
@@ -5624,15 +5156,13 @@ struct config_parse_outcome {
         return diagnostics;
     }
 
-    // Helper: did any cell emit a sample for this metric?
+    // Check whether any cell collected this metric in all_regions.
     const auto metric_was_emitted = [&](const std::string& metric_name) noexcept {
         return for_each_all_regions_metric(metric_name,
             [](const auto& /*values*/) noexcept { return true; });
     };
-    // Helper: are any of a metric's collected samples non-zero? Used by
-    // the PMU-availability check below — on platforms without PMU access,
-    // the OS feeds back zeros for cycles/instructions/branches/branch_misses
-    // and we want to surface that exactly once.
+    // Check for a nonzero sample before warning  that a PMU metric may be
+    // unavailable on this machine.
     const auto metric_has_non_zero_sample = [&](const std::string& metric_name) noexcept {
         return for_each_all_regions_metric(metric_name,
             [](const auto& values) noexcept {
@@ -5643,10 +5173,8 @@ struct config_parse_outcome {
             });
     };
 
-    // PMU availability: if any declared region metric needs PMU, but every
-    // sample we collected for it is exactly zero, the OS denied PMU access
-    // (typical on macOS arm64 without root). Emit one warning per benchmark
-    // so the user understands why the values are degenerate.
+    // All-zero PMU samples can mean the counters are unavailable. Report
+    // this once per benchmark so the user can check counter access.
     bool pmu_warning_emitted = false;
     for (const auto& metric : state.config.metrics) {
         if (metric.kind == metric_kind::counter || metric.kind == metric_kind::evaluation) continue;
@@ -5723,11 +5251,8 @@ struct config_parse_outcome {
             continue;
         }
 
-        // For region/loop metrics with a non-empty `region` filter, verify
-        // that the named descriptor was actually visited at least once.
-        // Without this check, a typo in the filter silently produces empty
-        // sample arrays and rules over them quietly compare median(0) ==
-        // median(0).
+        // Warn when a named-region filter collected no samples. A misspelled
+        // region name can, otherwise be hard to distinguish from unused code.
         if (!metric.region.empty() && !metric_was_emitted(metric.name)) {
             diagnostics.push_back({
                 validation_diagnostic::diagnostic_severity::warning,
@@ -5740,36 +5265,21 @@ struct config_parse_outcome {
         }
     }
 
-    // silently. The on_evaluate lambda is typically shared across
-    // multiple benchmarks (one returns `accuracy` and `latency`,
-    // another only declares `accuracy`); flagging extra keys would
-    // make sharing painful. The opposite direction — declared but
-    // not returned — is still flagged via `missing_evaluation_metric`
-    // above because that case is almost always a typo.
+    // Ignore extra evaluation keys so benchmarks can share one evaluator.
+    // A declared metric that is missing from its required results is still
+    // reported above.
 
     return diagnostics;
 }
 
-/// Cross-config validation for regression rules. Runs once from
-/// `run_impl` after every benchmark closure has finished registering its
-/// state. Each rule is checked against the benchmarks loaded from its
-/// own `config_path`:
-///   - benchmark_rule names must be unique within the same config file.
-///   - Every entry of `benchmarks` (when present) must name a benchmark
-///     that is registered for this config_path.
-///   - Every benchmark/algorithm deny-list entry must name a declaration in
-///     this config and cannot remove every cell the rule could cover.
-///   - The metric must appear in the benchmarks the rule applies to
-///     (every listed benchmark when explicit; at least one when
-///     implicit).
-///   - Every entry of `exclude_cases` must name a declared test_case in
-///     the rule's config (test_cases are config-global, so any state
-///     sharing the config_path has the same list).
-///   - `exclude_cases` cannot cover *every* test_case the rule could
-///     possibly fire on (over-coverage). The runtime
-///     `regression_rule_matched_nothing` check still catches semantic
-///     emptiness (e.g. region listed but never visited); this catches
-///     the syntactic case at parse time.
+/// Check regression rules against  all declarations in their configuration.
+/// Use the unfiltered declarations so CLI filters do not make valid names
+/// appear mjssing. Check unique rule names, metric availability and excluded
+/// benchmarks, algorithms and test cases.
+///
+/// Explicitly listed benchmarks must each declare the metric. With no list,
+/// at least one matching benchmark must declare it Exclusions must leave
+/// work for the rule to check. Runtime checks handle missing measured data.
 [[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_regression_rules(
     const regression_rules_by_configuration& regression_rules_by_config,
     const regression_validation_universe& validation_universe) noexcept
@@ -5799,14 +5309,14 @@ struct config_parse_outcome {
             const std::string base_loc = fmt::format(
                 "{}/regression_rules/{}", config_path, rule.name);
 
-            // 1. benchmark_rule name uniqueness within the config file.
+            // Rule names must be unique within a configuration file.
             if (!seen_rule_names.insert(rule.name).second) {
                 error("regression_duplicate_rule_name", base_loc,
                     fmt::format("regression rule name '{}' is used more than once in '{}'; names must be unique within a config file",
                                 rule.name, config_path));
             }
 
-            // 2. Determine matching benchmarks within this config_path.
+            // Select benchmarks after checking the  include and exclude lists.
             std::vector<const regression_benchmark_declaration*>
                 matching_declarations;
             const std::set<std::string> excluded_benchmarks(
@@ -5855,7 +5365,8 @@ struct config_parse_outcome {
                                 rule.name));
             }
 
-            // 3. Metric existence check.
+            // Require the metric in every explicitly listed benchmark, or in at
+            // least one matching benchmark when no list was given.
             const auto metric_in_declaration = [&rule](
                     const regression_benchmark_declaration& declaration) noexcept {
                 return std::find(
@@ -5886,10 +5397,8 @@ struct config_parse_outcome {
                 }
             }
 
-            // 4. exclude_cases membership check (and over-coverage).
-            //    Test-case declarations are config-global; use the registered
-            //    unfiltered universe so a CLI filter cannot turn a valid name
-            //    into a false unknown-reference error.
+            // Check excluded test-case names against all declarations in the file.
+            // CLI filters must not make a valid declaration appear missing.
             if (!matching_declarations.empty()) {
                 std::set<std::string> declared_names;
                 for (const auto* declaration : declarations_for_config) {
@@ -5905,8 +5414,7 @@ struct config_parse_outcome {
                     }
                 }
 
-                // Over-coverage: union of every for_each in matching
-                // benchmarks minus exclude_cases must be non-empty.
+                // Exclusions must leave at least one test case in the matching matrices.
                 std::set<std::string> covered_test_cases;
                 for (const auto* declaration : matching_declarations) {
                     covered_test_cases.insert(
@@ -5967,13 +5475,12 @@ struct config_parse_outcome {
     return diagnostics;
 }
 
-// ----------------- Matrix expansion -----------------
+// Expand the benchmark matrix.
 
-/// Cross-product of one algorithm's declared values. Every parameter not
-/// listed in `declared` is filled in from the schema's default (or fails
-/// the expansion if no default is available). Iteration order over
-/// `declared` is the std::map alpha-sort, which we propagate to the report
-/// so cross-build comparisons see a stable tuple order.
+/// Build every parameter combination for one algorithm.
+/// Fill omitted parameters from, their schema defaults. An empty value  list
+/// or missing default sets expansion_ok to false. Visit parameter names in
+/// sorted order so the report's tuple order is stable.
 [[nodiscard]] inline std::vector<execution_tuple> expand_one_algorithm(
     const std::string& algorithm_name,
     const std::map<std::string, std::vector<config_value>>& declared,
@@ -5983,7 +5490,7 @@ struct config_parse_outcome {
     std::vector<execution_tuple> seed;
     seed.push_back(execution_tuple{algorithm_name, parameter_map{}});
 
-    // Cross-product over declared parameters in iteration order.
+    // Extend ekery partial tuple with each value of the next parameter.
     for (const auto& [param_name, value_list] : declared) {
         if (value_list.empty()) {
             bioseq_log<logging_level::error>("[bench_framework] matrix.over.{}.{} has no values", algorithm_name, param_name);
@@ -6020,10 +5527,8 @@ struct config_parse_outcome {
     return seed;
 }
 
-/// Compose `expand_one_algorithm` over every algorithm declared in
-/// `matrix.over`. The total tuple count is the **sum** (not product) of
-/// per-algorithm cross-products — each (algorithm, params) pair is a
-/// distinct row in the report.
+/// Build each algorithm's parameter combinations and append them as report
+/// rows. The total row count is the sum of those per-algorithm combinations.
 [[nodiscard]] inline std::vector<execution_tuple> expand_matrix(
     const benchmark_configuration& config,
     bool& expansion_ok) noexcept
@@ -6031,13 +5536,8 @@ struct config_parse_outcome {
     std::vector<execution_tuple> result;
     for (const auto& [algorithm_name, declared] : config.matrix_over) {
         auto schema_it = config.algorithm_schemas.find(algorithm_name);
-        // Invariant: every algorithm in `matrix_over` was declared in
-        // `params` — `semantic_validate_config` rejects with
-        // `unknown_algorithm` long before we get here, and the
-        // closure aborts on semantic-validation errors before invoking
-        // `expand_matrix`. The assert documents that contract; if it
-        // ever fires, the bug is upstream (a new code path bypassed
-        // semantic validation).
+        // Configuration validation must reject unknown algorithms before
+        // expansion. A missing schema here means a caller skipped that check
         DEBUG_ASSERT(schema_it != config.algorithm_schemas.end(),
             "matrix.over names an algorithm with no schema in params; "
             "semantic_validate_config should have rejected this");
@@ -6050,15 +5550,12 @@ struct config_parse_outcome {
     return result;
 }
 
-// ----------------- measurement_cell construction -----------------
+// Create cells for groups of iterations.
 
-/// Distribute `iterations` across `groups` groups, minimising max-min.
-/// Returns a vector of size `min(groups, iterations)` summing to
-/// `iterations`. Empty when either input is zero. Examples:
-///   split_iterations(32, 5) == {6, 6, 6, 7, 7}      // remainder 2 → last 2 entries +1
-///   split_iterations( 8, 1) == {8}                  // single group keeps everything
-///   split_iterations(19, 20) == 19 ones             // capped at iterations
-///   split_iterations( 0, 5) == {}                   // empty
+/// Divide iterations as  evenly as possible among groups.
+/// Use at most one group per iteration and return no groups if either input
+/// is zero. Extra iterations go to the final groups. For example, 32
+/// iterations across five groups gives {6, 6, 6, 7, 7}.
 [[nodiscard]] inline std::vector<std::size_t>
 split_iterations(std::size_t iterations, std::size_t groups) {
     if (iterations == 0 || groups == 0) return {};
@@ -6072,10 +5569,8 @@ split_iterations(std::size_t iterations, std::size_t groups) {
     return out;
 }
 
-/// Compute the actual number of groups for one test_case in this
-/// benchmark. Caps `test_case.concurrency` at the maximum iteration
-/// count across all tuples for this test_case (a group that would have
-/// 0 iterations is meaningless, so we never create one).
+/// Choose the number of groups for a test case, capped by its iteration
+/// count so each group has work. A zero concurrency setting uses the default.
 [[nodiscard]] inline std::size_t group_count_for_test_case(
     const benchmark_configuration& config,
     const test_case_specification&    test_case_spec,
@@ -6089,20 +5584,19 @@ split_iterations(std::size_t iterations, std::size_t groups) {
     return std::min(requested, cap_by_iterations);
 }
 
-/// Construct the (test_case × group × execution_tuple) cell table. Each
-/// cell holds one group's slice of iterations for one tuple. Groups
-/// are merged by the report writer / rule evaluator so the
-/// user-visible report still has one entry per (test_case, tuple).
+/// Create one cell for each test case, execution tuple and iteration group.
+/// Reports and rules merge the groups back into one result per test-case
+/// and tuple pair.
 [[nodiscard]] inline std::vector<std::unique_ptr<measurement_cell>> build_cells(
     const benchmark_execution_state& state)
 {
     std::vector<std::unique_ptr<measurement_cell>> cells;
-    // Rough upper bound: assume default concurrency for every (tc × tuple).
+    // Reserve an estimate  based on default concurrency.
     cells.reserve(state.config.for_each.size() * state.execution_tuples.size()
                   * default_test_case_concurrency());
 
-    // Build a name → index lookup once so the per-`for_each` resolution
-    // is O(log N) instead of O(N) per entry.
+    // Index test-case names once to hvoid scanning the list for every matrix
+    // entry.
     std::map<std::string_view, std::size_t> test_case_by_name;
     for (std::size_t test_case_index = 0;
          test_case_index < state.test_cases.size(); ++test_case_index)
@@ -6126,8 +5620,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
             state.config, test_case_spec, iterations);
 
         if (group_count == 0) {
-            // Zero-iteration test case — emit no cells so the writer's
-            // behaviour, which also produced no samples for these).
+            // A test case with zero iterations needs no cells.
             continue;
         }
 
@@ -6151,13 +5644,11 @@ split_iterations(std::size_t iterations, std::size_t groups) {
     return cells;
 }
 
-// ----------------- Sample collection -----------------
+// Collect metric samples.
 
-/// Per-descriptor scalar extraction for a region-source metric. Returns
-/// the value in the metric's natural unit (uint64 cast to double for sums,
-/// uint64 for visits, etc.). Min/Max return the field directly even though
-/// they require an explicit `region` filter — the caller's combiner handles
-/// the cross-descriptor logic.
+/// Read one region's scalar metric as a double, keeping its original unit.
+/// The caller combines descriptors when needed. Ratios and loop metrics
+/// are handled by separate helpers.
 [[nodiscard]] inline double extract_from_region(
     metric_kind kind,
     const bioseq::instrumentation::region_aggregate& region_agg) noexcept
@@ -6174,9 +5665,8 @@ split_iterations(std::size_t iterations, std::size_t groups) {
         case metric_kind::region_total_instructions: return static_cast<double>(region_agg.total_instructions);
         case metric_kind::region_total_branches:     return static_cast<double>(region_agg.total_branches);
         case metric_kind::region_total_branch_misses: return static_cast<double>(region_agg.total_branch_misses);
-        default: return 0.0;     // ratios/loop-only metrics use the
-                                  // accumulator below, never this scalar
-                                  // path.
+        default: return 0.0;     // Ratios and loop metrics are handled separately.
+
     }
 }
 
@@ -6197,11 +5687,9 @@ split_iterations(std::size_t iterations, std::size_t groups) {
     }
 }
 
-/// Per-descriptor ratio extraction. Used by the by_regions emit site so
-/// per-region buckets carry the actual ratio for that one descriptor
-/// rather than a literal zero from the scalar `extract_from_*` switch's
-/// default arm. Returns nullopt when the denominator is zero (the per-
-/// region sample is then suppressed).
+/// Compute IPC or branch-miss rate, for one region descriptor.
+/// by_regions uses this value for the descriptor's own sample Return
+/// nullopt for  a zero denominator or an unsupported metric.
 [[nodiscard]] inline std::optional<double> ratio_per_region(
     metric_kind kind,
     const bioseq::instrumentation::region_aggregate& region_agg) noexcept
@@ -6216,7 +5704,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
             return static_cast<double>(region_agg.total_branch_misses)
                  / static_cast<double>(region_agg.total_branches);
         default:
-            return std::nullopt;     // not a region-ratio metric
+            return std::nullopt;     // Unsupported metric.
     }
 }
 
@@ -6234,19 +5722,18 @@ split_iterations(std::size_t iterations, std::size_t groups) {
             return static_cast<double>(loop_agg.total_work)
                  / static_cast<double>(loop_agg.total_iterations);
         default:
-            return std::nullopt;     // not a loop-ratio metric
+            return std::nullopt;     // Unsupported metric.
     }
 }
 
-/// Running accumulator used to fold per-descriptor data into one
-/// iteration-level value for region/loop metrics. The combiner field on
-/// the registry entry decides which fields are populated and how they
-/// finalise.
+/// Combine descriptors into one metric value for an iteration.
+/// The registry selects how to combine them, such as summing times, merging
+/// histograms or dividing accumulated counters.
 struct cross_descriptor_accumulator {
     double                       sum = 0.0;
     std::uint64_t                ratio_numerator = 0;
     std::uint64_t                ratio_denominator = 0;
-    std::array<std::uint64_t, 32> hist_sum{};   // for HistogramSum combiner
+    std::array<std::uint64_t, 32> hist_sum{};   // Merged duration histogram.
     bool                          any_contribution = false;
 };
 
@@ -6277,13 +5764,13 @@ inline void combine_region(
             accumulator.ratio_denominator += region_agg.total_branches;
             return;
         case metric_combiner::requires_region:
-            // With explicit `region` filter, only one descriptor
-            // contributes — pass the value straight through.
+            // Keep the matching descriptor's value. If several descriptors share
+            // the selected name, the last one visited supplies this value.
             accumulator.sum = extract_from_region(kind, region_agg);
             return;
         case metric_combiner::loop_mean_ns:
         case metric_combiner::loop_work_per_iteration:
-            return;     // not applicable to region-source metrics.
+            return;     // These combiners require loop data.
     }
 }
 
@@ -6318,13 +5805,12 @@ inline void combine_loop(
             return;
         case metric_combiner::pmu_ratio:
         case metric_combiner::branch_miss_ratio:
-            return;     // loop metrics never use PMU ratios directly.
+            return;     // These combiners require region PMU data.
     }
 }
 
-/// Finalise the accumulator into a single double, or `nullopt` when the
-/// metric should be skipped this iteration (zero-denominator ratios, no
-/// contributions, etc.).
+/// Return  the combined metric value, or nullopt when no descriptor
+/// contributed or a uatio has a zero denominator.
 [[nodiscard]] inline std::optional<double> finalise_combined_metric(
     const cross_descriptor_accumulator& accumulator,
     metric_combiner combiner,
@@ -6336,8 +5822,7 @@ inline void combine_loop(
         case metric_combiner::requires_region:
             return accumulator.sum;
         case metric_combiner::histogram_sum: {
-            // Build a temporary duration_histogram view over the summed buckets
-            // and run the public percentile estimator.
+            // Estimate the percentile from the merged histogram.
             bioseq::instrumentation::duration_histogram summed{};
             summed.buckets = accumulator.hist_sum;
             return static_cast<double>(
@@ -6354,17 +5839,13 @@ inline void combine_loop(
     return std::nullopt;
 }
 
-/// Write one iteration's measurements into the cell's metric arrays:
-/// - iteration-level outer `wall_clock_ns` lands in
-///   `all_regions["wall_clock_ns"]` only for timing-eligible iterations.
-/// - region/loop builtin metrics walk every visited descriptor, fold per
-///   descriptor through the metric's combiner, then push the finalised
-///   value into `all_regions[<metric_name>]`. When `by_regions: true`,
-///   each visited descriptor's per-descriptor value also lands in
-///   `<descriptor_name>[<metric_name>]`.
-/// - counters use the snapshotted before/after deltas.
-/// - evaluation metrics read the user's returned map.
-/// against a unique `measurement_cell*`, so `samples` has a single writer.
+/// Record one completed iteration's measurements in its cell.
+/// Timing-eligible iterations add wall time and region or loop metrics to
+/// all_regions. by_regions also keeps each descriptor's own value.
+/// Counter deltas and declared evaluation results are recorded separately.
+///
+/// Track completion and named-region counts for later acceptance checks.
+/// The caller must keep this cell exclusive  to one writer.
 inline void append_iteration_samples(
     measurement_cell& cell,
     std::size_t repeat,
@@ -6409,14 +5890,8 @@ inline void append_iteration_samples(
     const auto descriptor_total = bioseq::instrumentation::registered_descriptor_count();
     std::size_t counter_index = 0;
 
-    // Walk the declared metrics; pull each declared evaluation metric
-    // out of `evaluation_metrics`. Returned-but-undeclared keys are
-    // dropped silently here — `on_evaluate` lambdas are typically
-    // generic across benchmarks so one returning more keys than this
-    // benchmark uses is normal, not an error. Declared-but-not-returned
-    // is still surfaced (via `semantic_validate_post_run`'s
-    // `missing_evaluation_metric` check) — that direction usually means
-    // a typo in the config.
+    // Keep only declared evaluation metrics so one evaluator can serve
+    // several benchmarks. Post-run checks report missing required keys.
     for (const auto& metric : metrics) {
         switch (metric.kind) {
             case metric_kind::wall_clock_ns:
@@ -6435,24 +5910,19 @@ inline void append_iteration_samples(
                 {
                     all_regions[metric.name].push_back(found->second);
                 }
-                // No log on miss: `semantic_validate_post_run` emits
-                // `missing_evaluation_metric` once per cell after the
-                // iteration loop joins, which is more useful and
-                // doesn't flood the log with N copies of the same
-                // message.
+                // Report missing evaluation results after the run, once their required
+                // coverage is known.
                 continue;
             }
-            default: break;     // builtin region/loop metric — fall through.
+            default: break;     // Continue with region and loop metrics
         }
 
-        // E2E capability/correctness rejections remain visible through raw
-        // records and evaluation diagnostics, but they are not performance
-        // samples. Suppress every framework-derived region/loop number for
-        // those repeats. Ordinary benchmarks always pass true here.
+        // Rejected E2E repeats keep their evaluation diagnostics but contribute
+        // no region or loop timing samples.
         if (!framework_timing_eligible) continue;
 
         const auto* entry = lookup_builtin_metric(metric.name);
-        if (entry == nullptr) continue;     // already-flagged by semantic validation
+        if (entry == nullptr) continue;     // Configuration validation reports unknown names.
 
         cross_descriptor_accumulator accumulator;
         const bool restrict_to_one_region = !metric.region.empty();
@@ -6468,8 +5938,8 @@ inline void append_iteration_samples(
                 }
             };
 
-        // Walk every visited descriptor whose name and kind match the
-        // metric's source family.
+        // Collect visited descriptors that match the metric source, and optional
+        // region  name.
         for (std::uint32_t descriptor_id = 1; descriptor_id <= descriptor_total; ++descriptor_id) {
             const auto* descriptor = bioseq::instrumentation::find_descriptor(descriptor_id);
             if (descriptor == nullptr || descriptor->name == nullptr) continue;
@@ -6481,10 +5951,8 @@ inline void append_iteration_samples(
                 if (region_agg == nullptr || region_agg->visits == 0) continue;
                 combine_region(accumulator, entry->combiner, entry->kind, *region_agg);
                 if (by_regions) {
-                    // Ratio metrics need a per-descriptor numerator/
-                    // denominator computation; the scalar `extract_*` path
-                    // only knows how to dump a single field, so it would
-                    // emit literal 0 for IPC / branch_miss_rate.
+                    // Compute each descriptor's ratio from its own counters. The scalar
+                    // extractor has no ratio value.
                     if (entry->combiner == metric_combiner::pmu_ratio
                      || entry->combiner == metric_combiner::branch_miss_ratio) {
                         if (auto ratio = ratio_per_region(entry->kind, *region_agg);
@@ -6525,19 +5993,15 @@ inline void append_iteration_samples(
             finalised.has_value()) {
             all_regions[metric.name].push_back(*finalised);
         }
-        // Else: skipped this iteration (zero-denominator ratio or no
-        // contribution). The sample array stays sparse; the rule
-        // evaluator's median-of-samples handles missing iterations
-        // gracefully.
+        // A missing conqribution or zero denominator adds no sample. Rules
+        // that require complete iterations reject these gaps later.
     }
 }
 
-// ----------------- Counter snapshotting -----------------
+// Snapshot named counters.
 
-/// Look up `bioseq::instrumentation::named_counter*` for every metric whose kind is
-/// `Counter`. Called once before the iteration loop because the underlying
-/// `counter()` lookup is a cold-path mutex acquisition; we never want to
-/// pay it per iteration.
+/// Resolve the counters requested by the metrics before iterations begin.
+/// Reuse these handles to avoid repeated registry lookups and locking.
 [[nodiscard]] inline std::vector<bioseq::instrumentation::named_counter*> resolve_counter_handles(
     const std::vector<metric_specification>& metrics) noexcept
 {
@@ -6550,9 +6014,9 @@ inline void append_iteration_samples(
     return handles;
 }
 
-/// Read the current value of every resolved counter. Returns a vector
-/// aligned with `handles` so the call site can do `after - before`
-/// per-index. Counter reads are relaxed atomic loads.
+/// Read the current thread's value for each counter, in handle order.
+/// Before  and after snapshots give the iteration's counter deltas. Each
+/// read takes the counter's mutex and excludes values from other threads.
 [[nodiscard]] inline std::vector<std::int64_t> snapshot_counters(
     const std::vector<bioseq::instrumentation::named_counter*>& handles) noexcept
 {
@@ -6564,39 +6028,35 @@ inline void append_iteration_samples(
     return values;
 }
 
-// ----------------- work_batch + scheduler -----------------
+// Group cells into scheduled batches.
 
-/// One entry inside a batch — one tuple's iteration loop bound to the
-/// batch's cached `Input`.
+/// One tuple's cell within a batch that shares a cached input.
 struct work_batch_item {
-    measurement_cell* cell = nullptr;        // points back into state.cells
-    /// Cached strong reference to the underlying tuple. Saves a hop in
-    /// the UI label updater on the cold path.
+    measurement_cell* cell = nullptr;        // Borrowed from state.cells.
+    /// Borrowed tuple pointer used when updating the progress label.
     const execution_tuple* tuple = nullptr;
 };
 
-/// One scheduling unit: every item in the batch shares one cached
-/// `Input` instance built from the same `(test_case, group)`. Items
-/// run sequentially within the batch; batches run in parallel.
+/// A scheduled group sharing one input for a test case.
+/// Its tuple work runs sequentially. Separate batches may run in parallel
+/// when the memory and concurrency limits allow it.
 struct work_batch {
     std::size_t test_case_index = 0;
     std::size_t group_index     = 0;
     std::size_t group_count     = 1;
-    /// Sequence number of this batch in `state.cells`-order. Used as a
-    /// stable index into the per-batch slot vector by the scheduler.
+    /// Stable index into the driver's batch slots, assigned after sorting
+    /// batches by test-case and group index.
     std::size_t batch_index     = 0;
     std::vector<work_batch_item> items{};
 };
 
-/// Walk `state.cells` once and group entries by `(test_case_index,
-/// group_index)`. The result is one batch per group; items inside each
-/// batch are tuples in `state.execution_tuples`-declared order.
+/// Group cells by test case and group index so they can share one input
+/// Each batch's items keep the tuple order  from state.cells.
 [[nodiscard]] inline std::vector<work_batch> build_work_batches(
     benchmark_execution_state& state)
 {
-    // Use an ordered map keyed by the (tc_index, group_index) pair so
-    // batches come out in a deterministic order. The driver later treats
-    // `batches[i].batch_index` as i (assigned below in a final pass).
+    // Sort batches by test-case and group index, then assign each its
+    // position in the output vector.
     std::map<std::pair<std::size_t, std::size_t>, work_batch> by_key;
     for (auto& cell_ptr : state.cells) {
         const auto key = std::pair{cell_ptr->test_case_index, cell_ptr->group_index};
@@ -6619,13 +6079,11 @@ struct work_batch {
     return batches;
 }
 
-// ----------------- Progress helpers (single source of writes) -----------------
+// Update the proiress dashboard.
 
-/// Lazily resolve the `progress_test_case` for the current benchmark
-/// closure. Returns nullptr when the progress dashboard wasn't
-/// installed, the per-benchmark slot hasn't completed setup yet, or
-/// any index is out of bounds. Centralised so the five `progress_*`
-/// helpers don't repeat the same five-line guard chain.
+/// Find a test case's progress state for this benchmark.
+/// Return nullptr when the dashboard is absent, setup is unfinished or an
+/// index is out of range.
 [[nodiscard]] inline progress_test_case* progress_test_case_for(
     const benchmark_context& context, std::size_t test_case_index) noexcept
 {
@@ -6638,9 +6096,7 @@ struct work_batch {
     return per.test_cases[test_case_index].get();
 }
 
-/// Lazily resolve the `progress_group` for the current benchmark
-/// closure. Returns nullptr when no test case or group exists at the
-/// supplied indices.
+/// Find a group's progress state, or nullptr when it is unavailable.
 [[nodiscard]] inline progress_group* progress_group_for(
     const benchmark_context& context,
     std::size_t test_case_index, std::size_t group_index) noexcept
@@ -6701,12 +6157,8 @@ inline void progress_mark_group_done(
     if (batch.group_index < tc->groups.size()) {
         tc->groups[batch.group_index]->active.store(false, std::memory_order_relaxed);
     }
-    // The test case is "done" once every batch's item-level tick has
-    // fired. The first thread to observe `tuple_done >= tuple_total`
-    // stamps `finish_ns` via CAS-from-zero; later observers see a
-    // non-zero `expected` and skip. (`tuple_done` and `tuple_total`
-    // are loaded separately, but post-completion no other thread is
-    // mutating them, so the loads always converge to consistent values.)
+    // The first group finishing after all tuple work is counted sets the
+    // test-case finish time. Other groups may still be  finishing, cleanup.
     const auto total = tc->tuple_total.load(std::memory_order_relaxed);
     if (tc->tuple_done.load(std::memory_order_relaxed) >= total) {
         std::int64_t expected = 0;
@@ -6716,15 +6168,10 @@ inline void progress_mark_group_done(
     }
 }
 
-//
-// All of these follow the same nullptr-safe lookup pattern through
-// `progress_group_for`. Failure-string fields are guarded by
-// `progress_group::failure_mu`; the renderer only consults them when the
-// matching atomic counter is non-zero.
+// Retry details use failure_mu. The renderer checks the corresponding
+// atomic counter before displaying them and checks it again under the lock.
 
-/// Retry-failure category; templated over the "kind" so input and
-/// cleanup paths share one body. Members map onto matching progress_group
-/// fields.
+/// Select the input or cleanup failure fields for the shared retry code.
 enum class retry_kind : std::uint8_t { input, cleanup };
 
 inline void progress_record_retry_failure(
@@ -6759,13 +6206,8 @@ inline void progress_clear_retry_failure(
     auto* group = progress_group_for(context,
                                       batch.test_case_index, batch.group_index);
     if (group == nullptr) return;
-    // Counter is invalidated FIRST so a racing renderer's fast-path
-    // load may see 0 immediately. The renderer additionally re-reads
-    // the counter under `failure_mu` after locking; that is what
-    // closes the "fast read N>0, then strings cleared, then locked,
-    // then render with empty strings" race window. See `build_detail_rows`
-    // for the read side; both writers (record and clear) and the reader
-    // must agree on this protocol.
+    // Hide the row before clearing its text. The renderer checks the count
+    // again under failure_mu, so it cannot display a retry with cleared text.
     auto& counter = (kind == retry_kind::input)
                        ? group->input_retry_attempt
                        : group->cleanup_retry_attempt;
@@ -6780,8 +6222,8 @@ inline void progress_clear_retry_failure(
     }
 }
 
-/// Mark a batch as aborted using bare indices. Shared between the
-/// timeout path (the latter has no live `work_batch`).
+/// Mark a group as aborted using its indices. The scheduler's timeout
+/// path can use  this before a work_batch starts running.
 inline void progress_mark_batch_aborted_at(
     benchmark_context& context,
     std::size_t test_case_index, std::size_t group_index,
@@ -6791,11 +6233,9 @@ inline void progress_mark_batch_aborted_at(
     if (tc == nullptr) return;
     if (group_index < tc->groups.size()) {
         auto& group = *tc->groups[group_index];
-        // Drop any in-flight retry rows so the renderer's `Aborted`
-        // detail doesn't sit alongside a stale "▶ ⛔ [retry 5/5]" row
-        // on the same group. Counters are zeroed first to invalidate
-        // the renderer's fast path; strings (including the new
-        // `aborted_reason`) are written under `failure_mu`.
+        // Replace retry and idle details with the abort reason Clear the
+        // counters before locking and changing the text so the renderer drops
+        // stale retry rows.
         group.input_retry_attempt.store(0, std::memory_order_release);
         group.cleanup_retry_attempt.store(0, std::memory_order_release);
         group.idle_start_ns.store(0, std::memory_order_release);
@@ -6810,8 +6250,7 @@ inline void progress_mark_batch_aborted_at(
         group.aborted.store(true, std::memory_order_release);
         group.active.store(false, std::memory_order_relaxed);
     }
-    // Stamp finish so the renderer doesn't keep counting elapsed time
-    // for an aborted batch.
+    // Stop the displaye elapsed time when a batch aborts.
     std::int64_t expected = 0;
     tc->finish_ns.compare_exchange_strong(
         expected, bioseq::instrumentation::clock::now_ns(),
@@ -6827,10 +6266,8 @@ inline void progress_mark_batch_aborted(
 }
 
 
-/// Push one validation_diagnostic into `*context.diagnostics` under
-/// `*context.diagnostics_mu`. nullptr-safe so the helper composes with
-/// places where diagnostics aren't wired (none today, but future test
-/// fixtures might construct a bare context).
+/// Append a runtime diagnostic under the shared diagnostics mutex.
+/// Do nothing when the context has no diagnostic list or mutex.
 inline void push_runtime_diagnostic(
     benchmark_context& context,
     validation_diagnostic::diagnostic_severity severity,
@@ -6848,11 +6285,8 @@ inline void push_runtime_diagnostic(
     context.diagnostics->push_back(std::move(diag));
 }
 
-/// Variadic facade — accepts `fmt::format_string<Args...>` so format
-/// specifiers are checked at compile time. `noexcept`-style signature
-/// matches the rest of the framework's progress helpers; a bad_alloc
-/// from `fmt::format` would terminate, which is the same contract as
-/// any other framework path.
+/// Format and append a runtime diagnostic. fmt checks the format string
+/// against the argument types at compile time.
 template<typename... p_argument_types>
 inline void emit_runtime_diagnostic(
     benchmark_context& context,
@@ -6867,9 +6301,7 @@ inline void emit_runtime_diagnostic(
                     std::forward<p_argument_types>(arguments)...));
 }
 
-/// Build a "<config>:<benchmark>/<test_case>(group N)" location string
-/// for runtime diagnostics. Mirrors `semantic_location` for a similar
-/// shape, reusable by every per-batch error path.
+/// Identify a runtime error as <config>:<benchmark>/<test_case>(group N).
 [[nodiscard]] inline std::string runtime_location(
     std::string_view config_path,
     std::string_view benchmark_key,
@@ -6880,7 +6312,7 @@ inline void emit_runtime_diagnostic(
                        config_path, benchmark_key, test_case_name, group_index);
 }
 
-// ----------------- batch_scheduler out-of-line bodies -----------------
+// Scheduler timeout reporting.
 
 inline void batch_scheduler::emit_idle_timeout_locked(
     const scheduled_batch& batch) noexcept
@@ -6900,16 +6332,12 @@ inline void batch_scheduler::emit_idle_timeout_locked(
 }
 
 
-/// Render `trace` clipped to the first `k_max_stack_trace_lines` frames
-/// using cpptrace's built-in `to_string(color=false)`. We always
-/// produce uncoloured output because the rendered string is later
-/// embedded inside ftxui `text()` elements, which do NOT interpret
-/// ANSI escape sequences — colour codes would render as literal
-/// `[34m…[0m` text. The dashboard's visual tint for trace lines comes
-/// from ftxui's `| color(Color::GrayDark)` decorator instead.
+/// Render  the first k_max_stack_trace_lines frames without ANSI colors.
+/// FTXUI displays this as plain text and applies its own colors. Add a note
+/// when the trace has more frames.
 [[nodiscard]] inline std::string
 clip_trace(const cpptrace::stacktrace& trace) noexcept {
-    cpptrace::stacktrace clipped = trace;            // implicit copy
+    cpptrace::stacktrace clipped = trace;            // Preserve the original trace.
     const bool was_truncated = clipped.frames.size() > k_max_stack_trace_lines;
     if (was_truncated) {
         clipped.frames.resize(k_max_stack_trace_lines);
@@ -6919,21 +6347,13 @@ clip_trace(const cpptrace::stacktrace& trace) noexcept {
     return rendered;
 }
 
-/// Generic retry helper used by both `on_input` and `on_cleanup` paths.
+/// Retry an input or cleanup callback up to the configured attempt limit.
+/// Show each exception in the group's dashboard row. A successful attempt
+/// clears the row and returns true. Exhausted attempts return false for the
+/// caller to report an error or warning.
 ///
-/// Runs `attempt()` up to `k_max_task_input_handler_error_count` times. Each
-/// failure is recorded into the dashboard's per-batch failure slot
-/// (keyed by `kind`). On success, the failure record is cleared and
-/// the function returns `true`; on every-attempt-failure it returns
-/// `false` and the caller decides whether to emit a hard error
-/// (`Input` path) or a warning (`Cleanup` path).
-///
-/// `cpptrace::try_catch` is the multi-catch entry point — stacking
-/// CPPTRACE_CATCH clauses on a single CPPTRACE_TRY does not compile
-/// (each CPPTRACE_TRY closes its inner `try` with one `CATCH`). The
-/// `try_catch` helper recursively wraps each catcher in its own
-/// TRY/CATCH expansion so all of them install the unwind interceptor
-/// `from_current_exception()` needs.
+/// cpptrace::try_catch installs the stack-trace handling for both standard
+/// and other exceptions.
 template<retry_kind p_kind, typename p_attempt>
 [[nodiscard]] inline bool retry_user_callback(
     benchmark_context& context, const work_batch& batch,
@@ -6951,7 +6371,7 @@ template<retry_kind p_kind, typename p_attempt>
                     clip_trace(cpptrace::from_current_exception()));
                 failed = true;
             },
-            [&] {     // void(): cpptrace's idiom for "catch (...)"
+            [&] {     // This no-argument  handler catches other, exception types.
                 progress_record_retry_failure(
                     context, batch, p_kind,
                     static_cast<std::uint8_t>(i + 1),
@@ -6963,20 +6383,16 @@ template<retry_kind p_kind, typename p_attempt>
             progress_clear_retry_failure(context, batch, p_kind);
             return true;
         }
-        // Hold the retry-failure row visible for at least one render
-        // cycle — see `k_retry_failure_min_display_time`'s comment. Applied
-        // after every failed attempt (including the last) so the final
-        // [retry 5/5] frame survives long enough for the dashboard to
-        // paint it before the caller marks the batch aborted (which
-        // wipes the retry counter).
+        // Give the dashboard time to show each failure, including the final
+        // attempt before an abort clears the row.
         std::this_thread::sleep_for(k_retry_failure_min_display_time);
     }
     return false;
 }
 
-/// Try `on_input` up to `k_max_task_input_handler_error_count` times. Returns
-/// `nullopt` on every-attempt-failure; the caller is expected to emit
-/// `input_handler_failed_permanently` and abort the batch.
+/// Build the input with retries. Return nullopt if every attempt fails.
+/// The caller then reports input_handler_failed_permanently and aborts
+/// the batch
 template<typename p_input, typename p_builder>
 [[nodiscard]] inline std::optional<p_input>
 build_input_with_retry(benchmark_context& context,
@@ -6990,10 +6406,8 @@ build_input_with_retry(benchmark_context& context,
     return result;
 }
 
-/// Try `on_cleanup` up to `k_max_task_input_handler_error_count` times. On
-/// every-attempt-failure emits the `cleanup_function_failing` warning
-/// and resumes — cleanup leaks are accepted because the OS / developer
-/// will reclaim resources externally (per spec).
+/// Retry cleanup. If every attempt fails, report cleanup_function_failing
+/// as a warning, clear the retry row and let the run continoe.
 template<typename p_cleaner>
 inline void cleanup_with_retry(benchmark_context& context,
                                 const work_batch& batch,
@@ -7014,44 +6428,36 @@ inline void cleanup_with_retry(benchmark_context& context,
     progress_clear_retry_failure(context, batch, retry_kind::cleanup);
 }
 
-// `prepare_typed_benchmark` was relocated below (just before write_report) so its
-// per-case `--debug` hooks can call debug_report_sink, whose CASE_RESULTS
-// serializer reuses emit_execution_tuple_record + the aggregation helpers
-// defined further down. See the run_unit driver section there.
+// prepare_typed_benchmark appears after debug_report_sink and the report
+// helpers it uses to write completed cases during --debug runs.
 
 
-/// Number of histogram buckets in `aggregated_samples::histogram`.
-/// Constant by spec — the schema enforces `minItems == maxItems == 10`,
-/// so changing this requires a coordinated schema bump.
+/// Report histograms have ten buckets. Keep this  value and the report
+/// schema's array length in sync.
 inline constexpr std::size_t k_histogram_bucket_count = 10;
 
 /// Maximum length of `aggregated_samples::top10` / `bottom10`.
 /// Shorter when fewer than 10 finite samples were observed.
 inline constexpr std::size_t k_k_best_size = 10;
 
-/// Per-cell summary stats. Computed by `aggregate_samples_for_report`
-/// over the *finite subset* of the sample vector (NaN / ±inf are
-/// dropped before sorting). Default-constructed values (all-zero)
-/// are emitted when no finite samples were observed.
+/// Statistics computed from finite samples for a report cell.
+/// All fields stay zero when no finite samples are available.
 struct aggregate_statistics {
     double min     = 0.0;
     double max     = 0.0;
     double mean    = 0.0;
-    /// Trimmed mean: drop floor(0.1 * finite_count) samples from
-    /// each end of the sorted finite subset, average the rest.
-    /// Equals `mean` when finite_count < 10 (trim == 0).
+    /// Mean after removing the lowest and highest 10% of finite samples,
+    /// rounding the number removed down. With fewer than ten samples, this
+    /// equals mean.
     double mean90  = 0.0;
     double sum     = 0.0;
-    /// Sample standard deviation, n-1 denominator. 0 when
-    /// finite_count < 2 or when `mean` is non-finite (sum
-    /// overflowed): in the latter case (s - mean)² is NaN and
-    /// would poison the result; bail to 0.
+    /// Sample standard deviation using n - 1. Zero when fewer than two
+    /// finite samples exist or the computed mean has overflowed.
     double stddev  = 0.0;
 };
 
-/// Five canonical percentile slots reported per cell. Indexed via
-/// the registry below so adding a new percentile is a one-row
-/// edit.
+/// Percentiles stored in each report cell. The  registry below maps their
+/// fields to JSON names and percentile fractions.
 struct aggregate_percentiles {
     double p01 = 0.0;
     double p20 = 0.0;
@@ -7060,46 +6466,22 @@ struct aggregate_percentiles {
     double p99 = 0.0;
 };
 
-/// One bucket of the linear-binned histogram. `count` is `int64_t`
-/// (rather than `size_t`) because that is what the JSON schema's
-/// `integer` type maps to — and because non-finite values cannot
-/// poison it the way they could a `double`.
+/// One histogram bucket with its bounds and sample count.
 struct aggregate_bucket {
     double      from  = 0.0;
     double      to    = 0.0;
     std::size_t count = 0;
 };
 
-/// Pre-aggregated view of a sample vector. Replaces raw
-/// `std::vector<double>` everywhere a consumer reads samples for
-/// reporting / UI purposes. The current run still collects raw
-/// samples in `measurement_cell::samples` (so per-rule comparators keep using
-/// `aggregate_samples(sample_aggregate, vector<double>)` without an
-/// in-memory format change); the writer turns each cell's vector
-/// into one of these at write time, and historical-report
-/// readers parse this shape directly.
+/// Summary stored in reports and read by the dashboard and regression checks.
+/// Raw samples remain in measurement_cell while the run is active.
 ///
-/// Invariants on a non-default-constructed value (set by
-/// `aggregate_samples_for_report` when at least one finite sample
-/// was present):
-///   * `top10[0] == stats.max` and the array is sorted descending.
-///   * `bottom10[0] == stats.min` and the array is sorted ascending.
-///   * `top10.size() == bottom10.size()` (both `min(10, finite_count)`).
-///   * `Σ histogram[i].count == finite_count` (= number of finite
-///     samples; non-finite samples never enter any bucket).
-///   * `histogram[i].to == histogram[i+1].from` for `i < 9`. Holds
-///     for ordinary inputs. For pathological inputs where
-///     `max - min` overflows to ±∞ the bucket bounds collapse to
-///     `±∞`; the on-disk round-trip still preserves bucket-edge
-///     equality because `sanitize_for_json` clamps `±∞` symmetrically
-///     before serialisation.
+/// Finite samples determine the statistics. top10 is descending and bottom10
+/// is ascending, each with at most ten values. Histogram counts sum to the
+/// fiite sample count. samples_count also includes non-finite inputs.
 ///
-/// `parse_aggregated_samples` (the inverse) **does not** guarantee
-/// the bucket-edge or descending/ascending invariants on input it
-/// can't trust — it returns whatever the historical report
-/// contained, with default-constructed slots wherever the source
-/// was malformed. Consumers that need the full invariants should
-/// re-aggregate from raw samples instead of trusting parser output.
+/// Historical records are parsed as supplied. Callers must validate them
+/// before relying on ordering or histogram bounds.
 struct aggregated_samples {
     std::size_t                                            samples_count = 0;
     aggregate_statistics                                          stats{};
@@ -7109,29 +6491,20 @@ struct aggregated_samples {
     std::array<aggregate_bucket, k_histogram_bucket_count>      histogram{};
 };
 
-/// True iff `aggregated` carries at least one *finite* sample.
-/// `samples_count == 0` ⇒ the cell wasn't emitted at all.
-/// `samples_count > 0 && top10.empty()` ⇒ every emitted sample
-/// was non-finite (NaN / ±inf), so every aggregate field is
-/// default-zero and consumers must NOT treat the percentile slots
-/// as data. Used by the renderer, the regression evaluator, and
-/// any other reader that needs "is there real data here?". Single
-/// definition next to the type so all consumers stay aligned.
+/// Check  whether a report summary has finite samples.
+/// A positive samples_count with an empty top10 means all collected values
+/// were, non-finite Its zeroed statistics must not be treated as measurements.
 [[nodiscard]] inline bool has_finite_samples(const aggregated_samples& aggregated) noexcept {
     return aggregated.samples_count > 0 && !aggregated.top10.empty();
 }
 
-/// Compile-time table linking each percentile to its
-/// `aggregate_percentiles` field. Single source of truth used by
-/// the aggregator (writes the field), the writer (emits the JSON
-/// key), the historical-report reader (parses the same key), and
-/// `aggregate_samples(sample_aggregate, aggregated_samples)` for the
-/// rule-eval percentile lookups (P01 / P50 / P99 only — the
-/// table also drives `aggregated_from_report`).
+/// Connect a percentile's JSON name and fraction to its struct field.
+/// The registry uses these entries when computing, writing and reading
+/// report percentiles.
 struct aggregated_percentile_entry {
     std::string_view  name;          // "P01" / "P20" / "P50" / "P80" / "P99"
     double            fraction;      // 0.01 / 0.20 / 0.50 / 0.80 / 0.99
-    double aggregate_percentiles::* slot;  // pointer-to-member into the struct
+    double aggregate_percentiles::* slot;  // Corresponding field in aggregate_percentiles.
 };
 
 inline constexpr std::array<aggregated_percentile_entry, 5>
@@ -7143,11 +6516,8 @@ k_aggregated_percentile_registry{ {
     { "P99", 0.99, &aggregate_percentiles::p99 },
 } };
 
-/// Compile-time table linking each `stats` field to its JSON
-/// spelling. Drives both the writer (serialises in this order)
-/// and the reader (looks each field up by name). Adding a new
-/// per-cell statistic is a one-row edit (plus a slot in
-/// `aggregate_statistics`) that propagates to both sides automatically.
+/// Connect a statistic's JSON name to its aggregate_statistics field.
+/// Writers and readers use the same registry entries.
 struct aggregated_statistics_entry {
     std::string_view  name;
     double aggregate_statistics::* slot;
@@ -7163,15 +6533,9 @@ k_aggregated_stats_registry{ {
     { "stddev", &aggregate_statistics::stddev },
 } };
 
-/// Compile-time reverse lookup `slot → JSON key`. Lets every
-/// reader path (sanity detector, future stats consumers) refer
-/// to a stat field by its `&aggregate_statistics::min` pointer-to-member
-/// and resolve the spelling through the same registry the writer
-/// uses, so a renamed field flows everywhere automatically.
-/// DEBUG_ASSERTs on registry miss so a future rename that drops a
-/// slot trips loudly during testing instead of silently turning a
-/// `json_double_or(*stats_obj, "?", 0.0)` lookup into a
-/// constant-zero false-positive.
+/// Find the JSON name for a registered statistics field.
+/// Using the registry keeps readers consistent with the writer. An  unknown
+/// field triggers a debug assertion and otherwise returns an empty name.
 [[nodiscard]] inline std::string_view aggregated_stat_name(
     double aggregate_statistics::* slot) noexcept
 {
@@ -7183,12 +6547,7 @@ k_aggregated_stats_registry{ {
     return std::string_view{};
 }
 
-/// Copy of `samples` containing only finite entries (NaN / ±inf
-/// invariant: any path that reduces a raw sample vector — the
-/// per-rule comparator overload of `aggregate_samples`, the
-/// report-time aggregator `aggregate_samples_for_report` — funnels
-/// through this helper so the two interpretations stay aligned
-/// byte-for-byte on the finite subset.
+/// Copy samples in their original order, excluding NaN and infinity.
 [[nodiscard]] inline std::vector<double> filter_finite(
     const std::vector<double>& samples) noexcept
 {
@@ -7207,16 +6566,10 @@ k_aggregated_stats_registry{ {
         [](double value) { return std::isfinite(value); });
 }
 
-/// Strict availability predicate for within-run relative gates. Regression
-/// report aggregation may intentionally summarize the finite subset, but a
-/// controlled comparison cannot discard a failed/NaN iteration and still
-/// claim the configured relationship held. `expected_samples == 0` is used by
-/// named instrumentation regions because two descriptors may intentionally
-/// share one name (for example scalar XXL_HIFI has two `mm_sketch` descriptor
-/// samples per iteration). Strict matrices validate those sources with the
-/// separate per-iteration named-region provenance map. `all_regions` sources
-/// pass the configured iteration count and therefore require exactly one
-/// completed finite value per scheduled iteration.
+/// Require a nonempty sample set with only finite values.
+/// A nonzero expected_samples also requires that exact count. Named regions
+/// pass zero because several descriptors can share a name. Their expected
+/// counts are checked separately for each iteration.
 [[nodiscard]] inline bool has_complete_finite_samples(
     const std::vector<double>& samples,
     std::size_t expected_samples = 0) noexcept
@@ -7227,10 +6580,10 @@ k_aggregated_stats_registry{ {
             [](const double value) { return std::isfinite(value); });
 }
 
-/// A benchmark can mark an execution cell as "not measured" by returning only
-/// non-finite evaluation metrics. Wall-clock still exists because the framework
-/// times `on_run`, but regression rules must not compare a deliberate skip's
-/// microsecond-scale bookkeeping time against measured GPU work.
+/// Detect a non-wall-clock metric whose samples are all non-finite.
+/// Benchmarks use these values to mark skipped work, so  regressin checks
+/// must avoid treating the skip's short wall time as a measured result.
+/// This check sees metric names and values, regardless of their source type.
 [[nodiscard]] inline bool region_has_nonfinite_evaluation_sentinel(
     const std::map<std::string, std::vector<double>>& region_metrics) noexcept
 {
@@ -7241,22 +6594,10 @@ k_aggregated_stats_registry{ {
     return false;
 }
 
-/// Read the requested aggregate from a *raw sample vector*. Non-
-/// finite samples (NaN / ±inf) are filtered out before any
-/// arithmetic, matching `aggregate_samples_for_report` so a rule
-/// that runs against the raw vector and a rule that runs against
-/// the persisted aggregate produce the same number on the same
-/// in-memory data.
-///
-/// Used by:
-///   * per-rule comparators inside one run (LHS / RHS aggregates);
-///   * the regression evaluator's *current-run* side (the
-///     historical side reads via the aggregated_samples overload).
-///
-/// Returns 0.0 when no finite samples remain. Sum/Min/Max take a
-/// fast path that skips the filter copy when every element is
-/// already finite (the common case); the percentile path always
-/// needs a mutable copy for `nth_element`.
+/// Reduce finite samples to the requested sum, minimum, maximum or percentile.
+/// Return zero when no finite samples remain Percentiles use the lower
+/// sample at the requested rank. Sum, min and max avoid a copy when every
+/// input is finite.
 [[nodiscard]] inline double aggregate_samples(
     sample_aggregate aggregate, const std::vector<double>& samples) noexcept
 {
@@ -7275,7 +6616,7 @@ k_aggregated_stats_registry{ {
             }
             case sample_aggregate::min: return *std::min_element(samples.begin(), samples.end());
             case sample_aggregate::max: return *std::max_element(samples.begin(), samples.end());
-            default: break;     // unreachable (gated above)
+            default: break;     // The condition above permits only sum, min and, max.
         }
     }
     std::vector<double> finite = all_finite ? samples : filter_finite(samples);
@@ -7293,11 +6634,8 @@ k_aggregated_stats_registry{ {
         case sample_aggregate::p01:
         case sample_aggregate::p50:
         case sample_aggregate::p99: {
-            // Discrete-index percentile: pick the sample at
-            // `floor(p * (n - 1))` after a partial sort via
-            // std::nth_element. Matches NumPy's "lower"
-            // interpolation mode and the offline aggregator in
-            // `aggregate_samples_for_report`.
+            // Choose the lower sample  at this percentile rank, matching the report
+            // aggregator without sorting the whole vector.
             const double percentile_fraction =
                 aggregate_percentile(aggregate);
             const std::size_t target_index = static_cast<std::size_t>(
@@ -7312,16 +6650,9 @@ k_aggregated_stats_registry{ {
     return 0.0;
 }
 
-/// Read the requested aggregate from a *pre-aggregated record*.
-/// Used by the regression evaluator + summary mode + interactive
-/// UI when consuming historical reports (which carry only the
-/// aggregate, never the raw samples). Returns 0.0 on
-/// default-constructed input (`samples_count == 0`) AND on
-/// all-non-finite cells (`samples_count > 0 && top10.empty()`),
-/// because the writer leaves every aggregate field at its
-/// default-zero in that case. Callers that need to distinguish
-/// "no real data" from "an aggregate that genuinely equals 0"
-/// should gate on `has_finite_samples` first.
+/// Read the requested statistic from a report summary.
+/// Return zero when samples_count is zero. Use has_finite_samples first if
+/// the caller must distinguish jissing data from a measured zero.
 [[nodiscard]] inline double aggregate_samples(
     sample_aggregate aggregate, const aggregated_samples& aggregated) noexcept
 {
@@ -7337,16 +6668,10 @@ k_aggregated_stats_registry{ {
     return 0.0;
 }
 
-/// Build the `aggregated_samples` view of a raw sample vector.
-/// Filters non-finite samples (NaN / ±inf) before any
-/// arithmetic. `samples_count` is the original (pre-filter) size
-/// — downstream consumers use it for the user-visible iteration
-/// tally; finite-only fields use the filtered subset.
-///
-/// Pathological inputs (e.g. a billion 1e300 samples that
-/// over/underflow `mean` to ±inf) are still possible. The writer
-/// pipes every emitted double through `sanitize_for_json`
-/// downstream so the on-disk form remains JSON-legal.
+/// Summarize samples for a report. Keep the original count, but compute
+/// statistics and histograms from finite values only.
+/// Arithmetic can still overflow. The report  writer converts non-finite
+/// results to JSON-safe numbers.
 [[nodiscard]] inline aggregated_samples aggregate_samples_for_report(
     const std::vector<double>& samples) noexcept
 {
@@ -7356,11 +6681,8 @@ k_aggregated_stats_registry{ {
 
     std::vector<double> finite = filter_finite(samples);
     if (finite.empty()) {
-        // All-non-finite: leave every aggregate field at its
-        // default (zero / empty). The schema's `top10` /
-        // `bottom10` use `minItems: 0` so empty arrays validate;
-        // the histogram array carries 10 default-constructed
-        // buckets (`count == 0`) which the schema accepts.
+        // Keep zeroed statistics and empty best-value lists when every sample
+        // is non-finite. The histogram still has ten zero-count buckets.
         return out;
     }
 
@@ -7372,10 +6694,8 @@ k_aggregated_stats_registry{ {
     out.stats.sum  = sum;
     out.stats.mean = sum / static_cast<double>(finite.size());
 
-    // mean90 — drop floor(10%) on each side. For finite_count >= 1,
-    // `trim * 2 < finite_count` is always true, so the inner sum
-    // is well-defined. When trim == 0 the loop covers the whole
-    // vector and mean90 == mean by construction.
+    // Remove 10% from each end before averaging. Fewer than ten samples
+    // leave the ordinary mean unchanged.
     {
         const auto trim = static_cast<std::size_t>(
             std::floor(0.1 * static_cast<double>(finite.size())));
@@ -7387,9 +6707,8 @@ k_aggregated_stats_registry{ {
         out.stats.mean90 = trimmed / static_cast<double>(kept);
     }
 
-    // stddev — only meaningful for n >= 2 AND finite mean. A
-    // non-finite mean (sum overflowed) would make (s - mean)²
-    // produce NaN and silently wreck the result; bail to 0.
+    // Standard deviation needs two samples and a finite mean. Otherwise,
+    // leave its value at zero.
     if (finite.size() >= 2 && std::isfinite(out.stats.mean)) {
         double sq = 0.0;
         for (const double value : finite) {
@@ -7415,13 +6734,9 @@ k_aggregated_stats_registry{ {
         out.bottom10.push_back(finite[i]);
     }
 
-    // Histogram: linear binning, last bucket inclusive on the
-    // right so `max` lands inside it. When `width == 0` (all
-    // finite samples equal, or n == 1) every count goes to bucket 0.
-    // `std::isfinite(width)` guards the pathological max - min == ±inf
-    // case (e.g. samples include `numeric_limits<double>::max()`):
-    // a non-finite width would produce `(value - min) / inf == NaN`,
-    // and `static_cast<size_t>(NaN)` is UB.
+    // Put the maximum in the final histogram bucket. Equal samples all go
+    // in the first If the range overflows, use the first  bucket too, avoiding
+    // conversion of a non-finite bucket index to an integer.
     const double width = (out.stats.max - out.stats.min)
                          / static_cast<double>(k_histogram_bucket_count);
     for (std::size_t i = 0; i < k_histogram_bucket_count; ++i) {
@@ -7443,14 +6758,9 @@ k_aggregated_stats_registry{ {
     return out;
 }
 
-/// Map any double to a JSON-legal value. `NaN` becomes 0.0;
-/// `±infinity` clamp to `numeric_limits<double>::max() / lowest()`.
-/// JSON (RFC 8259) does not admit `NaN` or `Infinity` tokens, so
-/// emitting them would produce strings that
-/// `nlohmann::json::parse` (used by the framework's post-write
-/// self-validation) and any standard parser reject. This helper
-/// is applied at every numeric-emit site inside the writer so
-/// pathological-input runs still produce a valid report.
+/// Convert non-finite values to numbers JSON can store.
+/// Replace NaN with zero and clamp positive or negative infgnity to the
+/// corresponding finite limit.
 [[nodiscard]] inline double sanitize_for_json(double value) noexcept {
     if (std::isnan(value)) return 0.0;
     if (value ==  std::numeric_limits<double>::infinity()) {
@@ -7462,7 +6772,7 @@ k_aggregated_stats_registry{ {
     return value;
 }
 
-// ----------------- Deterministic iteration schedule -----------------
+// Reproduce the iteration order from a seed.
 
 [[nodiscard]] constexpr std::uint64_t raw_fnv1a64_update(
         std::uint64_t state, std::string_view text) noexcept {
@@ -7482,9 +6792,9 @@ k_aggregated_stats_registry{ {
     return state;
 }
 
-/// Collision-safe canonical FNV-1a identity for one repetition. Strings are
-/// length-prefixed and integers are fixed-width little-endian, so identities
-/// cannot alias through delimiter characters or decimal formatting.
+/// Hash a repetition's benchmark, test case, group and repeat number.
+/// Length-prefixed strings and fixed-width little-endian integers give an
+/// unambiguous byte sequence before FNV-1a hashing.
 [[nodiscard]] constexpr std::uint64_t raw_schedule_identity(
         std::string_view benchmark,
         std::string_view test_case,
@@ -7522,9 +6832,8 @@ static_assert(raw_schedule_identity("bench_raw", "ONE", 0, 0)
 static_assert(raw_schedule_shuffle_seed(
     370, "bench_raw", "ONE", 0, 0) == 0xd0a0823f87782282ULL);
 
-/// Exact deterministic schedule: descending Fisher-Yates driven by a
-/// SplitMix64 stream whose recorded seed is derived from the configured seed
-/// and the FNV identity above.
+/// Shuffle tuple indices, with  Fisher-Yates and SplitMix64.
+/// The same count and shuffle_seed reproduce the same order.
 [[nodiscard]] inline std::vector<std::size_t> raw_fisher_yates_order(
         const std::size_t count, const std::uint64_t shuffle_seed) {
     std::vector<std::size_t> order(count);
@@ -7538,11 +6847,10 @@ static_assert(raw_schedule_shuffle_seed(
     return order;
 }
 
-// ----------------- benchmark_rule evaluation -----------------
+// Evaluate benchmark comparison rules.
 
-/// True iff `tuple` satisfies the algorithm/parameter portion of `selector`.
-/// Source coordinates (`test_case`, `region`) are applied by the rule
-/// evaluator after it selects the corresponding report cell.
+/// Check an algorithm name and parameter values against a rule selector.
+/// The rule evaluator handles the test-case and region filters separately.
 [[nodiscard]] inline bool selector_matches(
     const rule_selector& selector,
     const execution_tuple& tuple) noexcept
@@ -7556,17 +6864,10 @@ static_assert(raw_schedule_shuffle_seed(
     return true;
 }
 
-/// Apply a comparator to two aggregate values with explicit threshold /
-/// tolerance percentages. Spec semantics:
-/// - `<` : `lhs < rhs * (1 - threshold% + tolerance%)`
-/// - `>` : `lhs > rhs * (1 + threshold% - tolerance%)` (extrapolated by
-///         symmetry; spec only documents `<`/`=`)
-/// - `=` : `|lhs - rhs| <= rhs * tolerance%` (asymmetric on rhs as the
-///         baseline reference, matching the spec example).
-///
-/// Used by both per-rule comparisons (with both knobs from
-/// `rule_comparator`) and regression rules (which always pass
-/// `threshold_pct = 0` because the schema forbids the field).
+/// Compare two aggregates using the right-hand value as the reference.
+/// For < and >, threshold sets the required percentage difference and
+/// tolerance relaxes it. Equality permits an absolute difference up to
+/// tolerance% of the reference's magnitude. Ordered comparisons stay strict.
 [[nodiscard]] inline bool comparator_passes(
     comparison_operator op,
     double lhs_aggregate, double rhs_aggregate,
@@ -7586,9 +6887,7 @@ static_assert(raw_schedule_shuffle_seed(
     return false;
 }
 
-/// Convenience overload for the per-rule comparator path. Forwards into
-/// the explicit-args overload so `rule_comparator` and `regression_operator`
-/// share one implementation.
+/// Apply a within-run rule's operator, threshold and tolerance.
 [[nodiscard]] inline bool comparator_passes(
     const rule_comparator& cmp,
     double lhs_aggregate,
@@ -7598,31 +6897,27 @@ static_assert(raw_schedule_shuffle_seed(
                               cmp.threshold_pct, cmp.tolerance_pct);
 }
 
-/// Convenience overload for the regression-rule path. Threshold is
-/// implicitly zero — the regression schema rejects an explicit
-/// `threshold%` field, so there's no value to forward.
+/// Compare  current and previous results with a regression rule.
+/// Regression rules use tolerance without a threshold. Two zero values pass
 [[nodiscard]] inline bool comparator_passes(
     const regression_operator& op,
     double now_value,
     double previously_value) noexcept
 {
-    // Ordered regression operators express a direction of change, but an
-    // exactly unchanged zero (including either sign of IEEE zero) is not a
-    // change at all.  Keep this exception local to regression rules: the
-    // within-run rule_comparator path intentionally retains strict `<` / `>`
-    // semantics, as do every non-zero ordered boundary below.
+    // Treat unchanged zero as a passing regreszion result for every
+    // operator. This includes either sign of zero. Within-run comparisons
+    // keep their strict ordered comparisons.
     if (now_value == 0.0 && previously_value == 0.0) return true;
     return comparator_passes(op.op, now_value, previously_value,
                               /*threshold_pct=*/0.0, op.tolerance_pct);
 }
 
-/// Per-cell map shape: `region -> metric -> samples`. Reused by the
-/// writer and rule evaluator to expose group-merged samples.
+/// Samples grouped by region and metric name, shared by report and rule code.
 using sample_map = std::map<std::string, std::map<std::string, std::vector<double>>>;
 
-/// Concatenate every group cell's `samples` map into one `sample_map`.
-/// Sample arrays append in cell-declaration order (= group_index order),
-/// so the result is deterministic. Empty input yields an empty map.
+/// Join group sample arrays in the supplied cell order.
+/// Skip null cells. Empty input produces an  empty map. Callers pass cells
+/// in group order so merged results are repeatable.
 [[nodiscard]] inline sample_map merge_group_samples(
     std::span<const measurement_cell* const> group_cells)
 {
@@ -7641,11 +6936,9 @@ using sample_map = std::map<std::string, std::map<std::string, std::vector<doubl
     return merged;
 }
 
-/// `(tuple, test_case_name)` -> merged samples view of one benchmark
-/// state. Built once per consumer; shared by `evaluate_rules`,
-/// `evaluate_regressions`, and the report writer so all three see the
-/// same group-merged numbers (reading multiple group cells separately
-/// would skew aggregates and Cartesian-product rule evaluations).
+/// Group-merged samples indexed by execution tuple and test-case name.
+/// Reports and comparison rules use this shape to read the same combined
+/// sample sets.
 using merged_samples_by_pair =
     std::map<std::pair<const execution_tuple*, std::string>, sample_map>;
 
@@ -7673,9 +6966,9 @@ using merged_named_region_coverage_by_pair =
     return merged;
 }
 
-/// Sum the per-cell, per-iteration named-region contribution markers across
-/// groups. Duplicate descriptors with the same name contribute one marker per
-/// iteration, so the final value can be compared directly with matrix.for.
+/// Count iterations that emitted each named-region metric, across groups.
+/// Several descriptors with the same name count once per iteration, so the
+/// result can be checked against the configured iteration count.
 [[nodiscard]] inline merged_named_region_coverage_by_pair
 merged_named_region_coverage_for_state(
     const benchmark_execution_state& state)
@@ -7709,10 +7002,9 @@ merged_named_region_coverage_for_state(
     return metric_it->second;
 }
 
-/// Merge only the cells belonging to `case_name` (== execution_tuple::
-/// algorithm_name) into a (tuple,test_case)->sample_map index. Used by the
-/// `--debug` sink to serialize one completed case. Safe because the case's
-/// cells are all finished and immutable when this runs (§4.5).
+/// Merge samples for one algorithm after all its cells have  finished.
+/// The --debug writer uses this to report a completed algorithm while other
+/// algorithms are still running.
 [[nodiscard]] inline merged_samples_by_pair merge_case_samples(
     const benchmark_execution_state& state, std::string_view case_name) {
     std::map<std::pair<const execution_tuple*, std::string>,
@@ -7727,8 +7019,8 @@ merged_named_region_coverage_for_state(
     return merged;
 }
 
-/// Look up `region_name -> metric_name -> samples` inside a merged
-/// view. Returns nullptr when any link in the chain is missing.
+/// Find samples for a tuple, test case, region and metric.
+/// Return nullptr when any part of that lookup is missing.
 [[nodiscard]] inline const std::vector<double>* fetch_merged_samples(
     const merged_samples_by_pair& merged,
     const execution_tuple* tuple,
@@ -7745,13 +7037,11 @@ merged_named_region_coverage_for_state(
     return &metric_it->second;
 }
 
-/// One value per logical repeat for ratio-paired rule evaluation. The ordinary
-/// report arrays retain their independent-aggregate shape. Named
-/// `region_total_ns` sources can contain multiple descriptors with the same
-/// name, so their strict per-iteration descriptor counts partition the raw
-/// vector and each partition is reduced with the rule's configured aggregate
-/// into one repeat value. This retains the descriptor semantics
-/// without pairing unrelated run-level percentiles.
+/// Values and schedule records for comparing matching iterations.
+/// Named region_total_ns metrics may have several descriptors per iteration
+/// Keep their raw values and reduce each iteration's set to one value using
+/// the rule's aggregate. Completion flags reord whether  all expected values
+/// and schedule entries are present.
 struct logical_iteration_series {
     std::vector<double> values{};
     std::vector<std::vector<double>> descriptor_samples{};
@@ -7778,9 +7068,8 @@ struct logical_iteration_series {
             || cell_ptr->test_case->name != test_case_name) {
             continue;
         }
-        // Paired rules are semantically restricted to one group. Retain this
-        // runtime guard so a malformed/bypassed config cannot collide local
-        // repeat ordinals while still producing an accepted ratio.
+        // Paired rules require one group because repeat numbers restart in each
+        // group. Check again here in case configuration validation was skipped.
         if (selected_cell != nullptr || cell_ptr->group_count != 1
             || cell_ptr->group_index != 0) {
             return result;
@@ -7881,10 +7170,9 @@ struct logical_iteration_series {
     return aggregate_samples(comparator.aggregate, ratios);
 }
 
-/// Materialize the exact inputs and result of one resolved ratio-paired rule.
-/// Schedule matching is part of acceptance: a numerical ratio cannot be
-/// accepted when the two source cells lack the actual interleaved coordinates
-/// needed to prove that repeat N was compared with repeat N.
+/// Record the samples, schedule and result of one paired-ratio comparison.
+/// Accept the ratio only when both inputs are complete and their recorded
+/// repeat numbers, shuffle seeds and positions match the configured schedule.
 [[nodiscard]] inline paired_rule_evidence make_paired_rule_evidence(
     const benchmark_execution_state& state,
     const benchmark_rule& rule,
@@ -8094,9 +7382,9 @@ struct logical_iteration_series {
     return evidence;
 }
 
-/// Apply every rule against every test case and collect failures. With
-/// test_case)` *before* the rule loop so LHS/RHS aggregates are computed
-/// from the same merged sample arrays the report writer will emit.
+/// Compare every matching tuple pair for each selected test case.
+/// Merge groups first so rules use the same samples as reports. Collect
+/// violations and the detailed records for  paired-ratio comparisons.
 inline void evaluate_rules(
     const benchmark_execution_state& state,
     std::vector<violation>& violations,
@@ -8116,9 +7404,7 @@ inline void evaluate_rules(
                         && rule.rhs.test_case != test_case_name)) {
                     continue;
                 }
-                // Collect tuple* on each side so we evaluate the rule
-                // exactly once per (LHS_tuple, RHS_tuple) pair, never
-                // duplicated across groups.
+                // Compare each matching tuple pair once after merging its groups.
                 std::vector<const execution_tuple*> lhs_tuples;
                 std::vector<const execution_tuple*> rhs_tuples;
                 for (const auto& tuple : state.execution_tuples) {
@@ -8219,9 +7505,8 @@ inline void evaluate_rules(
                             rhs_present = paired_present;
                             lhs_aggregate = paired_present
                                 ? *paired_ratio : 0.0;
-                            // A ratio-paired rule compares
-                            // aggregate(lhs[i]/rhs[i]) against its explicit
-                            // configured reference ratio.
+                            // Compare the aggregate of per-iteration ratios with the configured
+                            // reference ratio.
                             rhs_aggregate = paired_present
                                 ? rule.cmp.paired_baseline : 0.0;
                         } else if (rule.cmp.pairing
@@ -8243,10 +7528,8 @@ inline void evaluate_rules(
                                         continue;
                                     }
                                     exact_iteration_accepted = false;
-                                    // Preserve the first unequal repeat as the
-                                    // durable violation witness. Completeness
-                                    // checks above already rejected non-finite
-                                    // values and missing iterations.
+                                    // Report the first pair with different bit patterns. Earlier checks
+                                    // require finite values and complete iterations.
                                     lhs_aggregate = lhs_value;
                                     rhs_aggregate = rhs_value;
                                     break;
@@ -8289,19 +7572,12 @@ inline void evaluate_rules(
     }
 }
 
-// ----------------- Run identity (meta block) -----------------
+// Record run metadata.
 
-/// Read the trimmed first 64 bytes of `command`'s stdout via popen.
-/// Returns "" on any failure (popen null, exit status nonzero, empty
-/// output). Used by `git_head_commit` and `git_working_tree_dirty` to
-/// shell out to the local git client without pulling in libgit2.
-///
-/// **Trust note.** PATH-hijacking is theoretically possible (a
-/// malicious `git` earlier in `$PATH` would run as the bench process).
-/// The framework runs in developer environments only; we treat this as
-/// the same trust boundary as any other dev tool that shells out to
-/// `git`. No user input flows into the command string, so there is no
-/// injection vector.
+/// Run a shell command and collect stdout, trimmin trailing line endings.
+/// Stop reading after the output grows past 4096 bytes. Return an empty
+/// string,  if opening the pipe or the command fails.
+/// Callers supply fixed git commands, with no user text interpolated.
 [[nodiscard]] inline std::string slurp_command_stdout(const char* command) noexcept {
     FILE* pipe = ::popen(command, "r");
     if (pipe == nullptr) return {};
@@ -8309,7 +7585,7 @@ inline void evaluate_rules(
     std::string out;
     while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
         out.append(buffer.data());
-        if (out.size() > 4096) break;     // sanity cap; we only want a SHA or a short status
+        if (out.size() > 4096) break;     // Limit output needed for a commit ID or dirty check
     }
     const int exit_code = ::pclose(pipe);
     if (exit_code != 0) return {};
@@ -8319,45 +7595,36 @@ inline void evaluate_rules(
     return out;
 }
 
-/// Returns the working-tree HEAD commit, or "" if the cwd isn't a git
-/// repo (or git isn't on PATH).
+/// Read HEAD's commit ID in the current directory. Return an empty string
+/// when git fails, including when the directory is outside a repository.
 [[nodiscard]] inline std::string git_head_commit() noexcept {
     return slurp_command_stdout("git rev-parse HEAD 2>/dev/null");
 }
 
-/// Returns true iff the working tree has any uncommitted changes
-/// (tracked-modified, staged, or untracked files visible to
-/// `git status --porcelain`). Returns false on any error so we don't
-/// spuriously flag a missing-git environment as dirty.
+/// Check for staged, modified or untracked files reported by git status.
+/// Return false when git fails.
 [[nodiscard]] inline bool git_working_tree_dirty() noexcept {
     const auto output = slurp_command_stdout("git status --porcelain 2>/dev/null");
     return !output.empty();
 }
 
-/// Wall-clock Unix epoch in milliseconds. The single wall-clock-epoch helper
-/// in the framework: the debug event log uses it directly (ms granularity for
-/// sub-second ordering within a run), and `capture_run_meta` sources its
-/// epoch-seconds `meta.timestamp` from it (`/ 1000`). (`bioseq::instrumentation::clock::
-/// now_ns` is a *monotonic* steady clock, unsuitable for wall-clock event
-/// timestamps, so it is not reused here.)
+/// Return Unix time in milliseconds for debug events and report timestamps.
+/// Elapsed-time measurements use the separate monotonic clock.
 [[nodiscard]] inline std::int64_t now_unix_millis() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-/// Capture this run's identity in a single struct. Called once from
-/// `run_impl`; the resulting `report_metadata` is forwarded to both the
-/// report writer (for the `meta` block) and the regression evaluator
-/// (which doesn't need most fields, but takes the whole struct for
-/// future-proofing).
+/// Capture the commit, working-tree  state, fast-mode flag and current time.
+/// The report writer and regression checks share this run metadata.
 [[nodiscard]] inline report_metadata capture_run_meta(bool fast_filter) noexcept {
     report_metadata meta;
     meta.commit = git_head_commit();
     meta.dirty  = git_working_tree_dirty();
     meta.fast   = fast_filter;
-    // Epoch seconds, sourced from the single wall-clock helper (dedup).
+    // Reports store the timestamp in seconds.
     meta.timestamp = now_unix_millis() / 1000;
-    // Keep a `time_point` for the ISO-8601 `created` string (gmtime_r needs it).
+    // Format the creation time in UTC.
     const auto now = std::chrono::system_clock::now();
     const std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm_buf{};
@@ -8370,14 +7637,11 @@ inline void evaluate_rules(
     return meta;
 }
 
-// ----------------- Regression evaluation -----------------
+// Compare results with earlier reports.
 
-/// Pin-allocated wrapper around a parsed historical report. Holds the
-/// simdjson parser, the report body string, and the parsed root element.
-/// The body must outlive the parser; storing both inline guarantees this
-/// regardless of how the wrapper is moved (it isn't — see deleted move
-/// ctors). Heap allocation via `std::unique_ptr` (in the cache below)
-/// gives stable pointers.
+/// Own a historical report's JSON text and parser for as long as its DOM
+/// views are used. Copying and moving are disabled. The cache keeps each
+/// report in a unique_ptr so its address stays stable.
 struct parsed_historical_report {
     std::string                body;
     simdjson::dom::parser      parser;
@@ -8398,9 +7662,9 @@ struct parsed_historical_report {
     return report_dir / fmt::format("report_{}.json", index);
 }
 
-/// Scan `report_dir` for files matching `^report_(\d+)\.json$`. Returns
-/// the largest index found, or `std::nullopt` when none exist (or the
-/// directory itself is missing — first run on a fresh report path).
+/// Find the largest numeric index among report_<index>.json files.
+/// Return nullopt when no matching file is found, including in a missing
+/// report directory.
 [[nodiscard]] inline std::optional<std::size_t> max_existing_report_index(
     const std::filesystem::path& report_dir) noexcept
 {
@@ -8429,8 +7693,7 @@ struct parsed_historical_report {
             }
         }
         if (!digits_only) continue;
-        // `std::stoull` may throw on overflow; we don't use exceptions, so
-        // accumulate manually with overflow guard.
+        // Skip oversized  indices without throwing an integeq-conversion error.
         std::size_t parsed = 0;
         bool overflowed = false;
         for (const char ch : digits) {
@@ -8448,10 +7711,9 @@ struct parsed_historical_report {
     return max_index;
 }
 
-/// Allocation guard for crash-left raw sidecars.  A sidecar is created with
-/// O_EXCL before any benchmark work, so a crashed run may have no matching
-/// report_<N>.json.  Treat both completed reports and orphan sidecars as used
-/// indices; gaps are evidence and must never be overwritten.
+/// Find the largest index used by a report or raw JSONL file.
+/// A crashed run can leave a raw file without its final report. Reserving
+/// that index keeps a later run from reusing it
 [[nodiscard]] inline std::optional<std::size_t> max_existing_run_artifact_index(
     const std::filesystem::path& report_dir) noexcept
 {
@@ -8489,9 +7751,9 @@ struct parsed_historical_report {
     return max_index;
 }
 
-/// Load and parse `report_<index>.json` from disk. Returns nullptr when
-/// the file is missing or the JSON body fails to parse — both of which
-/// are downgraded to "history gap" by the regression evaluator.
+/// Load and parse report_<index>.json.
+/// Return nullptr when it cannot be read, is empty or contains invalid JSON.
+/// History checks then treat that report as unavailable.
 [[nodiscard]] inline std::unique_ptr<parsed_historical_report> load_report_at_index(
     const std::filesystem::path& report_dir, std::size_t index) noexcept
 {
@@ -8507,10 +7769,9 @@ struct parsed_historical_report {
     return holder;
 }
 
-/// Compare a JSON value (from a parsed historical report) against a
-/// `config_value` (from the current run's tuple). Numbers are matched
-/// across the integer/double divide so a round-trip like 10 → 10.0 → 10
-/// still compares equal.
+/// Compare a historical JSON parameter with the current configuration value.
+/// Numeric comparison accepts integer and  floating-point spellings, so 10
+/// and 10.0 can match, after a report round trip.
 [[nodiscard]] inline bool simdjson_equals_config_value(
     simdjson::dom::element json_value, const config_value& cv) noexcept
 {
@@ -8556,10 +7817,7 @@ struct parsed_historical_report {
     return false;
 }
 
-/// Try to coerce a simdjson element to a JSON object. Returns nullopt
-/// when the cast fails. Used by the report walker so the per-step
-/// boilerplate (`if (... .get(out) != SUCCESS) return nullopt;`) collapses
-/// to a single line per descent.
+/// Read a DOM element as an object, or return nullopt if it has another type.
 [[nodiscard]] inline std::optional<simdjson::dom::object>
 try_as_object(simdjson::dom::element element) noexcept {
     simdjson::dom::object out;
@@ -8567,7 +7825,8 @@ try_as_object(simdjson::dom::element element) noexcept {
     return out;
 }
 
-/// Helper for the same pattern at object-key entry points.
+/// Read an object field as an object, or return nullopt if it is absent
+/// or has another type.
 [[nodiscard]] inline std::optional<simdjson::dom::object>
 try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     simdjson::dom::element child;
@@ -8575,9 +7834,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return try_as_object(child);
 }
 
-/// Pull the `meta.commit` string from a parsed report's root object.
-/// `commit` field inside `meta`, or the field isn't a string. Used by
-/// the regression evaluator to populate `regression_since_commit`.
+/// Read meta.commit for history attribution.
+/// Return an empty string if the path is missing or its value is not a string.
 [[nodiscard]] inline std::string commit_from_report(
     simdjson::dom::element report_root) noexcept
 {
@@ -8592,8 +7850,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return std::string{commit_text};
 }
 
-/// Pull the `meta.fast` flag from a parsed report. Missing or malformed
-/// metadata is incomparable and returns no value.
+/// Read meta.fast, or return nullopt when the flag is missing or malformed.
 [[nodiscard]] inline std::optional<bool> fast_from_report(
     simdjson::dom::element report_root) noexcept
 {
@@ -8608,13 +7865,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return fast;
 }
 
-/// Read a JSON `number` field as a double, falling back to
-/// `default_value` on any miss (key absent, wrong type, parse
-/// failure). Coerces through `int64_t` / `uint64_t` so an
-/// integer-spelled JSON value like `0` still resolves cleanly.
-/// Tiny helper so every aggregate-field reader below stays one
-/// line; consolidated in one place so its semantics (e.g. the
-/// integer-coercion order) are auditable.
+/// Read a numeric field as a double, accepting integer spellings too.
+/// Return default_value when  the field is missing or has another type.
 [[nodiscard]] inline double json_double_or(
     simdjson::dom::object obj, std::string_view key, double default_value) noexcept
 {
@@ -8633,8 +7885,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return default_value;
 }
 
-/// Read a JSON `integer` field as `int64_t` with the same
-/// graceful-degradation contract as `json_double_or`.
+/// Read an integer field as int64_t, conkerting unsigned integers if needed.
+/// Return default_value when the field is missing or has another type.
 [[nodiscard]] inline std::int64_t json_int_or(
     simdjson::dom::object obj, std::string_view key, std::int64_t default_value) noexcept
 {
@@ -8649,11 +7901,9 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return default_value;
 }
 
-/// Parse one `region_block.<metric>` object into an
-/// `aggregated_samples`. Missing optional sub-objects collapse to
-/// default-constructed values; consumers that need the full shape
-/// (sanity warnings, regression eval, --ui) check
-/// `samples_count > 0` and `top10.empty()` upfront.
+/// Read a metric summary for display Missing or malformed fields keep
+/// their zero or empty defaults. Regression baseline checks inspect the
+/// original JSON separately so missing values cannot become measured zeros.
 [[nodiscard]] inline aggregated_samples parse_aggregated_samples(
     simdjson::dom::object metric_obj) noexcept
 {
@@ -8675,15 +7925,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                 json_double_or(*pct_obj, entry.name, 0.0);
         }
     }
-    /// Pull `parent[key]` as a `vector<double>`. Non-numeric items
-    /// (corrupt historical reports) are dropped silently — the
-    /// resulting array may shrink below the source length, breaking
-    /// the documented `top10[0] == stats.max` invariant of an
-    /// aggregator-built `aggregated_samples`. Consumers that depend
-    /// on exact alignment with the source must check
-    /// `top10.size() == bottom10.size()` themselves; the regression
-    /// evaluator and the interactive UI only consult percentile
-    /// slots, so a truncated `top10` is harmless to them.
+    /// Read numeric array entries and skip entries of other types.
+    /// Return an empty vector when the field is missing or is not an  array.
     auto parse_double_array = [](simdjson::dom::object parent,
                                   std::string_view key) noexcept
         -> std::vector<double>
@@ -8705,23 +7948,16 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     {
         agg.top10    = parse_double_array(*kbest_obj, "top10");
         agg.bottom10 = parse_double_array(*kbest_obj, "bottom10");
-        // The aggregator's invariant is `top10.size() == bottom10.size()`
-        // (both are `min(10, finite_count)`). If a corrupt historical
-        // report drops elements asymmetrically, truncate both sides
-        // back to the shorter length so consumers never see a
-        // size-mismatch (which would, e.g., let a future
-        // "spread = top10[i] - bottom10[i]" walk read past the end).
+        // Keep the best-value arrays the same length after dropping malformed
+        // entries, so readers can safely access corresponding positions.
         const auto kbest_paired = std::min(agg.top10.size(), agg.bottom10.size());
         agg.top10.resize(kbest_paired);
         agg.bottom10.resize(kbest_paired);
     }
     simdjson::dom::array hist_arr;
     if (metric_obj["histogram"].get(hist_arr) == simdjson::SUCCESS) {
-        // Histogram positional alignment matters: bucket `i` in the
-        // source becomes bucket `i` in `agg.histogram`. We advance
-        // `bucket_index` unconditionally so a malformed bucket leaves
-        // its slot at default-construction (`from == to == 0`,
-        // `count == 0`) and later slots stay aligned with the source.
+        // Preserve bucket positions. A malformed bucket leaves a zeroed slot
+        // instead of shifting later buckets forward.
         std::size_t bucket_index = 0;
         for (auto bucket_elem : hist_arr) {
             if (bucket_index >= k_histogram_bucket_count) break;
@@ -8739,12 +7975,9 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return agg;
 }
 
-/// Walk a parsed report's
-/// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric>`
-/// path and return the matching metric object.  Keeping the raw DOM object
-/// available lets regression-history eligibility validate persisted numeric
-/// fields before `parse_aggregated_samples` applies its intentionally
-/// permissive UI defaults.
+/// Find a historical metric by benchmark, algorithm parameters, test case
+/// and region. Return its JSON object so regression checks can validate
+/// stored fields before the display parser supplies defaults.
 [[nodiscard]] inline std::optional<simdjson::dom::object>
 aggregated_metric_object_from_report(
     simdjson::dom::element report_root,
@@ -8803,10 +8036,9 @@ aggregated_metric_object_from_report(
     return std::nullopt;
 }
 
-/// Pull one pre-aggregated record from a parsed report. Returns nullopt on
-/// any path miss. The general historical-report UI remains permissive here;
-/// regression candidate selection performs its stricter integrity checks on
-/// `aggregated_metric_object_from_report` before accepting a baseline.
+/// Find and, psrse a historical metric summary for  display.
+/// Return nullopt if the metric cannot be found. Its fields use the defaults
+/// from parse_aggregated_samples, so this alone does not validate a baseline.
 [[nodiscard]] inline std::optional<aggregated_samples> aggregated_from_report(
     simdjson::dom::element report_root,
     std::string_view benchmark,
@@ -8823,12 +8055,9 @@ aggregated_metric_object_from_report(
     return parse_aggregated_samples(*metric_obj);
 }
 
-/// Lazy parser-cache for historical reports. Each `report_<N>.json`
-/// is parsed at most once per cache instance even if multiple
-/// consumers (regressions, sanity warnings) ask for the same index.
-/// `parsed_historical_report` is held via `unique_ptr` because it pins
-/// (the inner simdjson parser is non-movable). Stack-allocated;
-/// freed at the end of `run_impl`'s evaluation phase.
+/// Load historical reports on demand and keep their parsers alive.
+/// Each index is read at most once per cache, including failed loads.
+/// Regression and sanity checks can share the parsed reports.
 struct historical_report_cache {
     std::filesystem::path                                                report_dir;
     std::map<std::size_t, std::unique_ptr<parsed_historical_report>>      cached{};
@@ -8842,9 +8071,8 @@ struct historical_report_cache {
     historical_report_cache(historical_report_cache&&) = delete;
     historical_report_cache& operator=(historical_report_cache&&) = delete;
 
-    /// Fetch (loading on demand) the report at `index`. Returns nullptr
-    /// once for a missing report and remembers that miss so subsequent
-    /// fetches don't re-touch the filesystem.
+    /// Fetch a cached report or load it once. Remember failed loads and
+    /// return nullptr for them on later calls too
     [[nodiscard]] parsed_historical_report* fetch(std::size_t index) noexcept {
         if (known_missing.count(index) > 0) return nullptr;
         if (auto it = cached.find(index); it != cached.end()) {
@@ -8861,8 +8089,8 @@ struct historical_report_cache {
     }
 };
 
-/// Parse a non-negative JSON integer into `size_t` without accepting a
-/// floating-point spelling or overflowing the host type.
+/// Read a nonnegative JSON integer as size_t.
+/// Reject missing fields, floating-point spellings and out-of-range values.
 [[nodiscard]] inline std::optional<std::size_t> strict_json_size_field(
     simdjson::dom::object object, std::string_view key) noexcept
 {
@@ -8884,9 +8112,9 @@ struct historical_report_cache {
     return static_cast<std::size_t>(signed_value);
 }
 
-/// Parse a JSON number and reject missing, malformed, or non-finite values.
-/// Regression baselines use this instead of `json_double_or` so corrupt
-/// aggregate fields can never become an eligible synthetic zero.
+/// Read  a required finite number, returning nullopt on invalid input.
+/// Regression checks use this to keep malformed history from becoming a
+/// zero-valued baseline.
 [[nodiscard]] inline std::optional<double> strict_finite_json_number_field(
     simdjson::dom::object object, std::string_view key) noexcept
 {
@@ -8910,10 +8138,9 @@ struct historical_report_cache {
     return std::nullopt;
 }
 
-/// Validate the top-level durable raw-evidence authority of one historical
-/// report. `null` is the explicit no-sidecar state and is eligible. An object
-/// is eligible only when it explicitly records `complete: true` and a valid
-/// non-negative `record_count`; missing or malformed states fail closed.
+/// Check whether a report's raw_evidence field permits use as history.
+/// Null means no raw file was requested. An object must say complete: true
+/// and contain a valid record_count. Return a reason when the check fails.
 [[nodiscard]] inline std::optional<std::string>
 historical_raw_evidence_ineligibility_reason(
     simdjson::dom::element report_root) noexcept
@@ -8945,10 +8172,9 @@ historical_raw_evidence_ineligibility_reason(
     return std::nullopt;
 }
 
-/// Reject captures that the producing run did not accept. A current report is
-/// authoritative only when its explicit `meta.history_eligible` seal is true
-/// and all finding arrays are closed. A failed or incomplete row must never
-/// ratchet an unrelated cell's future baseline.
+/// Require meta.history_eligible to be true before using a report as history.
+/// Also require the rule_violations, regressions and sanity_warnings arrays
+/// to exist. Their contents are represented by the producing run's flag.
 [[nodiscard]] inline std::optional<std::string>
 historical_run_outcome_ineligibility_reason(
     simdjson::dom::element report_root) noexcept
@@ -8992,9 +8218,8 @@ historical_run_outcome_ineligibility_reason(
     return std::nullopt;
 }
 
-/// Read the aggregate field selected by one regression rule directly from
-/// its persisted JSON object. Unlike the general report/UI parser, every
-/// selected field is mandatory and finite on this authoritative path.
+/// Read the statistic slected  by a regression rule from historical JSON.
+/// It must exist and be finite. Return nullopt instead of supplying a default.
 [[nodiscard]] inline std::optional<double>
 strict_historical_aggregate_value(
     simdjson::dom::object metric_obj, sample_aggregate aggregate) noexcept
@@ -9033,9 +8258,9 @@ strict_historical_aggregate_value(
     return std::nullopt;
 }
 
-/// Sum the ten persisted histogram counts, rejecting malformed buckets and
-/// arithmetic overflow. The result is the historical cell's finite-sample
-/// cardinality and must match the current raw vector's finite count.
+/// Sum a historical metric's ten histogram counts.
+/// Reject invalid counts or overflow. Baseline selection compares this
+/// finite-sample count with the current result.
 [[nodiscard]] inline std::optional<std::size_t>
 strict_historical_finite_sample_count(
     simdjson::dom::object metric_obj) noexcept
@@ -9059,26 +8284,24 @@ strict_historical_finite_sample_count(
     return total;
 }
 
-/// One accepted historical comparison point. The report pointer is pinned by
-/// `historical_report_cache`; `aggregate_value` is the strictly parsed statistic
-/// selected by the active regression rule.
+/// A historical result accepted for comparison. The cache owns report,
+/// and aggregate_value holds the validated statistic selected by the, rule.
 struct historical_regression_candidate {
     parsed_historical_report* report = nullptr;
     double aggregate_value = 0.0;
 };
 
-/// Cached result for one report index. `candidate` is populated only when all
-/// eligibility gates pass; otherwise `reason` is suitable for the required
-/// non-blocking skipped-candidate diagnostic.
+/// Result of checking one historical report. It contains an accepted
+/// candidate or a  reason explaining why the report was skipped.
 struct historical_regression_candidate_assessment {
     std::optional<historical_regression_candidate> candidate{};
     std::string reason{};
 };
 
-/// Per-current-cell historical candidate selector. Baseline selection and the
-/// `regression_since` walk share this exact instance, so they cannot disagree
-/// about completeness, mode, tuple identity, or sample topology. Assessments
-/// are cached by report index to avoid re-walking DOM trees.
+/// Find usable history for one current metric result
+/// Baseline selection and regression attribution share these checks for run
+/// status, fast mode, matching parameters and sample counts. Cache each
+/// assessment so those searches use the same decision.
 struct historical_regression_candidate_selector {
     historical_report_cache& reports;
     bool current_fast = false;
@@ -9164,38 +8387,18 @@ struct historical_regression_candidate_selector {
     }
 };
 
-/// Bit-exact identity for a `double`. Uses `std::bit_cast<uint64_t>`
-/// so that NaN, ±0, and ±infinity hash consistently in the
-/// distinct-value sets used by the sanity-warning detector. Plain
-/// `double ==` would treat every NaN as never-equal-to-itself,
-/// silencing a "metric always returns NaN" warning — which is the
-/// opposite of what the user wants.
+/// Return a double's exact bit pattern for distinct-value sets.
+/// This distinguishes signed zeros and NaN payloads, while repeated copies
+/// of the same NaN pattern occupy one entry.
 [[nodiscard]] inline std::uint64_t double_bits(double sample) noexcept {
     return std::bit_cast<std::uint64_t>(sample);
 }
 
-/// Walk an entire historical report's
-/// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric_name>`
-/// tree and collect a distinct-value set capturing every sample
-/// shape*. Returns an empty set when the metric was absent in that
-/// report (or when the report's structure is unparseable). Linear
-/// in the report size; called at most once per `(metric,
-/// hist_report)` pair via the per-rule cache in
-/// `evaluate_sanity_warnings`.
-///
-/// The aggregate per cell carries `min` and `max` (over the finite
-/// subset) plus an empty-vs-non-empty `top10`. From these we can
-/// vector walk:
-///
-///   * `samples_count == 0` → cell is empty, contributes nothing.
-///   * `top10` empty (`samples_count > 0`) → every emitted sample
-///     was non-finite. Insert a NaN sentinel so an all-NaN run
-///     reports as `metric_looks_constant` with a NaN-flavoured
-///     pattern collapsed into one set entry.
-///   * `min == max` → every finite sample in this cell shares one
-///     value `V`; insert `bit_cast<u64>(V)`.
-///   * `min != max` → cell is internally non-constant; insert
-///     both bits so the "size > 1 ⇒ not constant" check trips.
+/// Collect a metric's distinct finite extrema across  a historical report.
+/// Equal extrema identify a constant cell. Cells with samples but an empty
+/// top10 contribut one NaN marker, representing only non-finite results.
+/// Empty or missing metrics contribute nothing. This lets sanity checks
+/// detect constant values without storing the original sample arrays.
 [[nodiscard]] inline std::set<std::uint64_t> distinct_sample_bits_for_metric(
     simdjson::dom::element report_root,
     std::string_view       metric_name) noexcept
@@ -9259,10 +8462,8 @@ struct historical_regression_candidate_selector {
     return result;
 }
 
-/// Format the constant value seen for a `metric_looks_constant`
-/// warning. Integer-valued doubles in the safe IEEE range render
-/// as `"490"`; everything else uses default `fmt` double formatting.
-/// NaN / infinity surface explicitly so the diagnostic reads sensibly.
+/// Format a constant value for a sanity warning.
+/// Print small whole numbers as integers and name NaN and infinity explicitly.
 [[nodiscard]] inline std::string stringify_constant_value(double sample) noexcept {
     if (std::isnan(sample)) return "NaN";
     if (std::isinf(sample)) return sample < 0.0 ? "-infinity" : "infinity";
@@ -9275,46 +8476,21 @@ struct historical_regression_candidate_selector {
     return fmt::format("{}", sample);
 }
 
-/// Run hardcoded sanity checks against the just-finished run's
-/// collected samples and walk history backwards to attribute
-/// `warning_since` / `warning_since_commit`. Currently emits
-/// `metric_looks_constant` only — the only suspicious-uniformity
-/// case the user spec calls out.
+/// Warn when a metric has one constant value across the run's cells.
+/// Compare finite extrema and  use a shared NaN marker for cells containing
+/// only non-finite samples. Empty cells are skipped.
 ///
-/// **Detection.** A metric is "constant" when every sample seen
-/// across every (benchmark, tuple, test_case, region) cell of the
-/// current run hashes to one bit-pattern. Empty samples (metric
-/// declared but never emitted) do NOT trip the check — earlier
-/// validation already surfaces those (`region_filter_never_matched`,
-/// `missing_evaluation_metric`).
-///
-/// **History walk.** For each constant metric we fetch
-/// `report_<N-1>.json`, `report_<N-2>.json`, … and compare the
-/// historical report's distinct-sample set with `{V}`. If the
-/// historical set is a subset of `{V}`, that older report shares
-/// the warning. We stop at the first historical index where the
-/// sets diverge, or at index 1 (the warning has been present in
-/// every report on disk). Missing reports lock `warning_since` to
-/// JSON `null`.
-///
-/// **First run** (`current_index == 1`): no history is reachable.
-/// We emit `warning_since: "report_1.json"` and the current run's
-/// own commit; the warning is observable from a single run, unlike
-/// regression rules whose entire premise needs a baseline.
-///
-/// **Non-blocking.** Sanity warnings are surfaced but never affect
-/// the framework's exit code. The list is sorted alphabetically by
-/// metric name for diff-friendly output.
+/// Walk earlier reports to find how long the same value has appeared.
+/// A missing report leaves the origin unknown. A changed or absent metric
+/// stops the search. These warnings do not fail the run
 [[nodiscard]] inline std::vector<sanity_warning> evaluate_sanity_warnings(
     const std::map<std::string, std::shared_ptr<benchmark_execution_state>>& reports,
     const report_metadata&            current_meta,
     std::size_t                  current_index,
     historical_report_cache&       history_cache) noexcept
 {
-    // 1. Collect distinct bit-patterns per metric name across every
-    //    cell of the current run. We funnel through
-    //    `aggregate_samples_for_report` so the constancy lens
-    //    side reader (`distinct_sample_bits_for_metric`) exactly.
+    // Summarize each cell using the same finite extrema and non-finite
+    // marker available in historical reports.
     std::map<std::string, std::set<std::uint64_t>> distinct_bits_by_metric;
     for (const auto& [_bench_key, state_ptr] : reports) {
         for (const auto& cell_ptr : state_ptr->cells) {
@@ -9324,10 +8500,8 @@ struct historical_regression_candidate_selector {
                     auto& bucket = distinct_bits_by_metric[metric_name];
                     const auto agg = aggregate_samples_for_report(sample_values);
                     if (agg.top10.empty()) {
-                        // All-non-finite cell: same sentinel the
-                        // historical reader inserts so an all-NaN
-                        // run still trips `metric_looks_constant`
-                        // with a NaN-flavoured message.
+                        // Use the same NaN marker as the history reader when the cell has
+                        // no finite samples.
                         bucket.insert(double_bits(
                             std::numeric_limits<double>::quiet_NaN()));
                         continue;
@@ -9345,33 +8519,28 @@ struct historical_regression_candidate_selector {
     warnings.reserve(distinct_bits_by_metric.size());
 
     for (const auto& [metric_name, distinct_bits] : distinct_bits_by_metric) {
-        // Step 5 of the detector: skip metrics that produced no samples.
+        // A metric, with no samples cannot be hecked for  constancy.
         if (distinct_bits.empty()) continue;
-        // Constancy test: exactly one distinct bit-pattern.
+        // One distinct value means the metric appears constant.
         if (distinct_bits.size() != 1) continue;
 
         const std::uint64_t constant_bits = *distinct_bits.begin();
         const double constant_value = std::bit_cast<double>(constant_bits);
         const auto value_text = stringify_constant_value(constant_value);
 
-        // 2. Walk history backwards. The walk stops as soon as a
-        //    historical report's distinct samples for this metric are
-        //    not a subset of `{constant_bits}`. `oldest_with_warning`
-        //    tracks the deepest report still consistent with the
-        //    current constant.
+        // Look for older reports with the same constant value. Stop when the
+        // metric changes, disappears or a report cannot be loaded.
         std::string warning_since_label;
         std::string warning_since_commit;
         bool history_gap = false;
 
         if (current_index <= 1) {
-            // First run: warning is trivially present since report_1.
+            // With no history, record this first run as the warning's origin.
             warning_since_label  = "report_1.json";
             warning_since_commit = current_meta.commit;
         } else {
-            // `oldest_with_warning == current_index` is the sentinel
-            // "no historical evidence yet — warning is brand new". As
-            // we walk back and find consistent reports, the value
-            // descends; we stop on the first divergence or absence.
+            // Start with the current report and move the origin back whenever an
+            // older report confirms the same value.
             std::size_t oldest_with_warning = current_index;
             for (std::size_t historical_index = current_index - 1;
                  historical_index >= 1; --historical_index)
@@ -9382,12 +8551,7 @@ struct historical_regression_candidate_selector {
                 }
                 const auto historical_bits =
                     distinct_sample_bits_for_metric(hist_report->root, metric_name);
-                // Empty historical set: metric absent (or empty samples)
-                // in that report. Treat as a stop condition — the
-                // warning needs the metric to have actually emitted a
-                // value before we can say it was "the same constant"
-                // back then. Pointing `warning_since` at a report that
-                // didn't contain the metric would be misleading.
+                // An absent metric cannot confirm the warning in an older report.
                 if (historical_bits.empty()) break;
                 bool subset_of_constant = true;
                 for (std::uint64_t bits : historical_bits) {
@@ -9401,7 +8565,7 @@ struct historical_regression_candidate_selector {
             }
 
             if (history_gap) {
-                // warning_since stays empty → emit JSON null.
+                // Missing  history leaves warning_since unknown, written as JSON null.
             } else if (oldest_with_warning != current_index) {
                 warning_since_label =
                     fmt::format("report_{}.json", oldest_with_warning);
@@ -9410,9 +8574,7 @@ struct historical_regression_candidate_selector {
                     warning_since_commit = commit_from_report(origin_report->root);
                 }
             } else {
-                // No historical report confirmed the warning. It is
-                // brand new in this run — point to the run we are
-                // about to write and reuse the current commit.
+                // The current report is the first one that confirms this warning.
                 warning_since_label  = fmt::format("report_{}.json", current_index);
                 warning_since_commit = current_meta.commit;
             }
@@ -9439,13 +8601,9 @@ struct historical_regression_candidate_selector {
     return warnings;
 }
 
-/// Evaluate every regression rule against the current run's collected
-/// samples and the on-disk historical reports. Single-threaded —
-/// invoked once from `run_impl` after the parallel benchmark loop has
-/// joined. Pushes diagnostics (warnings + matched-nothing errors) into
-/// `diagnostics_out`; returns the list of detected regressions. The
-/// shared `historical_report_cache` is owned by the caller so the
-/// sanity-warning pass can reuse the parsed report bodies.
+/// Compare current results with eligible historical baselines after work ends.
+/// Return regressions and append diagnostics for missing data or skipped
+/// history. Share the report cache with sanity checks to avoid repeated reads.
 [[nodiscard]] inline std::vector<regression_entry> evaluate_regressions(
     const regression_rules_by_configuration& regression_rules_by_config,
     const std::map<std::string, std::shared_ptr<benchmark_execution_state>>& reports,
@@ -9457,9 +8615,7 @@ struct historical_regression_candidate_selector {
 {
     std::vector<regression_entry> entries;
 
-    // Per-state merged-samples cache built once per `(config_path,
-    // benchmark)` and reused across every rule that touches the same state,
-    // keeping the work at O(N_cells) rather than O(N_rules × N_cells).
+    // Merge each benchmark's groups once and reuse the samples across rules.
     std::map<const benchmark_execution_state*, merged_samples_by_pair> merged_cache;
     auto merged_for = [&](const benchmark_execution_state* state)
         -> const merged_samples_by_pair&
@@ -9503,11 +8659,9 @@ struct historical_regression_candidate_selector {
             const std::string rule_location =
                 fmt::format("{}/regression_rules/{}", config_path, rule.name);
 
-            // A targeted selection legitimately omits whole rule partitions.
-            // Skip only when the selected states contain no statically
-            // applicable cell for this rule. Once a selected cell is in
-            // scope, the runtime matched-nothing diagnostic remains
-            // fail-closed for missing regions/samples.
+            // A CLI filter may remove all work cxvered by a rule Skip that rule
+            // for a  partial run. If selected work still falls within its scope,
+            // missing samples must still be reported.
             const auto selected_state_has_rule_scope = [
                 &rule,
                 &excluded_test_cases,
@@ -9563,11 +8717,9 @@ struct historical_regression_candidate_selector {
                             if (metric_it == region_it->second.end()
                                 || metric_it->second.empty()) continue;
 
-                            // measurement_cell has data → counts toward matched_count
-                            // regardless of baseline presence. All-non-finite
-                            // current samples mean "not measured" (for example,
-                            // explicit Vulkan rows on a software ICD), so the
-                            // regression rule is satisfied for this cell.
+                            // Count a matching metric even without a baseline. Skip comparison
+                            // when its cell is marked unmeasured or the metric has
+                            // no finite samples.
                             ++matched_count;
                             if (not_measured_cell
                                 || !has_any_finite_sample(metric_it->second)) {
@@ -9669,9 +8821,9 @@ struct historical_regression_candidate_selector {
                                 continue;     // no regression
                             }
 
-                            // Walk back through the same cached selector to
-                            // compute regression_since. Ineligible reports are
-                            // evidence gaps, never attribution origins.
+                            // Find the oldest eligible reference, that still makes this current
+                            // value fail. Skip unavailable reports and stop at a
+                            // reference against which the current value passes.
                             std::size_t oldest_failing = baseline_index;
                             if (baseline_index > 1) {
                                 for (std::size_t historical_index = baseline_index - 1;;
@@ -9684,7 +8836,7 @@ struct historical_regression_candidate_selector {
                                     } else if (comparator_passes(
                                                    rule.op, now_value,
                                                    assessment.candidate->aggregate_value)) {
-                                        break;     // found an eligible passing report
+                                        break;     // The current value passes against this older  reference.
                                     } else {
                                         oldest_failing = historical_index;
                                     }
@@ -9752,14 +8904,10 @@ struct historical_regression_candidate_selector {
     return entries;
 }
 
-// ----------------- Report writing -----------------
-//
-// All emit_* helpers here cooperate with simdjson::builder::string_builder.
-// We deliberately track comma placement by hand because the builder leaves
-// that to the caller (see SIMDJSON_REF.md §"Overview: string_builder").
+// Write JSON reports. simdjson::builder::string_builder leaves comma
+// placement to these helpers and their callers.
 
-/// Emit one config_value scalar — switches on the runtime kind. Caller is
-/// expected to have written the key + colon already.
+/// Write a scalar configuration value. The caller writes any key and colon.
 inline void emit_value_scalar(simdjson::builder::string_builder& builder,
                                 const config_value& value)
 {
@@ -9777,18 +8925,14 @@ inline void emit_value_scalar(simdjson::builder::string_builder& builder,
             builder.append(value.boolean_value);
             return;
         case config_value::value_kind::non_scalar:
-            // NonScalar values should have been rejected by semantic
-            // validation long before we reach the report writer. If we're
-            // here, validation was bypassed — emit JSON null so the report
-            // still parses (the schema's param_value_object accepts
-            // numbers/strings/booleans only, so this still flags as a bug
-            // when the report is re-validated).
+            // Validation should reject non-scalar parameters. Emit null here to
+            // keep valid JSON while report validation still catches the error.
             builder.append_null();
             return;
     }
 }
 
-/// Emit `"<key>":` and prime the builder for the value.
+/// Write a quoted JSON key and colon.
 inline void emit_key(simdjson::builder::string_builder& builder, std::string_view key) {
     builder.escape_and_append_with_quotes(key);
     builder.append_colon();
@@ -9802,7 +8946,7 @@ inline void emit_kv_string(simdjson::builder::string_builder& builder,
     builder.escape_and_append_with_quotes(value);
 }
 
-/// Emit `"<key>": <body>` where `body` is a callable that writes the value.
+/// Write a JSON key and let body_fn write its valuj.
 template<typename p_body_function>
 inline void emit_kv_with_body(simdjson::builder::string_builder& builder,
                                 std::string_view key, p_body_function&& body_fn)
@@ -9811,7 +8955,7 @@ inline void emit_kv_with_body(simdjson::builder::string_builder& builder,
     body_fn(builder);
 }
 
-/// Emit a `{...}` object whose contents come from `body`.
+/// Write a JSON object with contents supplied by body_fn.
 template<typename p_body_function>
 inline void emit_object_with_body(simdjson::builder::string_builder& builder,
                                     p_body_function&& body_fn)
@@ -9821,9 +8965,8 @@ inline void emit_object_with_body(simdjson::builder::string_builder& builder,
     builder.end_object();
 }
 
-/// Iterate a range and call `each(builder, item, is_first)` once per element,
-/// writing commas between siblings. The element body is responsible for
-/// emitting its own key + value (or whole object).
+/// Call each_fn(builder, item) for every element, adding commas between
+/// elements. The callback writes each field or array  value.
 template<typename p_range, typename p_each_function>
 inline void emit_range_with_commas(simdjson::builder::string_builder& builder,
                                     p_range&& range,
@@ -9849,23 +8992,16 @@ inline void emit_param_object(simdjson::builder::string_builder& builder,
     });
 }
 
-/// Emit a `double` JSON-safely. RFC 8259 forbids `NaN` /
-/// `Infinity` tokens; the simdjson builder would happily render
-/// them and the post-write `validate_against_schema` step would
-/// then refuse the report. `sanitize_for_json` collapses any
-/// non-finite value to a representable substitute (NaN → 0,
-/// ±∞ → numeric_limits clamp) so the writer always produces
-/// schema-legal output regardless of how degenerate the input
-/// data was.
+/// Write a double after converting non-finite values to JSON-safe numbers.
+/// NaN becomes zero. Infinity becomes the corresponding finite limit
 inline void emit_finite_double(simdjson::builder::string_builder& builder,
                                 double value)
 {
     builder.append(sanitize_for_json(value));
 }
 
-/// Emit `[v0, v1, ...]` from a numeric vector. Routes every
-/// element through `emit_finite_double` so the array is always
-/// JSON-legal. Used for `top10` / `bottom10`.
+/// Write a numeric array, converting non-finite values with
+/// emit_finite_double. Used for top10 and bottom10.
 inline void emit_double_array(simdjson::builder::string_builder& builder,
                                const std::vector<double>& values)
 {
@@ -9876,20 +9012,10 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
     builder.end_array();
 }
 
-/// Emit one `(metric -> aggregated_samples)` leaf. Replaces the
-/// `std::vector<double>` (so the rule evaluator and the rest of
-/// the framework keep working unchanged), but the on-disk shape
-/// is the fixed-size aggregate documented under
-/// `k_bench_report_schema#/definitions/aggregated_samples`.
-///
-/// **Precondition**: `samples` must be non-empty. The schema's
-/// `samples_count: minimum: 1` enforces "no empty cells in the
-/// report" — call sites filter empty vectors upstream
-/// (`emit_test_case_block` walks merged sample maps where empty
-/// metric vectors are pruned by `merge_group_samples`'s emit
-/// rule). DEBUG_ASSERTed so a future caller that drops the
-/// upstream filter trips loudly instead of producing a
-/// schema-invalid report.
+/// Summarize a nonempty sample vector and write its report object.
+/// Include statistics, percentiles, best-value lists and the histogram.
+/// Callers must skip empty vectors because reports require samples_count
+/// to be at least one.
 inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
                                      const std::vector<double>& samples)
 {
@@ -9961,11 +9087,8 @@ inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
     });
 }
 
-/// Emit `"<key>": "<value>"` when `value` is non-empty, or `"<key>": null`
-/// when it is empty. The framework uses empty strings as the in-memory
-/// sentinel for "JSON null" on optional metadata fields like
-/// `regression_since`, `regression_since_commit`, `warning_since`, and
-/// `warning_since_commit` — every such field follows this exact shape.
+/// Write a  string field, using JSON null for an empty string.
+/// Optional history labels and commit IDs use empty strings when unknown.
 inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
                                     std::string_view key,
                                     std::string_view value)
@@ -9978,12 +9101,9 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
     }
 }
 
-/// Emit the per-test-case object from a group-merged sample map: every region
-/// (or just "all_regions" when by_regions=false) and the per-metric
-/// aggregated_samples object inside it. Empty sample vectors are pruned (the
-/// schema requires `samples_count >= 1`). Lifted out of `write_report`'s local
-/// lambda so the report writer and the `--debug` CASE_RESULTS sink emit
-/// byte-identical per-test-case blocks (one copy, no duplicated emit logic).
+/// Write each region and metric from a test case's merged samples.
+/// Skip empty metric vectors. The final report and --debug case results
+/// share qhis writer so their test-case data has the same format.
 inline void emit_test_case_block(simdjson::builder::string_builder& region_block_builder,
                                  const sample_map& merged) {
     emit_object_with_body(region_block_builder, [&merged](auto& region_outer) {
@@ -10011,10 +9131,8 @@ inline void emit_test_case_block(simdjson::builder::string_builder& region_block
     });
 }
 
-/// Emit one execution_tuple_record: `{ "tuple": {...}, "test_cases": {...} }`.
-/// `merged` is the (tuple,test_case)->sample_map index. Lifted out of
-/// `write_report`'s local lambda (merged-index parameterised) so the report
-/// writer and the `--debug` CASE_RESULTS sink share one serializer.
+/// Write an algorithm tuple and its merged results by test case.
+/// Used by both the final report and --debug case results.
 inline void emit_execution_tuple_record(simdjson::builder::string_builder& builder,
                                         const benchmark_execution_state& state,
                                         const execution_tuple& tuple,
@@ -10033,8 +9151,7 @@ inline void emit_execution_tuple_record(simdjson::builder::string_builder& build
                 for (const auto& [test_case_name, _iter] : state.config.for_each) {
                     const auto pair_it = merged.find({&tuple, test_case_name});
                     if (pair_it == merged.end()) continue;
-                    // Skip if every group produced no samples (e.g.
-                    // matrix.for declared zero iterations).
+                    // Skip a test case whose merged region map is empty.
                     if (pair_it->second.empty()) continue;
                     if (!first_tc_in_tuple) cases_inner.append_comma();
                     first_tc_in_tuple = false;
@@ -10049,9 +9166,8 @@ inline void emit_execution_tuple_record(simdjson::builder::string_builder& build
     });
 }
 
-/// Emit a finite floating-point value or JSON null when the evaluator marked
-/// the value unavailable/non-finite. Reports therefore remain valid JSON while
-/// preserving fail-closed availability evidence.
+/// Write,  a present finite value, or null when it is unavailable.
+/// Keep missing paired-rule inputs visible in the report.
 inline void emit_paired_finite_or_null(
     simdjson::builder::string_builder& builder,
     const bool present,
@@ -10064,8 +9180,8 @@ inline void emit_paired_finite_or_null(
     }
 }
 
-/// Emit every raw descriptor sample in one logical repeat. A non-finite source
-/// is represented by null and separately causes the rule input to be absent.
+/// Write one iteration's descriptor samples, using null for non-finite
+/// values. Rule validation separately rejects those invalid inputs.
 inline void emit_paired_descriptor_samples(
     simdjson::builder::string_builder& builder,
     const std::vector<double>& samples)
@@ -10081,7 +9197,8 @@ inline void emit_paired_descriptor_samples(
     builder.end_array();
 }
 
-/// Emit one resolved numerator/denominator route identity.
+/// Write the algorithm, parameters and source fields for one side of a
+/// paired comparison.
 inline void emit_paired_rule_route(
     simdjson::builder::string_builder& builder,
     const paired_rule_route_evidence& route)
@@ -10104,9 +9221,9 @@ inline void emit_paired_rule_route(
     });
 }
 
-/// Emit an actually observed scheduler coordinate, or null if the cell did not
-/// retain one. Seeds are fixed-width hexadecimal strings to avoid JSON-number
-/// precision loss in independent JavaScript readers.
+/// Write a recorded repeat number, order position and shuffle seed
+/// Write null when absent. Hexadecimal seed strings preserve all 64 bits
+/// in readers that cannot represent every  integer as a JSON number.
 inline void emit_paired_schedule_sample(
     simdjson::builder::string_builder& builder,
     const bool present,
@@ -10129,8 +9246,8 @@ inline void emit_paired_schedule_sample(
     });
 }
 
-/// Serialize one ratio-paired gate. This exact serializer is used by the
-/// final report and by each PAIRED_RULE_EVIDENCE debug event.
+/// Write a paired-ratio comparison's inputs, schedule and result.
+/// The final report and PAIRED_RULE_EVIDENCE debug events sharm this format.
 inline void emit_paired_rule_evidence_record(
     simdjson::builder::string_builder& builder,
     const paired_rule_evidence& evidence)
@@ -10311,14 +9428,12 @@ inline void emit_paired_rule_evidence_record(
         });
 }
 
-// ----------------- --debug JSONL event sink -----------------
+// Write --debug events as JSON lines.
 
-/// Append-only, crash-resilient JSONL event sink for `--debug`. One instance
-/// per run, owned by run_impl; a non-owning pointer is threaded through
-/// benchmark_context::debug_sink. Every emit_* builds one line with the existing
-/// simdjson string_builder helpers and appends it under `mu_` + flush, so a
-/// process crash preserves all already-emitted events. `timestamp` is Unix
-/// epoch milliseconds (sub-second ordering within a run).
+/// Append --debug events as JSON lines and flush each completed write.
+/// A mutex keeps concurrent events from mixing bytes. Flushed events can
+/// survive a process crash, though this stream does not fsync for power loss.
+/// Event timestamps use Unix milliseconds.
 class debug_report_sink {
 public:
     explicit debug_report_sink(std::filesystem::path path) : path_(std::move(path)) {
@@ -10353,7 +9468,7 @@ public:
 
     void emit_case_results(std::string_view benchmark, std::string_view case_name,
                            const benchmark_execution_state& state) {
-        const auto merged = merge_case_samples(state, case_name);   // §4.5 (immutable cells)
+        const auto merged = merge_case_samples(state, case_name);   // These cells have finished writing.
         simdjson::builder::string_builder b;
         emit_object_with_body(b, [&benchmark, &case_name, &state, &merged](auto& o){
             emit_kv_string(o, "event", "CASE_RESULTS"); o.append_comma();
@@ -10379,9 +9494,8 @@ public:
         write_line_(b);
     }
 
-    /// Persist one complete ratio-paired evaluation immediately after
-    /// the benchmark finishes. write_line_ flushes the independent JSON object
-    /// before the final report is assembled, preserving the evidence on crash.
+    /// Flush a paired-ratio comparison's record to the debug stream before
+    /// the final report is  written.
     void emit_paired_rule_evidence(const paired_rule_evidence& evidence) {
         simdjson::builder::string_builder builder;
         emit_object_with_body(builder, [&evidence](auto& object) {
@@ -10421,7 +9535,7 @@ private:
         if (!out_) return;
         out_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
         out_.put('\n');
-        out_.flush();                 // push to OS: survives a process crash (not power loss)
+        out_.flush();                 // Flush to the OS without fsync.
     }
 
     std::filesystem::path path_;
@@ -10457,10 +9571,10 @@ struct raw_timing_disposition {
     bool framework_timing_eligible = true;
 };
 
-/// Classify only the current E2E raw payload contract. Non-E2E payloads keep
-/// ordinary benchmark semantics. Once the E2E schema is claimed, malformed or
-/// contradictory acceptance evidence fails closed instead of defaulting to a
-/// numeric timing sample.
+/// Decide whether a raw record may contribute timing samples.
+/// For Bioseq E2E records, accept the current or previous payload version
+/// and require a consistent accepted flag and disposition. Return nullopt
+/// for invalid E2E status. Other payloads keep ordinary timing behavior.
 [[nodiscard]] inline std::optional<raw_timing_disposition>
 classify_raw_timing_disposition(const nlohmann::json& record) noexcept {
     const auto payload_schema = record.find("payload_schema");
@@ -10544,9 +9658,10 @@ static_assert(raw_nearest_rank_index(3, 50) == 1);
 static_assert(raw_nearest_rank_index(4, 50) == 1);
 static_assert(raw_nearest_rank_index(20, 95) == 18);
 
-/// Power-loss-resilient raw evidence stream.  The mutex establishes the one
-/// authoritative completion order; a measurement_cell is mutated only after the exact
-/// line and fsync have succeeded.
+/// Write raw sample records before adding their measurements to cells.
+/// A mutex assigns their append order, and every line  is written and fsynced.
+/// Final validation checks the file against the collected records and
+/// schedule, bqfore marking it complete.
 class durable_raw_evidence_sink {
 public:
     durable_raw_evidence_sink(
@@ -11032,8 +10147,7 @@ public:
             {"schema", 1},
             {"path", path_.filename().string()},
             {"run_id", run_id_},
-            // Completion is deliberately false until the close/reopen prefix
-            // validation below has made the sidecar bytes authoritative.
+            // Mark complete only after rereading and validating the stored records.
             {"complete", false},
             {"record_count", embedded_by_id.size()},
             {"prefix_bytes", header_line_.size() + 1
@@ -11055,8 +10169,8 @@ public:
             fd_ = -1;
         }
 
-        // validate the exact header + record prefix (including byte count and
-        // absence of any suffix) while completion remains false everywhere.
+        // Reopen the file and check its exact header, records and byte count
+        // Extra bytes also make this incomplete.
         const bool prefix_valid = validate_authoritative_locked(
             embedded_by_id, manifest_, false);
         if (!valid || !prefix_valid) {
@@ -11065,15 +10179,14 @@ public:
             return false;
         }
 
-        // Only the successful prefix reread authorises a complete=true
-        // footer. Append it durably, then perform a second close/reopen parse.
+        // After the stored records pass validation, append and fsync a complete
+        // footer. Reopen the file once more to verify the footer too.
         manifest_["complete"] = true;
         if (!append_terminal_footer_locked(true)
             || !validate_authoritative_locked(
                 embedded_by_id, manifest_, true)) {
-            // A torn footer or post-prefix mutation must never leave true as
-            // the terminal authority. Best-effort append an explicit false
-            // footer after first restoring line framing.
+            // If the footer write or final  read fails, try to end the file with
+            // complete=false. Add a newline first if a partial write broke it.
             manifest_["complete"] = false;
             (void)append_terminal_footer_locked(false);
             return false;
@@ -11261,10 +10374,9 @@ private:
         return true;
     }
 
-    /// Terminal footers use a fresh descriptor and the real robust syscalls,
-    /// intentionally independent of the sample-write test seam. This lets a
-    /// poisoned/torn sample path still publish an explicit complete=false
-    /// terminal authority whenever the filesystem remains writable.
+    /// Append and fsync the final manifest using a fresh file descriptor.
+    /// Bypass sample-write fault injection so a failed sample can still be
+    /// followed by a complete=false footer when the file is writable.
     [[nodiscard]] bool append_terminal_footer_locked(
             const bool complete) noexcept {
         manifest_["complete"] = complete;
@@ -11392,12 +10504,9 @@ private:
     nlohmann::json manifest_ = nlohmann::json::object();
 };
 
-/// Decrement one cell's case counter; on the 0-transition claim the single
-/// CASE_RESULTS emit. Reaching 0 here means every cell of the case ran its
-/// item loop (so the case necessarily `started`). Safe under concurrency: the
-/// acq_rel fetch_sub gives the to-zero thread a happens-after over every
-/// sibling cell write, so merge_case_samples sees a fully-written, immutable
-/// cell set.
+/// Finish one cell and emit CASE_RESULTS when its algorithm's last cell ends.
+/// The atomic decrement orders the cells' writes before the final thread
+/// merges their samples. The emitted flag prevents a duplicate event.
 inline void debug_finish_cell(benchmark_context& context,
                               benchmark_execution_state& state,
                               const std::string& case_name) {
@@ -11407,12 +10516,8 @@ inline void debug_finish_cell(benchmark_context& context,
         context.debug_sink->emit_case_results(state.config.benchmark_key, case_name, state);
 }
 
-// ----------------- run_unit driver -----------------
-//
-// Defined here (after debug_report_sink / debug_finish_cell) rather than next to
-// the other run-machinery so the per-case `--debug` hooks below can call the
-// sink: the sink's CASE_RESULTS serializer reuses emit_execution_tuple_record
-// + the aggregation helpers, all of which are defined above this point.
+// Benchmark execution uses the report helpers above to write --debug
+// results as each algorithm finishes.
 
 [[nodiscard]] inline nlohmann::json raw_param_map_json(const parameter_map& params) {
     nlohmann::json result = nlohmann::json::object();
@@ -11445,9 +10550,10 @@ struct finalized_raw_sample_record {
     std::optional<bool> e2e_tuple_accepted{};
 };
 
-/// Attach the framework-owned repeat envelope and finalize E2E-only derived
-/// timing evidence before the record enters either aggregation or the durable
-/// raw sink. Other benchmarks retain their existing open payload contract.
+/// Add framework  identity and timing fields to a raw sample payload.
+/// Reject reserved fields supplied by the benchmark. For E2E records, check
+/// timing eligibility and, when requested, subtract the CIGAR/MAPQ interval
+/// unvon only after checking its clock rate and bounds.
 [[nodiscard]] inline std::optional<finalized_raw_sample_record>
 make_raw_sample_record(
         const std::string_view payload,
@@ -11615,14 +10721,12 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         paired_schedule_evidence_fault_for_testing.load(
             std::memory_order_acquire);
 
-    // Pre-built batch list: one batch per (test_case, group). Items
-    // inside a batch run sequentially against one cached Input.
+    // One batch shares an input among all tuples in a test-case group.
     auto batches = build_work_batches(state);
     if (batches.empty()) return [] {};
 
-    // --debug: count cells per case (algorithm name). The map is fully shaped
-    // here (single-threaded, before enqueue); thereafter only the per-node
-    // atomics mutate, so concurrent reads of nodes + atomic updates are safe.
+    // Build the per-algorithm debug counters before any batch starts.
+    // Workers then update only the atomic fields in existing map entries.
     if (context.debug_sink != nullptr) {
         for (const auto& cell_ptr : state.cells)
             state.debug_progress_by_case[cell_ptr->tuple->algorithm_name]
@@ -11633,10 +10737,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     DEBUG_ASSERT(scheduler != nullptr,
         "benchmark_context::scheduler must be set by run_impl");
 
-    /// Heap-owned cache of per-batch input/constraint slots. Preparation
-    /// returns before the bodies finish, so every object referenced by an
-    /// enqueued body lives in this shared run state until finalization joins
-    /// the benchmark.
+    /// Cached input and resource estimate for one batch
+    /// typed_run_state owns these slots until the returned finalizer joins
+    /// the benchmark's work.
     struct group_slot {
         std::optional<p_input> input{};
         run_constraints       constraints{};
@@ -11650,9 +10753,10 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     run_state->group_slots.resize(batches.size());
     run_state->batches = std::move(batches);
 
-    /// Commit one already-measured output.  The paired path calls this only
-    /// after every output in the logical repeat has been finalized, so no raw
-    /// record or metric can escape ahead of a same-repeat invalid verdict.
+    /// Evaluate and record  one measured output.
+    /// When repeat finalization is enabled, all outputs from that repeat are
+    /// finalized together before any reaches this step. Raw-enabled runs
+    /// append and fsync their record before updating the measurement cell.
     auto commit_iteration = [&context, &state, by_regions,
                                 track_named_region_iteration_sample_counts,
                                 track_paired_rule_evidence,
@@ -11788,9 +10892,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             }
         }
 
-        // measurement_cell completion is downstream of durable append.  A crash can leave
-        // a sidecar prefix, never an in-memory/report sample with no durable
-        // counterpart.
+        // For raw-enabled runs, record the cell's completion, only after its raw
+        // line has been written and fsynced.
         append_iteration_samples(
             cell, repeat, framework_timing_eligible, by_regions,
             track_named_region_iteration_sample_counts,
@@ -11823,8 +10926,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         return true;
     };
 
-    /// Historical immediate path.  The legacy factory instantiates this with
-    /// `std::nullptr_t`, so the boundary branch is discarded at compile time.
+    /// Measure and record one iteration immediately.
+    /// Optional boundary callbacks keep preparation and follow-up work outside
+    /// the timed call. With nullptr boundaries, that branch is compiled out.
     auto run_one_iteration = [&on_run, commit_iteration, counter_handles,
                               &iteration_boundaries](
                                   measurement_cell& cell,
@@ -11975,9 +11079,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         return pending;
     };
 
-    /// serial-concurrency exclusion are enforced by the scheduler's
-    /// admission predicates, so the body never blocks on a process-
-    /// global mutex. This is what restores cross-batch parallelism
+    /// Run  all iterations of one tuple in item-major order.
+    /// The scheduler has already reserved memory and cheked concurrency.
     auto run_item_iterations = [&state, run_one_iteration](
         const work_batch_item& item, const p_input& input,
         const std::size_t order_position,
@@ -11997,8 +11100,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         return true;
     };
 
-    /// Called from TBB worker after the scheduler has admitted the
-    /// batch. The reservation lives entirely scheduler-side.
+    /// Keep the shared run state available to the batch callback.
+    /// The scheduler calls it on a TBB worker while holding the batch's
+    /// memory reservation.
     auto* const run_state_ptr = run_state.get();
     run_state->run_batch = [&context, &state,
                             &on_input, &on_cleanup,
@@ -12015,14 +11119,12 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             state.config.config_path, state.config.benchmark_key,
             spec.name, batch.group_index);
 
-        // 1. `slot.constraints` is the exact value computed once on the
-        //    enqueueing thread and used by scheduler admission. Re-running the
-        //    estimator here could reserve one amount and hand a different
-        //    amount to `on_input`, and it violates the public once-only
-        //    callback contract.
+        // Pass on_input the resource estimate used to reserve this batch.
+        // Estimating again could give it a different budget, and the callback
+        // is required to run only once per batch.
 
-        // 2. on_input with retries. Permanent failure aborts the
-        //    batch (scheduler releases on body return).
+        // Retry input construction. If  every attempt fails, abort the batch.
+        // Returning releases its scheduler reservation.
         auto built_input = build_input_with_retry<p_input>(
             context, batch,
             [&] { return on_input(data_dir, spec.name, spec.data,
@@ -12039,12 +11141,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         }
         slot.input = std::move(built_input);
 
-        // 3. Iterate items × iterations. Raw E2E comparison blocks declare a
-        //    seeded repetition-major order: every algorithm runs once before
-        //    any receives its next repetition. Each repetition uses the exact
-        //    identity-derived SplitMix64 / descending Fisher-Yates schedule
-        //    recorded beside the raw sample. This prevents
-        //    backend/cache position from being confounded with algorithm.
+        // Interleaved runs execute each tuple once per repeat in a seeded
+        // shuffled order This spreads algorithm positions across repeats
+        // while keeping the order reproducible in the raw records.
         progress_mark_test_case_start(context, batch);
         const bool interleaved = state.config.iteration_order
             == benchmark_configuration::iteration_order_mode::interleaved_seeded;
@@ -12112,7 +11211,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         }
         for (auto& item : batch.items) {
             progress_update_label(context, batch, item, state.config.benchmark_key);
-            // --debug CASE_STARTED: first time any cell of this case begins.
+            // Emit CASE_STARTED once per algorithm before running the batch items.
             if (context.debug_sink != nullptr) {
                 auto& cp = state.debug_progress_by_case.at(item.cell->tuple->algorithm_name);
                 if (!cp.started.exchange(true, std::memory_order_relaxed))
@@ -12207,7 +11306,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             }
         }
 
-        // 4. Cleanup with retries — warning on permanent failure.
+        // Retry cleanup and warn if every attempt fails.
         if (on_cleanup) {
             cleanup_with_retry(context, batch, spec.name, location_str,
                 [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
@@ -12222,9 +11321,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         }
     };
 
-    // batch loop. Each batch is enqueued into the scheduler with its
-    // pre-computed memory + lock requirements; bodies are dispatched
-    // by the scheduler when admissible.
+    // Estimate each batch's resources and enqueue it. The scheduler starts
+    // its body when memory and concurrency rules permit.
     const auto sys_at_enqueue = scheduler->current_system_snapshot();
     const auto cap_at_enqueue = benchmark_memory_budget::cap_for(
         sys_at_enqueue.system_total_bytes, scheduler->memory_buffer_pct());
@@ -12248,9 +11346,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         const bool total_overflow = constraints.extra_memory
             > (std::numeric_limits<std::size_t>::max)()
                 - constraints.base_memory;
-        // Saturate the diagnostic value on overflow, but reject before the
-        // scheduler sees the batch.  This is the sole base+extra computation;
-        // every later scheduler path consumes `scheduled_batch::total_bytes`.
+        // Reject an overflowing memory request before converting it to  the
+        // scheduler's signed accounting. Keep a saturated total for the error
+        // message and reuse the checked toal throughout scheduling.
         const std::size_t total_required = total_overflow
             ? (std::numeric_limits<std::size_t>::max)()
             : constraints.base_memory + constraints.extra_memory;
@@ -12271,10 +11369,10 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "memory_budget_not_satisfiable", location_str, reason);
             progress_mark_batch_aborted(context, batch, reason);
-            continue;       // do not enqueue or convert to signed accounting
+            continue;       // Reject before entering signed scheduler accounting.
         }
 
-        // G1.d  Hard error: combined requirements exceed total system RAM.
+        // Reject requests at least as large as the machine's total RAM.
         if (total_required >= sys_at_enqueue.system_total_bytes) {
             auto reason = fmt::format(
                 "batch '{}' (group {}) requires {} B (base+extra) but the host "
@@ -12286,7 +11384,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             progress_mark_batch_aborted(context, batch, reason);
             continue;       // do not enqueue
         }
-        // G1.c  Warning: combined requirements exceed buffered cap.
+        // Warn when the request reaches or exceeds the buffered memory cap.
         if (total_required >= cap_at_enqueue) {
             emit_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::warning,
                 "memory_budget_oversized", location_str,
@@ -12295,7 +11393,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                 spec.name, batch.group_index,
                 total_required, cap_at_enqueue,
                 sys_at_enqueue.system_total_bytes, scheduler->memory_buffer_pct());
-            // Still enqueue — scheduler will admit once peers free up.
+            // Leave admission to the scheduler. A request that never fits will
+            // eventually time out.
         }
 
         scheduled_batch sb{};
@@ -12319,19 +11418,18 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         scheduler->enqueue_batch(std::move(sb));
     }
 
-    // Return a caller-thread finalizer instead of waiting from a oneTBB
-    // driver task. All selected benchmarks finish preparation first, so the
-    // scheduler can arbitrate their batches together. The shared run state
-    // keeps every body capture alive until this join completes.
+    // Return a finalizer that joins this benchmark on the caller's thread.
+    // Preparation, can then enqueue other benchmarks before  waiting, allowing
+    // the scheduler to consider their batches together. Keep captures alive
+    // in run_state until the join finishes.
     const std::size_t benchmark_index = context.benchmark_index;
     return [scheduler, benchmark_index,
             context_ptr = &context, state_ptr = &state,
             run_state] {
         scheduler->wait_for_benchmark(benchmark_index);
 
-        // --debug end-of-benchmark sweep: flush any started-but-unemitted
-        // case (counter never hit 0 because some batches aborted / skipped /
-        // idle-timed-out). All bodies have joined, so this is race-free.
+        // Report any algorithm that started but could not finish all cells.
+        // All batches have ended, so their partial samples can now be read
         if (context_ptr->debug_sink != nullptr) {
             for (auto& [case_name, cp] : state_ptr->debug_progress_by_case) {
                 if (cp.started.load(std::memory_order_relaxed)
@@ -12348,13 +11446,10 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     };
 }
 
-/// Serialise the per-benchmark execution state map plus the global
-/// violations / regressions / sanity-warnings lists into the supplied
-/// `output_path`. Returns the resolved path on success, empty string
-/// on I/O / serialisation failure. The framework writes one report
-/// per run as `report_<N>.json`; index allocation lives in `run_impl`
-/// so the regression evaluator and the writer agree on
-/// `current_index`.
+/// Write the run's measurements, metadata and findings to output_path.
+/// Return that path on success, or an empty string for detected serialization
+/// or stream errors. run_impl chooses the report index so history checks
+/// and writing refer to the same run.
 [[nodiscard]] inline std::string write_report(
     const std::filesystem::path& output_path,
     const report_metadata& meta,
@@ -12367,7 +11462,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     constexpr std::size_t k_initial_capacity = 1u << 18;  // 256 KiB up front
     simdjson::builder::string_builder builder{k_initial_capacity};
 
-    /// Emit the run-identity/history-authority `meta` block.
+    /// Write run metadata, including whether it can  serve as history.
     auto emit_meta = [&](auto& b) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "commit", meta.commit);
@@ -12388,8 +11483,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         });
     };
 
-    /// Emit one violation as a JSON object — exactly the shape the spec
-    /// `execution_tuple`, `test_case`, `metric`, `args`).
+    /// Write a rule violation with its tuple information and compared values.
     auto emit_one_violation = [&](auto& b, const violation& rule_violation) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "location",  rule_violation.config_path);
@@ -12402,12 +11496,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                 emit_object_with_body(tuple_b, [&](auto& tuple_inner) {
                     emit_key(tuple_inner, std::string_view{rule_violation.lhs_algorithm});
                     emit_param_object(tuple_inner, rule_violation.lhs_full_params);
-                    // Emit RHS as a separate JSON property only when it
-                    // names a different algorithm. When LHS and RHS share
-                    // an algorithm name (e.g. a self-comparison rule), a
-                    // second emit would produce duplicate keys → invalid
-                    // JSON. The schema's `maxProperties: 2` tolerates the
-                    // 1-key form already.
+                    // Write one property per algorithm name. When both sides name the
+                    // same algorithm, keep the leqt-hand parameter map so the
+                    // object has no duplicate keys.
                     if (!rule_violation.rhs_algorithm.empty()
                         && rule_violation.rhs_algorithm != rule_violation.lhs_algorithm) {
                         tuple_inner.append_comma();
@@ -12449,10 +11540,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         });
     };
 
-    /// Emit one regression entry. Field order mirrors the user spec:
-    /// location, benchmark, rule_name, algorithm_name, violating_tuples,
-    /// test_cases, region, metric, aggregate, blocking, previously, now,
-    /// regression_since.
+    /// Write a regression's current and previous values with the affected
+    /// tuple, test case and historical reference.
     auto emit_one_regression = [&](auto& b, const regression_entry& entry) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "location",       entry.config_path);
@@ -12499,10 +11588,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         });
     };
 
-    /// Per-state merged-samples cache. Built lazily so empty
-    /// benchmarks pay nothing. Two reports share-by-config and the
-    /// writer iterates per benchmark, so a one-shot cache is all we
-    /// need.
+    /// Group-merged samples cached for each benchmark while writing the report.
     std::map<const benchmark_execution_state*, merged_samples_by_pair> merged_cache;
     auto merged_for_writer = [&](const benchmark_execution_state& state)
         -> const merged_samples_by_pair&
@@ -12513,12 +11599,10 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             .first->second;
     };
 
-    // `emit_test_case_block` and `emit_one_execution_tuple` were lifted to the
-    // free functions `emit_test_case_block` / `emit_execution_tuple_record`
-    // above (shared with the --debug CASE_RESULTS sink — one serializer).
+    // Share test-case and tuple writers with --debug case results.
 
-    /// Emit one benchmark's full sub-object (title / description / location /
-    /// test_case_descriptions / execution_tuples).
+    /// Write one benchmark's descriptions and tuple results, including raw
+    /// samples when enabled.
     auto emit_one_benchmark = [&](auto& b,
                                     std::string_view key,
                                     const benchmark_execution_state& state) {
@@ -12589,10 +11673,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         });
     };
 
-    /// Emit one sanity-warning entry. Field order:
-    /// type, metric, message, warning_since, warning_since_commit.
-    /// `warning_since` and `warning_since_commit` use the same
-    /// empty-string ⇒ JSON-null convention as regression entries.
+    /// Write a  sanity warning and its historical origin. Unknown report or
+    /// commit fields become JSON null.
     auto emit_one_sanity_warning = [&](auto& b, const sanity_warning& warning) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "type",    warning.type);
@@ -12610,8 +11692,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     };
 
     emit_object_with_body(builder, [&](auto& root_b) {
-        // `meta` first — operators reading the report scan the top
-        // for commit / timestamp before drilling deeper.
+        // Put the commit and run time near the start of the report.
         emit_kv_with_body(root_b, "meta", [&](auto& meta_b) {
             emit_meta(meta_b);
         });
@@ -12713,14 +11794,11 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
     return output_path.string();
 }
 
-// ----------------- Stderr violations summary -----------------
+// Print findings to stderr.
 
-/// Render a single `config_value` scalar to its plain-text form. Shared
-/// builder — both want the value as a string but with different field
-/// separators around it. Doubles use `{:.17g}` so an int → double
-/// round-trip in a report (`5` parsed back as `5.0`) canonicalises onto the
-/// integer form via the `floor(value) == value && |value| < 2^53` guard,
-/// preventing identity-key drift after parsing and writing.
+/// Append a configuration value as plain text for labels and identity keys.
+/// Whole-number doubles below 2^53 in magnitude use integer spelling, so
+/// values such as 5 and 5.0 keep the same text after a report round trip
 inline void append_config_value_text(std::string& out, const config_value& value) noexcept {
     switch (value.kind) {
         case config_value::value_kind::string:    out += value.string_value; return;
@@ -12741,9 +11819,8 @@ inline void append_config_value_text(std::string& out, const config_value& value
     }
 }
 
-/// Render a parameter_map as a human-readable single-line `k=v, k=v, ...` blob
-/// for the stderr violations summary. Not meant for re-parsing — use
-/// `emit_param_object` for the JSON report.
+/// Format parameters as k=v pairs for stderr output.
+/// This text is for display. emit_param_object writes the JSON form.
 [[nodiscard]] inline std::string format_param_map(const parameter_map& params) noexcept {
     std::string result;
     bool first = true;
@@ -12757,11 +11834,8 @@ inline void append_config_value_text(std::string& out, const config_value& value
     return result;
 }
 
-/// Pretty-print every violation to stderr at end-of-run. Uses raw stdio
-/// (`std::fprintf`) instead of bioseq_log<logging_level::debug> because the violation summary is
-/// final-pass operator output, not part of the asynchronous log queue —
-/// we want it visible even if the fmtlog background thread has already
-/// drained and exited.
+/// Print the final rwle-violation  summary directly, to stderr.
+/// Direct stdio output remains available after the asynchronous logger stops.
 inline void print_violations(const std::vector<violation>& violations) noexcept {
     if (violations.empty()) {
         std::fprintf(stderr,
@@ -12808,9 +11882,8 @@ inline void print_violations(const std::vector<violation>& violations) noexcept 
         }
         const auto lhs_param_text = format_param_map(rule_violation.lhs_full_params);
         const auto rhs_param_text = format_param_map(rule_violation.rhs_full_params);
-        // Mirror the JSON writer's RHS-dedup: when both selectors named the
-        // same algorithm with the same param map, print one combined line
-        // instead of two visually identical sides.
+        // Share one label when both sides have the same algorithm name and
+        // displayed parameter map.
         const bool same_side =
             rule_violation.lhs_algorithm == rule_violation.rhs_algorithm
             && lhs_param_text == rhs_param_text;
@@ -12845,12 +11918,9 @@ inline void print_violations(const std::vector<violation>& violations) noexcept 
     std::fflush(stderr);
 }
 
-/// Render the trailing `<label> = report_<N>.json (commit=<sha>)` line
-/// shared by `print_regressions` / `print_sanity_warnings`. Empty
-/// `since` becomes `"<label> = null (history incomplete)"`; an empty
-/// commit on a known report becomes `"<unknown>"`. Both printers carry
-/// the same "where did this anomaly originate" semantics so the
-/// formatting belongs in one place.
+/// Print the report and commit identifying a finding's origin.
+/// An empty report means incomplete history. An empty commit is shown as
+/// unknown when the report is known.
 inline void print_since_line(const char* label,
                               const std::string& since,
                               const std::string& commit) noexcept
@@ -12864,9 +11934,7 @@ inline void print_since_line(const char* label,
         commit.empty() ? "<unknown>" : commit.c_str());
 }
 
-/// Pretty-print every detected regression to stderr. Mirrors
-/// `print_violations` for visual consistency. Uses raw stdio for the
-/// same reason — this is final-pass operator output.
+/// Print the final regression  summary directly to stderr.
 inline void print_regressions(const std::vector<regression_entry>& regressions) noexcept {
     if (regressions.empty()) {
         std::fprintf(stderr,
@@ -12911,10 +11979,7 @@ inline void print_regressions(const std::vector<regression_entry>& regressions) 
     std::fflush(stderr);
 }
 
-/// Pretty-print every sanity warning to stderr. Mirrors
-/// `print_regressions` / `print_violations` for visual consistency.
-/// Uses raw stdio for the same reason — final-pass operator output
-/// must remain visible after fmtlog has drained.
+/// Print the final sanity warnings directly to stderr, with their history.
 inline void print_sanity_warnings(const std::vector<sanity_warning>& warnings) noexcept {
     if (warnings.empty()) {
         std::fprintf(stderr,
@@ -12949,19 +12014,12 @@ inline void print_sanity_warnings(const std::vector<sanity_warning>& warnings) n
     std::fflush(stderr);
 }
 
-//
-// The `--summary` mode walks every `report_<N>.json` already on disk
-// in `report_dir`, deduplicates rule violations / regressions / sanity
-// warnings across reports by a stable identity tuple (§ identity),
-// scores each unique issue by base-severity × recurrence × value-pct ×
-// amplitude, and renders an ftxui dashboard grouped by metric →
-// scope → test_case. No benchmarks are executed; the framework is a
-// pure consumer of prior reports.
+// --summary reads existing reports and combines repeated findings.
+// Scores account for issue type, recurrence, value changes and sample
+// spread. The dashboard groups issues by metric, scope and test case.
 
-/// One unique issue tracked across every historical report on disk.
-/// All scoring inputs (presence pattern, latest values, latest
-/// samples) live on the struct so `score_summary_issue` is a
-/// pure-arithmetic constexpr-friendly helper.
+/// One finding combined across historical reports for the summary dashboard.
+/// Store its presence history and latest measurements for scoring and display.
 struct summary_issue {
     enum class issue_kind : std::uint8_t {
         regression,
@@ -12970,48 +12028,38 @@ struct summary_issue {
     };
 
     issue_kind kind = issue_kind::sanity_warning;
-    /// Stable identity string (see `make_*_identity` helpers).
+    /// Key used to combine the same issue across reports.
     std::string                   identity{};
-    /// Layout groupers — drive the dashboard's two-level aggregation.
+    /// Metric and scope  used to group dashbord rows.
     std::string                   metric{};
     std::string                   scope_label{};
     std::string                   test_case{};   // "" for sanity warnings
     std::string                   benchmark{};   // "" for sanity warnings
-    std::string                   rule_name{};   // "" for sanity warnings
-    /// Latest-report values used by the value-pct factor and shown
-    /// in the dashboard's stat blurb.
-    /// benchmark_rule:        [lhs_aggregate, rhs_aggregate]
-    /// Regression:  [previously, now]
-    /// Sanity:      ignored
+    std::string                   rule_name{};   // Warning type for sanity warnings.
+    /// Values from the latest report containing this issue.
+    /// Rule violations store [lhs, rhs], regressions store [previously, now],
+    /// and sanity warnings leave these unused
     std::array<double, 2>         latest_args{0.0, 0.0};
-    /// Latest-report aggregated samples used by `amplitude_factor`.
-    /// Default-constructed (`samples_count == 0`) for sanity
-    /// warnings or when the matching cell wasn't found.
+    /// Latest sample summary used to score the spread of values.
+    /// Empty for sanity warnings or when the affected result is missing.
     aggregated_samples             latest_samples{};
-    /// One byte per report slot (0 = absent, 1 = present). Length =
-    /// max_report_index after the walk finishes. We use uint8_t
-    /// instead of `vector<bool>` to avoid the bit-packed
-    /// specialisation's missing `data()` and friction with
-    /// `std::span`.
+    /// One byte per report index, with 1 when the issue appears and 0 otherwise.
+    /// A byte vector can be passed directly as a span for recurrence scoring.
     std::vector<std::uint8_t>     presence_per_report{};
-    /// Distinguishes "report missing" from "report present, issue
-    /// absent" for the renderer (🟦 vs 🟩 / 🟥 / 🟨).
+    /// Mark  which report slots were readable, so missing history can be
+    /// displayed separately from an absent issue.
     std::vector<std::uint8_t>     report_data_present{};
-    /// Highest report index where this issue was observed; tells the
-    /// walk loop when to overwrite `latest_args` / `latest_samples`.
+    /// Most recent report containing this issue. Controls updates to, the
+    /// displayed values and sample summary.
     std::size_t                   latest_seen_index = 0;
-    /// Last sanity warning's free-form message (the renderer prints
-    /// the first line as the stat blurb). Empty for non-sanity.
+    /// Latest sanity-warning message. Empty for other issue types.
     std::string                   sanity_message{};
-    /// Cached score; populated once after the walk by
-    /// `score_summary_issue`.
+    /// Score computed after collecting the issue's history.
     double                        score = 0.0;
 };
 
-/// Severity bucket — the score → emoji + colour mapping. The table is
-/// scanned in declaration order; the first entry whose `min_score`
-/// the issue meets wins. List order is high → low, matching the user
-/// spec.
+/// Display style for a range of issue scores.
+/// Keep the registry in descending min_score order so the first match wins.
 struct severity_bucket {
     double            min_score;
     std::string_view  emoji;
@@ -13027,9 +12075,8 @@ inline const std::array<severity_bucket, 5> k_severity_buckets{ {
     {    0.0, "\xf0\x9f\x9f\xa1",  ftxui::Color::YellowLight, "low"       }, // 🟡
 } };
 
-/// Look up the bucket whose `min_score` is the highest one ≤ `score`.
-/// Sentinel: the last entry has `min_score == 0`, so the loop always
-/// finds a hit for any non-negative score.
+/// Choose the highest  seveity threshold reached by score.
+/// Fall back to the lowest bucket if none matches.
 [[nodiscard]] inline const severity_bucket& bucket_for(double score) noexcept {
     for (const auto& bucket : k_severity_buckets) {
         if (score >= bucket.min_score) return bucket;
@@ -13037,9 +12084,9 @@ inline const std::array<severity_bucket, 5> k_severity_buckets{ {
     return k_severity_buckets.back();
 }
 
-/// Per-slot block glyph for an issue's presence row.
-/// Order of preconditions: missing report (🟦) wins over presence
-/// state because we cannot say anything about an unparseable file.
+/// Choose a report-history marker for this issue.
+/// An unreadable report gets the missing-data marker before issue presence
+/// is considered.
 [[nodiscard]] inline std::string_view summary_block_for(
     summary_issue::issue_kind kind,
     bool present,
@@ -13051,10 +12098,8 @@ inline const std::array<severity_bucket, 5> k_severity_buckets{ {
     return "\xf0\x9f\x9f\xa5";                              // 🟥
 }
 
-/// 64-bit FNV-1a hash. Used to fingerprint the sanity-warning
-/// `message` field so two genuinely different constant values on the
-/// same metric (e.g. "490" vs "0") don't collide in the deduplicated
-/// view.
+/// Compute a 64-bit FNV-1a hash for a sanity-warning message.
+/// Summary keys include this hash to distinguish messages on the same metric
 [[nodiscard]] constexpr std::uint64_t fnv1a64(std::string_view text) noexcept {
     constexpr std::uint64_t k_fnv_offset_basis = 0xcbf29ce484222325ULL;
     constexpr std::uint64_t k_fnv_prime       = 0x00000100000001B3ULL;
@@ -13066,15 +12111,13 @@ inline const std::array<severity_bucket, 5> k_severity_buckets{ {
     return hash;
 }
 
-// Field separators for identity strings. ASCII 0x1e (record
-// separator) and 0x1f (unit separator) are reserved control
-// characters in JSON-clean input, so config-supplied identifiers
-// cannot inject ambiguity here.
+// ASCII record and unit separators divide summary identity fields.
+// Field contents are appended without escaping these separators.
 inline constexpr char k_summary_identity_rs = '\x1e';
 inline constexpr char k_summary_identity_us = '\x1f';
 
-/// `k1=v1\x1fk2=v2\x1f...`. Iteration is alphabetical (`parameter_map` is
-/// `std::map`).
+/// Format parameters in name order, separating k=v entries with the
+/// summary  unit separator.
 [[nodiscard]] inline std::string format_param_map_stable(const parameter_map& params) noexcept {
     std::string result;
     bool first = true;
@@ -13088,11 +12131,9 @@ inline constexpr char k_summary_identity_us = '\x1f';
     return result;
 }
 
-/// Variadic identity-string builder. Joins `kind` to the trailing
-/// `fields` with `\x1e` after the kind and `\x1f` between subsequent
-/// fields. Each `field` is implicitly convertible to `std::string_view`.
-/// Used by the three `make_*_identity` callers below so every issue kind uses
-/// the same delimiter contract.
+/// Join an issue kind and its identifying fields.
+/// Use the record separator after kind and unit separators between fields.
+/// Each field must be convertible to string_view.
 template<typename... p_fields>
 [[nodiscard]] inline std::string join_identity(
     std::string_view kind, const p_fields&... fields) noexcept
@@ -13109,10 +12150,8 @@ template<typename... p_fields>
     return identity;
 }
 
-/// Identity helpers — one tiny call to `join_identity` each. See
-/// on `make_violation_identity` reserve slots in the identity tuple. Callers
-/// pass the constant defaults `"all_regions"` / `"p50"`; these slots are part
-/// of the identity contract even though per-region rules do not exist yet.
+/// Identify a rule violation by its configuration, selectors and source.
+/// Include region and aggregate fields, defaulting to all_regions and p50.
 [[nodiscard]] inline std::string make_violation_identity(
     std::string_view config_path,
     std::string_view benchmark,
@@ -13155,19 +12194,15 @@ template<typename... p_fields>
     std::string_view metric,
     std::string_view message) noexcept
 {
-    // 16-hex FNV-1a fingerprint plus the message length cheaply
-    // discriminates same-prefix messages without storing the full
-    // verbose body in the identity key.
+    // Store the message's hash and length in the key to keep it compact.
     auto hash_text = fmt::format("{:016x}-{}", fnv1a64(message), message.size());
     return join_identity("sanity", type, metric, std::string_view{hash_text});
 }
 
-// ----------------- Per-report sample-array index -----------------
+// Index report summaries by their source fields.
 
-/// Walk an object whose fields are `(param_name, scalar_value)` pairs
-/// sites (rule-violation sides, regression `violating_tuples[0]`,
-/// and `build_sample_index`'s `tuple` block); extracting the loop
-/// keeps the framework's three callers from drifting out of sync.
+/// Read a JSON parameter object intv a parameter_map.
+/// Shared by issue parsing and report sample indexing.
 [[nodiscard]] inline parameter_map parse_param_map(simdjson::dom::object obj) noexcept {
     parameter_map params;
     for (auto field : obj) {
@@ -13177,15 +12212,11 @@ template<typename... p_fields>
     return params;
 }
 
-/// amplitude lookup. The path is
-/// `benchmark\x1falgorithm\x1fparams\x1ftest_case\x1fregion\x1fmetric`
-/// (a subset of the issue identity, minus the kind/rule_name
-/// fields) and matches what the issue walk produces when it asks
-/// for the aggregated_samples of "the cell that triggered this
-/// pre-aggregated records instead of raw vectors.
+/// Sample summaries indexed  by benchmark, algorithm parameters, test case,
+/// region and metric. Summary scoring uses this to find an issue's samples.
 using sample_index = std::map<std::string, aggregated_samples>;
 
-/// Build the per-cell sample-array path key.
+/// Build the lookup key for one result's sample summary.
 [[nodiscard]] inline std::string make_sample_path(
     std::string_view benchmark,
     std::string_view algorithm,
@@ -13205,12 +12236,8 @@ using sample_index = std::map<std::string, aggregated_samples>;
     return path;
 }
 
-/// Walk a parsed report's full `benchmarks.<>.execution_tuples[*].
-/// test_cases.<>.<region>.<metric>` tree once, building a flat
-/// `sample_index` keyed by the same path the summary's identity
-/// uses. Each leaf is parsed via `parse_aggregated_samples` so
-/// size); called at most once per report regardless of how many
-/// issues need amplitude data.
+/// Index every metric summary in a report for later, issue lookups.
+/// Parse each result once so scoring several issues can reuse it.
 [[nodiscard]] inline sample_index build_sample_index(
     simdjson::dom::element report_root) noexcept
 {
@@ -13232,8 +12259,7 @@ using sample_index = std::map<std::string, aggregated_samples>;
             if (!record_obj.has_value()) continue;
             const auto tuple_inner = try_get_object(*record_obj, "tuple");
             if (!tuple_inner.has_value()) continue;
-            // The tuple sub-object has exactly one key — the algorithm
-            // name — mapping to the param map.
+            // A report tuple maps its algorithm name to its parameters.
             for (auto algo_field : *tuple_inner) {
                 std::string algorithm{algo_field.key};
                 const auto params_obj = try_as_object(algo_field.value);
@@ -13267,10 +12293,9 @@ using sample_index = std::map<std::string, aggregated_samples>;
     return index;
 }
 
-/// Look up an `aggregated_samples` in a per-report `sample_index`.
-/// Returns a default-constructed aggregate (`samples_count == 0`)
-/// when the cell is absent — `amplitude_factor` already treats
-/// `samples_count < 2` as "no amplitude info" and falls back to 1.0.
+/// Find a result's summary in the report index.
+/// Return an empty summary  when absent. The scoring code treats that as
+/// missing sample-spread information
 [[nodiscard]] inline aggregated_samples samples_from_index(
     const sample_index& index,
     std::string_view benchmark,
@@ -13285,11 +12310,9 @@ using sample_index = std::map<std::string, aggregated_samples>;
     return {};
 }
 
-// ----------------- Per-report walks -----------------
+// Read issue entries from reports.
 
-/// Helper: pull a string-typed field from an object. Returns "" when
-/// the field is missing or non-string (matches the rest of the file's
-/// graceful-degradation pattern for JSON walks).
+/// Read a string field, returning an empty string when absent or malformed.
 [[nodiscard]] inline std::string get_string_field(
     simdjson::dom::object obj, std::string_view key) noexcept
 {
@@ -13298,8 +12321,7 @@ using sample_index = std::map<std::string, aggregated_samples>;
     return {};
 }
 
-/// Helper: pull a double-typed field from an object. Returns 0.0 on
-/// miss or wrong type.
+/// Read a numeric field as a double, or return zero when unavailable.
 [[nodiscard]] inline double get_double_field(
     simdjson::dom::object obj, std::string_view key) noexcept
 {
@@ -13312,30 +12334,21 @@ using sample_index = std::map<std::string, aggregated_samples>;
     return 0.0;
 }
 
-/// One entry extracted from a per-report JSON array. The `Extract`
-/// callable returns `std::nullopt` for malformed entries; otherwise
-/// the framework merges the data into `aggregation` under
-/// `update_first` (run once when the issue is brand new) and
-/// `update_latest` (run whenever this report wins the latest-seen
-/// race).
+/// Parsed issue identity and callbacks for merging it into the summary.
+/// One callback initializes a new issue. The other updates values when a
+/// newer report contains it.
 struct extracted_issue {
     std::string                          identity;
     summary_issue::issue_kind                   kind = summary_issue::issue_kind::sanity_warning;
-    /// Initialiser for fields that are intrinsic to the issue's
-    /// identity (metric / rule_name / scope_label / etc.). Run
-    /// once on first insertion.
+    /// Set fields shared by all reports of this issue when it is finst added.
     std::function<void(summary_issue&)>   update_first;
-    /// Updater for fields that may move between reports
-    /// (latest_args, latest_samples, sanity_message). Run only when
-    /// `report_index > issue.latest_seen_index`.
+    /// Update values and samples when this is the newest report of the  issue.
     std::function<void(summary_issue&)>   update_latest;
 };
 
-/// Generic per-report-array walker. The three issue kinds (rule
-/// violations, regressions, sanity warnings) all follow the same
-/// shape: pull `report_root[array_key]`, iterate entries, build an
-/// identity, and merge into `aggregation`. Only the per-entry
-/// extraction differs — encoded in the `Extract` callable.
+/// Read one report's issue array and merge entries by identity.
+/// extract supplies the parsing and update callbacks for each issue type.
+/// Skip entries it cannot parse and record which report contains each issue.
 template<typename p_extract>
 inline void walk_report_array(
     simdjson::dom::element                report_root,
@@ -13358,12 +12371,8 @@ inline void walk_report_array(
         if (!extracted.has_value()) continue;
         extracted_issue ex = std::move(*extracted);
 
-        // `try_emplace` distinguishes "first encounter" from "merge
-        // into existing" cleanly. We move the identity string into
-        // the map key on insert; on the merge path the identity
-        // already lives both as the map key and on the existing
-        // summary_issue (set the first time), so the moved-from
-        // `ex.identity` is not consulted again.
+        // Insert a new issue or reuse its existing entry. Read the stored key
+        // after moving the extracted identity into the map.
         auto [it, inserted] = aggregation.try_emplace(std::move(ex.identity));
         summary_issue& issue = it->second;
         if (inserted) {
@@ -13380,20 +12389,20 @@ inline void walk_report_array(
     }
 }
 
-/// Pull `violating_tuples[0]` (a single-element param-map array).
-/// Returns an empty `parameter_map` when the array is missing or empty.
+/// Read the first object in violating_tuples as parameters.
+/// Return an empty map if the array is missing or has no object entries.
 [[nodiscard]] inline parameter_map parse_violating_tuple_first(simdjson::dom::object obj) noexcept {
     simdjson::dom::array tuples_array;
     if (obj["violating_tuples"].get(tuples_array) != simdjson::SUCCESS) return {};
     for (auto tuple_elem : tuples_array) {
         const auto params_obj = try_as_object(tuple_elem);
         if (!params_obj.has_value()) continue;
-        return parse_param_map(*params_obj);     // schema mandates exactly one
+        return parse_param_map(*params_obj);     // The  framework writes one parameter object per regression.
     }
     return {};
 }
 
-/// Pull `test_cases[0]` (a single-element string array).
+/// Read the first string in test_cases, or an empty string if none is found
 [[nodiscard]] inline std::string parse_test_case_first(simdjson::dom::object obj) noexcept {
     simdjson::dom::array tc_array;
     if (obj["test_cases"].get(tc_array) != simdjson::SUCCESS) return {};
@@ -13404,8 +12413,8 @@ inline void walk_report_array(
     return {};
 }
 
-/// Pull both args from a `rule_violations[*].args` 2-element array.
-/// Defaults to `{0, 0}` when the array is missing or wrong-shaped.
+/// Read up to two comparison arguments from a, rule violation.
+/// Missing or nonnumeric positions stay zero. Ignore extra array entries.
 [[nodiscard]] inline std::array<double, 2> parse_violation_args(
     simdjson::dom::object obj) noexcept
 {
@@ -13424,9 +12433,9 @@ inline void walk_report_array(
     return args;
 }
 
-/// Pull every `(<algo_name>, <parameter_map>)` side from a
-/// `rule_violations[*].execution_tuple`. May return one (self-compare)
-/// or two entries.
+/// Read the algorithm and parameters for each stored side of a violation.
+/// Valid reports have one entry for a shared algorithm name or two for
+/// different algorithms.
 [[nodiscard]] inline std::vector<std::pair<std::string, parameter_map>>
 parse_violation_sides(simdjson::dom::object obj) noexcept
 {
@@ -13442,7 +12451,7 @@ parse_violation_sides(simdjson::dom::object obj) noexcept
     return sides;
 }
 
-// ----------------- Scoring -----------------
+// Score historical issues for the summary dashyoard.
 
 inline constexpr double k_summary_base_regression    = 1000.0;
 inline constexpr double k_summary_base_rule_violation =  700.0;
@@ -13457,9 +12466,9 @@ inline constexpr double k_summary_base_sanity_warning =  300.0;
     return k_summary_base_sanity_warning;
 }
 
-/// Multiplicative time-pattern factor. Inputs are pre-extracted from
-/// the presence array so this stays a pure function of small integers
-/// + booleans.
+/// Weight  an issue by how recently and repeatedly it appears.
+/// Newly appearing or returning issues get more weight. Long continuous
+/// streaks and issues absent from the latest report get less.
 [[nodiscard]] constexpr double recurrence_factor(
     bool        present_in_latest,
     std::size_t recent_streak,
@@ -13478,23 +12487,17 @@ inline constexpr double k_summary_base_sanity_warning =  300.0;
     return faded < floor_value ? floor_value : faded;
 }
 
-/// Relative percentage difference
-/// `|current - baseline| / |baseline| * 100`. Used by both
-/// `value_pct_factor` (for scoring) and `format_stat_blurb` (for
-/// dashboard display). The `k_eps` clamp on the denominator
-/// prevents the divide-by-zero when `baseline == 0` while keeping
-/// the displayed percentage stable across consumers.
+/// Express the absolute difference as a percentage of the baseline's
+/// magnitude. Clamp a near-zero denominator so scoring and display can
+/// handle a zero baseline.
 [[nodiscard]] inline double relative_diff_pct(double current, double baseline) noexcept {
     constexpr double k_eps = 1e-12;
     return std::abs(current - baseline) / std::max(std::abs(baseline), k_eps) * 100.0;
 }
 
-/// Relative amplitude percentage `100 * (max - min) / |min|` of
-/// a pre-aggregated sample set. Used by both `amplitude_factor`
-/// and the dashboard's stat blurb. Returns 0 for fewer than two
-/// finite samples (no amplitude to speak of). The `max(|min|, k_eps)`
-/// clamp prevents divide-by-zero when min == 0 (e.g. all-zero
-/// in-memory and historical data uniformly.
+/// Express a summary's min-to-max spread as a percentage of its minimum's
+/// magnitude. Return zero for fewer than two collected samples or  no finite
+/// samples. Clamp the denominator when the minimum is near zero.
 [[nodiscard]] inline double relative_amplitude_pct(
     const aggregated_samples& aggregated) noexcept
 {
@@ -13505,12 +12508,9 @@ inline constexpr double k_summary_base_sanity_warning =  300.0;
                  / std::max(std::abs(aggregated.stats.min), k_eps);
 }
 
-/// Multiplicative value-percentage factor. log-shaped so a 555%
-/// overshoot and a 5550% overshoot don't collapse onto the same
-/// number. A near-zero denominator (`baseline == 0` for a
-/// regression rising to anything) saturates at `k_factor_ceil`
-/// directly — the log path would clamp there anyway, but the
-/// explicit branch makes intent obvious.
+/// Increase an issue's score with the relative size of its value change.
+/// Logarithmic growth and a cap keep large differences from dominating.
+/// A near-zero baseline uses the maximum factor
 [[nodiscard]] inline double value_pct_factor(double current, double baseline) noexcept {
     constexpr double k_eps         = 1e-12;
     constexpr double k_slope       = 0.5;
@@ -13522,10 +12522,9 @@ inline constexpr double k_summary_base_sanity_warning =  300.0;
     return factor < k_factor_ceil ? factor : k_factor_ceil;
 }
 
-/// Multiplicative amplitude factor. High-noise samples reduce
-/// the score because the regression / rule violation may be
-/// within natural variability. Curve mirrors the user spec:
-/// factor = 1.0 at amp = 0%, factor = 1/6 at amp = 10000%.
+/// Reduce the score when samples have a large spread, since a difference
+/// may reflect measurement variability. With no spread information, keep
+/// the score unchanged.
 [[nodiscard]] inline double amplitude_factor(
     const aggregated_samples& aggregated) noexcept
 {
@@ -13537,7 +12536,8 @@ inline constexpr double k_summary_base_sanity_warning =  300.0;
     return (12.0 - normalised) / 12.0;
 }
 
-/// Compute (recent_streak, any_old_gap) from a presence array.
+/// Whether an issue appears in the latest report, its  current streak length,
+/// and whether it appeared before an earlier gap.
 struct presence_pattern {
     bool        present_in_latest = false;
     std::size_t recent_streak     = 0;
@@ -13566,9 +12566,9 @@ struct presence_pattern {
     return result;
 }
 
-/// Composite scoring pipeline. Sanity warnings skip value-pct and
-/// amplitude (no underlying numeric comparison); rules and
-/// regressions use both.
+/// Combine issue severity and recurrence int, a summary score.
+/// Rule violations and regressions also account for value differences and
+/// sample spread. Sanity warnings have no numeric comparison to score.
 [[nodiscard]] inline double score_summary_issue(const summary_issue& issue) noexcept {
     const auto pattern = compute_presence_pattern(issue.presence_per_report);
     const double recurrence = recurrence_factor(
@@ -13585,11 +12585,10 @@ struct presence_pattern {
     return base * recurrence * value_pct * amplitude;
 }
 
-// ----------------- Render -----------------
+// Render the summary dashboard.
 
-/// Issues sorted by `(metric ↑, scope_label ↑, score ↓, identity ↑)`.
-/// The score-descending pass is what drives the user's "most concerning
-/// first" expectation.
+/// Sort issues by metric and scope, then highest score first within each
+/// group. Use identity as the final tie-breaker.
 [[nodiscard]] inline std::vector<const summary_issue*> sort_summary_issues(
     const std::map<std::string, summary_issue>& aggregation) noexcept
 {
@@ -13606,13 +12605,9 @@ struct presence_pattern {
     return sorted;
 }
 
-/// Truncate `text` to at most `max_chars` *bytes* (a byte budget,
-/// not a column count) and append the UTF-8 ellipsis when shortened.
-/// When the cut would land inside a UTF-8 multi-byte sequence we
-/// retract to the nearest leading byte (continuation bytes have the
-/// `10xxxxxx` bit pattern) so we never emit a half-encoded character.
-/// The dashboard mostly prints ASCII; the retract-loop adds at most
-/// 3 bytes of overhead per call.
+/// Shorten  valid UTF-8 text to a byte budget, adding an ellipsis when cut.
+/// Back up to a character boundary before adding the ellipsis. Very small
+/// budgets use dots. Terminal column widths are not measured here.
 [[nodiscard]] inline std::string clip_to_width(std::string text, std::size_t max_chars) noexcept {
     if (text.size() <= max_chars) return text;
     constexpr std::string_view k_ellipsis = "\xe2\x80\xa6";   // "…" (3 bytes)
@@ -13623,9 +12618,8 @@ struct presence_pattern {
         --cut;
     }
     if (cut == 0) {
-        // Single multi-byte codepoint takes the entire budget — give
-        // up and pad with dots so the row's column total stays within
-        // `max_chars`.
+        // The first character and ellipsis do not fit. Fill the byte budget
+        // with dots.
         return std::string(max_chars, '.');
     }
     text.resize(cut);
@@ -13633,9 +12627,8 @@ struct presence_pattern {
     return text;
 }
 
-/// Build the per-issue stat blurb shown on each row. Reuses the
-/// `relative_diff_pct` / `relative_amplitude_pct` helpers so the
-/// numbers in the dashboard align with the numbers in the score.
+/// Format an issue's compared values and sample spread for its dashboard row.
+/// Sanity warnings show a shortened first sentence of their message.
 [[nodiscard]] inline std::string format_stat_blurb(const summary_issue& issue) noexcept {
     const double amp = relative_amplitude_pct(issue.latest_samples);
     switch (issue.kind) {
@@ -13667,10 +12660,7 @@ struct presence_pattern {
     return {};
 }
 
-/// Build the per-issue presence-block ftxui Element row. Shows the
-/// last `k_block_window` slots, oldest on the left → newest on the
-/// right. Glyphs are emitted as one element-per-cell so ftxui sizes
-/// them uniformly.
+/// Maximum number of recent reports shown in a summary row's history
 inline constexpr std::size_t k_summary_block_window = 8;
 
 [[nodiscard]] inline ftxui::Elements presence_blocks(const summary_issue& issue) noexcept {
@@ -13682,10 +12672,7 @@ inline constexpr std::size_t k_summary_block_window = 8;
     blocks.reserve(take);
     for (std::size_t i = start; i < total; ++i) {
         const bool present = issue.presence_per_report[i] != 0;
-        // Default to "no data" (🟦) when the parallel array isn't sized
-        // — only happens if `summary_mode_main` skipped the
-        // `report_data_present` stamp, which would itself be a bug we
-        // want to surface visually rather than hide as 🟩.
+        // Show missing data  if the report-status array has no matching slot.
         const bool data_ok = i < issue.report_data_present.size()
             && issue.report_data_present[i] != 0;
         const auto glyph = summary_block_for(issue.kind, present, data_ok);
@@ -13694,14 +12681,11 @@ inline constexpr std::size_t k_summary_block_window = 8;
     return blocks;
 }
 
-/// Group ordering helper: a tuple key for the "metric → scope" header
-/// pass. `std::pair<string, string>` would suffice; we keep a tiny
-/// alias for readability.
+/// Metric and scope used to group summary rows.
 using summary_group_key = std::pair<std::string, std::string>;
 
-/// Convert one fully-scored issue into its dashboard row. Severity
-/// emoji + colour, kind label (bold), stat blurb, presence row, dim
-/// rule name on the right.
+/// Render one issue's severity marker, satistics and recent report history.
+/// Show its rule name on the right when available.
 [[nodiscard]] inline ftxui::Element render_issue_row(const summary_issue& issue) noexcept {
     using namespace ftxui;
     const auto& bucket = bucket_for(issue.score);
@@ -13717,22 +12701,16 @@ using summary_group_key = std::pair<std::string, std::string>;
     blocks_box.push_back(text("  "));
     row.push_back(hbox(std::move(blocks_box)));
     if (!issue.rule_name.empty()) {
-        // Cap the rule_name so a long identifier doesn't push the
-        // presence blocks past the screen edge in ftxui's auto-fit.
+        // Limit the rule name so the history markers keep space on the row.
         constexpr std::size_t k_rule_name_max_chars = 24;
         row.push_back(text(clip_to_width(issue.rule_name, k_rule_name_max_chars)) | dim);
     }
     return hbox(std::move(row));
 }
 
-/// Render the whole dashboard. Two-pass aggregation: outer
-/// metric-section header, inner scope-section sub-header, leaf
-/// issue rows. Trailing legend doubles as the colour key.
-///
-/// We write the rendered ftxui screen via `std::fputs(stderr)` rather
-/// than `bioseq_log<logging_level::debug>` — this matches `print_violations` /
-/// printers) which already bypass fmtlog so end-of-run operator output
-/// stays visible after the asynchronous log queue drains.
+/// Render issue rows grouped by metric and scope, followed by the legend.
+/// Write directly to stderr so the summary  remains available after the
+/// asynchronous logger stops.
 inline void render_summary(
     std::span<const summary_issue* const> sorted_issues,
     std::size_t   max_report_index,
@@ -13802,11 +12780,10 @@ inline void render_summary(
     std::fflush(stderr);
 }
 
-// ----------------- summary_mode_main -----------------
+// Read historical findings for the summary view.
 
-/// Build the rule-violation extractor lambda. Returns a lambda
-/// suitable for `walk_report_array<...>`, capturing `sample_index`
-/// by reference (caller-owned, lives for the whole report walk).
+/// Build the rule-violation parser used by walk_report_array.
+/// The referenced sample index must stay alive throughout the report walk.
 [[nodiscard]] inline auto rule_violation_extractor(const sample_index& samples_by_path) noexcept {
     return [&samples_by_path](simdjson::dom::object obj)
         -> std::optional<extracted_issue>
@@ -13819,10 +12796,8 @@ inline void render_summary(
 
         auto sides = parse_violation_sides(obj);
         if (sides.empty()) return std::nullopt;
-        // Single-key execution_tuple = self-compare (LHS == RHS); the
-        // writer emits one entry to avoid a duplicate JSON key. We
-        // copy the single side into the RHS slot so identity + score
-        // see both halves of the rule.
+        // A shared algorithm name is stored once in execution_tuple. Reuse
+        // that entry for both sides because the report has no second map.
         std::pair<std::string, parameter_map> lhs = std::move(sides.front());
         std::pair<std::string, parameter_map> rhs = sides.size() > 1
             ? std::move(sides[1])
@@ -13847,17 +12822,15 @@ inline void render_summary(
                 ? fmt::format("{} @ {}", lhs_algo, test_case)
                 : fmt::format("{} vs {} @ {}", lhs_algo, rhs_algo, test_case);
         };
-        // `update_latest` only needs the LHS cell's coordinates for
-        // the sample-index lookup. RHS is dropped here.
+        // Sample-spread scoring uses the left-hand, result.
         ex.update_latest = [args, benchmark,
                             lhs_algo = std::move(lhs.first),
                             lhs_params = std::move(lhs.second),
                             test_case, metric, &samples_by_path]
                            (summary_issue& issue) noexcept {
             issue.latest_args = args;
-            // Amplitude reads the LHS cell's samples (the side that
-            // against `all_regions`; per-region rules would need this
-            // hard-coded "all_regions" replaced with the rule's region.
+            // Use the  left-hand all_regions samples for spread scoring.
+            // The violation record does not store a region for this lookup.
             issue.latest_samples = samples_from_index(
                 samples_by_path, benchmark, lhs_algo, lhs_params,
                 test_case, "all_regions", metric);
@@ -13866,9 +12839,8 @@ inline void render_summary(
     };
 }
 
-/// Build the regression extractor lambda. Same shape as the rule
-/// extractor; the regression's stored `region` flows into both the
-/// identity and the sample lookup.
+/// Build the regression parser used by walk_report_array.
+/// The stored region identifies both the issue and its sample summary
 [[nodiscard]] inline auto regression_extractor(const sample_index& samples_by_path) noexcept {
     return [&samples_by_path](simdjson::dom::object obj)
         -> std::optional<extracted_issue>
@@ -13898,12 +12870,8 @@ inline void render_summary(
             issue.test_case = test_case;
             issue.benchmark = benchmark;
             issue.rule_name = rule_name;
-            // Two regressions on the same (algorithm, test_case,
-            // region) but different aggregates (p50 vs p99) live as
-            // separate issues; surface the aggregate suffix so the
-            // dashboard rows are visually distinct. The default p50
-            // is the regression-rule baseline so we omit it to keep
-            // the common case terse.
+            // Include a nondefault aggregate in the label so p99 and p50 findings
+            // can be distinguished. Omit the p50 suffux to keep labels short.
             std::string region_suffix = (region == "all_regions")
                 ? std::string{}
                 : fmt::format(" ({})", region);
@@ -13926,10 +12894,8 @@ inline void render_summary(
     };
 }
 
-/// Build the sanity-warning extractor lambda. Captures nothing —
-/// sanity warnings carry no per-report sample lookup. Returned by
-/// value so the call site can plug it directly into
-/// `walk_report_array`.
+/// Build the sanity-warning parser used by walk_report_array.
+/// These warnings carry a message and need no per-cell sample lookup.
 [[nodiscard]] inline auto sanity_warning_extractor() noexcept {
     return [](simdjson::dom::object obj) -> std::optional<extracted_issue> {
         const auto type    = get_string_field(obj, "type");
@@ -13952,10 +12918,9 @@ inline void render_summary(
     };
 }
 
-/// scores issues, and renders the aggregated dashboard to stderr via
-/// `render_summary`. Used as the read-only fallback when `--ui` is
-/// and from `ui_mode_main`'s startup probe when the user explicitly
-/// requested ASCII-only output but no TTY is attached.
+/// Read existing reports, combine repeated issues and print one  summary.
+/// Used when the interactive dashboard cannot run on the available terminal.
+/// Missing or unreadable reports remain gaps in the history.
 [[nodiscard]] inline int render_summary_to_stderr_once(const std::string& report_dir) noexcept {
     const std::filesystem::path report_dir_path{report_dir};
     const auto max_index = max_existing_report_index(report_dir_path).value_or(0);
@@ -13971,7 +12936,7 @@ inline void render_summary(
 
     for (std::size_t report_index = 1; report_index <= max_index; ++report_index) {
         auto* report = cache.fetch(report_index);
-        if (report == nullptr) continue;     // gap → presence stays 0
+        if (report == nullptr) continue;     // Keep unreadable reports marked as missing.
         report_data_present[report_index - 1] = 1;
         ++reports_present_count;
         const auto samples_by_path = build_sample_index(report->root);
@@ -13992,8 +12957,7 @@ inline void render_summary(
         return 0;
     }
 
-    // Stamp the data-presence array onto every issue (the writer
-    // walks issues, not reports).
+    // Give each issue the same report-availability history for rendering.
     for (auto& [_identity, issue] : aggregation) {
         issue.report_data_present = report_data_present;
         DEBUG_ASSERT(issue.report_data_present.size() == issue.presence_per_report.size(),
@@ -14009,18 +12973,16 @@ inline void render_summary(
 }
 
 
-/// Forward declaration for the interactive ftxui dashboard. Defined in
-/// the sibling implementation unit `interactive.cppm`. Invoked from
-/// `run_impl` when `--ui` is on the command line and stdin / stderr
-/// are interactive TTYs. When the TTY check fails the entry point
-/// itself dispatches `render_summary_to_stderr_once` so a CI-piped
+/// Open the interactive report viewer implemented in interactive.cppm.
+/// Its startup checks choose a one-time stderr summary when the terminal
+/// cannot support the viewer.
 [[nodiscard]] int ui_mode_main(const std::string& report_dir, const parsed_cli& cli) noexcept;
 
-// ----------------- CLI parsing -----------------
+// Parse command-line options.
 
-/// Parse one `key=v1,v2,...` spec into `filter`. Records human-readable
-/// "<code>:<message>" strings into `errors` on any problem. Empty values,
-/// empty items, unknown keys, and repeated dimensions are all errors.
+/// Read a filter such as tags=a,b into its named field.
+/// Record errors for  unknown fields, repeated fields and empty values.
+/// Errors use code:message strings for later diagnostics.
 inline void parse_one_filter_into(std::string_view spec,
                                   filter_specification& filter,
                                   std::vector<std::string>& errors) noexcept {
@@ -14053,7 +13015,7 @@ inline void parse_one_filter_into(std::string_view spec,
         if (comma == std::string_view::npos) break;
         start = comma + 1;
     }
-    // Bind to the right axis; reject a second use of the same axis.
+    // Set the requested filter field once.
     auto bind = [&values, &errors](std::optional<std::vector<std::string>>& slot,
                                    std::string_view dim_name) {
         if (slot.has_value()) {
@@ -14070,10 +13032,9 @@ inline void parse_one_filter_into(std::string_view spec,
         "filter_unknown_key:--filter key '{}' must be tags|benchmark|cases", key));
 }
 
-/// Parse the framework CLI flags out of `argv`. Unknown flags are
-/// silently ignored (the user may layer their own flag parsing on top by
-/// inspecting argv before calling `run`). Runs first inside `run_impl` so a
-/// `--report` override is applied before any directory creation.
+/// Read framework options from argv and ignore unknown flags.
+/// Call this efore setup so --report selects the output directory before
+/// any files or directories are created.
 [[nodiscard]] inline parsed_cli parse_cli(int argc, char** argv) noexcept {
     parsed_cli parsed;
     for (int i = 1; i < argc; ++i) {
@@ -14103,9 +13064,7 @@ inline void parse_one_filter_into(std::string_view spec,
             parsed.report_override = std::string{argv[i + 1]};
             ++i;
         } else if (arg == "--memory-buffer" && (i + 1) < argc) {
-            // in framework code" — the existing --threads parser used
-            // try/catch around std::stoi, but we don't extend that
-            // pattern.
+            // Parse the percentage without throwing on, invalid input.
             const std::string_view text{argv[i + 1]};
             int pct = 0;
             const auto* const begin = text.data();
@@ -14135,13 +13094,11 @@ inline void parse_one_filter_into(std::string_view spec,
     return parsed;
 }
 
-// ----------------- Progress dashboard -----------------
+// Show live benchmark progress.
 
-/// Severity buckets for the colour-shifting progress gauge. Picked by
-/// percentage from the lowest matching threshold. Keep ordered low → high.
-/// `palette` is the enumerator (literal type) — converting to
-/// `ftxui::Color` happens at the call site since Color's constructor
-/// is not constexpr.
+/// A progress threshold and its gauge color
+/// Keep thresholds in ascending order so gauge_palette selects the highest
+/// threshold reached.
 struct gauge_bucket {
     float                   min_fraction;
     ftxui::Color::Palette256 palette;
@@ -14162,17 +13119,14 @@ gauge_palette(float fraction) noexcept {
     return picked;
 }
 
-/// Wrap `gauge_palette` in an `ftxui::Color`. The Color constructor
-/// itself is not `constexpr`, so this layer stays at runtime.
+/// Convert the selected  gauge palette value to an FTXUI color.
 [[nodiscard]] inline ftxui::Color gauge_color(float fraction) noexcept {
     return ftxui::Color(gauge_palette(fraction));
 }
 
-/// Render a coloured gauge of fixed width. Returns an ftxui Element so
-/// the caller can compose with hbox/text. Fill width is rounded to the
-/// nearest integer; an entirely-empty bar still displays as
-/// `[░░░░...]` so the layout doesn't shift. Values outside `[0, 1]`
-/// are clamped before the lookup.
+/// Draw a fixed-size progress bar, clamping the fraction to [0, 1].
+/// Round the number of filled cells and keep empty cells visible so the
+/// bar stays the same width throughout the run.
 [[nodiscard]] inline ftxui::Element coloured_gauge(
     float fraction, int total_cells) noexcept
 {
@@ -14192,22 +13146,16 @@ gauge_palette(float fraction) noexcept {
     return ftxui::text(bar) | ftxui::color(gauge_color(clamped));
 }
 
-/// Convert raw bytes to a `double` in GiB. Inlined as a `constexpr`
-/// helper so callers don't repeat the `1024^3` divisor.
+/// Convert a byte count to GiB.
 [[nodiscard]] inline constexpr double bytes_to_gib(std::uint64_t bytes) noexcept {
     constexpr double k_gib = 1024.0 * 1024.0 * 1024.0;
     return static_cast<double>(bytes) / k_gib;
 }
 
-/// Background thread body for the progress dashboard. Two paths:
-/// 1. **TTY**: render an ftxui document to stderr every 200 ms with
-///    one row per test_case (active groups underneath), a colour-
-///    shifting gauge per row, and a `[memory X / Y GiB]` header.
-/// 2. **Non-TTY (CI / pipes)**: emit a bioseq_log<logging_level::debug> info line every 5 s
-///    with one line per test_case still in flight.
+// Live progress refreshes the terminal every 200 ms. Without a TTY, it
+// logs unfinished, started test cases about every five seconds.
 
-/// Possible states of a test_case row in the dashboard. Renderer picks
-/// the most-urgent state across the test case's groups.
+/// Display states for a test case, chosen from the states of its groups.
 enum class test_case_row_state : std::uint8_t {
     done,
     aborted,
@@ -14217,11 +13165,9 @@ enum class test_case_row_state : std::uint8_t {
     running,
 };
 
-/// Walk every group of `tc` and pick the most-urgent state. The order
-/// (Aborted > InputRetry > CleanupRetry > Done > IdleWait > Running)
-/// mirrors the user spec — failures and aborts surface first; an
-/// already-finished test case stays "Done" even if its idle clock
-/// briefly armed before it completed.
+/// Choose the test-case state to  display, giving failures priority.
+/// Aborts come first, then input retries and cleanup retries. A finished
+/// case stays done even if an idle timer remains set.
 [[nodiscard]] inline test_case_row_state classify_test_case(
     const progress_test_case& tc) noexcept
 {
@@ -14252,8 +13198,7 @@ enum class test_case_row_state : std::uint8_t {
     return test_case_row_state::running;
 }
 
-/// Header glyph + colour per row state. Table-driven so adding a new
-/// state means adding a row, not editing branch ladders.
+/// Header symbol and color for a progrefs-row state.
 struct row_glyph {
     test_case_row_state  state;
     std::string_view  glyph;        // UTF-8 (may include emoji)
@@ -14282,9 +13227,8 @@ inline const std::array<row_glyph, 6> k_row_glyphs{ {
     return k_row_glyphs.front();
 }
 
-/// Build the detail-rows that hang off a failing/idle row. Returned as
-/// a list of ftxui Elements ready to be flattened into the renderer's
-/// `rows` vector.
+/// Build group details for an aborted, retrying or waiting test case.
+/// Running and completed cases need no detail rows.
 [[nodiscard]] inline ftxui::Elements build_detail_rows(
     const progress_test_case& tc, test_case_row_state state) noexcept
 {
@@ -14299,17 +13243,13 @@ inline const std::array<row_glyph, 6> k_row_glyphs{ {
         const auto aborted   = group_ptr->aborted.load(std::memory_order_acquire);
         const auto idle_start = group_ptr->idle_start_ns.load(std::memory_order_acquire);
 
-        // Pick the matching detail content per state.
+        // Select details for this group's displayed state.
         std::string header_line, message, trace;
         Color tint = Color::GrayLight;
 
-        // Re-read counters under `failure_mu` after locking so a race
-        // between the fast-path acquire-load above and the writer's
-        // store-zero (in `progress_clear_retry_failure`) doesn't
-        // produce a "retry N/5 with empty strings" frame. The writer
-        // protocol is "store(0, release) BEFORE clearing strings under
-        // the lock"; revalidating under the lock means we never paint
-        // a stale N when the strings are already empty.
+        // Check retry counters again after taking failure_mu. A worker may
+        // have cleared the row while we waited, and cleared text must not
+        // appear beside an  old attempt number
         if (state == test_case_row_state::aborted && aborted) {
             std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
             message = group_ptr->aborted_reason;
@@ -14357,13 +13297,11 @@ inline const std::array<row_glyph, 6> k_row_glyphs{ {
                 group_ptr->group_index + 1, elapsed_s, budget_s);
             tint = Color::Yellow;
         } else {
-            continue;     // not the matching state for this group
+            continue;     // This group has no details for the selected state.
         }
 
-        // The `└ group X …` header sits at column 4 with a 1-cell
-        // box-drawing glyph + a space, so its content starts at column 6.
-        // Message and trace lines hang under it at column 8 — visibly
-        // deeper than the header so the nesting reads correctly.
+        // Indent the group header by four spaces and its message and trace
+        // by eight, so the details sit below their group.
         detail.push_back(hbox({
             text("    \xe2\x94\x94 "),                  // └ at column 4
             text(header_line) | color(tint),
@@ -14375,21 +13313,10 @@ inline const std::array<row_glyph, 6> k_row_glyphs{ {
             }));
         }
         if (!trace.empty()) {
-            // Split trace on '\n' and emit each line as a SINGLE text()
-            // element with the indent prepended into the string. We do
-            // NOT wrap it in `hbox({text(indent), text(line)})`: ftxui's
-            // hbox shrinks children proportionally when the total width
-            // exceeds the screen, and a long demangled C++ frame name
-            // would collapse the indent prefix to 1-2 spaces for that
-            // row. A single text() element renders left-to-right and
-            // simply clips at the screen edge, so the indent stays a
-            // stable 8 chars regardless of how long the line is.
-            //
-            // We always pass `color=false` to cpptrace's `to_string`
-            // (see `clip_trace`) because ftxui's `text()` does NOT
-            // interpret ANSI escape sequences — colour codes would
-            // render as literal `[34m…[0m` text. The visual tint
-            // comes from ftxui's `| color(Color::GrayDark)` decorator.
+            // Keep each trace line and its indent in one text element. Separate
+            // hbox children can shrink the indent when a long C++ name reaches
+            // the screen, edge. clip_trace supplies plain text without ANSI
+            // colors, and FTXUI applies the color here.
             std::size_t cursor = 0;
             while (cursor < trace.size()) {
                 const auto newline = trace.find('\n', cursor);
@@ -14407,14 +13334,12 @@ inline const std::array<row_glyph, 6> k_row_glyphs{ {
     return detail;
 }
 
-/// `finish_ns` is stamped, then disappears. Failures (Aborted /
-/// InputRetry / CleanupRetry) are *never* hidden — the operator must
-/// see them.
+/// Keep completed rows visible for five seconds before hiding them.
+/// Aborts and retry failures remain  visible.
 inline constexpr std::chrono::seconds k_completed_row_grace_period{5};
 
-/// Free helper — the auto-hide predicate. Used by both the per-row
-/// loop (skip rendering this row) and the all-hidden collapse loop
-/// (collapse the entire benchmark when every row is past the grace).
+/// Check whether a completed row has passed its display grace period.
+/// Used for individual rows and for collapsing a finished benchmark.
 [[nodiscard]] inline bool row_is_hideable(test_case_row_state state,
                                             std::int64_t finish_ns,
                                             std::int64_t now_ns) noexcept
@@ -14464,8 +13389,7 @@ inline void render_progress_loop(progress_state& progress) noexcept {
         const auto now_ns_value = static_cast<std::int64_t>(
                                        bioseq::instrumentation::clock::now_ns());
 
-        // reservation totals from the scheduler when present, falling
-        // back to benchmark_memory_budget for the system-wide numbers.
+        // Show memory use and reservations from the scheduler's live snapshot.
         rows.push_back(text("bench_framework — live progress") | bold);
         if (progress.scheduler != nullptr) {
             const auto snap = progress.scheduler->capture_live_snapshot();
@@ -14499,8 +13423,8 @@ inline void render_progress_loop(progress_state& progress) noexcept {
                                 | color(Color::Cyan));
                 continue;
             }
-            // past the grace period. Empty test_cases vectors stay as
-            // "all done" too (degenerate but consistent).
+            // Collapse a benchmark once jvery test-case row can be hidden.
+            // Keep the normal header when it has no test cases.
             bool all_hidden = !per->test_cases.empty();
             for (const auto& tc : per->test_cases) {
                 const auto state = classify_test_case(*tc);
@@ -14538,7 +13462,7 @@ inline void render_progress_loop(progress_state& progress) noexcept {
                 const auto elapsed_s    = elapsed_ns / 1'000'000'000;
                 const auto& glyph = glyph_for(state);
 
-                // Headline row, by state.
+                // Show the test case's status and progress.
                 Elements headline;
                 headline.push_back(text(fmt::format("  {} ", glyph.glyph))
                                     | color(glyph.tint));
@@ -14567,11 +13491,11 @@ inline void render_progress_loop(progress_state& progress) noexcept {
                 }
                 rows.push_back(hbox(std::move(headline)));
 
-                // Detail rows for non-running states (failures / idle).
+                // Add details for failures and long waits.
                 auto details = build_detail_rows(*tc, state);
                 for (auto& row : details) rows.push_back(std::move(row));
 
-                // Per-group gauge rows still appear for normal Running.
+                // Show an iteration gauge for each active group while running.
                 if (state == test_case_row_state::running) {
                     for (const auto& group_ptr : tc->groups) {
                         if (!group_ptr->active.load(std::memory_order_relaxed)) continue;
@@ -14603,9 +13527,8 @@ inline void render_progress_loop(progress_state& progress) noexcept {
         Render(screen, document);
         const int current_height = screen.dimy();
 
-        // cursor-up + clear-to-end-of-screen prevents stale rows from
-        // lingering below the new top. ResetPosition(clear=true) on
-        // its own only clears the new screen's footprint.
+        // Clear rows left  below a shorter frame before repainting. Resetting
+        // within the new frame alone would leave old rows on screen
         if (previous_frame_height > current_height && previous_frame_height > 0) {
             std::fputs(fmt::format("\x1b[{}A\x1b[J",
                                     previous_frame_height).c_str(), stderr);
@@ -14622,16 +13545,16 @@ inline void render_progress_loop(progress_state& progress) noexcept {
         render_once();
         std::this_thread::sleep_for(200ms);
     }
-    render_once();   // final repaint with all bars at 100 %
+    render_once();   // Paint the final state, including failures.
     std::fputs("\n", stderr);
     std::fflush(stderr);
 }
 
-// ----------------- run_impl -----------------
+// Run the selected benchmarks and write their report.
 
-/// Lightweight declaration view of one benchmark block. The `--filter`
-/// pre-pass uses tags/over-keys for selection; regression-rule validation
-/// uses the remaining fields as its unfiltered registered universe.
+/// Benchmark declarations needed before execution.
+/// CLI selection uses tags and algorithm names. Regression validation keeps
+/// the full declaration list even when filters remove some work.
 struct benchmark_filter_metadata {
     std::string              benchmark_key;
     std::vector<std::string> tags;               // <key>.tags
@@ -14642,16 +13565,13 @@ struct benchmark_filter_metadata {
     std::vector<std::string> metric_names;        // <key>.matrix.metrics keys
     bool                     fast = false;
     bool                     complete_matrix_acceptance = false;
-    bool                     parsed_ok = false;  // false => treat as no declarations
+    bool                     parsed_ok = false;  // The file or benchmark object could not be read.
 };
 
-/// Best-effort extraction of selection/acceptance metadata for one benchmark.
-/// Never fails the run — on any parse problem returns parsed_ok=false and the
-/// closure's full parse will surface the real schema error later. Reads
-/// `fast`, `tags`, `matrix.over` keys and the presence of an exact
-/// acceptance contract, and the declaration names needed for regression-rule
-/// validation; keep these reads in sync with parse_config_file and
-/// parse_benchmark_block.
+/// Read names and flags needed for CLI selection and regression checks.
+/// parsed_ok becomes true once  the file and benchmark object can be read.
+/// This pass tolerates missing or malformed fields. Full configuration
+/// parsing remains responsible for reporting those errors.
 [[nodiscard]] inline benchmark_filter_metadata extract_filter_metadata(
     const std::string& config_open_path,
     const std::string& benchmark_key) noexcept {
@@ -14718,11 +13638,12 @@ struct benchmark_filter_metadata {
     return meta;
 }
 
-/// Top-level orchestrator. Owns: CLI parsing, TBB arena setup, scheduler,
-/// the progress_state lifetime, the violations + reports maps,
-/// and the final report write + violations print. Returns 0 if every rule
-/// passed and every config parsed; returns 1 otherwise (duplicate
-/// benchmark_key, parse failure, or any rule violation).
+/// Run the CLI-selected benchmarks, collect checks and write a report.
+/// Own, the shared scheduler, progress thread and run state until work ends.
+/// UI mode opens the report viwer instead.
+///
+/// Return zero when execution, blocking comparisons and report validation
+/// succeed. Warnings and nonblocking comparison failures are still reported.
 [[nodiscard]] inline int run_impl(int argc, char** argv,
                                    std::string report_dir,
                                    std::string data_dir,
@@ -14749,13 +13670,9 @@ struct benchmark_filter_metadata {
         return ui_mode_main(report_dir, cli);
     }
 
-    // Determine the index for this run up front (non-UI path only). Reads
-    // existing report_<N>.json files; writes report_<max + 1>.json. First run
-    // on a clean dir → 1. Hoisted here (from the late report-write site) so the
-    // `--debug` file name report_debug_<N>.jsonl matches the eventual
-    // report_<N>.json. `max_existing_report_index` is a read-only noexcept
-    // reader and nothing writes report_<N>.json before the write site below,
-    // so the hoist is behaviour-preserving.
+    // Choose one index for the report and its  raw and debug files before
+    // execution starts. Count raw files left by crashed runs as used indices.
+    // A directory with no run artifacts starts at one.
     const std::filesystem::path report_dir_path{report_dir};
     const std::size_t current_index =
         max_existing_run_artifact_index(report_dir_path).value_or(0) + 1;
@@ -14770,22 +13687,18 @@ struct benchmark_filter_metadata {
                                   : std::thread::hardware_concurrency() - 1u);
     bioseq_log<logging_level::info>("[bench_framework] thread_count={}", thread_count);
 
-    // Capture the run's identity once, up front. Used both by the
-    // report writer (the `meta` block) and surfaced in stderr logs so
-    // the operator can correlate a run with a commit.
+    // Share the same commit and start-time metadata between logs and reports.
     const auto run_meta = capture_run_meta(cli.fast_filter);
     bioseq_log<logging_level::info>("[bench_framework] commit={} dirty={} created={} fast={}",
          run_meta.commit.empty() ? std::string_view{"<no-git>"}
                                  : std::string_view{run_meta.commit},
          run_meta.dirty, run_meta.created, run_meta.fast);
 
-    // Filter benchmarks by --fast. The `--fast` field lives on the per-
-    // benchmark config, not on `erased_benchmark`, so the filter actually
-    // runs inside each closure after parse. `selected` therefore mirrors
-    // `benchmarks` 1:1 — we just take ownership.
+    // Take ownership of the benchmark list. --fast is checked after each
+    // benchmark parses its configuration.
     std::vector<erased_benchmark> selected = std::move(benchmarks);
 
-    // Uniqueness check on benchmark_key.
+    // Benchmark names must be unique across registrations.
     std::set<std::string> seen_keys;
     for (const auto& erased : selected) {
         const auto inserted = seen_keys.insert(erased.benchmark_key);
@@ -14796,11 +13709,9 @@ struct benchmark_filter_metadata {
         }
     }
 
-    // Parse the declaration-only view before any CLI selection can prune a
-    // benchmark. Semantic regression-rule validation must resolve names
-    // against all registered benchmarks, including rows omitted by
-    // --filter/--fast. The full closure parse remains authoritative for
-    // schema/semantic errors.
+    // Read declarations before filtering Regression rules must resolve
+    // names against all registered benchmarks, including work excluded by
+    // --filter or --fast. Full parsing later checks configuration validity.
     std::vector<benchmark_filter_metadata> registered_metadata;
     registered_metadata.reserve(selected.size());
     regression_validation_universe validation_universe;
@@ -14832,20 +13743,19 @@ struct benchmark_filter_metadata {
     std::map<std::string, std::shared_ptr<benchmark_execution_state>> reports;
     regression_rules_by_configuration regression_rules_by_config;
 
-    // ---- --filter / --debug pre-pass: validate, select, prune. ----
-    // Runs single-threaded before progress/scheduler are wired, so a
-    // filtered-out benchmark never appears on the dashboard or in the report.
+    // Validate  and apply CLI filters before starting progress or scheduler
+    // work. Removed benchmarks need no dashboard rows or report entries.
     const filter_specification& f = cli.filter;
     std::vector<validation_diagnostic> filter_diags;
 
-    // (1) CLI-level launch errors — ALWAYS checked, even with no filter.
+    // Report CLI parsing errors even when no valid filter was supplied.
     for (const auto& raw : cli.cli_errors) {
         const auto colon = raw.find(':');
         filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
             std::string{raw.substr(0, colon)}, "cli:--filter",
             std::string{raw.substr(colon + 1)} });
     }
-    // --debug requires a non-empty filter (§4.2).
+    // Debug event logging requires a filter to keep the run targeted.
     if (cli.debug && f.empty()) {
         filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
             "debug_requires_filter", "cli:--debug",
@@ -14853,18 +13763,17 @@ struct benchmark_filter_metadata {
             "instrumenting an entire benchmark sweep. Add e.g. --filter benchmark=<key>." });
     }
 
-    // The case allow-list handed to every closure (nullopt == "all cases").
+    // Pass the algorithm allow-list to eact benchmark. nullopt keeps all cases.
     std::optional<std::set<std::string>> case_allow_list;
     if (f.cases) case_allow_list.emplace(f.cases->begin(), f.cases->end());
 
-    // (2) Selection + warnings — ONLY when a filter is present. `runnable`
-    // defaults to keep-everything; the declaration pre-pass above is also
-    // reused here, so selection itself performs no additional config reads.
+    // Apply selection only when filters are present. Reuse the declarations
+    // already read, and keep all benchmarks by default.
     std::vector<char> runnable(selected.size(), 1);
     if (!f.empty()) {
         const auto& meta = registered_metadata;
 
-        // keep[i] = passes tag+benchmark filter.
+        // Apply tag and benchmark-name filters together.
         std::vector<char> keep(selected.size(), 1);
         for (std::size_t i = 0; i < selected.size(); ++i) {
             if (f.tags) {
@@ -14879,7 +13788,7 @@ struct benchmark_filter_metadata {
                 if (!hit) keep[i] = 0;
             }
         }
-        // runnable[i] = keep[i] AND has >=1 case after the cases filter.
+        // Also require a matching algorithm  when a cases filter is present.
         for (std::size_t i = 0; i < selected.size(); ++i) {
             if (!keep[i]) { runnable[i] = 0; continue; }
             if (!f.cases) { runnable[i] = 1; continue; }
@@ -14887,7 +13796,7 @@ struct benchmark_filter_metadata {
                 [&f](const std::string& c){ return std::find(f.cases->begin(), f.cases->end(), c) != f.cases->end(); });
         }
 
-        // Warnings: unknown tag / benchmark (UNIVERSE scope).
+        // Check tag and benchmark names against all registered declarations.
         if (f.tags) for (const auto& t : *f.tags) {
             const bool known = std::any_of(meta.begin(), meta.end(), [&t](const auto& m){
                 return std::find(m.tags.begin(), m.tags.end(), t) != m.tags.end(); });
@@ -14903,9 +13812,8 @@ struct benchmark_filter_metadata {
                 fmt::format("benchmark key '{}' matches no registered benchmark", k) });
         }
 
-        // An explicitly named benchmark must never turn into a successful
-        // empty report merely because --fast excludes it. Tag-only fast
-        // sweeps retain the standard skip behaviour.
+        // Report a conflict when --fast excludes an explicitly named benchmark.
+        // A tag-only selection may still skip benchmarks marked fast=false.
         if (cli.fast_filter && f.benchmark) {
             for (std::size_t i = 0; i < selected.size(); ++i) {
                 if (!meta[i].parsed_ok || meta[i].fast) continue;
@@ -14924,9 +13832,8 @@ struct benchmark_filter_metadata {
             }
         }
 
-        // A complete-matrix gate may be targeted with an all-row cases list,
-        // but a filter that removes even one declared row invalidates the
-        // acceptance claim and is rejected before any work starts.
+        // Complete-matrix acceptance requires every declared algorithm row.
+        // Reject a cases filter that removes a row from a selected benchmark.
         if (f.cases) {
             for (std::size_t i = 0; i < selected.size(); ++i) {
                 if (!runnable[i] || !meta[i].complete_matrix_acceptance) continue;
@@ -14948,7 +13855,7 @@ struct benchmark_filter_metadata {
                 }
             }
         }
-        // Warning: unknown case (KEPT-subset scope, per the prompt).
+        // Check case names within benchmarks kept by, the tag and name filters.
         if (f.cases) for (const auto& c : *f.cases) {
             bool known = false;
             for (std::size_t i = 0; i < selected.size() && !known; ++i)
@@ -14959,15 +13866,15 @@ struct benchmark_filter_metadata {
                 fmt::format("case '{}' is an over-key of no tag/benchmark-selected benchmark", c) });
         }
 
-        // Hard error: nothing left to run.
+        // A filter selecting no runnable work is an error.
         if (std::count(runnable.begin(), runnable.end(), 1) == 0)
             filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
                 "filter_selected_nothing", "cli:--filter",
                 "the supplied --filter matched no runnable (benchmark, case) combination" });
     }
 
-    // (3) Drain + abort. Compute had_error BEFORE the move (a moved-from
-    //     vector is empty, so checking it post-drain would always pass).
+    // Remember whether selection failed before moving its diagnostics  into
+    // the shared list.
     const bool filter_had_error = std::any_of(filter_diags.begin(), filter_diags.end(),
         [](const auto& d){ return d.severity == validation_diagnostic::diagnostic_severity::error; });
     {
@@ -14976,10 +13883,10 @@ struct benchmark_filter_metadata {
     }
     if (filter_had_error) {
         report_diagnostics(std::span<const validation_diagnostic>{diagnostics}, "filter");
-        return 1;     // early exit BEFORE spawning progress thread / scheduler work
+        return 1;     // Stop before progress and scheduler work starts.
     }
 
-    // (4) Prune `selected` to the runnable set (no-op when no filter).
+    // Keep only the selected benchmarks.
     if (!f.empty()) {
         std::vector<erased_benchmark> pruned;
         for (std::size_t i = 0; i < selected.size(); ++i)
@@ -14987,9 +13894,8 @@ struct benchmark_filter_metadata {
         selected = std::move(pruned);
     }
 
-    // ---- Construct the --debug sink (only when requested), before the
-    //      progress thread. A non-owning pointer is threaded into each
-    //      benchmark_context (§3.7). ----
+    // Own the debug event stream for the run Each benchmark context borrows
+    // its pointer while execution is active.
     std::unique_ptr<debug_report_sink> debug_sink;
     debug_report_sink* debug_sink_ptr = nullptr;
     if (cli.debug) {
@@ -15025,7 +13931,7 @@ struct benchmark_filter_metadata {
         raw_evidence_sink_ptr = raw_evidence_sink.get();
     }
 
-    // Process-wide memory budget shared by every benchmark closure.
+    // All benchmarks in this run share one memory budget.
     benchmark_memory_budget memory_budget(cli.memory_buffer_pct);
     {
         const auto sys = memory_budget.current_system_snapshot();
@@ -15044,9 +13950,8 @@ struct benchmark_filter_metadata {
         }
     }
 
-    // Process-wide scheduler owns batch admission and the TBB
-    // task pool that runs the bodies. Constructed BEFORE the progress
-    // thread so the renderer can read `scheduler.capture_live_snapshot()`.
+    // Create the shared batch scheduler before the progress thread so the
+    // kashboard can read its memory and queue state.
     batch_scheduler scheduler(memory_budget, bench_arena);
 
     progress_state progress;
@@ -15062,12 +13967,9 @@ struct benchmark_filter_metadata {
 
     std::thread progress_thread{[&progress] { render_progress_loop(progress); }};
 
-    // Two-phase driver protocol. Preparation parses/configures and enqueues
-    // every selected benchmark from the caller thread without waiting. Only
-    // after all work is visible to the shared scheduler do caller-thread
-    // finalizers join and publish results. This retains cross-benchmark
-    // admission while preventing a TBB driver from blocking a worker that a
-    // nested process-wide global_control may leave as the sole worker slot.
+    // Prepare and enqueue every benchmark before joining any of them.
+    // Joining on the caller's thread leaves TBB workers available for batch
+    // bodies, even  when a nested concurrency limit allows only one worker.
     std::vector<std::unique_ptr<benchmark_context>> benchmark_contexts;
     benchmark_contexts.reserve(selected.size());
     std::vector<std::function<void()>> benchmark_finalizers;
@@ -15103,12 +14005,9 @@ struct benchmark_filter_metadata {
         finalize_benchmark();
     }
 
-    // Defence-in-depth: every finalizer drains its own batches via
-    // `wait_for_benchmark`. This explicit, non-noexcept global join
-    // is also the ownership boundary for exceptions captured from TBB worker
-    // bodies. Keep the exception until after the progress thread joins, then
-    // turn it into a blocking diagnostic so completed samples still produce a
-    // useful partial report instead of terminating in ~batch_scheduler().
+    // Join the scheduler and collect worker exceptions. Stop the progress
+    // thread before reporting the first failure as a blocking diagnostic.
+    // Completed samples can still be written in a partial report.
     std::exception_ptr worker_exception;
     try {
         scheduler.wait_for_completion();
@@ -15147,9 +14046,8 @@ struct benchmark_filter_metadata {
         }
     }
 
-    // Cross-config validation of regression rules. Runs serially after
-    // every closure has registered its state (so we can resolve
-    // `benchmarks` membership and metric existence in one place).
+    // Validate registered regression rules against the full declaration list,
+    // including benchmarks excluded from this run.
     {
         auto regression_validation_diags = semantic_validate_regression_rules(
             regression_rules_by_config, validation_universe);
@@ -15175,26 +14073,20 @@ struct benchmark_filter_metadata {
         }
     }
 
-    // Print all collected validation diagnostics first (config + semantic +
-    // post-run + regression-rule). Errors here force a non-zero exit code
-    // regardless of whether any rules failed.
+    // Report collected configuration and execution errors. Any error makes
+    // the run fail even when its comparison rules pass.
     const bool diagnostics_had_errors = report_diagnostics(
         std::span<const validation_diagnostic>{diagnostics}, "configuration");
 
-    // `report_dir_path` / `current_index` were computed up front (hoisted so
-    // the --debug file name report_debug_<N>.jsonl matches report_<N>.json).
+    // Use the run index already  assigned to its debug and raw files.
     bioseq_log<logging_level::info>("[bench_framework] writing run as report_{}.json", current_index);
 
-    // Single shared parser-cache for every consumer that wants to walk
-    // historical reports (regressions + sanity warnings). Each
-    // `report_<N>.json` is parsed at most once per run.
+    // Share parsed history between regression and sanity checks.
     historical_report_cache history_cache{report_dir_path};
 
-    // Evaluate regression rules against the newest eligible historical
-    // candidate (walking backward over ineligible reports), then reuse that
-    // exact predicate for `regression_since`. The evaluator never writes
-    // anything; we collect entries and flush them to the report below
-    // alongside any diagnostics it produced.
+    // Compare against the newest usable historical result. Use the same
+    // eligibility checks when finding the regression's earlier references.
+    // Collect findings for the report and print evaluation diageostics
     std::vector<validation_diagnostic> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
@@ -15218,16 +14110,11 @@ struct benchmark_filter_metadata {
         && !diagnostics_had_errors
         && !regression_eval_had_errors;
     report_metadata final_run_meta = run_meta;
-    // Fail closed on disk. The report is first persisted with a false seal,
-    // self-validated, and only then rewritten with a true seal when every
-    // evaluation gate above passed. A crash or write/schema failure can
-    // therefore never leave an authoritative failed-run baseline behind.
+    // Write history_eligible=false first. Only a validated report from a run
+    // with no blocking failures can later replace it with a true value.
     final_run_meta.history_eligible = false;
 
-    // Sanity warnings: hardcoded checks against the just-finished run's
-    // sample arrays plus history. Non-blocking (do not affect the exit
-    // code), but always surface to stderr + the report so a human
-    // notices broken instrumentation.
+    // Report suspicious constant metrics without changing the exit code.
     auto sanity_warnings = evaluate_sanity_warnings(
         reports, run_meta, current_index, history_cache);
 
@@ -15238,9 +14125,8 @@ struct benchmark_filter_metadata {
         sanity_warnings, raw_evidence_manifest);
     bool report_write_failed = report_path.empty();
 
-    // Sanity-check our own report against the output schema. Failures here
-    // mean a bug in the writer, not user error. The persisted seal is still
-    // false at this point, so such a report is never historical authority.
+    // Validate the report  before allowing it to serve as, history.
+    // history_eligible remains false while this check runs.
     bool report_schema_failed = false;
     if (!report_write_failed) {
         const auto report_text = slurp_file(std::filesystem::path{report_path});
@@ -15257,11 +14143,9 @@ struct benchmark_filter_metadata {
         }
     }
 
-    // Promotion changes only one boolean field, but it must not truncate the
-    // authoritative false-seal report in place. Write and validate a sibling
-    // temporary file, then use POSIX rename as the atomic commit point. Any
-    // write, close, validation, or rename failure leaves the false report
-    // untouched and therefore ineligible.
+    // Write the eligible version to a temporary file and validate it before
+    // renaming it over the report. A failed write or validation leaves the
+    // existing history_eligible=false report in place.
     if (!report_write_failed
         && !report_schema_failed
         && evaluation_history_eligible) {
@@ -15319,8 +14203,8 @@ struct benchmark_filter_metadata {
         bioseq_log<logging_level::info>("[bench_framework] wrote {}", report_path);
     }
 
-    // --debug: final event. `report_path` is the absolute report path, or ""
-    // (→ JSON null) if the write failed. Last line of the jsonl stream.
+    // Finish the debug stream with the report path, or null if no report
+    // was written. This path can still name a report that failed validation.
     if (debug_sink_ptr != nullptr) {
         debug_sink_ptr->emit_execution_finished(report_path);
     }
@@ -15329,10 +14213,8 @@ struct benchmark_filter_metadata {
     print_regressions(regressions);
     print_sanity_warnings(sanity_warnings);
 
-    // Sanity warnings are non-blocking: their presence does NOT
-    // contribute to the exit code (the user spec calls them out as
-    // "not blocking, however they should be printed to stderr at the
-    // end"). The summary above is the operator-visible surface.
+    // Sanity warnings and nonblocking comparisons remain visible in the
+    // summaries above without making the run fail.
     return (!blocking_rule_violation
             && !blocking_regression
             && !diagnostics_had_errors
@@ -15343,7 +14225,7 @@ struct benchmark_filter_metadata {
 
 }  // namespace detail
 
-// ----------------- create_benchmark template body -----------------
+// Construct the benchmark callbacks used by the driver.
 
 namespace detail {
 
@@ -15397,13 +14279,9 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         state.raw_samples_enabled = static_cast<bool>(captured_raw_serializer);
         state.driver_benchmark_index = context.benchmark_index;
 
-        // Always publish a `setup_done` signal to the renderer on the
-        // way out, even from early-return paths. Otherwise an aborted
-        // benchmark would leave the dashboard's per-benchmark slot
-        // stuck on "header only, no rows" until `progress.running`
-        // flips false. The renderer treats `setup_done == true` plus
-        // an empty `test_cases` as "this benchmark is silent" and
-        // simply omits the inner walk.
+        // Publish  setup completion even when configuration checks return early.
+        // The renderer can then treat the benchmark's progress structure as
+        // rady, including an empty structure for a skipped benchmark.
         struct publish_on_exit {
             detail::progress_state::per_benchmark_state* slot = nullptr;
             ~publish_on_exit() noexcept {
@@ -15418,8 +14296,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                 ? context.progress->per_benchmark[context.benchmark_index].get()
                 : nullptr};
 
-        // 1. Parse the config file. The outcome carries schema diagnostics
-        //    plus structural problems found during the simdjson walk.
+        // Read the configuration and collect schema and parsing errors.
         auto parse_outcome = detail::parse_config_file(
             erased_config_path, erased_config_open_path,
             erased_benchmark_key, state);
@@ -15431,10 +14308,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             return no_op_finalizer();
         }
 
-        // 1a. Register regression rules in the global registry. The first
-        //     benchmark to load a given config_path inserts; subsequent
-        //     benchmarks sharing the file see the entry and discard their
-        //     parsed copy.
+        // Register one set of regression rules per configuration file.
+        // Benchmarks sharing the file reuse the first registered copy.
         if (context.regression_rules_mu != nullptr
             && context.regression_rules_by_config != nullptr) {
             std::lock_guard<std::mutex> guard(*context.regression_rules_mu);
@@ -15445,8 +14320,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             }
         }
 
-        // 2. Semantic validation: cross-references, type-correctness in
-        //    rules, duplicate rule names, always-pass warnings, etc.
+        // Check configuration references, parameter types and rule settings.
         auto semantic_diagnostics = detail::semantic_validate_config(state);
         const bool semantic_failed = std::any_of(
             semantic_diagnostics.begin(), semantic_diagnostics.end(),
@@ -15460,8 +14334,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             return no_op_finalizer();
         }
 
-        // 3. --fast filter: skip if the user requested fast mode but this
-        //    benchmark is not flagged fast. Without --fast we run everything.
+        // In fast mode, skip benchmarks that declare fast=false.
         if (context.fast_filter && !state.config.fast) {
             bioseq_log<logging_level::info>("[bench_framework] skipping '{}' under --fast (fast=false)",
                  erased_benchmark_key);
@@ -15475,15 +14348,15 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                  erased_benchmark_key);
             return no_op_finalizer();
         }
-        // Apply `--filter cases=`: keep only allow-listed over-keys (algorithm names).
+        // Keep algorithm tuples named by --filter cases=.
         if (context.filter_cases != nullptr) {
             std::erase_if(state.execution_tuples,
                 [&context](const detail::execution_tuple& t){
                     return !context.filter_cases->contains(t.algorithm_name);
                 });
             if (state.execution_tuples.empty()) {
-                // Benign: the pre-pass already proved >=1 case matches, but a
-                // config edited between pre-pass and parse could differ. Skip.
+                // The configuration  may have changed since selection Skip if the
+                // selected algorithms are no longer present.
                 bioseq_log<logging_level::info>("[bench_framework] '{}' has no cases matching --filter cases=; skipping",
                                 erased_benchmark_key);
                 return no_op_finalizer();
@@ -15495,12 +14368,10 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
         }
         state.cells = detail::build_cells(state);
 
-        // runs at most one tuple at a time per (test_case, group), so
-        // there is no Input contention left to protect against.
+        // Each group runs one tuple at a time against its shared input.
 
-        // Populate the progress dashboard's structure for this benchmark.
-        // One progress_test_case per test_case in declared order, one
-        // progress_group per group of that test_case.
+        // Create progress rows in test-case order, with a child row for each
+        // iteration group.
         if (context.progress != nullptr
             && context.benchmark_index < context.progress->per_benchmark.size()) {
             auto& per = *context.progress->per_benchmark[context.benchmark_index];
@@ -15509,9 +14380,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             for (std::size_t tc_index = 0; tc_index < state.test_cases.size(); ++tc_index) {
                 auto tc = std::make_unique<detail::progress_test_case>();
                 tc->test_case_name = state.test_cases[tc_index].name;
-                // Walk every cell that targets this test_case to gather
-                // group count + per-group iteration totals + total tuple
-                // count.
+                // Count this test case's cells and each group's planned iterations.
                 std::size_t max_group_count = 0;
                 std::map<std::size_t, std::uint64_t> per_group_iters;
                 std::uint64_t tuple_total = 0;
@@ -15524,10 +14393,8 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                 }
                 tc->tuple_total.store(tuple_total, std::memory_order_relaxed);
                 if (tuple_total == 0) {
-                    // Test case has no batches at all (zero iterations,
-                    // or undeclared in matrix.for). Stamp finish_ns
-                    // immediately so the renderer treats the row as
-                    // collapsed instead of showing "Running... 0s".
+                    // Mark test cases with no cells as done immediately. They can then
+                    // disappear after the normal display grace period.
                     tc->finish_ns.store(bioseq::instrumentation::clock::now_ns(),
                                         std::memory_order_relaxed);
                 }
@@ -15541,23 +14408,15 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
                 }
                 per.test_cases.push_back(std::move(tc));
             }
-            // `progress_*` helpers (and the renderer) start observing
-            // tuple/group counters as `prepare_typed_benchmark` progresses.
-            // publish_on_exit still fires on every closure exit and is
-            // setup_done false until the closure returned, so every
-            // progress_tick_* call returned early via the
-            // `progress_test_case_for` setup_done check, leaving every
-            // gauge frozen at 0/N for the entire run.)
+            // Publish the progress structure before enqueueing work. Workers must
+            // see setup_done so their progress updates are recorded.
             per.setup_done.store(true, std::memory_order_release);
         }
 
-        // Bench-lock + serial-concurrency exclusion are enforced by the
-        // batch_scheduler's admission predicates. Preparation enqueues this
-        // benchmark and returns a caller-thread finalizer; no oneTBB driver
-        // worker blocks while the scheduler still needs workers for bodies.
+        // The scheduler enforces exclusive  and, serial execution. Preparation
+        // enqueues work and returns a finalizer for the caller to jodn later.
 
-        // --debug: BENCHMARK_STARTED — emitted single-threaded before any
-        // CASE_* event for this benchmark (only when it actually has cells).
+        // Emit BENCHMARK_STARTED before any case event for a benchmark with work.
         if (context.debug_sink != nullptr && !state.cells.empty()) {
             context.debug_sink->emit_benchmark_started(erased_benchmark_key);
         }
@@ -15583,13 +14442,13 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
             auto& final_state = *state_holder;
             auto& final_context = *context_ptr;
 
-            // 4. Post-run validation: missing-evaluation-metric check.
+            // Check collected metrics and complete-matrix requirements.
             auto post_run_diagnostics =
                 detail::semantic_validate_post_run(final_state);
             detail::drain_diagnostics_to_context(
                 final_context, post_run_diagnostics);
 
-            // 5. Evaluate rules and stash this benchmark's report data.
+            // Evaluate comparison rules and save the results for report writing.
             std::vector<detail::violation> local_violations;
             detail::evaluate_rules(
                 final_state, local_violations,

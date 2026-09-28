@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/bucket_codec.cppm
- * @brief Direct minimizer bucket wire records and serialization.
+ * @brief Defines direct minimizer bucket records and their, saved binary format.
  */
 export module bioseq.indexing.minimizer_sequence.bucket_codec;
 
@@ -17,11 +17,9 @@ using bioseq::minimizers::minimizer_sketch_backend;
 using bioseq::storage::sequence_size_t;
 
 /**
- * @brief Records scalar collection work for one direct-bucket build.
- *
- * Every collection leaf records the symbols and packed bytes actually handed
- * to `collect_minimizers_view`. Parallel builds merge worker-local instances
- * after the join in range order.
+ * @brief Counts the scalar sketching work used to build direct inimizer buckets.
+ * Each collection call records its input size and packed storage format.
+ * Worker results can be merged, with mismatched formats and overflow flagged.
  */
 struct direct_minimizer_bucket_build_stats {
     minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
@@ -36,12 +34,7 @@ struct direct_minimizer_bucket_build_stats {
     bool aggregation_mismatch = false;
     bool saturated = false;
 
-    /**
-     * @brief Adds a counter increment with saturation reporting.
-     * @param destination Counter to update
-     * @param increment Increment to add
-     * @param saturated_flag Set when the addition overflows
-     */
+    /** Add to a counter, stopping  at its maximum and setting saturated_flag on overflow. */
     static constexpr void add(
             std::uint64_t& destination,
             std::uint64_t increment,
@@ -56,10 +49,8 @@ struct direct_minimizer_bucket_build_stats {
     }
 
     /**
-     * @brief Binds the receipt to one backend and packed storage shape.
-     * @param backend Selected sketch backend
-     * @param storage_unit_bytes Bytes per packed storage unit
-     * @param letters_per_unit Logical symbols per storage unit
+     * Record the backend and packed storage format on first use. Flag zero widths
+     * or later calls that disagree with the recorded format.
      */
     constexpr void bind_backend(
             minimizer_sketch_backend backend,
@@ -81,13 +72,7 @@ struct direct_minimizer_bucket_build_stats {
             || letters_per_storage_unit != letters_per_unit;
     }
 
-    /**
-     * @brief Records one scalar collection call.
-     * @param symbols Logical symbols consumed
-     * @param storage_units Packed storage units consumed
-     * @param storage_unit_bytes Bytes per storage unit
-     * @param letters_per_unit Logical symbols per storage unit
-     */
+    /** Record one scalar collection call and add its symbol, storage-unit and byte counts. */
     constexpr void record_scalar_collection(
             std::uint64_t symbols,
             std::uint64_t storage_units,
@@ -114,10 +99,7 @@ struct direct_minimizer_bucket_build_stats {
         saturated = overflow;
     }
 
-    /**
-     * @brief Merges another worker-local receipt.
-     * @param other Receipt to merge
-     */
+    /** Merge a worker's counts, checking that its backend and storage format agree. */
     constexpr void merge(
             const direct_minimizer_bucket_build_stats& other) noexcept {
         const bool other_has_counters = other.scalar_collection_calls != 0
@@ -148,15 +130,15 @@ struct direct_minimizer_bucket_build_stats {
         saturated = overflow;
     }
 
-    /** @brief Records successful completion of the direct-bucket build. */
+    /** Count one completed direct-bucket build */
     constexpr void record_completed_build() noexcept {
         add(completed_builds, 1u, saturated);
     }
 
     /**
-     * @brief Validates backend binding and operation-originated counters.
-     * @param require_nonempty_work Whether the build must have consumed input
-     * @return `true` when the receipt is internally consistent
+     * Check that the counters describe one completed scalar build with a valid
+     * storage format and consistent  input sizes. When require_nonempty_work is
+     * true, require positive input and no more collection calls than input symbols.
      */
     [[nodiscard]] constexpr bool is_internally_consistent(
             bool require_nonempty_work = true) const noexcept {
@@ -192,31 +174,30 @@ struct direct_minimizer_bucket_directory_entry {
     std::uint64_t lo_kmer;
     /// @brief Inclusive largest hash in the bucket.
     std::uint64_t hi_kmer;
-    /// @brief Persisted storage sub-key of the bucket.
+    /// Storage sub-key of the saved bucket.
     std::int64_t sub_key;
 };
 static_assert(sizeof(direct_minimizer_bucket_directory_entry) == 24 &&
               alignof(direct_minimizer_bucket_directory_entry) == 8);
 
 /**
- * @brief Fixed persisted directory header followed by sorted bucket entries.
- *
- * Field widths, offsets, magic, and layout revision are serialization ABI.
+ * @brief Header of a saved direct-bucket directory, followed by sorted bucket entries.
+ * Its field widths and offsets are part of the binary format.
  */
 struct direct_minimizer_bucket_directory {
-    /// @brief Magic word identifying the direct-bucket directory wire image.
+    /// Magic value identifying a direct-bucket directpry.
     static constexpr std::uint32_t k_direct_minimizer_bucket_magic = 0xB1000002u;
-    /// @brief Current direct-bucket directory layout revision.
+    /// Version of the saved directory layout.
     static constexpr std::uint32_t k_direct_minimizer_bucket_layout_revision = 2u;
-    /// @brief Flag recording generation through the Vulkan backend.
+    /// Flag indicating that Vulkan generated the buckets.
     static constexpr std::uint32_t k_gpu_built = 1u << 0u;
-    /// @brief Persisted magic word.
+    /// Directory format identifier.
     std::uint32_t magic = k_direct_minimizer_bucket_magic;
-    /// @brief Persisted layout revision.
+    /// Saved  directory layout version.
     std::uint32_t layout_revision = k_direct_minimizer_bucket_layout_revision;
-    /// @brief Persisted generation flags.
+    /// Flags describing how the buckets were generated.
     std::uint32_t flags = 0;
-    /// @brief Reserved field that remains zero in revision 2.
+    /// Reserved field written as zero in version 2.
     std::uint32_t reserved = 0;
     /// @brief Number of directory entries following this header.
     std::uint64_t num_buckets = 0;
@@ -241,25 +222,23 @@ static_assert(__builtin_offsetof(direct_minimizer_bucket_directory_entry, sub_ke
               "dir entry field offsets pinned");
 
 /**
- * @brief Owning aligned directory view supporting binary-search lookup.
- *
- * The source blob is copied so subsequent storage reads cannot invalidate the
- * decoded header or entry pointers.
+ * @brief Owns a copied directory and finds buckets by hash range.
+ * Copying the bytes keeps the header and entry pointers valid when storage
+ * advances to another row.
  */
 struct direct_minimizer_bucket_directory_view {
-    /// @brief Aligned storage retaining the copied wire bytes.
+    /// Aligned buffer containing the copied, directory bytes.
     std::vector<std::int64_t> owned;
-    /// @brief Decoded header within `owned`.
+    /// Header stored inside owned.
     const direct_minimizer_bucket_directory* hdr = nullptr;
-    /// @brief First decoded entry within `owned`.
+    /// First bucket entry stored inside owned.
     const direct_minimizer_bucket_directory_entry* entries = nullptr;
     /// @brief Number of decoded entries.
     std::size_t n = 0;
 
     /**
-     * @brief Copies and validates one persisted directory image.
-     * @param blob Persisted bytes
-     * @param bytes Persisted byte count
+     * Copy a saved directory and check its magic, version, byte size and bucket order.
+     * Report malformed  input through index_corruption_panic().
      */
     direct_minimizer_bucket_directory_view(const char* blob, std::size_t bytes) {
         if (bytes < sizeof(direct_minimizer_bucket_directory)) {
@@ -288,11 +267,7 @@ struct direct_minimizer_bucket_directory_view {
             }
         }
     }
-    /**
-     * @brief Finds the bucket covering one minimizer hash.
-     * @param kmer Minimizer hash
-     * @return Matching directory entry or `nullptr`
-     */
+    /** Find the bucket whose inclusive hash range contains kmer, or return nullptr. */
     [[nodiscard]] const direct_minimizer_bucket_directory_entry* find(std::uint64_t kmer) const {
         std::size_t lo = 0, hi = n;
         while (lo < hi) {
@@ -308,10 +283,7 @@ struct direct_minimizer_bucket_directory_view {
         }
         return nullptr;
     }
-    /**
-     * @brief Reports whether the persisted directory records Vulkan generation.
-     * @return `true` when the Vulkan flag is set
-     */
+    /** Return whether the saved directory marks its buckets as Vulkan-generated. */
     [[nodiscard]] bool is_gpu_built() const noexcept {
         return hdr != nullptr
             && (hdr->flags & direct_minimizer_bucket_directory::k_gpu_built) != 0u;
@@ -323,15 +295,16 @@ namespace detail {
 using encoded_bucket_header = minimizer_hashmap_fragment_index::encoded_header;
 using encoded_bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
 
-constexpr std::size_t k_encoded_header_bytes = minimizer_hashmap_fragment_index::k_encoded_header_bytes;     // 32
-constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index::k_encoded_bucket_bytes;     // 16
+constexpr std::size_t k_encoded_header_bytes = minimizer_hashmap_fragment_index::k_encoded_header_bytes;     // Header bytes.
+constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index::k_encoded_bucket_bytes;     // Bytes per hash record
 
 /**
- * @brief Serializes a direct-bucket header, records, and flat positions.
- * @param out Destination buffer sized for the complete image
- * @param target_len_val Target length stored in the header
- * @param bkts Bucket records
- * @param poss Flat encoded positions
+ * Write the header, hash records and encoded positions into one bucket image.
+ * The caller supplies a buffer large enough for all three parts.
+ * @param out Destination buffer.
+ * @param target_len_val Target length stored in the header.
+ * @param bkts Hash records with offsets into poss.
+ * @param poss Encoded positions.
  */
 inline void serialize_direct_minimizer_bucket_image(char* out,
                                                     sequence_size_t target_len_val,

@@ -23,7 +23,7 @@ export namespace bioseq::common {
 inline constexpr std::uint64_t k_fnv1a_64_standard_offset_basis =
     14695981039346656037ull;
 
-/// @brief Alternate 64-bit FNV-1a offset basis used by identities that define this exact seed.
+/// @brief Alternate FNV-1a seed kept for hashes that already use this value.
 inline constexpr std::uint64_t k_fnv1a_64_alternate_offset_basis =
     1469598103934665603ull;
 
@@ -47,11 +47,10 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
     0x94d049bb133111ebull;
 
 /**
- * @brief Extends a 64-bit FNV-1a hash with a byte span.
- *
- * @param[in] hash Initial or previously accumulated hash value.
- * @param[in] bytes Bytes appended in iteration order.
- * @return Hash after consuming every byte.
+ * @brief Continues an FNV-1a hash with the supplied bytes.
+ * @param[in] hash Initial seed or previous hash value.
+ * @param[in] bytes Bytes to append, in order.
+ * @return Updated hash.
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t extend_fnv1a_64(
     std::uint64_t hash,
@@ -64,11 +63,12 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 }
 
 /**
- * @brief Extends a 64-bit FNV-1a hash with a character string's bytes.
+ * @brief Continues an FNV-1a hash with a string's bytes.
  *
- * @param[in] hash Initial or previously accumulated hash value.
- * @param[in] bytes Characters appended without terminator or framing bytes.
- * @return Hash after consuming every character byte.
+ * No terminator or length is added.
+ * @param[in] hash Initial seed or previous hash value.
+ * @param[in] bytes String bytes to append.
+ * @return Updated hash.
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t extend_fnv1a_64(
     std::uint64_t hash,
@@ -79,11 +79,10 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 }
 
 /**
- * @brief Computes 64-bit FNV-1a over a byte span.
- *
- * @param[in] bytes Bytes hashed in iteration order.
- * @param[in] offset_basis Initial hash value defined by the owning identity contract.
- * @return FNV-1a hash of the supplied bytes.
+ * @brief Computes an FNV-1a hash of the supplied bytes.
+ * @param[in] bytes Bytes to hash, in  order.
+ * @param[in] offset_basis Initial seed, using the standard FNV-1a value by default.
+ * @return 64-bit hash.
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t fnv1a_64(
     std::span<const std::byte> bytes,
@@ -92,11 +91,12 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 }
 
 /**
- * @brief Computes 64-bit FNV-1a over a character string's bytes.
+ * @brief Computes an FNV-1a hash of a string's bytes.
  *
- * @param[in] bytes Characters hashed without a terminator or framing bytes.
- * @param[in] offset_basis Initial hash value defined by the owning identity contract.
- * @return FNV-1a hash of the supplied characters.
+ * No terminator or length is added.
+ * @param[in] bytes String to hash.
+ * @param[in] offset_basis Initial seed, using the standard FNV-1a value by default.
+ * @return 64-bit hash.
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t fnv1a_64(
     std::string_view bytes,
@@ -132,13 +132,10 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 }
 
 /**
- * @brief Applies the SplitMix64 mixing permutation to one input word.
+ * @brief Maps a 64-bit value through SplitMix64.
  *
- * The increment is part of this stateless operation, matching the SplitMix64
- * word mapping used by existing identity and deterministic-data producers.
- *
- * @param[in] value Input word.
- * @return Deterministically mixed 64-bit word.
+ * Adds the SplitMix64 increment before mixing. This function has no stored
+ * state, so the same input alays produces the same output
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t splitmix64(
     std::uint64_t value) noexcept {
@@ -151,10 +148,10 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 }
 
 /**
- * @brief Stateful generator for the canonical SplitMix64 word sequence.
+ * @brief Generates a repeatable sequence of 64-bit SplitMix64 values.
  *
- * The object owns only its current 64-bit state and is neither synchronized
- * nor shared implicitly. Unsigned wraparound is part of the sequence.
+ * The seed determines the sequence. Each  call advances the stored state
+ * with unsigned wraparound. Concurrent calls need external synchronization.
  *
  * @code{.cpp}
  * bioseq::common::splitmix64_generator generator{42u};
@@ -190,11 +187,11 @@ public:
 using sha256_digest = std::array<std::byte, 32>;
 
 /**
- * @brief Incrementally computes a SHA-256 digest over unframed bytes.
+ * @brief Computes SHA-256 as bytes arrive in one or more calls.
  *
- * The object owns its compression state and an incomplete 64-byte block. It
- * is not synchronized. Calling @ref finalize does not mutate the object, so a
- * caller may obtain an intermediate digest and continue appending bytes.
+ * The hasher keeps unfinished input in a 64-byte buffer. finalize() works
+ * on a copy, so hashing can continue after reading a digest. Concurrent
+ * updates need external synchronization.
  *
  * @code{.cpp}
  * bioseq::common::sha256_hasher hasher;
@@ -359,12 +356,10 @@ private:
 
 public:
     /**
-     * @brief Appends a contiguous byte span to the running digest.
+     * @brief Appends bytes to the, hash without adding a length or separator.
      *
-     * Complete 64-byte blocks are compressed directly from the caller's span.
-     * Only the incomplete suffix is copied into object storage.
-     *
-     * @param[in] bytes Bytes appended without framing or length prefixes.
+     * Fills any pending block first, then processes complete 64-byte blocks
+     * directly from the input. Keeps the remaining bytes for the next call.
      */
     void update(std::span<const std::byte> bytes) noexcept {
         if (bytes.empty()) {

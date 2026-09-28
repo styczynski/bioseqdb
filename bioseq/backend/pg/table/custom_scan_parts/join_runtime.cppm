@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates base-scan parameter binding, admission, and tuple production.
+ * @brief Exposes the base-scan callbacks, parameter binding, and expression helpers.
  */
 export module bioseq.postgres.table:custom_scan_join_runtime;
 

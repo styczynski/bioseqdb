@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/organelle_paths.cppm
- * @brief NCBI organelle endpoint fragments.
+ * @brief NCBI organelle download and  report requests.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:organelle_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Organelle accession download path entries. */
+/** @brief Organelle data packages requested by nucleotide accession. */
 inline constexpr std::string_view organelle_download_paths =
     R"bioseq_openapi(  /organelle/accession/{accessions}/download:
     get:
@@ -111,7 +111,7 @@ inline constexpr std::string_view organelle_download_paths =
           default: ncbi_dataset.zip
 )bioseq_openapi";
 
-/** @brief Organelle dataset-report path entries. */
+/** @brief Organelle reports requested by accession or taxon. */
 inline constexpr std::string_view organelle_report_paths =
     R"bioseq_openapi(  /organelle/accessions/{accessions}/dataset_report:
     get:

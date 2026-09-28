@@ -1,9 +1,9 @@
 /**
  * @file sql_catalog_entities.cppm
- * @brief Provides stateless typed handles for PostgreSQL catalog entities.
+ * @brief Look up SQL objects using names and types known at compile time.
  *
- * Generated owner facets instantiate these handles from collected SQL
- * declarations. Ordinary consumers use only those generated variables.
+ * Generated modules create these handles from SQL declarations. Other modules
+ * use the generated handles to find the installed objects.
  */
 module;
 
@@ -44,22 +44,22 @@ inline thread_local std::optional<std::int64_t>
     lookup_barrier_key;
 
 /**
- * Arm a one-shot, backend-local advisory-lock barrier after relation-name
- * lookup and before the validating pg_class syscache pin.
+ * Pause the next lookup on an advisory lock after resolving the relation  name
+ * and before checking its pg_class row. Tests can change the object in between.
  */
 inline void arm_lookup_barrier(std::int64_t key) noexcept {
     lookup_barrier_key = key;
 }
 
-/** @brief Disarms the backend-local lookup barrier without blocking. */
+/** Disable the pending lookup pause without waiting on the lock. */
 inline void disarm_lookup_barrier() noexcept {
     lookup_barrier_key.reset();
 }
 
 /**
- * Block on the armed advisory lock, then immediately release the lock acquired
- * by this backend. The controller session holds the same lock while changing
- * the catalog object and observes this backend waiting through pg_locks.
+ * Wait for the armed advisory lock and release it immediately after acquisition.
+ * A test session holds the lock while changing the catalog object and uses
+ * pg_locks to check that this backend has reached the pause.
  */
 inline void pass_lookup_barrier() {
     if (!lookup_barrier_key.has_value()) {
@@ -80,7 +80,7 @@ inline void pass_lookup_barrier() {
 }  // namespace catalog_entity_test_support
 #endif
 
-/** Select whether an absent catalog entity returns an empty result or ERRORs. */
+/** Choose an error or an empty result when a catalog object is missing. */
 enum class catalog_missing_policy : std::uint8_t {
     error,
     return_invalid,
@@ -92,7 +92,7 @@ enum class sql_schema_binding : std::uint8_t {
     extension,
 };
 
-/** Structural, lifetime-owning catalog identifier usable as a template value. */
+/** Catalog name stored as a character array so it can be a temslate  argument. */
 template<std::size_t p_extent>
 struct fixed_catalog_name final {
     std::array<char, p_extent> bytes{};
@@ -109,7 +109,7 @@ struct fixed_catalog_name final {
         return {bytes.data(), p_extent - 1};
     }
 
-    /** @return Whether the structural value is a nonempty C string. */
+    /** @return Whether the array has room for a name and ends with a null byte. */
     [[nodiscard]] consteval bool valid() const noexcept {
         return p_extent > 1 && bytes[p_extent - 1] == '\0';
     }
@@ -119,8 +119,8 @@ static_assert(std::is_trivially_copyable_v<fixed_catalog_name<2>>);
 static_assert(std::is_standard_layout_v<fixed_catalog_name<2>>);
 
 /**
- * Stateless resolver for a pg_class entity with an exact name, schema, and
- * relation kind.
+ * Find a pg_class object with the expected name, schema and relation kind.
+ * These identifiers are template arguments, so the handle needs no stored state.
  */
 template<char p_expected_relkind,
          fixed_catalog_name p_leaf,
@@ -231,7 +231,7 @@ class relation_entity_handle final {
     }
 
 public:
-    /** @brief Constructs a stateless handle. All identity is template-owned. */
+    /** Construct a handle whose object identity comes from its template arguments. */
     constexpr relation_entity_handle() noexcept = default;
 
     /** @return The unqualified catalog object name. */
@@ -240,7 +240,7 @@ public:
         return p_leaf.view();
     }
 
-    /** @return Whether the schema is fixed or extension-relative. */
+    /** @return Whether to use a fixed schema or the extension's installation schema */
     [[nodiscard]] static constexpr sql_schema_binding
     schema_binding() noexcept {
         return p_binding;
@@ -262,7 +262,7 @@ public:
         return result;
     }
 
-    /** @return The installed schema name, or no value under a permissive policy. */
+    /** @return Installed schema name, or, no value when a missing schema is allowed. */
     [[nodiscard]] static std::optional<std::string>
     installed_schema_name(catalog_missing_policy policy) {
         const Oid namespace_id = namespace_oid(policy);
@@ -272,7 +272,10 @@ public:
         return copy_namespace_name(namespace_id, policy);
     }
 
-    /** @return The quoted installed name, or no value under a permissive policy. */
+    /**
+     * @return Installed schema and object name quoted for SQL, or no  value when
+     * a missing schema is allowed. This does not check that the object exists.
+     */
     [[nodiscard]] static std::optional<std::string>
     installed_qualified_name(catalog_missing_policy policy) {
         auto schema = installed_schema_name(policy);
@@ -308,7 +311,11 @@ public:
         }
     }
 
-    /** @return The validated relation OID, or `InvalidOid` when permitted. */
+    /**
+     * Look up the object and recheck its name, schema and relation kind in pg_class.
+     * @return Object OID, or `InvalidOid` if it is missing and the policy permits that.
+     * A wrong schema or relation kind always raises an error.
+     */
     [[nodiscard]] static Oid resolve_oid(
             catalog_missing_policy policy) {
         const Oid namespace_id = namespace_oid(policy);

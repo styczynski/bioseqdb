@@ -87,7 +87,7 @@ TEST_CASE("Darwin page queues do not double-count speculative pages",
         darwin_conservative_available_page_bytes;
 
     constexpr std::uint64_t page_bytes = 16'384;
-    // The illustrative speculative subset is already inside free_pages=100.
+    // The 100 free pages already include speculative pages.
     const auto available = darwin_conservative_available_page_bytes(
         100, 50, page_bytes);
     REQUIRE(available.has_value());

@@ -17,13 +17,8 @@ import bioseq.sequences;
 
 export namespace bioseq::io {
 
-/// Which I/O backend the dispatcher in `read_sequences_file` actually
-/// chose for a given call. The dispatcher's branch tree depends on
-/// magic-byte sniff + the runtime options + size thresholds, so the
-/// backend that really ran can differ from what the caller "asked
-/// for" via `reader_options`. Bench harnesses use this so they can
-/// label samples with the path that actually executed instead of the
-/// runner's nominal source kind.
+/// Input backend selected for a read. Benchmarks use this value to report
+/// the source that ran after file checks and fallback decisions.
 enum class reader_backend : std::uint8_t {
     unknown = 0,   ///< No backend was selected.
     memory_mapped, ///< Plain `mmap_source`.
@@ -49,18 +44,10 @@ enum class reader_backend : std::uint8_t {
     return "?";
 }
 
-/// View of one record's packed sequence inside a batch's shared
-/// `_sequence_storage`. Models the same surface used by
-/// `compact_sequence_range<p_range>`: `size()` (storage-unit count),
-/// `padding()` (count of trailing dummy letters), and a const
-/// random-access iterator pair so range-based `for` over storage
-/// units works unchanged. Templated on the same custom alphabet range as
-/// `compact_sequence_range<p_range>` so callers can use the same
-/// `traits` typedef.
-///
-/// The view is non-owning — its lifetime is bound to the batch that
-/// produced it. Once the batch is destroyed the view is dangling.
-/// In practice the handler always processes the batch in scope.
+/// Borrows one record's packed words from a batch. `size()` counts words,
+/// and `padding()` counts unused letter positions in the final word.
+/// Iterators read the words directly. The batch storage must remain alive
+/// and unchanged while the view is used.
 template <supports_compact_sequence_range p_range> class compact_sequence_view {
   public:
     /// Traits of the packed sequence range represented by this view.
@@ -91,7 +78,7 @@ template <supports_compact_sequence_range p_range> class compact_sequence_view {
         return _padding;
     }
 
-    /// Return the first packed storage unit.
+    /// Returns a pointer to the first packed word.
     [[nodiscard]] constexpr const storage_unit* data() const noexcept {
         return _base;
     }
@@ -127,39 +114,27 @@ template <supports_compact_sequence_range p_range> class compact_sequence_view {
     std::size_t _padding = 0;
 };
 
-/// One bounded, column-unit-packed chunk emitted by
-/// `stream_sequences_file`. `words` is a non-owning view of naturally-aligned
-/// packed storage units valid only for the duration of the `sink.chunk(...)`
-/// call (the consumer must copy out before returning). For all non-final
-/// chunks of a record `logical_length == words.size() * letters_per_unit`. The final
-/// chunk (`end_of_record == true`) may carry fewer valid bases, with the
-/// trailing padding implied by `logical_length`
-/// (i.e. `words.size()*letters_per_unit - logical_length`). This is the surface that
-/// lets a 6 Gbp FASTA record be loaded
-/// without ever materialising a whole-record `sequence_batch`.
+/// Packed sequence words passed to a streaming sink. The borrowed span is
+/// valiw during `sink.chunk` only. Non-final chunks contain full words.
+/// The final chunk may have  padding, given by the, difference between the
+/// words' capacity in letters and `logical_length`.
 template <typename p_storage_unit> struct packed_sequence_chunk {
-    std::span<const p_storage_unit> words; // column-unit-packed, naturally aligned
-    std::uint64_t logical_length = 0;      // valid bases in this chunk
+    std::span<const p_storage_unit> words; // packed words aligned for their storage type
+    std::uint64_t logical_length = 0;      // valid letters in this chunk
     bool end_of_record = false;
 };
 
-/// A batch of records delivered to the user's handler. It holds three
-/// shared buffers (`_header_storage`, `_sequence_storage`,
-/// `_quality_storage`) and per-record offset / metadata arrays. This
-/// eliminates per-record `std::string` + `std::vector<uint64_t>`
-/// allocations that dominated short-read throughput.
-///
-/// The accessors `header(i)` / `sequence(i)` / `quality(i)` return
-/// non-owning views (`std::string_view`, `compact_sequence_view<p_range>`,
-/// `std::span<const std::uint8_t>`) into the batch's shared storage.
-/// Returned views remain valid as long as the batch.
+/// Owns record headers, packed sequences, and qualities in shared buffers.
+/// Offset arrays locate each record without separate per-record allocations.
+/// Accessors return borrowed views. Keep the batch storage alive and unchanged
+/// while those views are in use.
 template <supports_compact_sequence_range p_range> class sequence_batch {
   public:
     /// Owning compact range used to define the batch alphabet and packing.
     using sequence_range = compact_sequence_range<p_range>;
     /// Borrowed packed sequence returned for one record.
     using sequence_view = compact_sequence_view<p_range>;
-    /// Packed storage word retained by the batch.
+    /// Packed word type used by the batch
     using storage_unit = typename sequence_view::storage_unit;
 
     /// Return the number of logical records in the batch.
@@ -172,14 +147,14 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         return _sequence_paddings.empty();
     }
 
-    /// Return the borrowed header bytes for one record.
+    /// Borrows the header of a record. The index  must be below `size()`.
     [[nodiscard]] std::string_view header(std::size_t index) const noexcept {
         const std::size_t start = _header_offsets[index];
         const std::size_t stop = _header_offsets[index + 1];
         return std::string_view{_header_storage.data() + start, stop - start};
     }
 
-    /// Return the borrowed packed sequence for one record.
+    /// Borrows a record's packed words and padding. The index must be below `size()`.
     [[nodiscard]] sequence_view sequence(std::size_t index) const noexcept {
         const std::size_t start = _sequence_offsets[index];
         const std::size_t stop = _sequence_offsets[index + 1];
@@ -187,7 +162,8 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
             _sequence_storage.data() + start, stop - start, _sequence_paddings[index]};
     }
 
-    /// Return the borrowed quality bytes for one record, or an empty span.
+    /// Borrows a record's quality bytes, or returns empty when qualities are absent.
+    /// For a batch with qualities, the index must be below `size()`.
     [[nodiscard]] std::span<const std::uint8_t> quality(std::size_t index) const noexcept {
         if (_quality_offsets.empty())
             return {};
@@ -196,11 +172,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         return std::span<const std::uint8_t>{_quality_storage.data() + start, stop - start};
     }
 
-    /// Mutable accessors used by the FSM emit-record callbacks. The
-    /// FSM appends through raw pointers. The batch is only
-    /// observed through the public `header(i)` / `sequence(i)` /
-    /// `quality(i)` views once handed to the user handler.
-    /// Return mutable header storage for the parser callback.
+    /// Returns the header buffer that parsers append to while building the batch.
     [[nodiscard]] std::vector<char>& header_storage() noexcept {
         return _header_storage;
     }
@@ -235,8 +207,8 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         return _quality_offsets;
     }
 
-    /// Initialise the offset prefix arrays so the first record's
-    /// offset is 0. Called once per batch by the FSM driver.
+    /// Starts a batch with empty header and sequence storage and zero first offsets.
+    /// When `with_quality` is true, also resets the quality storage and offsets.
     void prepare(std::size_t expected_record_count, bool with_quality) {
         _sequence_paddings.clear();
         _sequence_paddings.reserve(expected_record_count);
@@ -256,10 +228,9 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         }
     }
 
-    /// Reserve the storage buffers up front so the per-record append
-    /// path runs without reallocs once steady state is reached. The
-    /// caller passes a rough byte estimate. The batch grows
-    /// geometrically beyond that if the corpus exceeds the hint.
+    /// Reserves estimated capacity before records are appended.
+    /// Sequence capacity is measured  in packed words. Header and quality
+    /// capacities are measured in bytes. The buffers can still wrow later.
     void reserve_storage(std::size_t header_bytes_hint,
                          std::size_t sequence_words_hint,
                          std::size_t quality_bytes_hint) {
@@ -270,7 +241,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         }
     }
 
-    /// Release every logical record while retaining each vector's allocation.
+    /// Release every logical record while keeping each vector's allocation.
     void clear() noexcept {
         _header_storage.clear();
         _header_offsets.clear();

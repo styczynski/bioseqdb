@@ -29,20 +29,20 @@ import :resource_sampler;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Contract/assertion failure in the source-neutral fixture layer.
+/// @brief A failed check in the PostgreSQL test helpers.
 class postgres_fixture_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Pins a still-existing private root to its canonical report path.
+/// @brief Resolves the existing cluster  root for use in cleanup reports.
 [[nodiscard]] inline std::filesystem::path
 canonical_cleanup_observation_root(
     const std::filesystem::path& root) {
     return std::filesystem::canonical(root);
 }
 
-/// @brief Structured observation of one expected PostgreSQL error.
+/// @brief Error fields saved when a SQL command fails as expected.
 struct sql_error_observation {
     std::string sql_state;
     std::string message;
@@ -51,7 +51,7 @@ struct sql_error_observation {
     std::string severity;
 };
 
-/// @brief Requires and returns one non-null text cell.
+/// @brief Requires one non-null result cell and returns a view into it.
 [[nodiscard]] inline std::string_view read_single_text_cell(
     const bioseq::libpq::command_result& result) {
     if (result.row_count() != 1 || result.column_count() != 1
@@ -61,7 +61,7 @@ struct sql_error_observation {
     return result.text_value(0, 0);
 }
 
-/// @brief Requires and parses one signed 64-bit result cell.
+/// @brief Parses the only result cell as a signed 64-bit integer.
 [[nodiscard]] inline std::int64_t read_single_int64_cell(
     const bioseq::libpq::command_result& result) {
     const std::string_view text = read_single_text_cell(result);
@@ -75,7 +75,7 @@ struct sql_error_observation {
     return value;
 }
 
-/// @brief Requires and parses one PostgreSQL Boolean text cell.
+/// @brief Reads the only result cell as PostgreSQL Boolean text, t or f.
 [[nodiscard]] inline bool read_single_bool_cell(
     const bioseq::libpq::command_result& result) {
     const std::string_view text = read_single_text_cell(result);
@@ -89,7 +89,8 @@ struct sql_error_observation {
                         + std::string(text));
 }
 
-/// @brief Executes SQL and requires the exact expected five-character SQLSTATE.
+/// @brief Runs SQL and returns its error fields if the SQLSTATE matches.
+/// Throws when SQL succeeds or reports a different SQLSTATE.
 [[nodiscard]] inline sql_error_observation execute_expecting_sql_state(
     bioseq::libpq::client_connection& connection,
     std::string_view sql,
@@ -118,7 +119,8 @@ struct sql_error_observation {
                         + ", but SQL succeeded");
 }
 
-/// @brief Polls a controller predicate until success or an absolute deadline.
+/// @brief Rechecks a predicate until it succeeds or the deadline is reached.
+/// Each, predicate call must finish on its own.
 template <class p_predicate>
 [[nodiscard]] bool wait_until(
     p_predicate&& predicate,
@@ -143,7 +145,12 @@ template <class p_predicate>
     }
 }
 
-/// @brief RAII owner of one private cluster, admin session, and resource sampler.
+/**
+ * Starts a private PostgreSQL cluster and opens its admin connection.
+ * Extensions are installed by default. When observation collection  is
+ * enabled, the fixture also samples resources and records cleanup results.
+ * Destruction closes the admin connection and attempts cluster cleanup.
+ */
 class private_cluster_fixture {
 public:
     explicit private_cluster_fixture(
@@ -180,13 +187,14 @@ public:
         cleanup_and_record();
     }
 
-    /// @brief Returns the owned cluster for restart/crash/backend controls.
+    /// @brief Returns the cluster so tests can control its server and backends.
     [[nodiscard]] private_cluster& cluster() noexcept { return cluster_; }
     [[nodiscard]] const private_cluster& cluster() const noexcept {
         return cluster_;
     }
 
-    /// @brief Returns the long-lived administrative connection.
+    /// @brief Returns the admin connection, replacing it if it is missing or not idle.
+    /// Waits for configured extension readiness before returning.
     [[nodiscard]] bioseq::libpq::client_connection& admin() {
         if (!admin_ || !admin_->is_transaction_idle()) {
             admin_.reset();
@@ -200,7 +208,7 @@ public:
         return *admin_;
     }
 
-    /// @brief Replaces the admin session after an intentional server restart.
+    /// @brief Opens a new admin connection and checks extension readiness
     void reconnect_admin() {
         admin_.reset();
         admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
@@ -209,7 +217,7 @@ public:
         wait_for_extension_readiness();
     }
 
-    /// @brief Opens an independent session under a caller deadline.
+    /// @brief Opens a separate connection witp the given connection timeout.
     [[nodiscard]] bioseq::libpq::client_connection connect(
         std::chrono::milliseconds deadline = std::chrono::seconds(10)) const {
         bioseq::libpq::client_connection connection =
@@ -218,7 +226,8 @@ public:
         return connection;
     }
 
-    /// @brief Runs ordinary CREATE EXTENSION in artifact-vector order.
+    /// @brief Creates the configured extensions in their listed order.
+    /// Checks readiness after installation and rejects a second installation  call.
     void install_extensions() {
         if (extensions_installed_) {
             throw postgres_fixture_error("fixture extensions are already installed");
@@ -234,14 +243,15 @@ public:
         wait_for_extension_readiness();
     }
 
-    /// @brief Forces an exact resource sample at a workload stage boundary.
+    /// @brief Requests a resource sample for this stage when sampling is enabled.
     void record_resource_stage(std::string_view stage) noexcept {
         if (resource_sampler_) {
             resource_sampler_->record_stage_boundary(stage);
         }
     }
 
-    /// @brief Stops sampling and preserves its terminal report for cleanup.
+    /// @brief Stops the sampler and returns its results.
+    /// Throws if this fixture has no sampler.
     [[nodiscard]] resource_usage_samples finish_resource_sampling() {
         if (!resource_sampler_) {
             throw postgres_fixture_error(
@@ -285,7 +295,7 @@ private:
         }
     }
 
-    /// @brief Copies artifact names before private_cluster_options is moved.
+    /// @brief Copies extension names before the cluster options are moved.
     [[nodiscard]] static std::vector<std::string> collect_extension_names(
         std::span<const extension_install_source> extensions) {
         std::vector<std::string> names;
@@ -296,7 +306,8 @@ private:
         return names;
     }
 
-    /// @brief Polls one configured Boolean gate without knowing its extension.
+    /// @brief Polls the configured SQL query until it returns true or times out.
+    /// Skips the query when extensions are uninstalled or no check is configured.
     void wait_for_extension_readiness() {
         if (!extensions_installed_ || !extension_readiness_) {
             admin_readiness_confirmed_ = true;
@@ -344,7 +355,11 @@ private:
     bool cleanup_recorded_{};
 };
 
-/// @brief Restores one session GUC to its exact prior value on destruction.
+/**
+ * Sets a PostgreSQL session setting for a test scope. Destruction tries
+ * to restore its previous value, or RESET it if no previous  value existed.
+ * Cleanup errors are ignored. The connection must outlive this object.
+ */
 class scoped_session_setting {
 public:
     scoped_session_setting(bioseq::libpq::client_connection& connection,
@@ -393,7 +408,7 @@ public:
         }
     }
 
-    /// @brief Changes the scoped GUC while preserving its original restore value.
+    /// @brief Changes the setting while keeping the original value for cleanup.
     void set(std::string_view value) {
         const std::string identifier =
             render_setting_name(*connection_, name_);
@@ -404,7 +419,7 @@ public:
     }
 
 private:
-    /// @brief Restricts a GUC to dotted identifier syntax.
+    /// @brief Allows only letters, digits, underscores and dots in a setting name.
     static void validate_setting_name(std::string_view name) {
         if (name.empty()) {
             throw postgres_fixture_error("GUC name is empty");
@@ -422,7 +437,7 @@ private:
         }
     }
 
-    /// @brief Quotes every component of a dotted GUC name independently.
+    /// @brief Quotes the parts of a dotted setting name as SQL identifiers.
     [[nodiscard]] static std::string render_setting_name(
         const bioseq::libpq::client_connection& connection,
         std::string_view name) {
@@ -454,7 +469,11 @@ private:
     std::chrono::milliseconds deadline_;
 };
 
-/// @brief Creates and drops one exact schema around a test scope.
+/**
+ * Creates a schema for a test scope. Destruction attempts DROP SCHEMA
+ * CASCADE and ignores cleanup errors. The conection must outlive this
+ * object.
+ */
 class scoped_schema {
 public:
     scoped_schema(bioseq::libpq::client_connection& connection,
@@ -492,7 +511,11 @@ private:
     std::chrono::milliseconds deadline_;
 };
 
-/// @brief Holds an explicit transaction across independently bounded commands.
+/**
+ * Begins a transaction on an idle connection. Call commit() or rollback()
+ * to finish it. Destruction tries to  roll back a still-active, transaction
+ * and ignores cleanup errors. The connection must outlive this object
+ */
 class scoped_transaction {
 public:
     explicit scoped_transaction(
@@ -552,7 +575,11 @@ private:
     bool active_{true};
 };
 
-/// @brief Owns one named savepoint inside an existing transaction.
+/**
+ * Creates a savepoint inside an open transaction. Destruction tries to
+ * roll back to it and release it, ignoring cleanup errors. The connection
+ * must outlive this object.
+ */
 class scoped_savepoint {
 public:
     scoped_savepoint(bioseq::libpq::client_connection& connection,
@@ -602,7 +629,7 @@ public:
         active_ = false;
     }
 
-    /// @brief Rolls back changes and removes the savepoint.
+    /// @brief Rolls back to this savepoint and releases it.
     void rollback() {
         if (!active_) {
             throw postgres_fixture_error("savepoint is no longer active");
@@ -621,7 +648,12 @@ private:
     bool active_{true};
 };
 
-/// @brief Owns a two-phase transaction and cleans it through a fresh session.
+/**
+ * Begins a transaction that a test can prepare and finish in a new session.
+ * Destruction tries to roll back unfinished work. A prepared  transaction
+ * gets a fresh cleanup connection if the cluster is still running.
+ * Cleanup errors are ignored, and the cluster must outlive this object.
+ */
 class scoped_prepared_transaction {
 public:
     scoped_prepared_transaction(
@@ -666,7 +698,7 @@ public:
         }
     }
 
-    /// @brief Returns the session in which work is added before PREPARE.
+    /// @brief Returns the transaction connection while it is still open.
     [[nodiscard]] bioseq::libpq::client_connection& session() {
         if (!session_ || state_ != state::open) {
             throw postgres_fixture_error("prepared transaction session is not open");
@@ -674,7 +706,7 @@ public:
         return *session_;
     }
 
-    /// @brief Persists the transaction under its GID.
+    /// @brief Prepares the transaction under its configured global identifier.
     void prepare() {
         if (state_ != state::open) {
             throw postgres_fixture_error("prepared transaction is not open");
@@ -723,10 +755,10 @@ private:
     state state_{state::open};
 };
 
-/// @brief Deadline-aware typed session passed to each independent thread.
+/// @brief A test connection whose SQL commands share a deadline.
 class bounded_session_context {
 public:
-    /// @brief Constructs a task context from one independent typed connection.
+    /// @brief Takes ownership of a connection and stores its task dealine.
     bounded_session_context(bioseq::libpq::client_connection connection,
                     std::chrono::steady_clock::time_point deadline,
                     sql_transcript* transcript = nullptr,
@@ -736,7 +768,7 @@ public:
           transcript_(transcript),
           session_name_(std::move(session_name)) {}
 
-    /// @brief Executes SQL using the task's remaining absolute deadline.
+    /// @brief Runs SQL with the time left before the task  deadline.
     [[nodiscard]] bioseq::libpq::command_result execute(
         std::string_view sql,
         bioseq::libpq::transaction_policy policy =
@@ -748,7 +780,7 @@ public:
                   connection_, session_name_, sql, budget, policy);
     }
 
-    /// @brief Executes SQL with the smaller of a local budget and task deadline.
+    /// @brief Runs SQL within both the local time budget and the task deadline.
     [[nodiscard]] bioseq::libpq::command_result execute(
         std::string_view sql,
         std::chrono::milliseconds local_budget,
@@ -762,17 +794,17 @@ public:
                   connection_, session_name_, sql, budget, policy);
     }
 
-    /// @brief Quotes an identifier through the shared libpq connection.
+    /// @brief Quotes a SQL identifier using this connection.
     [[nodiscard]] std::string escape_identifier(std::string_view value) const {
         return connection_.escape_identifier(value);
     }
 
-    /// @brief Quotes a literal through the shared libpq connection.
+    /// @brief Quotes a SQL string literal using this connection.
     [[nodiscard]] std::string escape_literal(std::string_view value) const {
         return connection_.escape_literal(value);
     }
 
-    /// @brief Returns the task's absolute steady-clock deadline.
+    /// @brief Returns the task deadline on the steady clock.
     [[nodiscard]] std::chrono::steady_clock::time_point deadline() const noexcept {
         return deadline_;
     }
@@ -795,13 +827,13 @@ private:
     std::string session_name_;
 };
 
-/// @brief One named concurrent SQL/session operation.
+/// @brief A named test operation to run in its, own database session.
 struct independent_session_task {
     std::string name;
     std::function<void(bounded_session_context&)> body;
 };
 
-/// @brief Nonthrowing observation of one independent session task.
+/// @brief Result, error and elapsed time for one session task
 struct independent_session_result {
     std::string name;
     bool passed{};
@@ -810,10 +842,14 @@ struct independent_session_result {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Runs each independent session on one dedicated operating-system thread.
-///
-/// Task bodies must perform all SQL and waits through `bounded_session_context` and the
-/// bounded `wait_until` helper so every joined thread reaches a terminal state.
+/**
+ * Runs each task in a separate thread with its own database connection.
+ * All tasks share a deadline, and results follow the input order.
+ *
+ * Threads are joined before returning. Task bodies must keep SQL and waits
+ * within that  deadline using bounded_session_context and wait_until. The
+ * runner cannot interrupt arbitrary work that blocks inside a task.
+ */
 [[nodiscard]] inline std::vector<independent_session_result>
 run_independent_sessions(
     const private_cluster& cluster,

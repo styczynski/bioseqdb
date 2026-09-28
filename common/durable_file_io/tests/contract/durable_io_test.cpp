@@ -797,8 +797,8 @@ TEST_CASE(
     REQUIRE(result.error().code == file_error_code::identity_changed);
     REQUIRE_FALSE(std::filesystem::exists(destination));
     /*
-     * The peer replacement is not our staged inode, so identity-bound cleanup
-     * deliberately leaves it alone rather than deleting another actor's file.
+     * Another writer replaced the temporary file. Cleanup preserves that file
+     * because its inode differs from the one created for this publication.
      */
     REQUIRE(temporary_count(destination) == 1);
 }

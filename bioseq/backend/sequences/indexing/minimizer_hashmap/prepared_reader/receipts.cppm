@@ -1,6 +1,6 @@
 /**
  * @file receipts.cppm
- * @brief Authenticated grouped-SoA generation-row receipts.
+ * @brief Lets index readers reuse a completed row checksum check.
  */
 module;
 
@@ -37,26 +37,25 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Callback-scoped qualified row emitted directly to PostgreSQL/fake storage.
+/// Borrowed index row passed between storage callbacks and generation readers.
 struct minimizer_generation_row_view {
-    /// Persisted address included in the row checksum domain.
+    /// Storage address covered by the row checksum.
     index_chunk_address address{};
     /// Borrowed row bytes, valid only for the surrounding callback.
     std::span<const std::byte> bytes;
-    /// Stored address-bound CRC64 value.
+    /// CRC64 of the row address, byte count and payload.
     std::uint64_t row_checksum = 0;
 };
 namespace minimizer_prepared_reader_detail {
-/// Trait-directed prepared-query implementation shared by public readers.
-/// @tparam p_traits Persisted codec and ordering contract.
+/// Prepared query reader selected by storage-layout traits.
+/// @tparam p_traits Saved record format and read order.
 template <class p_traits> class trait_driven_prepared_query_core;
 } // namespace minimizer_prepared_reader_detail
 
-/// Unforgeable evidence that the address-bound row checksum was checked before
-/// callback-scoped bytes reached a prepared reader. Ordinary importers can
-/// obtain one only through validate_minimizer_generation_row_receipt(), which
-/// performs that check. PostgreSQL retains that same receipt beside the loaded
-/// row, so consumers reuse the single validation pass without special access.
+/// Records thab a row's address and payload checksum have been checked.
+/// validate_minimizer_generation_row_receipt() creates the receipt, letting
+/// readers skip a repeated checksum scan. The  caller must keep the borrowed
+/// bytes alive and unchanged until all receipt users have finished.
 class validated_minimizer_generation_row_receipt {
   private:
     index_chunk_address address_{};
@@ -65,14 +64,14 @@ class validated_minimizer_generation_row_receipt {
     std::uint64_t authority_seal_ = 0;
     bool live_ = false;
 
-    /// Bind the authenticated address, bytes, checksum, and receipt object identity.
+    /// Calculate a check value tied to this object, row address, byte span and checksum.
     [[nodiscard]] static std::uint64_t
     authority_seal(const validated_minimizer_generation_row_receipt* self,
                    const index_chunk_address& address,
                    std::span<const std::byte> bytes,
                    std::uint64_t row_checksum) noexcept {
         std::uint64_t value = 0x9E3779B97F4A7C15ULL;
-        /// Mix one authority component into the process-local seal.
+        /// Mix one value into the receipt's check value
         const auto mix = [&value](std::uint64_t word) noexcept {
             value ^= word + 0x9E3779B97F4A7C15ULL + (value << 6u) + (value >> 2u);
         };
@@ -87,14 +86,14 @@ class validated_minimizer_generation_row_receipt {
         return value;
     }
 
-    /// Construct live authority over callback-scoped bytes after checksum validation.
+    /// Create a valid receipt after checking the borrowed row's checksum.
     validated_minimizer_generation_row_receipt(index_chunk_address address,
                                                std::span<const std::byte> bytes,
                                                std::uint64_t row_checksum) noexcept
         : address_(address), bytes_(bytes), row_checksum_(row_checksum),
           authority_seal_(authority_seal(this, address, bytes, row_checksum)), live_(true) {}
 
-    /// Clear borrowed state and revoke this object's authority seal.
+    /// Clear the borrowed row and mark this receipt invalid.
     void invalidate() noexcept {
         address_ = {};
         bytes_ = {};
@@ -125,7 +124,7 @@ class validated_minimizer_generation_row_receipt {
     validated_minimizer_generation_row_receipt&
     operator=(validated_minimizer_generation_row_receipt&&) = delete;
 
-    /// Transfer authority to a new object identity and revoke the source.
+    /// Move the receipt, recompute its object-specific check value and invalidate the source.
     validated_minimizer_generation_row_receipt(
         validated_minimizer_generation_row_receipt&& other) noexcept
         : address_(other.address_), bytes_(other.bytes_), row_checksum_(other.row_checksum_),
@@ -134,35 +133,35 @@ class validated_minimizer_generation_row_receipt {
         other.invalidate();
     }
 
-    /// Revoke the process-local authority seal at end of lifetime.
+    /// Clear the receipt  when its lifetime ends.
     ~validated_minimizer_generation_row_receipt() {
         invalidate();
     }
 
-    /// Return whether the move-bound authority seal still matches this receipt.
+    /// Check that the receipt is live and still matches its saved fields and object address.
     [[nodiscard]] bool has_valid_authority() const noexcept {
         return live_ && authority_seal_ == authority_seal(this, address_, bytes_, row_checksum_);
     }
 
   private:
-    /// Return the authenticated persisted address.
+    /// Borrow the checked, row address.
     [[nodiscard]] constexpr const index_chunk_address& address() const noexcept {
         return address_;
     }
-    /// Return the callback-scoped authenticated bytes.
+    /// Borrow the row bytes covered by the checksum check.
     [[nodiscard]] constexpr std::span<const std::byte> bytes() const noexcept {
         return bytes_;
     }
-    /// Return the authenticated row checksum.
+    /// Return the checked row checksum.
     [[nodiscard]] constexpr std::uint64_t row_checksum() const noexcept {
         return row_checksum_;
     }
 };
 
-/// Visit an authenticated row without exporting the receipt's representation.
-/// The byte span remains callback-scoped. Callers cannot retain authority or
-/// mutate the receipt, and an invalid/moved-from receipt is never visited.
-/// @tparam p_visitor Callable accepting the address, byte span, and checksum.
+/// Call the visitor with the checked row address, borrowed bytes and checksum.
+/// Return false for an invalid or moved-from receipt. The visitor must keep
+/// any use of the bytes within the lifetime guaranteed by the row owner.
+/// @tparam p_visitor Callable accepting the addess, byte span and checksum.
 template <class p_visitor>
 [[nodiscard]] bool visit_validated_minimizer_generation_row(
     const validated_minimizer_generation_row_receipt& receipt,
@@ -176,9 +175,8 @@ template <class p_visitor>
     return true;
 }
 
-/// Authenticate one callback-scoped row before granting the trusted-reader
-/// fast path. This is deliberately the only exported receipt construction
-/// path, and it never returns authority for an unchecked or mismatched CRC.
+/// Check a row's CRC64, including its  address and byte count, and return a receipt
+/// for readers to reuse. The receipt borrows the row's bytes.
 [[nodiscard]] inline std::expected<validated_minimizer_generation_row_receipt,
                                    minimizer_generation_encoding_error>
 validate_minimizer_generation_row_receipt(const minimizer_generation_row_view& row) noexcept {

@@ -1,13 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Creates and destroys C++ objects in PostgreSQL memory contexts.
  *
- * PostgreSQL-memory-context ownership for cache executor objects.
- *
- * Cache scan state is allocated by PostgreSQL without running C++
- * constructors. These helpers construct nontrivial leaf objects in the
- * owning query context without raw new/delete and release them explicitly
- * from the registered context cleanup callback.
- *
- *-------------------------------------------------------------------------
+ * PostgreSQL allocates scan state without calling C++ constructors. These
+ * helpers constrlct the C++ members separately. The scan registers a context
+ * cleanup callback to destroy those members.
  */
 module;
 
@@ -26,7 +23,7 @@ export module bioseq.cache.pg.executor.context;
 
 export namespace bioseq::cache::pg::executor {
 
-/** Construct one object in a selected PG context without raising on OOM. */
+/** Construct an object in the given memory context. Return null on allocation or  constructor failure. */
 template <class p_value_type, class... p_argument_types>
 [[nodiscard]] p_value_type* try_construct_context_owned(
     MemoryContext context, p_argument_types&&... arguments) noexcept {
@@ -48,7 +45,7 @@ template <class p_value_type, class... p_argument_types>
     }
 }
 
-/** Destroy and release one context-owned object, clearing its observer. */
+/** Destroy the object, free its context allocation and clear the caller's pointer. */
 template <class p_value_type> void destroy_context_owned(p_value_type*& value) noexcept {
     static_assert(std::is_nothrow_destructible_v<p_value_type>);
     if (value == nullptr) {

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns base-scan begin admission and immutable runtime configuration.
+ * @brief Starts BioseqScan by checking its  plan and configuring sequence reads and alignment.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -64,11 +64,14 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Validates a base-scan plan and constructs its query-owned execution runtime.
+     * @brief Checks a BioseqScan plan and prepares its runtime for this query
      *
-     * The runtime and its cleanup callback are bound to the executor query memory context.
+     * Bind sequence reads to the scan snapshot, configure the owned mmsearch
+     * inputs, and select the alignment work required by the output fields.
+     * The query memory context owns the cleanup callback.
      *
-     * @throws PostgreSQL ERROR when serialized planner state or scan admission is invalid.
+     * @throws PostgreSQL ERROR for invalid saved plan data or unsupported
+     * execution settings.
      */
     void bioseq_column_scan_begin_custom_scan_impl(CustomScanState* cscanstate,
                                                    EState* estate,
@@ -232,10 +235,8 @@ export {
             }
         }
 
-        /*
-         * Make a new ExprContext just like the existing one, except that we don't
-         * reset it every tuple.
-         */
+        /* Keep parameter values and scan expressions in a context that survives
+         * the per-tuple resets of the normal expression context. */
         ExecAssignExprContext(estate, &cscanstate->ss.ps);
         bioseq_scan_state->runtime_expression_context = cscanstate->ss.ps.ps_ExprContext;
         cscanstate->ss.ps.ps_ExprContext = stdecontext;
@@ -262,10 +263,7 @@ export {
             reinterpret_cast<List*>(eval_params(reinterpret_cast<Node*>(storage_plain_clauses),
                                                 bioseq_scan_state->runtime_expression_context))};
 
-        /*
-         * Third list in custom_exprs should contain vectorized qual list if not
-         * NULL.
-         */
+        /* custom_exprs[2] holds the  optional vectorized row filters. */
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() "
                                          "examining custom_exprs for vectorized qual");
         List* vectorized_qual_list = custom_exprs.get_third();
@@ -292,10 +290,8 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() "
                                          "custom_private iteration complete");
 
-        /*
-         * Vectorization is enabled if global variable is set and there is at least one
-         * filter which can be vectorized.
-         */
+        /* Enable vectorized filtering or aggregation when requested, except
+         * for scans that pass sequence locators or lazy values to, a parsnt. */
         bioseq_scan_state->vectorization.is_enabled =
             bioseq::settings::vectorization::enabled && !runtime.locator_passthrough &&
             !runtime.lazy_source_projection &&
@@ -326,12 +322,11 @@ export {
                 cscanstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
         }
 
-        /* The owned mmsearch was deliberately removed from plan.qual and lives in
-         * custom_exprs[3], but its target/query Vars remain physical scan-column
-         * dependencies.  In projection-free shapes such as count(*), omitting that
-         * private expression makes the columnar reader optimize the target column
-         * away and submit_scan observes a false NULL.  Combine only list cells for
-         * dependency discovery; the private expression remains non-executable. */
+        /* mmsearch lives in custom_exprs[3] because the scan executes it.
+         * Its target and query columns are still required, even for count(*).
+         * Include those expressions when finding columns to read, or the
+         * reader may omit the sequence and report a false NULL. Copy list
+         * cells only and leave the private expression out of SQL evaluation. */
         List* attr_needed_custom_expressions = list_concat_copy(
             bioseq_scan_state->vectorization.qualifiers.get(), owned_mmsearch_quals);
         bioseq_scan_state->attributes_needed = bioseq::postgres::support::postgres_bitmapset{
@@ -344,11 +339,9 @@ export {
             bioseq_scan_state->vectorization.attributes_needed.append(attr_index);
         }
 
-        /*
-         * If we have pending changes that need to be flushed (row_mask after update/delete)
-         * or new stripe we need to do them here because sequential columnar scan
-         * can have parallel execution and updated are not allowed in parallel mode.
-         */
+        /* Flush pending row-deletion masks and new stripes before reading.
+         * A  parallel scan cannot perform these writes, so do this only
+         * outside parallel mode and keep the resulting scan snapshot. */
         bioseq_scan_state->snapshot = estate->es_snapshot;
         bioseq_scan_state->owns_snapshot_registration = false;
         Oid relation_oid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
@@ -375,15 +368,9 @@ export {
             runtime.buffer.bind_sequence_source_provider(runtime.lazy_source_provider);
         }
 
-        /*
-         * Discover the primary-key column by scanning the unmutated
-         * targetlist for the first bioseq.<field>(Var) FuncExpr and using
-         * its Var argument's varattno. BeginCustomScan runs before
-         * CustomExecScan, so at this point cscan->scan.plan.targetlist
-         * still contains the FuncExprs — they haven't been rewritten to
-         * Const* yet (the rewrite target is newtargetlist, not
-         * scan.plan.targetlist).
-         */
+        /* Find an optional integer key argument in a direct match-helper
+         * projection. The plan targetlist still holds the helper expressions
+         * here, before execution builds its replacement projection */
         const bioseq_stub_oids& scan_stub_oids = get_cached_stub_oids();
         for (Node* executable_qual : postgres_list<Node>(cscan->scan.plan.qual)) {
             if (contains_mmsearch_qualifier(executable_qual, scan_stub_oids)) {
@@ -425,10 +412,8 @@ export {
                 continue;
             if (pk_var->varattno <= 0)
                 continue;
-            /* Projection helpers are semantically tied to the current match_result,
-             * not to an int key argument.  The direct-query surface therefore
-             * permits bioseq.edit(seq) / bioseq.cigar(seq).  Retain the
-             * optional PK capture only when the supplied Var is actually INT4. */
+            /* Helpers such as edit(seq) and cigar(seq) read the current match
+             * result. Capture an optional key only for an INT4 argument. */
             if (pk_var->vartype != INT4OID)
                 continue;
             primary_key_attno = pk_var->varattno;
@@ -439,61 +424,32 @@ export {
             break;
         }
 
-        /*
-         * Register the per-query MemoryContext callback BEFORE touching
-         * the runtime so an ereport(ERROR) further down still triggers
-         * cleanup on transaction abort. Idempotent across rescans.
-         */
+        /* Keep query-context cleanup registered  before configuring the buffer.
+         * Registration is idempotent and also covers PostgreSQL errors. */
         register_runtime_cleanup_callback(bioseq_scan_state, estate);
 
-        /*
-         * Decode the planner-owned expression set from custom_exprs and configure
-         * the dispatch buffer. The executable qual list is intentionally ignored.
-         */
-        /* Begin is the only place that should drop extras as part of the
-         * primary reset — every Begin call repopulates them from scratch
-         * via the qual loop. ReScan / failure paths must NOT drop extras
-         * (see clear_mmsearch_context for the retention contract). */
+        /* Configure alignmeny from the planner-owned custom_exprs entries. */
+        /* Begin rebuilds all search inputs, including constant extras.
+         * A NULL parameter on ReScan clears the primary query while keeping
+         * those extras for the next non-NULL parameter value. */
         runtime.buffer.clear_mmsearch_context(/*clear_extras=*/true);
         runtime.param_rebind = mmsearch_parameter_rebind{};
 
         Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
         const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
 
-        /*
-         * State used by the classifier/configuration branches. Planner
-         * ownership guarantees this loop contains one primary expression and, only
-         * for the parameterized join shape, at most one same-target Const extra.
-         *
-         * `primary_configured` flips once the primary owned expression is installed
-         * through the Const, Param-rebind, or same-relation Var path.
-         */
+        /* Track the single primary search. The planner can also admit one
+         * constant filter on the same target with a parameterized primary. */
         bool primary_configured = false;
         AttrNumber primary_seq_attno = InvalidAttrNumber;
         FuncExpr* primary_mmsearch_fe = nullptr;
 
-        /*
-         * Process only the private expressions selected by the planner. Executable
-         * quals never participate in alignment ownership. General stacked calls are
-         * rejected before a CustomPath is built; the bounded Param-primary/Const-
-         * extra shape is sorted and configured here.
-         *
-         * Solution: classify quals first, then pick the primary by
-         * priority:
-         *   - Var-same-rel  > Param  > Const
-         * Var-same-rel and Param NEED to be the primary (their machinery
-         * lives in the buffer's mmsearch_context / param_rebind slots
-         * which only exist once per scan). Const can be either primary
-         * OR an extra. So putting Param first guarantees the AND-stack
-         * works regardless of planner qual order.
-         *
-         * If we discover a Var-same-rel and a Param in the same plan
-         * we reject the Param (we only have one primary slot); same for
-         * multi-Param or multi-Var-same-rel. Every top-level mmsearch qual must
-         * be accounted for below: unsupported combinations fail closed rather
-         * rather than reaching the fail-closed SQL rendezvous stub.
-         */
-        // Records the admitted query-source shape of one top-level mmsearch qualifier.
+        /* Row-dependent and, parameter queries need the scan's single primary
+         * slot. Classify the  planner-owned searches first so an optional
+         * constant filter comes afterwards regardless of clause order.
+         * Every admitted search must be consumed here. Reject unsupported
+         * combinations before an mmsearch SQL stub could run. */
+        // Records whether this search uses a constant, parameter, column, or row expression.
         struct classified_mmsearch_qualifier {
             FuncExpr* fe;
             Node* arg0;
@@ -509,13 +465,9 @@ export {
             FuncExpr* fe_classify = try_cast_pg_node<FuncExpr>(qual_node);
             if (fe_classify == nullptr ||
                 !is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
-                /* The storage-pruning copy deliberately drops every clause whose
-                 * subtree contains mmsearch(), but the alignment runtime currently
-                 * consumes only a top-level mmsearch FuncExpr. Letting a BooleanTest,
-                 * NOT, CASE, COALESCE, or other wrapper proceed would leave the
-                 * runtime unconfigured and evaluate the immutable SQL stub instead.
-                 * That stub is only a planner/executor rendezvous marker and must never
-                 * become the query's alignment result. */
+                /* The alignment runtime accepts a top-level mmsearch call. A wrapper
+                 * such as NOT or CASE would leave the search unconfigured. Reject it
+                 * here because the SQL stub only marks work  for the custom execumor */
                 if (contains_mmsearch_qualifier(qual_node, scan_stub_oids)) {
                     ereport(ERROR,
                             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -527,8 +479,8 @@ export {
                 continue;
             }
             ++top_level_mmsearch_qual_count;
-            /* Reject a parameterized/column-valued third argument even when this
-             * qualifier is later rejected as an unsupported primary/extra shape. */
+            /* Check constant options now, even if this search will later be
+             * rejected for its primary or extra-query shape. */
             (void)require_aligner_options_const(fe_classify, scan_stub_oids);
             pg_first_two_node_arguments classify_args =
                 get_pg_first_two_arguments_if_arity_between(*fe_classify, 2, 3);
@@ -556,18 +508,14 @@ export {
             }
             classified_quals.push_back({fe_classify, a0, a1, is_c, is_p, is_v, is_evaluated_query});
         }
-        /*
-         * Sort by priority (Var-same-rel > Param > Const) using stable
-         * partition so quals of equal priority keep planner order. The
-         * Var-same-rel and Param branches can each fire AT MOST ONCE per
-         * scan (they consume the single primary slot); unsupported subsequent
-         * quals fail closed below.
-         */
+        /* Put row expressions first, then parameters, then constants. Keep
+         * planner order among equal priorities. Only one search can use the
+         * primary slot, and any additional search must pass the extra-query checks. */
         std::stable_sort(
             classified_quals.begin(),
             classified_quals.end(),
             [](const classified_mmsearch_qualifier& lhs, const classified_mmsearch_qualifier& rhs) {
-                // Orders query sources so the single primary slot is selected deterministically.
+                // Gives row queries and parameters priority over optional constant filters.
                 auto pri = [](const classified_mmsearch_qualifier& q) {
                     if (q.is_var_same_rel)
                         return 0;
@@ -614,10 +562,9 @@ export {
                         scan_stub_oids.bioseq_seq_type_oid);
                     continue;
                 }
-                /* PARAM_EXEC is installed by a parameterized Nested Loop;
-                 * PARAM_EXTERN is supplied by PREPARE/client parameters. The
-                 * shared evaluator below routes each kind through PostgreSQL's
-                 * own ExprContext storage. */
+                /* Nested loops supply PARAM_EXEC values. PREPARE or the client
+                 * supplies PARAM_EXTERN values. Read both through PostgreSQL's
+                 * expression context. */
                 if (query_param->paramkind != PARAM_EXEC &&
                     query_param->paramkind != PARAM_EXTERN) {
                     bioseq_log<logging_level::debug>("[bioseq] pg: BeginCustomScan() mmsearch arg1 "
@@ -655,14 +602,9 @@ export {
                 continue;
             }
 
-            /*
-             * Resolve arg1's typmod. There are exactly three outcomes:
-             *   - same (alphabet, width): direct dispatch, no extras.
-             *   - same alphabet, different width: deterministic rewidth to
-             *     the target column's physical shape.
-             *   - different bound alphabets: SQLSTATE 42804 before any
-             *     detoast, dispatch, sidecar read, or generic recoder.
-             */
+            /* The query and target  must use the same alphabet. A different
+             * storage width can be repacked to the target type. Reject a known
+             * alphabet mismatch before reading or dispatching the sequence. */
             if (runtime.match_target_typmod < 0) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; "
@@ -695,10 +637,9 @@ export {
             }
             const auto unpacked_typmod =
                 compact_sequence_stdc_type_params::decode(runtime.match_target_typmod);
-            /* PostgreSQL's generic PREPARE Param retains only the base type OID and
-             * commonly reports paramtypmod=-1 even when the declaration spells a
-             * bioseq typmod.  Its varlena header remains authoritative and is checked
-             * on every Begin/ReScan by resolve_mmsearch_param_query(). */
+            /* PREPARE can leave paramtypmod at -1 even for a typed sequence.
+             * resolve_mmsearch_param_query() checks the type stored in the value
+             * when, binding the parameter at Begin or ReScan. */
             const auto unpacked_arg1_typmod =
                 runtime_typed_external_param
                     ? unpacked_typmod
@@ -710,12 +651,9 @@ export {
                     unpacked_typmod, unpacked_arg1_typmod, "column scan begin");
             }
 
-            /*
-             * Sanity-check the primary key column: the scan contract requires INT4.
-             * If it is not INT4 or InvalidAttrNumber we still configure — the
-             * batch processor will treat the column as null-PK and filter
-             * those rows out (see tuple_dispatch_buffer::run_batch_and_build_cursors).
-             */
+            /* Log an unexpected type for the optional integer key. Row identity
+             * inside a batch comes from the buffer entry index, so  this check
+             * does not discard rows. */
             if (primary_key_attno != InvalidAttrNumber &&
                 primary_key_attno <= tuple_descriptor->natts) {
                 Form_pg_attribute pk_attr_form =
@@ -797,12 +735,9 @@ export {
             }
 
             if (arg1_is_const) {
-                /*
-                 * Literal-query case. Detoast the query bioseq.seq varlena once;
-                 * submit_scan reuses the bytes across every row so the TOAST read
-                 * never happens on the hot path. The buffer owns a std::vector<char>
-                 * copy so the bytes outlive the planner's per-query memory context.
-                 */
+                /* Keep an owned copy of the constant quer in the dispatch buffer
+                 * for reuse across rows. Detoast it here so row submission does not
+                 * repeatedly fetch the same query value */
                 Const* query_const = reinterpret_cast<Const*>(arg1);
                 if (query_const->constisnull) {
                     runtime.mmsearch_null_input = true;
@@ -833,18 +768,12 @@ export {
                                                       unpacked_typmod.alphabet_code,
                                                       unpacked_typmod.storage_unit_byte_width,
                                                       primary_key_attno);
-                    /* Same-alphabet width coalescing preserves logical letters and keeps
-                     * the target column's sidecar valid. Alphabet mismatch was rejected
-                     * above and can never enter this block. */
+                    /* Repacking changes storage width while preserving the letters, so
+                     * the target's saved minimizer index remains compatible. */
                     if (physical_query_type != unpacked_typmod) {
-                        /*
-                         * Rewidth the literal at the column's typmod when its physical
-                         * payload has not already been normalized to that shape. We
-                         * have to re-detoast here because the previous
-                         * detoast scope above already pfree'd the local
-                         * copy. apply_typmod_coalesce stores the result
-                         * inside the buffer's mmsearch_context.
-                         */
+                        /* Fetch the literal again because the first detoasted copy was
+                         * released. Repack it to the target width and keep the replacement
+                         * bytes in the buffer through apply_typmod_coalesce(). */
                         bioseq::pg_types::seq* src_hdr2 = reinterpret_cast<bioseq::pg_types::seq*>(
                             PG_DETOAST_DATUM(query_const->constvalue));
                         bioseq::pg_types::seq* rewidthed =
@@ -870,12 +799,9 @@ export {
                     }
                 }
             } else if (arg1_is_param) {
-                /*
-                 * Parameterized-query case. Stash the Param coordinates for the
-                 * shared evaluator. PARAM_EXTERN is available and installed now;
-                 * PARAM_EXEC remains inactive until its Nested Loop parent installs
-                 * the value and calls ReScan.
-                 */
+                /* Save  the parameter identity for later rebinding. PARAM_EXTERN is
+                 * available now. A nested loop installs PARAM_EXEC before calling
+                 * ReScan on this scan. */
                 Param* query_param = reinterpret_cast<Param*>(arg1);
                 runtime.param_rebind.active = true;
                 runtime.param_rebind.paramid = query_param->paramid;
@@ -900,7 +826,7 @@ export {
                     static_cast<int>(query_param->paramkind),
                     static_cast<unsigned>(unpacked_typmod.alphabet_code),
                     static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width));
-            } else /* same-row raw Var or complete evaluated query recipe */
+            } else /* Query column or evaluated expression from the same row. */
             {
                 const bool evaluated_submission =
                     runtime.match_target_evaluated || arg1_is_evaluated_row;
@@ -953,12 +879,8 @@ export {
             runtime.match_sequence_attno = col_var->varattno;
 
             pfree(attname_cstr);
-            /*
-             * Don't break — subsequent loop iterations that also match
-             * an mmsearch FuncExpr will fall into the
-             * `primary_configured` branch above and stack as additional
-             * AND filters.
-             */
+            /* Continue so the next owned call can be checked as the optional
+             * constant filter on this same target. */
         }
         if (consumed_mmsearch_qual_count != top_level_mmsearch_qual_count &&
             (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
@@ -988,8 +910,8 @@ export {
                  errmsg("BioseqScan configured match target disagrees with its finalized owner")));
         }
         if (runtime.match_evaluated_submission) {
-            /* These are the exact post-setrefs argument cells in custom_exprs[3].
-             * The metadata-only mmsearch FuncExpr itself is never initialized. */
+            /* Initialize the operand expressions after setrefs. The enclosing
+             * mmsearch call is metadata and must never become an ExprState. */
             runtime.match_target_recipe = configured_match_target;
             runtime.match_target_expr_state =
                 ExecInitExpr(reinterpret_cast<Expr*>(configured_match_target), &cscanstate->ss.ps);
@@ -1015,11 +937,9 @@ export {
                            static_cast<int>(primary_seq_attno))));
         }
 
-        /*
-         * Resolve one executor request. Planner semantic payloads remain
-         * value-only; provider scans without mmsearch take no aligner snapshot.
-         * Freeze after options, policy, alphabet and projected-output flags.
-         */
+        /* Build one execution plan after resolving call options, index policy,
+         * sequence type, and requested match fields. A scan without mmsearch
+         * does  not need an alignment plan. */
         scan_feature_flags features = detect_feature_flags(
             cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
         features.has_mmsearch = owned_mmsearch_quals != NIL;
@@ -1134,16 +1054,10 @@ export {
         const bool selected_vulkan_accelerator =
             bioseq::simd::pipe::vulkan_accelerator_requested(aligner_params);
         const bool executable_scan = (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
-        /*
-         * C1 is deliberately fail-closed: the readable persisted minimizer-fragment
-         * and minimizer-sequence
-         * layouts lack the READY head-and-manifest identity required by ordinal 2.
-         * Rebuilding pairs or trusting a warm
-         * assembled/GPU cache would counterfeit a persisted-compatible read.
-         * Reject executable scans here before Vulkan initialization and retain the
-         * typed-processor check as defence in depth for non-standard callers. Plain
-         * EXPLAIN keeps the ordinal visible without initializing either payload.
-         */
+        /* Ordinary BioseqScan cannot hold the READY index generation
+         * required by require_compatible_persisted. Reject that policy before
+         * starting Vulkan. Recomputed seeds and cached results cannat, satisfy
+         * it. Plain EXPLAIN can still show the policy without running a search. */
         if (index_read_requirement ==
                 bioseq::indexing::index_read_requirement::require_compatible_persisted &&
             executable_scan) {
@@ -1158,11 +1072,9 @@ export {
                          "index_read_requirement=allow/require_absent; recompute and cache "
                          "fallback are forbidden.")));
         }
-        /* Plain EXPLAIN must describe the selected pipeline without touching the
-         * process-owned Vulkan runtime or its immutable Metal policy.  PostgreSQL
-         * clears EXEC_FLAG_EXPLAIN_ONLY for SELECT and EXPLAIN (ANALYZE), so every
-         * executable path retains the fail-closed enablement, cache and device
-         * checks below. */
+        /* Plain EXPLAIN describes the chosen pipeline without starting Vulkan
+         * or changing its Metal policy. SELECT and EXPLAIN ANALYZE must pass
+         * the runtime enablement and hardware-device checks below */
         const bool executable_vulkan =
             features.has_mmsearch && selected_vulkan_accelerator && executable_scan;
         if (executable_vulkan && !aligner_params.vulkan_enabled) {
@@ -1205,13 +1117,8 @@ export {
         runtime.aligner_state.index_read_requirement = index_read_requirement;
         runtime.aligner_state.read_sequence_index = executor_read_sequence_index;
 
-        /*
-         * Capture the structured pipeline description for EXPLAIN.  Walks the
-         * same dispatch ladder `dispatch_pipeline` would but invokes each stage's
-         * `describe()` instead of `on_batch(...)`.  The cold planner selects the
-         * already-validated target alphabet once, then constructs its own empty
-         * query/target prototypes; this is not another dispatch-chain dimension.
-         */
+        /* Describe the selected pipeline for EXPLAIN using the execution  plan
+         * and target alphabet. Stage descriptions do not run alignment work. */
         if (features.has_mmsearch) {
             runtime.aligner_state.pipeline_desc = describe_pipeline_for_pg_alphabet(
                 runtime.aligner_state.execution_plan,
@@ -1219,20 +1126,13 @@ export {
                 query_sketch_plan_route_for(index_read_requirement));
         }
 
-        /*
-         * Only consult the sidecar when mmsearch is actually present. Without
-         * mmsearch there is no batch_processor call so opening the sidecar
-         * relation would be wasted work (and would surface a confusing
-         * "Recomputed" line in EXPLAIN on a query that doesn't use any index).
-         */
+        /* Enable saved-index access only for an mmsearch scan. Scans without
+         * mmsearch do not need to open the sequence index or report its strategy. */
         const Oid resolved_user_relid = cscanstate->ss.ss_currentRelation != nullptr
                                             ? RelationGetRelid(cscanstate->ss.ss_currentRelation)
                                             : InvalidOid;
-        /*
-         * Pass the parent's three-part physical identity
-         * (database, tablespace, relfilenode) so the dispatch buffer can route
-         * its per-bucket SM::fetch_payload_bulk calls to the right sub-tables.
-         */
+        /* Supply database, tablespace, and relation-file ids so the buffer
+         * can find the sequence fragments belonging to this table. */
         Oid scan_db_oid = InvalidOid;
         Oid scan_spc_oid = InvalidOid;
         Oid scan_relfile = InvalidOid;

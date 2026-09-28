@@ -1,6 +1,6 @@
 /**
  * @file segmented_test.cpp
- * @brief Exercises segmented pipeline execution.
+ * @brief Check reverse-strand alignment coordinates across target segments.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 
@@ -22,9 +22,9 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     using ::bioseq::simd::chaining_algorithm;
     using ::bioseq::simd::base_alignment_algorithm;
 
-    // Force the production geometry to its 32-Mbp floor, then place the truth
-    // strictly inside the second core. This exercises two real target-range
-    // sketches without introducing a test-only segmentation implementation.
+    // Limit the memory budget so target segments use the 32-million-base
+    // minimum. Put the matching sequence inside the second segment to check
+    // that its local coordinates are converted back to target coordinates.
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     struct restore_cap {

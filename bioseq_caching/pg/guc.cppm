@@ -1,12 +1,9 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief PostgreSQL settings for cache mode and completed-result lifetime.
  *
- * PostgreSQL GUC ownership for bioseq_cache.
- *
- * This module is the single owner of the user-visible cache mode and TTL
- * variables. Callers consume typed accessors rather than retaining pointers
- * to PostgreSQL's mutable GUC storage.
- *
- *-------------------------------------------------------------------------
+ * This modle stores the settings and exposes their current values through
+ * typed accessors.
  */
 module;
 
@@ -43,7 +40,7 @@ bool g_preload_requested = false;
 int g_mode = static_cast<int>(query_cache_mode::disabled);
 int g_ttl_ms = 60 * 60 * 1000;
 
-/** Reject non-disabled use when shared memory was not requested at preload. */
+/** Require shared preload before a caller can enable caching. */
 [[nodiscard]] bool check_mode(int* new_value, void**, GucSource) noexcept {
     if (*new_value == static_cast<int>(query_cache_mode::disabled)) {
         return true;
@@ -56,7 +53,7 @@ int g_ttl_ms = 60 * 60 * 1000;
     return false;
 }
 
-/** Invalidate generic prepared plans on every real mode transition. */
+/** Clear cached plans when the mode changes during a transaction. */
 void assign_mode(int new_value, void*) noexcept {
     static int previous_value = static_cast<int>(query_cache_mode::disabled);
     const bool changed = previous_value != new_value;
@@ -86,7 +83,7 @@ void mark_preload_requested() noexcept {
     detail::g_preload_requested = true;
 }
 
-/** Register the two production GUCs exactly once per loaded DSO. */
+/** Register the, cache mode  and result lifetime settings once. */
 void register_variables() {
     if (detail::g_registered) {
         return;
@@ -121,9 +118,8 @@ void register_variables() {
                             nullptr,
                             nullptr);
     /*
-     * The bioseq prefix is shared with the main extension DSO, which can be
-     * loaded after this preloaded cache DSO. Reserving it here would make
-     * PostgreSQL reject the main extension's GUC registrations.
+     * The main Bioseq extension can load after this cache library and register its
+     * own settings. Reserving the shared bioseq prefix here would block those registrations.
      */
     detail::g_registered = true;
 }

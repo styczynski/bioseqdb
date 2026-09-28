@@ -37,9 +37,8 @@ namespace detail {
 // Also used by HeapSort, so do not require VQSORT_ENABLED.
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
-// Highway does not provide a lane type for 128-bit keys, so we use uint64_t
-// along with an abstraction layer for single-lane vs. lane-pair, which is
-// independent of the order.
+// Represent each 128-bit key with two uint64_t lanes. These helpers move
+// whole keys and work with both ascending and descending order
 struct KeyAny128 {
   static constexpr bool Is128() { return true; }
   constexpr size_t LanesPerKey() const { return 2; }
@@ -172,13 +171,9 @@ struct Key128 : public KeyAny128 {
   }
 };
 
-// Anything order-related depends on the key traits *and* the order (see
-// FirstOfLanes). We cannot implement just one Compare function because Lt128
-// only compiles if the lane type is u64. Thus we need either overloaded
-// functions with a tag type, class specializations, or separate classes.
-// We avoid overloaded functions because we want all functions to be callable
-// from a SortTraits without per-function wrappers. Specializing would work, but
-// we are anyway going to specialize at a higher level.
+// Keep 128-bit comparison in separate order classes because Lt128 requires
+// uint64_t lanes. SortTraits can then inherit the comparison methods directly,
+// while Traits128 supplies reductions shared by both orders.
 struct OrderAscending128 : public Key128 {
   using Order = SortAscending;
   using OrderForSortingNetwork = OrderAscending128;
@@ -204,7 +199,7 @@ struct OrderAscending128 : public Key128 {
 
   // FirstOfLanes/LastOfLanes are implemented in Traits128.
 
-  // Same as for regular lanes because 128-bit keys are u64.
+  // Repeating the uint64_t limit fills both halves of each 128-bit key.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> FirstValue(D d) const {
     return Set(d, hwy::LowestValue<TFromD<D> >());
@@ -257,7 +252,7 @@ struct OrderDescending128 : public Key128 {
 
   // FirstOfLanes/LastOfLanes are implemented in Traits128.
 
-  // Same as for regular lanes because 128-bit keys are u64.
+  // Repeating the uint64_t limit fills both halves of each 128-bit key.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> FirstValue(D d) const {
     return Set(d, hwy::HighestValue<TFromD<D> >());
@@ -355,7 +350,7 @@ struct OrderAscendingKV128 : public KeyValue128 {
 
   // FirstOfLanes/LastOfLanes are implemented in Traits128.
 
-  // Same as for regular lanes because 128-bit keys are u64.
+  // Repeating the uint64_t limit also sets every key lane to that  limit.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> FirstValue(D d) const {
     return Set(d, hwy::LowestValue<TFromD<D> >());
@@ -404,7 +399,7 @@ struct OrderDescendingKV128 : public KeyValue128 {
 
   // FirstOfLanes/LastOfLanes are implemented in Traits128.
 
-  // Same as for regular lanes because 128-bit keys are u64.
+  // Repeating the uint64_t limit also sets every key lane to that limit.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> FirstValue(D d) const {
     return Set(d, hwy::HighestValue<TFromD<D> >());
@@ -514,8 +509,8 @@ struct Traits128 : public Base {
     return IfVecThenElse(ReplicateTop4x(cmpHx), swapped, v);
   }
 
-  // Swaps with the vector formed by reversing contiguous groups of four 128-bit
-  // keys, which implies 512-bit vectors (we do not support more than that).
+  // Compare and swap with groups of four 128-bit keys in reverse order.
+  // This operation requires 512-bit vectors.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> SortPairsReverse4(D d, Vec<D> v) const {
     HWY_DASSERT(Lanes(d) == 8);  // For TableLookupLanes below
@@ -523,14 +518,14 @@ struct Traits128 : public Base {
     Vec<D> swapped = base->ReverseKeys4(d, v);
 
     const Vec<D> cmpHx = base->template CompareTop<Base>(d, v, swapped);
-    // Similar to ReplicateTop4x, we want to gang together 2 comparison results
-    // (4 lanes). They are not contiguous, so use permute to replicate 4x.
+    // Repeat each comparison result over both keys it selects. The two masks
+    // come from separate lanes, so use a permutation to place them.
     HWY_ALIGN uint64_t kIndices[8] = {7, 7, 5, 5, 5, 5, 7, 7};
     const Vec<D> select = TableLookupLanes(cmpHx, SetTableIndices(d, kIndices));
     return IfVecThenElse(select, swapped, v);
   }
 
-  // Conditionally swaps lane 0 with 4, 1 with 5 etc.
+  // Unused hook for sorting keys four positions apart.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> SortPairsDistance4(D, Vec<D>) const {
     // Only used by Merge16, which would require 2048 bit vectors (unsupported).

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares exact edit-sequence recipe validation without semantic-analysis fanout.
+ * @brief Declares the check that, edit helpers refer to their match target.
  */
 module;
 #include <cstdint>
@@ -11,7 +11,12 @@ export module bioseq.postgres.table:custom_scan_oid_expression_support_edit_sequ
 
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
-/** @brief Check that an edit helper names the complete owned target recipe. */
+/**
+ * @brief Checks that a sequence-valued edit argument equals the complete match target
+ *
+ * Non-sequence row identifiers use the surrounding helper-ownership checks.
+ * Calls to other functions pass this check.
+ */
 export [[nodiscard]] bool edit_sequence_argument_matches_recipe(
     const FuncExpr* function,
     Node* target_expression,

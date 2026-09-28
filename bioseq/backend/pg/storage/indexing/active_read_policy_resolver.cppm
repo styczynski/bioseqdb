@@ -1,6 +1,6 @@
 /**
  * @file active_read_policy_resolver.cppm
- * @brief Declares the executor-scoped active-read policy resolver.
+ * @brief Select a column's active index using the executor's snapshot.
  */
 module;
 
@@ -15,11 +15,13 @@ import bioseq.postgres.storage.indexing.minimizer_read_stats;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Resolves the active read index for an executor-owned relation column.
- * @param[in] executor_read Borrowed executor relation and snapshot context.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in,out] cold_stats Optional counters updated for catalog and lock work.
- * @return Selected index name and its policy source.
+ * Read the enabled active index for this relation column using the executor's
+ * snapshot. Use the default when no active row exists, and reject  multiple
+ * active rows.
+ * @param executor_read Borrowed relation context with a registered MVCC snapshot.
+ * @param attno One-based PostgreSQL column, number.
+ * @param cold_stats Optional counters for catalog reads and locks.
+ * @return Selected index name and the source of that choice.
  */
 [[nodiscard]] active_read_policy_resolution
 resolve_active_read_index_outcome(const borrowed_executor_read_context& executor_read,

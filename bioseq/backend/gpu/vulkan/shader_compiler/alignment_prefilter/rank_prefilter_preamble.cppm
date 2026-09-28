@@ -1,6 +1,6 @@
 /**
  * @file rank_prefilter_preamble.cppm
- * @brief Defines the shared rank-prefilter GLSL preamble.
+ * @brief Shared GPU input layouts and rank readers for the sequence prefilters.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_rank_prefilter_preamble;
 
@@ -8,10 +8,11 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Shared rank-prefilter GLSL ABI. Both algorithms consume byte-rank streams,
-/// the canonical 20-byte job/16-byte result records, and the same bounds-aware
-/// 16-byte push block. Every load helper checks the exact logical byte count.
-/// algorithm bodies still reject a malformed job before making any load.
+/// @brief Shares input layouts and rank readers between SneakySnake and GateKeeper.
+/// Symbols occupy one byte each. Jobs use 20 bytes, results use 16 bytes, and
+/// push constants supply the job count, mode, and  input byte counts in 16 bytes.
+/// Checked readers enforce byte bounds. Unchecked readers require the, caller
+/// to validate the job and bound the index before reading.
 inline constexpr std::string_view k_rank_prefilter_preamble = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 

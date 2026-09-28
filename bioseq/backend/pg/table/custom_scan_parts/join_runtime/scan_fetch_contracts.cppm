@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines the inline PostgreSQL scan-fetch path without tuple-injection fanout.
+ * @brief Fetches scan rows, including replacement rows used by PostgreSQL for rechecks.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,10 +10,11 @@ export module bioseq.postgres.table:custom_scan_join_runtime_scan_fetch_contract
 import bioseq.common.logging;
 
 /**
- * @brief Fetches a scan tuple while honoring EvalPlanQual replacement semantics.
+ * @brief Returns the next scan row or the row supplied for an EvalPlanQual recheck.
  *
- * This routine is concerned with substituting a test tuple if we are inside an
- * EvalPlanQual recheck. Otherwise it executes the access method's next-tuple routine.
+ * During a recheck, PostgreSQL may supply a replacemen row after a concurrent
+ * update. Test that row with recheck_mtd and return it at most once for its
+ * relation. Otherwise, fetch the next row through access_mtd.
  */
 export inline TupleTableSlot* exec_scan_fetch(ScanState* node,
                                               ExecScanAccessMtd access_mtd,

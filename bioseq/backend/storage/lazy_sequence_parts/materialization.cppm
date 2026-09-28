@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence_parts/materialization.cppm
- * @brief Admission-accounted packed-sequence materialization.
+ * @brief Creates packed sequence copies covered by memory reservations.
  */
 module;
 
@@ -27,11 +27,11 @@ export namespace bioseq::storage {
 namespace lazy_sequence_detail {
 
 /**
- * Source-proven upper bound for Highway 1.3's underlying allocator request.
- * AllocateAlignedBytes requests payload + kAlias + offset. A single-group
- * target replaces offset zero with one alignment; a multi-group target's
- * largest cyclic offset is kAlias - kAlignment. The callback checks the actual
- * request before allocating, so a changed contract cannot exceed admission.
+ * Bounds the allocation request for a Highway-aligned payload.
+ *
+ * Includes space for alignment and Highway's varying offset between allocations.
+ * The allocation callback checks the actual request against this bound before
+ * allocating, so a larger request fails instead of exceeding  the reserved plan.
  */
 [[nodiscard]] inline std::size_t packed_allocator_request_bound(std::size_t bytes) {
     if (bytes == 0u) {
@@ -72,8 +72,8 @@ class aligned_packed_storage {
         if (requested_bytes > pending.highway_request_bound || pending.allocated_bytes != 0u) {
             return nullptr;
         }
-        // Allocate the plan's complete Highway-request bound so the physical
-        // requirement is independent of Highway's private cyclic offset.
+        // Allocate the full planned request so the backing allocation has the
+        // same bound regardless of Highway's chosen offset.
         return bioseq::common::heap_allocation_detail::allocate_and_touch(
             pending.heap_plan, pending.allocated_bytes);
     }
@@ -97,8 +97,8 @@ class aligned_packed_storage {
             .highway_request_bound = highway_request_bound,
             .heap_plan = heap_plan,
         };
-        // Default deleter owns only the returned pointer. The stack-local
-        // callback state is never retained in the deleter or published owner.
+        // The deleter needs only the allocated pointer. The callback's temporary
+        // state, remains on this stack and is not saved in the owner.
         storage.data_.reset(static_cast<std::uint8_t*>(
             hwy::AllocateAlignedBytes(bytes, &allocate_under_bound, std::addressof(pending))));
         if (storage.data_ == nullptr) {
@@ -332,23 +332,23 @@ pack_view_region_into(lazy_sequence_view<p_alphabet> view,
 
 template <sequence_alphabet p_alphabet> class admitted_packed_sequence;
 
-/** Checked physical-allocation requirements for one packed sequence owner. */
+/** Allocation sizes and reservation bounds for the packed payload and its owner. */
 struct packed_sequence_physical_plan {
     /// Bytes visible through the packed descriptor.
     std::uint64_t logical_payload_bytes = 0u;
-    /// Maximum source-valid request made by pinned Highway 1.3.
+    /// Upper bound on Highway's aligned-allocation request.
     std::uint64_t payload_highway_request_bound_bytes = 0u;
-    /// Bytes passed to the allocator backing the Highway callback.
+    /// Bytes requested from the allocator for the packed payload.
     std::uint64_t payload_allocator_request_bytes = 0u;
-    /// Pre-admission bound for the allocator-reported payload extent.
+    /// Payload allocation bound used when reserving memory.
     std::uint64_t payload_allocation_requirement_bytes = 0u;
-    /// C++ object extent requested for `stable_state`.
+    /// Size of the stable_state control object.
     std::uint64_t control_object_bytes = 0u;
-    /// Bytes passed to the allocator backing `stable_state`.
+    /// Bytes requested from the allocator  for stable_state.
     std::uint64_t control_allocator_request_bytes = 0u;
-    /// Pre-admission bound for the allocator-reported control extent.
+    /// Control allocation bound used when reserving memory
     std::uint64_t control_allocation_requirement_bytes = 0u;
-    /// Checked sum of the two independently allocated physical requirements.
+    /// Combined payload and control allocation bounds, checkej for overflow.
     std::uint64_t total_allocation_requirement_bytes = 0u;
 };
 
@@ -358,7 +358,7 @@ enum class packed_materialization_policy : std::uint8_t {
     require_native_copy,
 };
 
-/** Raised when a caller forbids logical-rank decode/repacking and no native path exists. */
+/** Raised when native copying is required but unavailable for the requested region. */
 class native_packed_materialization_unavailable final : public std::runtime_error {
   public:
     native_packed_materialization_unavailable()
@@ -366,13 +366,13 @@ class native_packed_materialization_unavailable final : public std::runtime_erro
               "native packed materialization is unavailable for this sequence facade") {}
 };
 
-/** @brief Return the checked physical plan for packed materialization. */
+/** Computes payload and owner allocation bounds, rejecting unsupported widths or size overflow. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] packed_sequence_physical_plan
 plan_packed_sequence_allocation(sequence_size_t logical_length,
                                 std::uint8_t requested_width);
 
-/** @brief Return the retained-byte budget required for packed materialization. */
+/** Returns the memory reservation needed for a packed copy and its owner. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t packed_sequence_admission_bytes(sequence_size_t logical_length,
                                                             std::uint8_t requested_width);
@@ -389,7 +389,13 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
                             bioseq::parallelism::memory_footprint_probe footprint_probe =
                                 bioseq::parallelism::live_process_footprint_probe);
 
-/** @brief Move-only owner of an admission-accounted aligned packed sequence. */
+/**
+ * Owns an aligned packed sequence and any memory reservation still held for it.
+ *
+ * The control object stays at a fixed address when this owner is moved, so
+ * previously  returned views remain valid until the owning object is destroyed.
+ * Views borrow storage and must not outlive it.
+ */
 template <sequence_alphabet p_alphabet> class admitted_packed_sequence {
   public:
     using view_type = lazy_sequence_view<p_alphabet>;
@@ -453,9 +459,8 @@ template <sequence_alphabet p_alphabet> class admitted_packed_sequence {
         descriptor_type descriptor_;
         lazy_sequence_detail::resident_view_ops_context<p_alphabet> view_context_;
 
-        // make_unique requests exactly this control object's storage. Initialize
-        // the complete byte extent, including padding, before construction;
-        // construction then starts every member's ordinary lifetime.
+        // Allocate and touch the full control-object allocation before constructing
+        // its members, so the memory measurement includes its backing pages.
         static void* operator new(std::size_t bytes) {
             if (bytes != sizeof(stable_state)) {
                 throw std::length_error("packed control allocation has an unexpected extent");
@@ -474,7 +479,7 @@ template <sequence_alphabet p_alphabet> class admitted_packed_sequence {
             std::free(allocation);
         }
 
-        /** Keep the physical reservation through both payload and control free. */
+        /** Releases the reservation after freeing both the payload and control object. */
         static void operator delete(stable_state* allocation,
                                     std::destroying_delete_t) noexcept {
             auto permit = std::move(allocation->permit_);
@@ -572,7 +577,17 @@ template <sequence_alphabet p_alphabet>
         .total_allocation_requirement_bytes;
 }
 
-/** @brief Materialize a planned region into permit-backed packed storage. */
+/**
+ * Copies [from, to) into aligned packed storage using an existing memory permit.
+ *
+ * The permit must cover the payload and control allocations. Memory is measured
+ * befare source reads begin. Complete sequences first  try native packed copying.
+ * Other regions or layouts are packed from ranks when policy allows it.
+ *
+ * The owner keeps storage and any remaining reservation alive. Invalid inputs,
+ * insufficient permits and allocation, or packing failures raise exceptions.
+ * Requiring native copying also raises if that path is unavailable.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] admitted_packed_sequence<p_alphabet>
 materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
@@ -637,9 +652,8 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
         .trailing_padding = static_cast<std::uint16_t>(trailing),
         .bit_order = bit_order_type::least_significant_symbol_first,
     };
-    // The child reservation remains local through construction, full touch,
-    // reconciliation and the transaction's second footprint sample. No nested
-    // reservation is made here: the caller already owns this exact allowance.
+    // Keep the caller's permit through allocation and memory measurement
+    // Transfer any remaining reservation to the owner after the checks pass.
     std::unique_ptr<typename owner_type::stable_state> state;
     auto& admission = *permit.controller();
     const auto materialization = admission.materialize(permit,
@@ -682,8 +696,8 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
     }
     state->permit_ = std::move(permit);
 
-    // Source reads and existing rank packing occur outside the serialized
-    // allocation transaction: a lazy source may itself materialize storage.
+    // Read the source after the allocation transaction ends. Lazy reads can
+    // allocate memory themselves  and must not nest that transaction.
     const bool complete_range = from == 0u && to == view.bp_size();
     bool native_copied = complete_range &&
                          view.try_copy_packed_sequence(

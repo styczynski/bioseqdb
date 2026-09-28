@@ -1,9 +1,8 @@
 /**
  * @file ksw2.cppm
- * @brief Provides the public KSW2 alignment facade.
+ * @brief Export the alignment types through the public bioseq.alignment module.
  *
- * @details Re-exports `bioseq.alignment.contracts` through the public `bioseq.alignment`
- * module. Target selection and algorithm implementation remain outside this facade.
+ * The declarations come from bioseq.alignment.contracts.
  */
 export module bioseq.alignment;
 

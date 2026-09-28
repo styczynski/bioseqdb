@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Implements aggregate transitions, ordering, and projection.
+ * @brief Update aggregate states, process sorted inputs, and return group results.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -19,15 +19,10 @@ import :support;
 using bioseq::postgres::support::memory_context_scope;
 using bioseq::postgres::support::postgres_list;
 
-/**
- * Select the current grouping set. Affects current_set and
- * curaggcontext.
- */
+/** Select the grouping set and the memory context that owns its transition values. */
 export void select_current_set(AggState* aggregate_state, int set_index, bool is_hash) {
-    /**
-     * When changing this, also adapt ExecAggPlainTransByVal() and
-     * ExecAggPlainTransByRef().
-     */
+    /* Keep this context  selection consistent with PostgreSQL's
+     * ExecAggPlainTransByVal() and ExecAggPlainTransByRef(). */
     if (is_hash)
         aggregate_state->curaggcontext = aggregate_state->hashcontext;
     else
@@ -36,16 +31,11 @@ export void select_current_set(AggState* aggregate_state, int set_index, bool is
     aggregate_state->current_set = set_index;
 }
 
-/**
- * Switches aggregation phases and rotates or releases their tuplesorts.
- */
+/** Start an aggregation phase and prepare sorting for its input and the next phase. */
 export void initialize_phase(AggState* aggregate_state, int new_phase) {
     Assert(new_phase <= 1 || new_phase == aggregate_state->current_phase + 1);
 
-    /**
-     * Whatever the previous state, we're now done with whatever input
-     * tuplesort was in use.
-     */
+    /* The previous phase has finished reading its sorted input. */
     if (aggregate_state->sort_in) {
         tuplesort_end(aggregate_state->sort_in);
         aggregate_state->sort_in = nullptr;
@@ -60,20 +50,14 @@ export void initialize_phase(AggState* aggregate_state, int new_phase) {
             aggregate_state->sort_out = nullptr;
         }
     } else {
-        /**
-         * The old output tuplesort becomes the new input one, and this is the
-         * right time to actually sort it.
-         */
+        /* Sort the rows saved by the previous phase and use them as this phase's input */
         aggregate_state->sort_in = aggregate_state->sort_out;
         aggregate_state->sort_out = nullptr;
         Assert(aggregate_state->sort_in);
         tuplesort_performsort(aggregate_state->sort_in);
     }
 
-    /**
-     * If this isn't the last phase, we need to sort appropriately for the
-     * next phase in sequence.
-     */
+    /* Save input in the order required by the following phase. */
     if (new_phase > 0 && new_phase < aggregate_state->numphases - 1) {
         Sort* sort_node = aggregate_state->phases[new_phase + 1].sortnode;
         PlanState* outer_node = outerPlanState(aggregate_state);
@@ -94,16 +78,13 @@ export void initialize_phase(AggState* aggregate_state, int new_phase) {
     aggregate_state->phase = &aggregate_state->phases[new_phase];
 }
 
-/**
- * Fetches one input tuple from the outer plan or the preceding phase sorter.
- *
- * The returned slot is valid only until the next fetch.
- */
+/** Read the next input from the child plan or a previous phase's sort.
+ * The  slot is reused by later fetches. Save its contents before keeping a row. */
 export TupleTableSlot* fetch_input_tuple(AggState* aggregate_state) {
     TupleTableSlot* input_slot;
 
     if (aggregate_state->sort_in) {
-        /* make sure we check for interrupts in either path through here */
+        /* Check for cancellation while reading from the sorter too. */
         CHECK_FOR_INTERRUPTS();
         if (!tuplesort_gettupleslot(
                 aggregate_state->sort_in, true, false, aggregate_state->sort_slot, nullptr))
@@ -128,16 +109,11 @@ export void initialize_aggregate(AggState* aggregate_state,
      * Start a fresh sort operation for each DISTINCT/ORDER BY aggregate.
      */
     if (transition_state->numSortCols > 0) {
-        /**
-         * In case of rescan, maybe there could be an uncompleted sort
-         * operation?  Clean it up if so.
-         */
+        /* A rescan can leave an unfinished sort to close. */
         if (transition_state->sortstates[aggregate_state->current_set])
             tuplesort_end(transition_state->sortstates[aggregate_state->current_set]);
 
-        /**
-         * Uses the Datum sorter for one input and the tuple sorter otherwise.
-         */
+        /* Sort a single input as Datums and several inputs as tuples. */
         if (transition_state->numInputs == 1) {
             Form_pg_attribute sort_attribute = bioseq::postgres::support::tuple_descriptor_attribute(transition_state->sortdesc, 0);
 
@@ -162,10 +138,7 @@ export void initialize_aggregate(AggState* aggregate_state,
                                      TUPLESORT_NONE);
     }
 
-    /**
-     * Restores the initial transition value, copying referenced state into the
-     * aggregate context.
-     */
+    /* Copy the initial transition value into the context that owns this group. */
     if (transition_state->initValueIsNull)
         per_group_state->transValue = transition_state->initValue;
     else {
@@ -177,17 +150,11 @@ export void initialize_aggregate(AggState* aggregate_state,
     }
     per_group_state->transValueIsNull = transition_state->initValueIsNull;
 
-    /**
-     * Lets the first non-null input initialize a transition with no catalog
-     * initial value.
-     */
+    /* A strict transition with no initial value can sfart from, its first non-NULL input. */
     per_group_state->noTransValue = transition_state->initValueIsNull;
 }
 
-/**
- * Initializes the requested leading grouping sets, or every set when the
- * reset count is zero.
- */
+/** Initialize  the first reset_count grouping sets, or all sets when reset_count is zero. */
 export void initialize_aggregates(AggState* aggregate_state,
                                   AggStatePerGroup* group_state_sets,
                                   int reset_count) {
@@ -213,9 +180,9 @@ export void initialize_aggregates(AggState* aggregate_state,
 }
 
 /**
- * Advances one preloaded transition call for the selected grouping set.
- *
- * Strictness and pass-by-reference state ownership follow PostgreSQL fmgr rules.
+ * Apply one transition call whose input arguments are already loaded.
+ * Honor SQL NULL rules and keep any referenced result in the group's memory
+ * context so temporary input storage can be reset safely.
  */
 static void advance_transition_function(AggState* aggregate_state,
                                         AggStatePerTrans transition_state,
@@ -224,10 +191,7 @@ static void advance_transition_function(AggState* aggregate_state,
     Datum new_value;
 
     if (transition_state->transfn.fn_strict) {
-        /**
-         * For a strict transfn, nothing happens when there's a nullptr input. We
-         * just keep the prior transValue.
-         */
+        /* A strict transition skips rows with a SQL NULL input. Keep the current state. */
         const int num_transition_inputs = transition_state->numTransInputs;
 
         for (int argument_index = 1; argument_index <= num_transition_inputs; ++argument_index) {
@@ -251,34 +215,28 @@ static void advance_transition_function(AggState* aggregate_state,
             return;
         }
         if (per_group_state->transValueIsNull) {
-            /**
-             * Propagates a null state previously returned by a strict transition.
-             */
+            /* Once a strict transition returns NULL, later rows keep that NULL state. */
             return;
         }
     }
 
-    /* We run the transition functions in per-input-tuple memory context */
+    /* Temporary transition work belongs to the input  context. */
     memory_context_scope input_context_scope{aggregate_state->tmpcontext->ecxt_per_tuple_memory};
 
-    /* set up aggregate_state->curpertrans for AggGetAggref() */
+    /* Let aggregate support functions identify the active transition */
     aggregate_state->curpertrans = transition_state;
 
-    /**
-     * OK to call the transition function
-     */
+    /* Pass the current state before the already loaded row arguments. */
     call_info->args[0].value = per_group_state->transValue;
     call_info->args[0].isnull = per_group_state->transValueIsNull;
-    call_info->isnull = false; /* just in case transfn doesn't set it */
+    call_info->isnull = false; /* Default to a non-NULL result unless the function says otherwise. */
 
     new_value = FunctionCallInvoke(call_info);
 
     aggregate_state->curpertrans = nullptr;
 
-    /**
-     * Reparents changed referenced state while preserving in-place returns and
-     * expanded objects already owned by the aggregate context.
-     */
+    /* Keep a newly returned reference alive in the group context. A result
+     * that reuses the previous state already has the required lifetime. */
     if (!transition_state->transtypeByVal &&
         DatumGetPointer(new_value) != DatumGetPointer(per_group_state->transValue))
 
@@ -293,13 +251,11 @@ static void advance_transition_function(AggState* aggregate_state,
     per_group_state->transValueIsNull = call_info->isnull;
 }
 
-/**
- * Evaluates the compiled transition expression for one input tuple.
- */
+/** Evaluate this phase's transition expression for the current input slot. */
 export void advance_aggregates(AggState* aggregate_state) {
 #if PG_VERSION_NUM >= 190000
-    // PG19 transition programs end in EEOP_DONE_NO_RETURN, which requires
-    // a null result-is-null pointer; their result lives in the group state.
+    // PG19 transivion programs store results in  group state and end with
+    // EEOP_DONE_NO_RETURN. Use the evaluator for expressions with no result.
     ExecEvalExprNoReturnSwitchContext(
         aggregate_state->phase->evaltrans, aggregate_state->tmpcontext);
 #else
@@ -310,11 +266,7 @@ export void advance_aggregates(AggState* aggregate_state) {
 #endif
 }
 
-/**
- * Sorts one-input DISTINCT or ORDER BY values and advances each accepted value.
- *
- * The dedicated Datum path preserves the common single-column fast path.
- */
+/** Sort single-column aggregate inputs, skip duplicates for DISTINCT, and update the state. */
 static void process_ordered_aggregate_single(AggState* aggregate_state,
                                              AggStatePerTrans transition_state,
                                              AggStatePerGroup per_group_state) {
@@ -333,13 +285,11 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
 
     tuplesort_performsort(transition_state->sortstates[aggregate_state->current_set]);
 
-    /* Load the column into argument 1 (arg 0 will be transition value) */
+    /* Read the column into argument one. Argument zero holds the transition state. */
     current_value_out = &call_info->args[1].value;
     current_is_null_out = &call_info->args[1].isnull;
 
-    /**
-     * Releases referenced values allocated by the Datum sorter after use.
-     */
+    /* Keep one previous value for DISTINCT checks and free sorter-owned copies after use. */
 
     while (tuplesort_getdatum(transition_state->sortstates[aggregate_state->current_set],
                               true,
@@ -347,16 +297,11 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
                               current_value_out,
                               current_is_null_out,
                               &new_abbreviated_value)) {
-        /**
-         * Clear and select the working context for evaluation of the equality
-         * function and transition function.
-         */
+        /* Reset scratch memory before equality checks and the transition call. */
         MemoryContextReset(work_context);
         memory_context_scope evaluation_context_scope{work_context};
 
-        /**
-         * If DISTINCT mode, and not distinct from prior, skip it.
-         */
+        /* DISTINCT accepts only the first occurrence of each sorted value. */
         if (is_distinct && has_old_value &&
             ((old_is_null && *current_is_null_out) ||
              (!old_is_null && !*current_is_null_out &&
@@ -365,7 +310,7 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
                                              transition_state->aggCollation,
                                              old_value,
                                              *current_value_out))))) {
-            /* equal to prior, so forget this one */
+            /* Free this duplicate  value if it owns storage. */
             if (!transition_state->inputtypeByVal && !*current_is_null_out)
                 pfree(DatumGetPointer(*current_value_out));
         } else {
@@ -373,7 +318,7 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
             /* forget the old value, if any */
             if (!old_is_null && !transition_state->inputtypeByVal)
                 pfree(DatumGetPointer(old_value));
-            /* and remember the new one for subsequent equality checks */
+            /* Keep this value for the next duplicate check. */
             old_value = *current_value_out;
             old_abbreviated_value = new_abbreviated_value;
             old_is_null = *current_is_null_out;
@@ -388,9 +333,7 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
     transition_state->sortstates[aggregate_state->current_set] = nullptr;
 }
 
-/**
- * Sorts multi-input DISTINCT or ORDER BY tuples and advances accepted rows.
- */
+/** Sort multi-column, aggregate inputs, remove DISTINCT duplicates, and update the state. */
 static void process_ordered_aggregate_multi(AggState* aggregate_state,
                                             AggStatePerTrans transition_state,
                                             AggStatePerGroup per_group_state) {
@@ -424,14 +367,11 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
         if (distinct_column_count == 0 || !has_old_value ||
             new_abbreviated_value != old_abbreviated_value ||
             !ExecQual(transition_state->equalfnMulti, temporary_context)) {
-            /**
-             * Extract the first num_transition_inputs columns as datums to pass to
-             * the transfn.
-             */
+            /* Fetch the columns passed as transition-function inputs. */
             slot_getsomeattrs(current_slot, num_transition_inputs);
 
-            /* Load values into call_info */
-            /* Start from 1, since the 0th arg will be the transition value */
+
+            /* Argument zero holds the state. Row inputs start at argument one */
             for (int input_index = 0; input_index < num_transition_inputs; ++input_index) {
                 call_info->args[input_index + 1].value = current_slot->tts_values[input_index];
                 call_info->args[input_index + 1].isnull = current_slot->tts_isnull[input_index];
@@ -440,18 +380,18 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
             advance_transition_function(aggregate_state, transition_state, per_group_state);
 
             if (distinct_column_count > 0) {
-                /* swap the slot pointers to retain the current tuple */
+                /* Keep the accepted row in the previous slot for the next DISTINCT check. */
                 TupleTableSlot* temporary_slot = previous_slot;
 
                 previous_slot = current_slot;
                 current_slot = temporary_slot;
-                /* avoid ExecQual() calls by reusing abbreviated keys */
+                /* Different abbreviated keys let the next comparison skip funl equality checks. */
                 old_abbreviated_value = new_abbreviated_value;
                 has_old_value = true;
             }
         }
 
-        /* Reset context each time */
+        /* Release temporary expression data from this row. */
         ResetExprContext(temporary_context);
 
         ExecClearTuple(current_slot);
@@ -463,13 +403,11 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
     tuplesort_end(transition_state->sortstates[aggregate_state->current_set]);
     transition_state->sortstates[aggregate_state->current_set] = nullptr;
 
-    /* restore previous slot, potentially in use for grouping sets */
+    /* Restore the input  slot used by the surrounding grouping-set execution. */
     temporary_context->ecxt_outertuple = saved_outer_slot;
 }
 
-/**
- * Finalizes one aggregate without mutating transition state shared by peers.
- */
+/** Produce one aggregate result, exposing expanded transition values as read-only. */
 static void finalize_aggregate(AggState* aggregate_state,
                                AggStatePerAgg aggregate_descriptor,
                                AggStatePerGroup per_group_state,
@@ -483,10 +421,8 @@ static void finalize_aggregate(AggState* aggregate_state,
     memory_context_scope output_context_scope{
         aggregate_state->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
-    /**
-     * Evaluates direct arguments for side effects and places them after the
-     * transition state.
-     */
+    /* Evaluate direct arguments once for this group, including their side effects.
+     * Their values follow the transition state in the final-function call. */
     for (ExprState* direct_argument :
          postgres_list<ExprState>{aggregate_descriptor->aggdirectargs}) {
         call_info->args[argument_index].value =
@@ -497,13 +433,11 @@ static void finalize_aggregate(AggState* aggregate_state,
         ++argument_index;
     }
 
-    /**
-     * Apply the agg's finalfn if one is provided, else return transValue.
-     */
+    /* Call the final function when present, otherwise return the transition value. */
     if (OidIsValid(aggregate_descriptor->finalfn_oid)) {
         const int final_argument_count = aggregate_descriptor->numFinalArgs;
 
-        /* set up aggregate_state->curperagg for AggGetAggref() */
+        /* Let support functions identify the aggregate  being finalized. */
         aggregate_state->curperagg = aggregate_descriptor;
 
         InitFunctionCallInfoData(*call_info,
@@ -513,14 +447,14 @@ static void finalize_aggregate(AggState* aggregate_state,
                                  reinterpret_cast<Node*>(aggregate_state),
                                  nullptr);
 
-        /* Fill in the transition state value */
+        /* Pass the transition state with expanded objects marked read-only. */
         call_info->args[0].value = MakeExpandedObjectReadOnly(per_group_state->transValue,
                                                               per_group_state->transValueIsNull,
                                                               transition_state->transtypeLen);
         call_info->args[0].isnull = per_group_state->transValueIsNull;
         contains_null |= per_group_state->transValueIsNull;
 
-        /* Fill any remaining argument positions with nulls */
+        /* Extra final-function arguments carry type information and are passed as SQL NULL. */
         for (; argument_index < final_argument_count; ++argument_index) {
             call_info->args[argument_index].value = Datum{0};
             call_info->args[argument_index].isnull = true;
@@ -528,7 +462,7 @@ static void finalize_aggregate(AggState* aggregate_state,
         }
 
         if (call_info->flinfo->fn_strict && contains_null) {
-            /* don't call a strict function with nullptr inputs */
+            /* A strict final function returns NULL when any argument is SQL NULL. */
             *result_value = Datum{0};
             *result_is_null = true;
         } else {
@@ -544,12 +478,8 @@ static void finalize_aggregate(AggState* aggregate_state,
     }
 }
 
-/**
- * Compute the output value of one partial aggregate.
- *
- * The serialization function will be run, and the result delivered, in the
- * output-tuple context. Caller's CurrentMemoryContext does not matter.
- */
+/** Return a partial aggregate state, serializing it when required.
+ * The serializer runs in the output-tuple memory context. */
 static void finalize_partial_aggregate(AggState* aggregate_state,
                                        AggStatePerAgg aggregate_descriptor,
                                        AggStatePerGroup per_group_state,
@@ -560,12 +490,9 @@ static void finalize_partial_aggregate(AggState* aggregate_state,
     memory_context_scope output_context_scope{
         aggregate_state->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
-    /**
-     * serialfn_oid will be set if we must serialize the transvalue before
-     * returning it
-     */
+    /* Serialize the state when this partial-aggregation mode requires it. */
     if (OidIsValid(transition_state->serialfn_oid)) {
-        /* Don't call a strict serialization function with nullptr input. */
+        /* A strict serializer returns NULL for a SQL NULL state */
         if (transition_state->serialfn.fn_strict && per_group_state->transValueIsNull) {
             *result_value = Datum{0};
             *result_is_null = true;
@@ -589,14 +516,11 @@ static void finalize_partial_aggregate(AggState* aggregate_state,
     }
 }
 
-/**
- * Extract the attributes that make up the grouping key into the
- * hash_slot. This is necessary to compute the hash or perform a lookup.
- */
+/** Copy the  group keys and required output columns into the compact hash tuple. */
 export inline void prepare_hash_slot(AggStatePerHash hash_state,
                                      TupleTableSlot* input_slot,
                                      TupleTableSlot* hash_slot) {
-    /* transfer just the needed columns into hash_slot */
+    /* Copy only columns recorded in the hash tuple's input mapping. */
     slot_getsomeattrs(input_slot, hash_state->largestGrpColIdx);
     ExecClearTuple(hash_slot);
 
@@ -610,10 +534,8 @@ export inline void prepare_hash_slot(AggStatePerHash hash_state,
     ExecStoreVirtualTuple(hash_slot);
 }
 
-/**
- * Prepares a representative slot for one grouping set by nulling excluded
- * attributes in place and publishing the current grouping bitmap.
- */
+/** Prepare a group's representative row, setting excluded groupin columns to NULL.
+ * Record the active, grouping columns for grouping expressions. */
 export void
 prepare_projection_slot(AggState* aggregate_state, TupleTableSlot* slot, int current_set) {
     if (aggregate_state->phase->grouped_cols) {
@@ -629,7 +551,7 @@ prepare_projection_slot(AggState* aggregate_state, TupleTableSlot* slot, int cur
         } else if (aggregate_state->all_grouped_cols) {
             ListCell* grouped_column_cell;
 
-            /* all_grouped_cols is arranged in desc order */
+            /* The first list entry is the largest attribute number needed. */
             slot_getsomeattrs(slot, linitial_int(aggregate_state->all_grouped_cols));
 
             foreach (grouped_column_cell, aggregate_state->all_grouped_cols) {
@@ -642,9 +564,7 @@ prepare_projection_slot(AggState* aggregate_state, TupleTableSlot* slot, int cur
     }
 }
 
-/**
- * Finalizes every aggregate for the selected group into the output context.
- */
+/** Finish all aggregate results for the selected group in the output context. */
 export void finalize_aggregates(AggState* aggregate_state,
                                 AggStatePerAgg aggregate_descriptors,
                                 AggStatePerGroup group_state) {
@@ -652,10 +572,7 @@ export void finalize_aggregates(AggState* aggregate_state,
     Datum* aggregate_values = expression_context->ecxt_aggvalues;
     bool* aggregate_nulls = expression_context->ecxt_aggnulls;
 
-    /**
-     * If there were any DISTINCT and/or ORDER BY aggregates, sort their
-     * inputs and run the transition functions.
-     */
+    /* Feed sorted DISTINCT and ORDER BY inputs through their transition functions. */
     for (int transition_index = 0; transition_index < aggregate_state->numtrans;
          ++transition_index) {
         AggStatePerTrans transition_state = &aggregate_state->pertrans[transition_index];
@@ -675,9 +592,7 @@ export void finalize_aggregates(AggState* aggregate_state,
         }
     }
 
-    /**
-     * Run the final functions.
-     */
+    /* Produce final values or partial states according to  the plan's aggregation mode. */
     for (int aggregate_index = 0; aggregate_index < aggregate_state->numaggs; ++aggregate_index) {
         AggStatePerAgg aggregate_descriptor = &aggregate_descriptors[aggregate_index];
         const int transition_index = aggregate_descriptor->transno;
@@ -698,22 +613,14 @@ export void finalize_aggregates(AggState* aggregate_state,
     }
 }
 
-/**
- * Project the result of a group (whose aggs have already been calculated by
- * finalize_aggregates). Returns the result slot, or nullptr if no row is
- * projected (suppressed by qual).
- */
+/** Project a group after its aggregate values have been finalized.
+ * Return nullptr when HAVING rejects the group. */
 export TupleTableSlot* project_aggregates(AggState* aggregate_state) {
     ExprContext* expression_context = aggregate_state->ss.ps.ps_ExprContext;
 
-    /**
-     * Check the qual (HAVING clause). If the group does not match, ignore it.
-     */
+    /* Return only groups that pass HAVING. */
     if (ExecQual(aggregate_state->ss.ps.qual, expression_context)) {
-        /**
-         * Form and return projection tuple using the aggregate results and
-         * the representative input tuple.
-         */
+        /* Build the output from aggregate results and the representative input row. */
         return ExecProject(aggregate_state->ss.ps.ps_ProjInfo);
     } else
         InstrCountFiltered1(aggregate_state, 1);

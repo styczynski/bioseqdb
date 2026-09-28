@@ -1,6 +1,6 @@
 /**
  * @file symbol_counts_test.cpp
- * @brief Tests per-rank symbol histograms and the inline symbol-count index.
+ * @brief Checks counts for  each alphabet symbol and their stored index.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -37,12 +37,12 @@ using bioseq::indexing::test::fake_sequence_storage;
 
 /// Packed DNA4 alphabet used by histogram fixtures.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-/// Resident DNA4 range used by histogram fixtures.
+/// A sequence range packed into 64-bit DNA4 storage units.
 using range_t = compact_sequence_range<dna4_u64>;
-/// Small chunked scanner used to exercise fragmented counting.
+/// A scanneq that reads at most 1024 storage units at a time.
 using chunked = chunked_span_sequence_scanner<std::uint64_t, 1024>;
 
-/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+/// Generate repeatable DNA4 test data from a seed.
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
                                                std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> symbols(symbol_count);
@@ -56,7 +56,7 @@ using chunked = chunked_span_sequence_scanner<std::uint64_t, 1024>;
     return symbols;
 }
 
-/// Count DNA4 ranks directly from the unpacked fixture symbols.
+/// Count each DNA4 symbol directly to build the expected result.
 [[nodiscard]] std::array<std::int64_t, 4> expected_histogram(const std::vector<seq::dna4>& data) {
     std::array<std::int64_t, 4> histogram{};
     for (const seq::dna4& symbol : data) {
@@ -73,7 +73,7 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
     range_t range(data);
     const auto want = expected_histogram(data);
 
-    // scanner_none (all-in-RAM) path.
+    // Read directly from the sequence held in memory.
     {
         auto lazy = make_resident_lazy_sequence(range);
         const auto lazy_view =
@@ -85,7 +85,7 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
         REQUIRE(total == static_cast<std::int64_t>(data.size()));
         REQUIRE(total == static_cast<std::int64_t>(lazy.bp_size()));
     }
-    // fragmented (chunked) path.
+    // Read through the chunked scanner.
     {
         lazy_sequence<dna4_u64, chunked> frag{chunked::from_range(range)};
         const auto frag_view =
@@ -106,7 +106,7 @@ TEST_CASE("symbol_counts_index build + read_count round-trips the tally",
 
     fake_sequence_storage storage;
 
-    // read_count on a FRESH (un-built) storage => nullopt so the caller recomputes.
+    // An index that has not been built has no stored count.
     REQUIRE_FALSE(
         bioseq::indexing::symbol_counts_index<fake_sequence_storage>::read_count(storage, 0).has_value());
 
@@ -115,7 +115,7 @@ TEST_CASE("symbol_counts_index build + read_count round-trips the tally",
     bioseq::indexing::symbol_counts_index<fake_sequence_storage>::build(
         storage, lazy_view);
 
-    REQUIRE(storage.number_of_chunks() == 1u);                 // exactly one inline chunk
+    REQUIRE(storage.number_of_chunks() == 1u);
     REQUIRE(storage.chunk_byte_size() == 4u * sizeof(std::int64_t));
 
     auto tally = bioseq::indexing::tally_symbol_counts(lazy_view);

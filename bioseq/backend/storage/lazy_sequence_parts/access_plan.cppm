@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence_parts/access_plan.cppm
- * @brief Resident borrowing and admitted sequence-access planning.
+ * @brief Chooses streaming, borrowed storage, or  a reserved packed copy.
  */
 export module bioseq.storage.lazy_sequence:access_plan;
 
@@ -14,33 +14,31 @@ import bioseq.storage.size;
 
 export namespace bioseq::storage {
 
-/** @brief Physical route selected for a consumer's sequence-access requirement. */
+/** How a consumer will read the requested sequence region */
 enum class sequence_access_route : std::uint8_t {
     stream_symbols,
     borrow_resident,
     materialize_admitted,
 };
 
-/// Controls what a contiguous-resident consumer is permitted to borrow.
-/// CPU algorithms that form or dereference `storage_unit*` must keep the
-/// default.  The byte-upload policy is intentionally narrow: it permits a
-/// layout-compatible cross-width descriptor only for consumers that copy the
-/// object representation as bytes and never form typed loads from it.
+/// Controls whether borrowing may expose a different packed word width.
+/// CPU readers use native_typed_storage_only. byte_upload_compatible also
+/// permits compatible bytes to be copied to a GPU, without typed CPU loads.
 enum class sequence_resident_borrow_policy : std::uint8_t {
     native_typed_storage_only,
     byte_upload_compatible,
 };
 
-/// Truthful receipt for the storage behind a borrowed descriptor.  In
-/// particular, `reinterpreted_bytes` is not typed storage of requested_width
-/// and must never be passed to a CPU `compact_sequence_range` consumer.
+/// Records how borrowed storage can be read.
+/// reinterpreted_bytes permits byte access only. Its pointer must not be
+/// dereferenced as an array of the requested word type.
 enum class sequence_resident_borrow_kind : std::uint8_t {
     none,
     native_typed_storage,
     reinterpreted_bytes,
 };
 
-/** @brief Resolved access route, resident descriptor, and admission requirement. */
+/** Selected access method, optional borrowed storage, and required memory reservation. */
 template <sequence_alphabet p_alphabet> struct sequence_access_plan {
     using descriptor_type = typename lazy_sequence_view<p_alphabet>::resident_packed_sequence;
 
@@ -54,18 +52,18 @@ template <sequence_alphabet p_alphabet> struct sequence_access_plan {
     std::uint8_t requested_width{};
 };
 
-/// Borrow a narrower packed *byte representation* over already resident
-/// storage.  The only cross-width shape required by current upload paths is
-/// canonical u64 -> u32 DNA packing.  On little-endian hosts the low u32 word
-/// of each u64 contains the earlier LSB-first symbols, so splitting each
-/// resident word is byte-for-byte identical to the established packed wire
-/// layout.
-///
-/// The returned descriptor does not change the effective type of the source
-/// allocation.  Its `units` member may be copied/read only through
-/// character/byte access (for example a Vulkan buffer upload). Dereferencing
-/// it as `uint32_t*` would violate the C++ effective-type/aliasing rules.
-/** @brief Borrow a byte-only u32 representation from compatible resident u64 storage. */
+/**
+ * Borrows a u32 byte layout from compatible resident u64 words.
+ *
+ * On little-endian hosts, splitting each u64 word preserves symbol order when
+ * the rank  width divides both word widths. The requested region must start
+ * at a u32 boundary.
+ *
+ * The returned pointer still refers to u64 storage. Copy it through byte or
+ * character access, as a GPU upload dojs. Typed uint32_t loads would violate
+ * the source object's access rules. No allocation or ownership transfer occurs.
+ */
+
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<typename lazy_sequence_view<p_alphabet>::resident_packed_sequence>
 try_borrow_reinterpreted_packed_bytes(lazy_sequence_view<p_alphabet> view,
@@ -161,7 +159,14 @@ try_borrow_reinterpreted_packed_bytes(lazy_sequence_view<p_alphabet> view,
     }
 }
 
-/** @brief Plan streaming, borrowing, or admission-backed materialization for a region. */
+/**
+ * Plans access to [from, to) without allocating or reserving memory.
+ *
+ * Sequential access streams ranks. A, contiguous request first tries compatible
+ * resident storage with no leading symbols. Other requests need a packed copy
+ * and report the bytes to reserve  before creating it.
+ * @throws std::invalid_argument If the range or required word width is invalid.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] sequence_access_plan<p_alphabet>
 plan_sequence_access(lazy_sequence_view<p_alphabet> view,

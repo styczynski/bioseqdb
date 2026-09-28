@@ -16,10 +16,9 @@ import :markdown_directives;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// MD4C driver (§10.2). Uses MD4C's typed callbacks to project CommonMark plus
-// the enabled extensions onto the owned content_node tree; md4c (not
-// md4c-html) is linked so this unit owns safe emission. No MD4C pointer ever
-// escapes this translation unit.
+// Converts Markdown into content_node trees through MD4C callbacks.
+// Copies parser data into owned strings and nodes so later stages can
+// render the content without keeping MD4C objects alive.
 namespace bioseq::codegen::website {
 
 namespace {
@@ -78,11 +77,9 @@ int enter_markdown_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
     case MD_BLOCK_ADMONITION: {
         content_node& node = builder.push(content_node_kind::admonition);
         const auto* admonition = static_cast<MD_BLOCK_ADMONITION_DETAIL*>(detail);
-        // Carry the severity across as "class"; :html_renderer falls back to "note"
-        // when it is absent, so dropping this detail silently renders every
-        // [!WARNING]/[!CAUTION]/[!TIP]/[!IMPORTANT] as a note. Classify through
-        // the shared mapping so an unrecognized tag takes that fallback rather
-        // than emitting an admonition-<tag> class with no stylesheet rule.
+        // Keep the admonition kind so warnings and tips get the right styling.
+        // The shared mapping leaves unknown kinds unset, allowing the renderer
+        // to fall  back to the note style.
         if (std::string severity = admonition_class(attribute_text(admonition->type));
             !severity.empty()) {
             node.attributes.emplace("class", std::move(severity));
@@ -147,7 +144,7 @@ int append_markdown_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, vo
     std::string_view value(text, size);
     content_node& parent = builder.current();
     if (parent.kind == content_node_kind::code_block) {
-        // Verbatim code content, including newlines, accrues on the block node.
+        // Keep code-block text and newlines exactly as the parser supplies them.
         parent.text.append(value);
         return 0;
     }
@@ -169,9 +166,9 @@ int append_markdown_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, vo
 
 }  // namespace
 
-/// @brief Parses Markdown body text into an owned document tree.
-/// @param markdown Body text (frontmatter already removed).
-/// @return The document-rooted node with its rendered children.
+/// @brief Parses Markdown into a content tree.
+/// @param markdown Body text with frontmatter removed.
+/// @return Root node containing the parsed blocks.
 [[nodiscard]] content_node parse_markdown_content(std::string_view markdown) {
     markdown_tree_builder builder;
     MD_PARSER parser{};

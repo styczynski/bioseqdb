@@ -2,8 +2,8 @@
  * @file substring_property_test.cpp
  * @brief Verifies half-open mmsearch coordinates and exact-match CIGARs.
  *
- * A contiguous probe must begin at query offset zero and retain its target
- * offset. Full self-alignment must produce the same result across five SQL
+ * A contiguous probe must begin at query offset zero and keep its target
+ * offset. Full  self-alignment must produce the same result across five SQL
  * shapes.
  */
 
@@ -20,15 +20,15 @@ namespace {
 constexpr std::string_view k_substring_table = "substring_alignment";
 constexpr std::string_view k_substring_self_table = "self_alignment";
 
-/// A 30 bp probe admitted by the fixture's explicit frozen chain thresholds.
+/// A 30 bp probe accepted by the chaining limits set in this fixture.
 constexpr std::string_view k_probe_sequence = "CTATCATTCATACTTCTATCATTCATACTT"; // 30 bp
 
 /// A padded target whose probe begins after 23 bases.
 constexpr std::string_view k_padded_target =
     "AAAAAAAAAAAAAAAAAAAAAAACTATCATTCATACTTCTATCATTCATACTTAAAAAAAA";
-//   ^---- 23 A ----^^------ 30 bp probe B -----------^^-- 8 A --^
+// 23 A bases, the 30 bp probe, then 8 A bases.
 
-/// Inclusive probe offset within the padded target.
+/// Zero-based starl of the probe within the target.
 constexpr long long k_expected_target_start = 23;
 /// Exclusive probe endpoint within the padded target.
 constexpr long long k_expected_target_end =
@@ -48,7 +48,7 @@ void seed_substring_table(const connection_test_context& ctx, std::string_view t
         seq_table_spec{
             .name = std::string(table_name),
             .typmod = {.alphabet = "dna4", .width = 32},
-            .seq_columns = 2, // seq0 stores A, seq1 stores B (probe)
+            .seq_columns = 2, // seq0 stores the target, seq1 the probe.
             .using_bioseq = true,
         },
         {
@@ -79,7 +79,7 @@ void seed_self_alignment_table(const connection_test_context& ctx, std::string_v
 TEST_CASE("mmsearch(A, B) where B is a substring of A returns exact "
           "target_start / target_end / cigar coordinates",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Require every projection so rows containing null alignment fields fail.
+    // Request every alignment field so, missing values fail the test.
     auto ctx = fresh_context({k_substring_table});
     seed_substring_table(ctx, k_substring_table);
 
@@ -103,18 +103,14 @@ TEST_CASE("mmsearch(A, B) where B is a substring of A returns exact "
         REQUIRE(row[column_index].has_value());
     }
     REQUIRE(std::stoll(row[0].value()) == 1);
-    // Substring property: the aligner-reported coordinates must
-    // match the offset of the probe inside the target under the
-    // half-open alignment coordinate contract.
+    // Query coordinates cover the whole probe. Target coordinates include its
+    // padding offset, and both end positions are exclusive
     REQUIRE(std::stoll(row[1].value()) == 0); // query_start
     REQUIRE(std::stoll(row[2].value()) ==
             static_cast<long long>(k_probe_sequence.size()));       // query_end (half-open)
     REQUIRE(std::stoll(row[3].value()) == k_expected_target_start); // target_start
     REQUIRE(std::stoll(row[4].value()) == k_expected_target_end);   // target_end (half-open)
-    // CIGAR: a fuzzy aligner is allowed to return any CIGAR that
-    // sums to a length covering the substring. The canonical
-    // exact-match shape is "{B.size()}M". For the seeded data
-    // the canonical answer is the only accepted result.
+    // This exact substring must produce one full-length match  in the CIGAR.
     REQUIRE(is_valid_cigar(row[5].value()));
     REQUIRE(is_exact_match_cigar(row[5].value(), static_cast<long long>(k_probe_sequence.size())));
 }
@@ -122,13 +118,8 @@ TEST_CASE("mmsearch(A, B) where B is a substring of A returns exact "
 TEST_CASE("mmsearch(A, A) — full self-alignment over a single column "
           "produces a full-length CIGAR",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Self-alignment is the special case of the substring property
-    // where B = A. The aligner must return target_start=0,
-    // target_end=A.size()-1, cigar "{A.size()}M". The result must
-    // include a non-empty CIGAR when both operands are Vars.
-    //
-    // The same-relation Var path uses per-row mode, so each row aligns
-    // against its own column value.
+    // Align each row's seq0 value with itself. Both intervals must cover
+    // [0, sequence length), and the CIGAR must describe a full-length match.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -139,7 +130,7 @@ TEST_CASE("mmsearch(A, A) — full self-alignment over a single column "
                                         "       bioseq.target_end(pk) AS te, "
                                         "       bioseq.cigar(pk) AS cig "
                                         "  FROM {} "
-                                        " WHERE mmsearch(seq0, seq0) " // SAME-VAR self-alignment
+                                        " WHERE mmsearch(seq0, seq0) " // Both operands refer to seq0.
                                         " ORDER BY pk;",
                                         k_substring_self_table);
 
@@ -174,13 +165,8 @@ TEST_CASE("nested mmsearch qualifier fails closed instead of executing the SQL s
 
 TEST_CASE("Self-alignment via different columns containing the same data",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Here arg0 = seq0 and arg1 = seq1, while the
-    // dataset writes IDENTICAL bytes to both columns. The
-    // per-row mode in BeginCustomScan dispatches arg1's column
-    // value at submit_scan time, so the alignment is still
-    // X-vs-X — must produce the same full-length match.
-    //
-    // Per-row mode must extract both operand columns independently.
+    // Read the two operand columns independently. They contain identical bytes,
+    // so aligning them must still return a full-length match.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -190,7 +176,7 @@ TEST_CASE("Self-alignment via different columns containing the same data",
                     "       bioseq.target_end(pk) AS te, "
                     "       bioseq.cigar(pk) AS cig "
                     "  FROM {} "
-                    " WHERE mmsearch(seq0, seq1) " // DIFFERENT vars, identical data
+                    " WHERE mmsearch(seq0, seq1) " // Separate columns with identical data.
                     " ORDER BY pk;",
                     k_substring_self_table);
 
@@ -209,11 +195,8 @@ TEST_CASE("Self-alignment via different columns containing the same data",
 
 TEST_CASE("Self-alignment via cross join with WHERE t1.pk = t2.pk",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // A cross join restricted to the diagonal via
-    // WHERE t1.pk = t2.pk. The aligner takes mmsearch(t1.seq, t2.seq)
-    // — but because t1 and t2 are both the same row (filtered by
-    // pk equality), this is logically a self-alignment.
-    // The result requires the exact full-match CIGAR.
+    // Restrict the cross join to rows with equal primary keys. Each sequence
+    // then aligns with  itself and must produce a full-length match.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -243,11 +226,8 @@ TEST_CASE("Self-alignment via cross join with WHERE t1.pk = t2.pk",
 
 TEST_CASE("Self-alignment via INNER JOIN on t1.pk = t2.pk",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Flavor 2: same semantic content as the CROSS JOIN flavor
-    // above, but expressed as INNER JOIN ... ON t1.pk = t2.pk.
-    // The planner generates a different physical plan (parameterised
-    // inner-side scan via Param-rebind), but the result rows
-    // must be byte-identical.
+    // Express the same row pairing with INNER JOIN. The coordinates and CIGAR
+    // must match the self-alignment result.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -276,11 +256,8 @@ TEST_CASE("Self-alignment via INNER JOIN on t1.pk = t2.pk",
 
 TEST_CASE("Self-alignment via subquery returning identical data",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Flavor 5: a (SELECT ...) subquery that returns the same data
-    // as the outer relation. This stresses the planner path where
-    // the inner side is a SubqueryScan above a BioseqScan.
-    // The mmsearch qualifier must still bind both columns to the underlying
-    // bioseq.seq and produce the full-length match.
+    // Read one operand through a subquery. mmsearch must still use the sequence
+    // values from both sides and return a full-length katch.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -310,9 +287,7 @@ TEST_CASE("Self-alignment via subquery returning identical data",
 
 TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Cross-check: all five self-alignment flavors must return the
-    // same rows. This is the strongest version of the property:
-    // the result set is invariant under the SQL surface used.
+    // Compare the returned rows across all five ways of expressing self-alignment.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -323,7 +298,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                                       k_substring_self_table));
     };
 
-    // Flavor 1: CROSS JOIN with WHERE t1.pk = t2.pk
+    // CROSS JOIN restricted to equal primary keys.
     const auto rows_cross_join =
         canonical_query("SELECT t1.pk, bioseq.target_start(t1.pk), bioseq.target_end(t1.pk), "
                         "       bioseq.cigar(t1.pk) "
@@ -331,7 +306,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                         " WHERE mmsearch(t1.seq0, t2.seq0) AND t1.pk = t2.pk "
                         " ORDER BY t1.pk;");
 
-    // Flavor 2: INNER JOIN ON t1.pk = t2.pk
+    // INNER JOIN on equal primary keys.
     const auto rows_inner_join =
         canonical_query("SELECT t1.pk, bioseq.target_start(t1.pk), bioseq.target_end(t1.pk), "
                         "       bioseq.cigar(t1.pk) "
@@ -339,7 +314,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                         " WHERE mmsearch(t1.seq0, t2.seq0) "
                         " ORDER BY t1.pk;");
 
-    // Flavor 3: same column on a single relation
+    // The same column supplies both operands.
     auto canonical_single = [&ctx](std::string_view sql_template) {
         return query_rows(ctx, fmt::format(fmt::runtime(sql_template), k_substring_self_table));
     };
@@ -350,7 +325,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                          " WHERE mmsearch(seq0, seq0) "
                          " ORDER BY pk;");
 
-    // Flavor 4: different columns with same data
+    // Separate columns contain  the same sequence.
     const auto rows_diff_columns =
         canonical_single("SELECT pk, bioseq.target_start(pk), bioseq.target_end(pk), "
                          "       bioseq.cigar(pk) "
@@ -358,7 +333,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                          " WHERE mmsearch(seq0, seq1) "
                          " ORDER BY pk;");
 
-    // Flavor 5: subquery returning same data
+    // A subquery supplies the matching row
     const auto rows_subquery =
         canonical_query("SELECT t1.pk, bioseq.target_start(t1.pk), bioseq.target_end(t1.pk), "
                         "       bioseq.cigar(t1.pk) "

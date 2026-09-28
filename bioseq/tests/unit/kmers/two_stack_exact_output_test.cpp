@@ -1,6 +1,6 @@
 /**
  * @file two_stack_exact_output_test.cpp
- * @brief Fixed-output checks for resident and fixed-target two-stack kernels.
+ * @brief Compare two-stack minimizer output with fixed expected position/hash pairs.
  */
 
 #include <catch2/catch_test_macros.hpp>

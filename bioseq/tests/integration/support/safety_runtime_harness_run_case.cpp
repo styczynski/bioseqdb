@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_run_case.cpp
- * @brief Execute sealed runtime scenarios and emit their evidence receipts.
+ * @brief Runs runtime-safety cases and records their PostgreSQL results.
  */
 
 module;
@@ -53,7 +53,8 @@ import :scenario_support;
 
 namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Execute one sealed runtime case and write its complete evidence receipt.
+/// Check the request against the installed test build, run its runtime-safety
+/// case, and verify cleanup and recovery before writing the result  file.
 [[nodiscard]] int run_case(
         const command_line& command) {
     require_exact_options(command, {"--request", "--output"});

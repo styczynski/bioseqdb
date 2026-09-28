@@ -1,6 +1,6 @@
 /**
  * @file catalog_storage_descriptors.cppm
- * @brief Defines generation storage descriptors and publication capabilities.
+ * @brief Describe stored index generations and the checks required before publication.
  */
 module;
 
@@ -29,8 +29,8 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_storage_descriptors;
 
 import std;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.postgres.support; // PostgreSQL catalog and error helpers.
+import bioseq.indexing.minimizer_fragment_image; // On-disk format for minimizer fragment indexes.
 
 import :catalog_contracts;
 import :catalog_metadata;
@@ -39,9 +39,9 @@ export namespace bioseq::storage::indexing {
 class index_storage_fragment_generation_row_sink;
 class ready_minimizer_generation_token;
 
-/// Exact receipt returned by the immutable minimizer fragment image writer. Device/inode
-/// are transaction-local sealing receipts. The descriptor persists the byte
-/// length and authenticated header checksum.
+/// File size, checksums and file identity returned by the index image writer.
+/// Device and inode identify the  fize during this transaction. The catalog stores
+/// its byte length and header checksum.
 struct minimizer_fragment_image_file_receipt {
     std::uint64_t file_bytes = 0u;
     std::uint64_t payload_crc64 = 0u;
@@ -50,16 +50,15 @@ struct minimizer_fragment_image_file_receipt {
     ino_t inode{};
 };
 
-/// Publication lifecycle stored in the generation descriptor catalog.
+/// Whether the catalog points readers to this generation or has retired it.
 enum class minimizer_generation_storage_state : std::int16_t {
     live = 1,
     retired = 2,
 };
 
-/// Production row model for
-/// bioseq_internal.minimizer_generation_storage. The SQL catalog requires the
-/// complete relation locator. Defensive in-memory optionals prevent a malformed
-/// raw row from acquiring relation authority through a default value.
+/// One row from bioseq_internal.minimizer_generation_storage.
+/// It identifies the sequence, index generation and payload relation. Optional
+/// relation fields let validation detect missing values before opening storage.
 struct minimizer_generation_storage_descriptor {
     Oid database_oid = InvalidOid;
     Oid tablespace_oid = InvalidOid;
@@ -84,7 +83,7 @@ struct minimizer_generation_storage_descriptor {
 inline constexpr std::size_t k_storage_descriptor_attribute_count =
     minimizer_generation_storage_codec::field_count;
 
-/// Report whether a descriptor belongs to the requested catalog identity.
+/// Check that the descriptor belongs to this sequence column, index and row.
 [[nodiscard]] inline bool
 exact_storage_descriptor_identity(const minimizer_generation_storage_descriptor& descriptor,
                                   const minimizer_generation_administration_identity& identity,
@@ -97,7 +96,7 @@ exact_storage_descriptor_identity(const minimizer_generation_storage_descriptor&
            descriptor.index_name == identity.index_name && descriptor.query_key == query_key;
 }
 
-/// Report whether every relation-locator field carries valid authority.
+/// Check that, the payload relation identity is complete and uses the descriptor's database.
 [[nodiscard]] inline bool has_exact_storage_descriptor_relation_shape(
     const minimizer_generation_storage_descriptor& descriptor) noexcept {
     return descriptor.payload_relation_oid && OidIsValid(*descriptor.payload_relation_oid) &&
@@ -108,7 +107,7 @@ exact_storage_descriptor_identity(const minimizer_generation_storage_descriptor&
            descriptor.payload_relation_name && !descriptor.payload_relation_name->empty();
 }
 
-/// Immutable receipt for one atomically published grouped-SoA head.
+/// The published generation head and  the generation it replaced, if any.
 struct ready_minimizer_generation_published_head_receipt {
     std::string table_name;
     std::uint64_t query_key = 0;
@@ -126,13 +125,14 @@ concept reports_ready_minimizer_generation_acceptance =
 static_assert(!reports_ready_minimizer_generation_acceptance<
               ready_minimizer_generation_published_head_receipt>);
 
-/// Consume a validated token and atomically replace the active head.
+/// Make the validated generation active within the current transaction.
+/// Consumes the token so it cannot be published again.
 [[nodiscard]] ready_minimizer_generation_published_head_receipt
 publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& token);
 
-/// Move-only authorization that one exact relation/source/generation was completely
-/// reread under an own-write-visible registered snapshot. Construction is
-/// private to the generation sink's full validation pass.
+/// Proof that the writer has read back and checked this index generation.
+/// Only the generation writer can create the token. Publication consumes it
+/// in the same transaction that wrote the rows.
 class ready_minimizer_generation_token {
   private:
     minimizer_generation_administration_identity identity_{};
@@ -241,10 +241,10 @@ static_assert(!std::is_copy_assignable_v<ready_minimizer_generation_token>);
 static_assert(std::is_nothrow_move_constructible_v<ready_minimizer_generation_token>);
 static_assert(std::is_nothrow_move_assignable_v<ready_minimizer_generation_token>);
 
-/// Read the sole LIVE descriptor for one exact storage identity through the
-/// catalog's partial unique index.  The caller owns both relation locks and
-/// the registered MVCC snapshot. This helper neither substitutes SnapshotSelf
-/// nor consults mutable payload-routing state.
+/// Find the active storage descriptor through the catalog unique index
+/// Check that it matches the expected generation and has a nomplete payload
+/// relation identity. The  caller keeps both relations locked and the supplied
+/// MVCC snapshot registered while this function reads the catalog.
 [[nodiscard]] inline minimizer_generation_storage_descriptor
 read_live_minimizer_generation_storage_descriptor_pg(
     Relation storage_relation,

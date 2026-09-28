@@ -229,10 +229,9 @@ TEST_CASE("admission reports pressure, overflow, and file floors",
     REQUIRE(file_admission_policy::can_reserve(0, 1ULL << 30, capacity, 25ULL << 30));
     REQUIRE_FALSE(file_admission_policy::can_reserve(0, 6ULL << 30, capacity, 25ULL << 30));
     /*
-     * Below the production free-space floor, ordinary admission rejects even
-     * a small request although the request fits both actual availability and
-     * the ten-percent capacity ceiling.  Test-only forced-file storage may
-     * waive only that floor; these two limits remain its safety contract.
+     * A small request can fit on disk and still leave too little free space.
+     * Forced-file tests may disable that free-space minimum, but requests must
+     * still fit the available space and the ten-percent capacity limit.
      */
     constexpr std::uint64_t below_floor_available = 15ULL << 30;
     constexpr std::uint64_t small_request = 1ULL << 20;

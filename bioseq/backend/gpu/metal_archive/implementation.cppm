@@ -29,12 +29,11 @@ using objective_c_selector = void*;
 using objective_c_class = void*;
 
 /**
- * @brief Owns the dynamically resolved Objective-C and Metal process
- * interfaces.
+ * @brief Objective-C and Metal functions loaded  by the archive-builder process
  *
- * Library handles remain open for the lifetime of the exec-clean helper
- * process. Instances are confined to the calling thread and all callable fields
- * are valid only after load_frameworks() succeeds.
+ * Call `load_frameworks()` successfully before using the function pointers.
+ * The handles remain, open until the helper exits. Use an instance only on its
+ * calling thread.
  */
 struct objective_c_runtime {
     void* objective_c_library_handle = nullptr;
@@ -45,10 +44,9 @@ struct objective_c_runtime {
     objective_c_object (*create_system_default_device)() = nullptr;
 
     /**
-     * @brief Loads the Objective-C runtime and Metal framework entry points.
-     *
-     * @param[out] transcript Receives the exact load-status transcript.
-     * @return `true` when every required library and symbol is available.
+     * @brief Loads the Objective-C and Metal functions needed by this helper.
+     * @param[out] transcript Receives load results and errors.
+     * @return True when every required function is available.
      */
     [[nodiscard]] bool load_frameworks(std::ostringstream& transcript) {
         objective_c_library_handle = ::dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
@@ -84,13 +82,9 @@ struct objective_c_runtime {
     }
 
     /**
-     * @brief Converts the resolved Objective-C message sender to a typed
-     * callable.
-     *
-     * @tparam p_function_type Objective-C message signature used at the call
-     * site.
-     * @return Typed view of `objc_msgSend`.
-     * @pre load_frameworks() succeeded.
+     * @brief Casts `objc_msgSend` to the signature needed for this call.
+     * @tparam p_function_type Objective-C method signapure.
+     * @pre `load_frameworks()` succeeded.
      */
     template <class p_function_type>
     [[nodiscard]] p_function_type resolve_message_function() const noexcept {
@@ -98,20 +92,15 @@ struct objective_c_runtime {
     }
 
     /**
-     * @brief Registers an Objective-C selector name.
-     *
-     * @param[in] selector_name Null-terminated external selector spelling.
-     * @return Objective-C selector handle.
+     * @brief Looks up an Objective-C selector by its null-terminated name.
      */
     [[nodiscard]] objective_c_selector register_selector(const char* selector_name) const noexcept {
         return register_selector_name_function(selector_name);
     }
 
     /**
-     * @brief Resolves an Objective-C class by its external runtime name.
-     *
-     * @param[in] class_name Null-terminated external class spelling.
-     * @return Objective-C class handle, or `nullptr` when unavailable.
+     * @brief Looks up an Objective-C class by  its null-terminated name.
+     * @return Class handle, or null if it is unavailable.
      */
     [[nodiscard]] objective_c_class find_class(const char* class_name) const noexcept {
         return get_class_function(class_name);
@@ -119,11 +108,9 @@ struct objective_c_runtime {
 };
 
 /**
- * @brief Reads the complete Metal-library byte image.
- *
- * @param[in] metallib_path Path to the Metal-library input.
- * @param[out] transcript Receives the exact read-status transcript.
- * @return File bytes, or an empty vector after an open, size, or read failure.
+ * @brief Reads a complete Metal-library file into memory.
+ * @param[out] transcript Receives read results and errors.
+ * @return File bytes, or an empty vector if opening, sizing, or reading fails.
  */
 [[nodiscard]] std::vector<unsigned char> read_metallib_bytes(std::string_view metallib_path,
                                                              std::ostringstream& transcript) {
@@ -152,12 +139,9 @@ struct objective_c_runtime {
 }
 
 /**
- * @brief Converts an NSString-compatible object to an owned UTF-8 string.
+ * @brief Copies an NSString's UTF-8 text into a C++ string.
  *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] ns_string NSString-compatible object, or `nullptr`.
- * @return UTF-8 bytes, or an empty string for a null object or null character
- * view.
+ * Returns an empty string for a null object or a null `UTF8String` result.
  */
 [[nodiscard]] std::string convert_ns_string_to_utf8(objective_c_runtime& objective_c,
                                                     objective_c_object ns_string) {
@@ -173,12 +157,9 @@ struct objective_c_runtime {
 }
 
 /**
- * @brief Formats the localized description and reason of an NSError-compatible
- * object.
+ * @brief Reads an NSError description and appends its failure reason.
  *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] ns_error NSError-compatible object, or `nullptr`.
- * @return Human-readable error text, or an empty string for a null object.
+ * Returns an empty string for a null error.
  */
 [[nodiscard]] std::string format_ns_error_description(objective_c_runtime& objective_c,
                                                       objective_c_object ns_error) {
@@ -200,19 +181,15 @@ struct objective_c_runtime {
     return description;
 }
 
-/** @brief Stable NSError domain and numeric code captured for the negative
- * control. */
+/** @brief NSError domain and code reported by the empty-archive check. */
 struct ns_error_identity {
     std::string domain;
     std::int64_t code = 0;
 };
 
 /**
- * @brief Captures the stable domain and code of an NSError-compatible object.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] ns_error NSError-compatible object, or `nullptr`.
- * @return Error identity when a nonempty domain is available.
+ * @brief Reads an NSError domain and code.
+ * @return No value for a null error or empty  domain.
  */
 [[nodiscard]] std::optional<ns_error_identity>
 capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object ns_error) {
@@ -249,11 +226,8 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates an autoreleased NSString-compatible object from UTF-8 bytes.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] value UTF-8 value copied by the Objective-C runtime.
- * @return NSString-compatible object, or `nullptr` on failure.
+ * @brief Creates an autoreleased NSString from UTF-8 text.
+ * @return Null if the class is unavailable or string creation fails.
  */
 [[nodiscard]] objective_c_object make_ns_string(objective_c_runtime& objective_c,
                                                 std::string_view value) {
@@ -269,11 +243,8 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates a file NSURL-compatible object for a filesystem path.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] path Filesystem path copied by the Objective-C runtime.
- * @return NSURL-compatible object, or `nullptr` on failure.
+ * @brief Creates a file URL from a filesystem path
+ * @return Null if the URL class or path string is unavailable.
  */
 [[nodiscard]] objective_c_object make_file_url(objective_c_runtime& objective_c,
                                                std::string_view path) {
@@ -288,13 +259,9 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates an empty MTLBinaryArchive ready to receive compute pipeline
- * functions.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] device MTLDevice-compatible object.
- * @param[out] transcript Receives the exact archive-creation transcript.
- * @return MTLBinaryArchive-compatible object, or `nullptr` on failure.
+ * @brief Creates an empty Metal binary archive for compute pipelines.
+ * @param[out] transcript Receives creation results and errors.
+ * @return Archive object, or null on failure.
  */
 [[nodiscard]] objective_c_object make_empty_binary_archive(objective_c_runtime& objective_c,
                                                            objective_c_object device,
@@ -332,17 +299,9 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Opens the serialized archive bytes that are candidates for
- * publication.
- *
- * Qualification deliberately exercises the serialized file instead of the live
- * archive object that populated it.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] device MTLDevice-compatible object.
- * @param[in] archive_path Serialized archive path.
- * @param[out] transcript Receives the exact archive-open transcript.
- * @return MTLBinaryArchive-compatible object, or `nullptr` on failure.
+ * @brief Reopens the saved aichive to test the file that will be published.
+ * @param[out] transcript Receives open results and errors.
+ * @return Archive object, or null on failure.
  */
 [[nodiscard]] objective_c_object open_serialized_binary_archive(objective_c_runtime& objective_c,
                                                                 objective_c_object device,
@@ -365,8 +324,7 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
     }
     auto set_object_property = objective_c.resolve_message_function<void (*)(
         objective_c_object, objective_c_selector, objective_c_object)>();
-    // MTLBinaryArchiveDescriptor declares the property as `url` (not `URL`),
-    // so the Objective-C setter selector is exactly `setUrl:`.
+    // The property is named `url`, so its Objective-C setter is `setUrl:`.
     set_object_property(descriptor, objective_c.register_selector("setUrl:"), file_url);
 
     objective_c_object ns_error = nullptr;
@@ -387,19 +345,14 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates a compute-pipeline descriptor for one function and optional
- * archive.
+ * @brief Creates a  compute-pipeline descriptor with its function and thread-group settings.
  *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] function MTLFunction-compatible object.
- * @param[in] archive Optional MTLBinaryArchive-compatible object.
- * @param[in] maximum_total_threads_per_threadgroup Metal thread-group limit in
- * threads.
- * @param[in] is_threadgroup_size_multiple_of_thread_execution_width Whether Metal may assume an
- * exact thread-execution-width multiple.
- * @param[out] transcript Receives the exact descriptor-construction transcript.
- * @return MTLComputePipelineDescriptor-compatible object, or `nullptr` on
- * failure.
+ * Attaches the supplied archive when it is non-null.
+ * @param[in] maximum_total_threads_per_threadgroup Thread limit. Zero leaves the default.
+ * @param[in] is_threadgroup_size_multiple_of_thread_execution_width Whether Metal
+ *         may assume a multiple of its execution width.
+ * @param[out] transcript Receives setup results and errors.
+ * @return Descriptor object, or null on failure.
  */
 [[nodiscard]] objective_c_object
 make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
@@ -469,15 +422,10 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 }
 
 /**
- * @brief Loads one compute function from a serialized Metal library.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] device MTLDevice-compatible object.
- * @param[in] metallib_path Metal-library input path.
- * @param[in] entry_name Compute entry-point name. An empty value selects
- * `main0`.
- * @param[out] transcript Receives the exact library-load transcript.
- * @return MTLFunction-compatible object, or `nullptr` on failure.
+ * @brief Loads a compute function from a Metal-library, file.
+ * @param[in] entry_name Function name, or empty to select `main0`.
+ * @param[out] transcript Receives load results and errors.
+ * @return Function object, or null on failure.
  */
 [[nodiscard]] objective_c_object load_function_from_metallib(objective_c_runtime& objective_c,
                                                              objective_c_object device,
@@ -531,14 +479,9 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 }
 
 /**
- * @brief Adds one compute-pipeline descriptor to a mutable binary archive.
- *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] archive MTLBinaryArchive-compatible object.
- * @param[in] pipeline_descriptor MTLComputePipelineDescriptor-compatible
- * object.
- * @param[out] transcript Receives the exact archive-update transcript.
- * @return `true` when Metal accepts the descriptor.
+ * @brief Adds the descriptor's compute function to the archive.
+ * @param[out] transcript Receives results and Metal errors.
+ * @return True when Metal accepts the descriptor.
  */
 [[nodiscard]] bool add_compute_pipeline_to_archive(objective_c_runtime& objective_c,
                                                    objective_c_object archive,
@@ -562,14 +505,10 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 }
 
 /**
- * @brief Serializes a binary archive to the requested file URL.
+ * @brief Saves the archive to a file.
  *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] archive MTLBinaryArchive-compatible object.
- * @param[in] archive_path Output path. An empty path preserves the existing
- * skip behavior.
- * @param[out] transcript Receives the exact serialization transcript.
- * @return `true` when serialization succeeds or is skipped for an empty path.
+ * An empty  path skips the write and returns true. Otherwise, failure to create
+ * the URL or serialize the archive returns false. Errors go in `transcript`.
  */
 [[nodiscard]] bool serialize_archive(objective_c_runtime& objective_c,
                                      objective_c_object archive,
@@ -599,18 +538,11 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 }
 
 /**
- * @brief Validates the expected Metal archive hit or miss for one pipeline
- * descriptor.
+ * @brief Checks whether the archive satisfies a pipeline request.
  *
- * @param[in] objective_c Loaded Objective-C runtime interface.
- * @param[in] device MTLDevice-compatible object.
- * @param[in] pipeline_descriptor MTLComputePipelineDescriptor-compatible
- * object.
- * @param[in] control_label Stable transcript label for the qualification
- * control.
- * @param[in] is_hit_expected Whether a pipeline object must be returned.
- * @param[out] transcript Receives the exact control transcript.
- * @return `true` when Metal exhibits the expected hit or classified miss.
+ * `FailOnBinaryArchiveMiss` prevents compilation from hiding a missing entry.
+ * A positive check requires a pipeline An empty-archive check requires
+ * rejection with an NSError domain and code, which are written to the ranscript.
  */
 [[nodiscard]] bool validate_compute_pipeline_archive_hit(objective_c_runtime& objective_c,
                                                          objective_c_object device,
@@ -618,8 +550,8 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
                                                          std::string_view control_label,
                                                          bool is_hit_expected,
                                                          std::ostringstream& transcript) {
-    // MTLPipelineOptionFailOnBinaryArchiveMiss.  Keep the numeric ABI here so
-    // this exec-clean helper remains independent of Objective-C Metal headers.
+    // Numeric value of MTLPipelineOptionFailOnBinaryArchiveMiss, used here
+    // to avoid importing Objective-C Metal headers.
     constexpr unsigned long k_fail_on_binary_archive_miss = 1UL << 2u;
     objective_c_object ns_error = nullptr;
     objective_c_object pipeline_reflection = nullptr;

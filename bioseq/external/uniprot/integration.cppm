@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/integration.cppm
- * @brief UniProt generated-client identity and integration fragments.
+ * @brief UniProt client name and requests used by generated integration tests.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:integration;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Generated-client name and integration request contracts. */
+/** @brief Client name and rxample requests with expected responses. */
 inline constexpr std::string_view integration_contracts =
     R"bioseq_openapi(x-bioseq-client-name: UniProt
 x-bioseq-integration:

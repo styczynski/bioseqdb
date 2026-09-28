@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_scanner.cppm
- * @brief Exported source-scanner facade.
+ * @brief Sequence source readers, providers and routes for parent plan nodes.
  */
 export module bioseq.postgres.storage.scanner:source_scanner;
 

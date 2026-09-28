@@ -1,6 +1,6 @@
 /**
  * @file sealed_seed.cppm
- * @brief Owns sealed shader-seed serialization, validation, admission, and publication.
+ * @brief Writes and loads fixed shader seeds, checking their files and memory needs.
  */
 module;
 
@@ -23,9 +23,8 @@ export namespace bioseq::gpu::vulkan {
 
 namespace sealed_shader_cache_detail {
 
-/// @brief Serializes a sealed shader manifest and computes its checksum.
-/// @param[in] manifest Manifest to serialize.
-/// @return Serialized bytes and checksum, or a contract diagnostic.
+/// @brief Encodes a seed manifest and appends its checksum.
+/// Checks count and filename limits. Returns the bytes and checksum, or an error.
 [[nodiscard]] inline std::expected<std::pair<std::vector<std::byte>, std::uint64_t>, std::string>
 serialize_manifest(const sealed_shader_cache_manifest& manifest) {
     if (!valid_digest(manifest.cache_digest)) {
@@ -74,9 +73,8 @@ serialize_manifest(const sealed_shader_cache_manifest& manifest) {
     return std::pair{std::move(bytes), checksum};
 }
 
-/// @brief Parses and validates a sealed shader-cache manifest.
-/// @param[in] bytes Serialized manifest bytes.
-/// @return Validated manifest or a wire-format diagnostic.
+/// @brief Parses a seed manifest and checks its format, field bounds, and checksum.
+/// File  contents and expected shader membership are checked sparately
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 parse_manifest(std::span<const std::byte> bytes) {
     if (bytes.size() > k_maximum_manifest_bytes) {
@@ -185,12 +183,9 @@ parse_manifest(std::span<const std::byte> bytes) {
 load_validated_artifact_bytes(const std::filesystem::path& cache_dir,
                               const sealed_shader_cache_artifact& artifact);
 
-/// @brief Validates manifest digest, key membership, artifact order, and seed identity.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] manifest Parsed manifest.
-/// @param[in] expected_digest Expected cache digest.
-/// @param[in] expected_keys Expected shader key membership.
-/// @return Success or the first manifest-shape diagnostic.
+/// @brief Checks that the manifest lists exactly the requested shader files.
+/// Checks cache and seed IDs and the MoltenVK command bundle. On Apple systems,
+/// the bundle's helper identity must match the current, process.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_shape(const std::filesystem::path& cache_dir,
                const sealed_shader_cache_manifest& manifest,
@@ -264,10 +259,7 @@ validate_shape(const std::filesystem::path& cache_dir,
     return {};
 }
 
-/// @brief Validates artifact bytes against their sealed size and SHA-256.
-/// @param[in] artifact Sealed artifact descriptor.
-/// @param[in] bytes Candidate artifact bytes.
-/// @return Success or a size or digest diagnostic.
+/// @brief Checks file bytes against the size and SHA-256 stored in the manifest.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_artifact_bytes(const sealed_shader_cache_artifact& artifact,
                         std::span<const std::byte> bytes) {
@@ -287,10 +279,8 @@ validate_artifact_bytes(const sealed_shader_cache_artifact& artifact,
     return {};
 }
 
-/// @brief Reads and validates one artifact from a sealed cache directory.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] artifact Sealed artifact descriptor.
-/// @return Validated bytes or an identity, size, digest, or I/O diagnostic.
+/// @brief Reads one seed file and checks its size and SHA-256.
+/// Returns the checked bytes or a read/validation error.
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
 load_validated_artifact_bytes(const std::filesystem::path& cache_dir,
                               const sealed_shader_cache_artifact& artifact) {
@@ -305,10 +295,8 @@ load_validated_artifact_bytes(const std::filesystem::path& cache_dir,
     return bytes;
 }
 
-/// @brief Validates one on-disk artifact against its sealed descriptor.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] artifact Sealed artifact descriptor.
-/// @return Success or the artifact diagnostic.
+/// @brief Checks an on-disk seed file against its manifest entry.
+/// Discards the bytes after checking their  size and hash.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_artifact(const std::filesystem::path& cache_dir,
                   const sealed_shader_cache_artifact& artifact) {
@@ -318,10 +306,10 @@ validate_artifact(const std::filesystem::path& cache_dir,
     return {};
 }
 
-/// @brief Validates all seed artifacts and cross-artifact qualification bindings.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] manifest Parsed sealed manifest.
-/// @return Success or the first artifact or qualification diagnostic.
+/// @brief Checks all seed files and that their archive records refer to the same build.
+/// Archive records must match the shader library, entry point, and workgroup
+/// settings. The command library and pipeline archives must agree on the helper
+/// executable and Metal device.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_all_artifacts(const std::filesystem::path& cache_dir,
                        const sealed_shader_cache_manifest& manifest) {
@@ -491,12 +479,8 @@ validate_all_artifacts(const std::filesystem::path& cache_dir,
     return {};
 }
 
-/// @brief Finds one retained artifact by kind, key ordinal, and filename.
-/// @param[in] images Retained seed artifacts.
-/// @param[in] kind Required artifact kind.
-/// @param[in] key_index Required shader key ordinal.
-/// @param[in] filename Required artifact filename.
-/// @return Borrowed image or `nullptr` when absent.
+/// @brief Finds a loaded file matching its type, shader-key index, and filename.
+/// Returns a borrowed pointer, or null when absent.
 [[nodiscard]] inline const sealed_shader_cache_artifact_image*
 find_artifact_image(std::span<const sealed_shader_cache_artifact_image> images,
                     sealed_shader_cache_artifact_kind kind,
@@ -513,12 +497,9 @@ find_artifact_image(std::span<const sealed_shader_cache_artifact_image> images,
     return image == images.end() ? nullptr : &*image;
 }
 
-/// @brief Validates all semantic relationships using retained artifact
-/// bytes. File size/SHA validation happened during their one loader read.
-/// @param[in] cache_dir Shader-cache directory used to derive archive names.
-/// @param[in] manifest Parsed sealed manifest.
-/// @param[in] images Retained artifact images in manifest order.
-/// @return Success or the first relationship diagnostic.
+/// @brief Checks that loaded seed files and their archive records agree.
+/// Uses the bytes already in memory. The caller must first check their  sizes
+/// and hashes against the maninest. `cache_dir` is used to derive filenames.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_all_artifact_images(const std::filesystem::path& cache_dir,
                              const sealed_shader_cache_manifest& manifest,
@@ -725,13 +706,7 @@ validate_all_artifact_images(const std::filesystem::path& cache_dir,
     return {};
 }
 
-/// @brief Computes the nonzero identity for one completed seed load.
-/// @param[in] manifest Accepted manifest.
-/// @param[in] artifact_read_count Number of artifact reads.
-/// @param[in] manifest_bytes Loaded manifest extent.
-/// @param[in] artifact_bytes Aggregate loaded artifact extent.
-/// @param[in] load_ns Measured load duration.
-/// @return Nonzero receipt identity.
+/// @brief Builds a nonzero receipt ID from the seed identity and recorded load measurements.
 [[nodiscard]] inline std::uint64_t
 sealed_seed_receipt_identity(const sealed_shader_cache_manifest& manifest,
                              std::uint64_t artifact_read_count,
@@ -760,10 +735,9 @@ sealed_seed_receipt_identity(const sealed_shader_cache_manifest& manifest,
     return identity == 0u ? k_fnv_offset : identity;
 }
 
-/// @brief Computes peak memory admission before loading a sealed seed image.
-/// @param[in] manifest Accepted manifest.
-/// @param[in] manifest_bytes Loaded manifest extent.
-/// @return Saturating peak byte estimate.
+/// @brief Estimates peak memory for the parsed seed and its file data
+/// Allows container growth and one temporary file buffer. Returns the largest
+/// 64-bit value on overflow.
 [[nodiscard]] inline std::uint64_t
 seed_image_preallocation_peak_bytes(const sealed_shader_cache_manifest& manifest,
                                     std::uint64_t manifest_bytes) noexcept {
@@ -791,7 +765,7 @@ seed_image_preallocation_peak_bytes(const sealed_shader_cache_manifest& manifest
     return saturating_add(retained_headroom, maximum_transient_artifact);
 }
 
-/// @brief Bounded header facts read before admitting a complete seed image.
+/// @brief Manifest sizes and counts needed to reserve memory before loading.
 struct manifest_admission_probe {
     std::uint64_t file_bytes = 0u;
     std::uint64_t seed_bytes = 0u;
@@ -820,12 +794,9 @@ struct manifest_admission_probe {
     return value;
 }
 
-/// @brief Computes a conservative admission bound from manifest header facts.
-/// @param[in] manifest_bytes Manifest file extent.
-/// @param[in] seed_bytes Aggregate artifact extent.
-/// @param[in] key_count Manifest key count.
-/// @param[in] artifact_count Manifest artifact count.
-/// @return Saturating peak byte estimate.
+/// @brief Estimates loading memory from the manifest's sizes and counts.
+/// Uses the maximum filename length and allows container growth plus a temporary
+/// file buffer. Returns the largest 64-bit value  on overflow.
 [[nodiscard]] inline std::uint64_t
 seed_image_probe_peak_bytes(std::uint64_t manifest_bytes,
                             std::uint64_t seed_bytes,
@@ -845,14 +816,14 @@ seed_image_probe_peak_bytes(std::uint64_t manifest_bytes,
     retained = saturating_add(retained, seed_bytes);
     retained =
         saturating_mul(retained, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    // During each exact read the retained image and one incoming artifact may
-    // coexist. The largest possible artifact is the entire bounded seed.
+    // Leave room for an incoming file beside the, loaded seed data. Before
+    // parsing filenames and sizes, the whole seed is the safe upper bound.
     return saturating_add(retained, seed_bytes);
 }
 
-/// @brief Reads bounded manifest header and tail fields before memory admission.
-/// @param[in] path Sealed manifest path.
-/// @return Stable admission facts or a header, size, identity, or I/O diagnostic.
+/// @brief Reads the manifest header and tail to estimate memory before loading it.
+/// Checks basic format, size limits, and file metadata around these small reads.
+/// Full parsing and checksum checks follow after memory has been reserved.
 [[nodiscard]] inline std::expected<manifest_admission_probe, std::string>
 probe_manifest_for_admission(const std::filesystem::path& path) {
     constexpr std::size_t k_header_bytes = 32u;
@@ -927,11 +898,8 @@ probe_manifest_for_admission(const std::filesystem::path& path) {
     return result;
 }
 
-/// @brief Reads and validates manifest shape without reading artifacts.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] expected_digest Expected cache-build digest.
-/// @param[in] expected_keys Expected shader key membership.
-/// @return Validated manifest or a shape or I/O diagnostic.
+/// @brief Reads the manifest and checks its expected cache ID and shader files.
+/// Also reads the MoltenVK command bundle as part of `validate_shape`.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 read_manifest_shape(const std::filesystem::path& cache_dir,
                     std::string_view expected_digest,
@@ -952,19 +920,17 @@ read_manifest_shape(const std::filesystem::path& cache_dir,
 
 } // namespace sealed_shader_cache_detail
 
-/// @brief Returns validated canonical shader-key order for a sealed seed.
-/// @param[in] requested_keys Requested shader keys.
-/// @return Sorted unique keys or a validation diagnostic.
+/// @brief Validates shader keys and returns them in manifest  order.
+/// Duplicate keys are rejected.
 [[nodiscard]] inline std::expected<std::vector<shader_variant_key>, std::string>
 canonical_sealed_shader_cache_keys(std::span<const shader_variant_key> requested_keys) {
     return sealed_shader_cache_detail::canonical_keys(requested_keys);
 }
 
-/// @brief Loads one complete sealed seed under bounded memory admission.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Expected cache-build digest.
-/// @param[in] expected_keys Expected shader key membership.
-/// @return Immutable process image or the first validation or admission diagnostic.
+/// @brief Loads a comolete seed into memory after reserving space for it.
+/// Checks the expected cache ID and keys, verifies each file's hash, and checks
+/// the links between libraries and archive records. Returns the loaded bytes
+/// with their load receipt and memory reservation.
 [[nodiscard]] std::expected<sealed_shader_cache_seed_image, std::string>
 load_validated_sealed_shader_cache_seed(const std::filesystem::path& cache_dir,
                                         std::string_view cache_digest,
@@ -1075,16 +1041,13 @@ load_validated_sealed_shader_cache_seed(const std::filesystem::path& cache_dir,
     return std::move(image);
 }
 
-/// @brief Install-once process owner for an immutable seed. Both production and
-/// focused tests use this exact store, so a second acquisition reuses the
-/// original loader receipt without repeating filesystem validation.
+/// @brief Keeps one validated shader seed for reuse by a process
+/// Later acquisitions return the same bytes and load receipt without reading
+/// the seed files again. A different cache request is rejected.
 class sealed_shader_cache_process_store {
   public:
-    /// @brief Loads the process seed once and requires later calls to match it.
-    /// @param[in] cache_dir Shader-cache directory.
-    /// @param[in] digest Expected cache-build digest.
-    /// @param[in] requested_keys Expected shader key membership.
-    /// @return Shared immutable seed image or a contract diagnostic.
+    /// @brief Loads the seed on first use and shares it with callers.
+    /// Later calls must use  the same normalized directory, cache ID, and shader keys.
     [[nodiscard]] std::expected<std::shared_ptr<const sealed_shader_cache_seed_image>, std::string>
     load_once(const std::filesystem::path& cache_dir,
               std::string_view digest,
@@ -1115,13 +1078,13 @@ class sealed_shader_cache_process_store {
         return retained;
     }
 
-    /// @brief Captures the installed immutable seed image.
+    /// @brief Returns shared ownership of the loaded seed, or null before the first load.
     [[nodiscard]] std::shared_ptr<const sealed_shader_cache_seed_image> snapshot() const {
         std::lock_guard<std::mutex> guard(mutex_);
         return image_;
     }
 
-    /// @brief Returns the number of successful filesystem seed loads.
+    /// @brief Returns successful seed loads performed by this store.
     [[nodiscard]] std::uint64_t filesystem_load_count() const noexcept {
         std::lock_guard<std::mutex> guard(mutex_);
         return filesystem_load_count_;
@@ -1136,12 +1099,11 @@ class sealed_shader_cache_process_store {
 
 namespace sealed_shader_cache_detail {
 
-/// @brief Seals the canonical artifact set after stable reads and identity checks.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Cache-build digest.
-/// @param[in] requested_keys Requested shader key membership.
-/// @param[in] before_identity_check Optional test hook before final identity checks.
-/// @return Published manifest or the first validation, admission, or I/O diagnostic.
+/// @brief Checks the cache files and writes a manifest that fixes their identities.
+/// Reserves memory before reading. Verifies each file through an open descriptor,
+/// checks relationships between files, and checks their identities again before
+/// publishing the manifest. `before_identity_check` lets tests change files
+/// immediately before the final checks.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest_impl(const std::filesystem::path& cache_dir,
                                 std::string_view cache_digest,
@@ -1321,11 +1283,8 @@ seal_shader_cache_manifest_impl(const std::filesystem::path& cache_dir,
 
 } // namespace sealed_shader_cache_detail
 
-/// @brief Seals a shader cache without a test mutation hook.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Cache-build digest.
-/// @param[in] requested_keys Requested shader key membership.
-/// @return Published manifest or the first validation, admission, or I/O diagnostic.
+/// @brief Checks and seals the requested cache files with a published manifest.
+/// Returns the, manifest or a file, validation, or memory-reservation  eiror.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest(const std::filesystem::path& cache_dir,
                            std::string_view cache_digest,
@@ -1334,12 +1293,8 @@ seal_shader_cache_manifest(const std::filesystem::path& cache_dir,
         cache_dir, cache_digest, requested_keys, nullptr);
 }
 
-/// @brief Seals a shader cache with a hook before final artifact identity checks.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Cache-build digest.
-/// @param[in] requested_keys Requested shader key membership.
-/// @param[in] before_identity_check Test hook invoked before publication checks.
-/// @return Published manifest or the first validation, admission, or I/O diagnostic.
+/// @brief Tests sealing with a callback before the final file-identity checks.
+/// The callback can change a file to verify that publication is rejected.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest_for_test(
     const std::filesystem::path& cache_dir,
@@ -1350,11 +1305,7 @@ seal_shader_cache_manifest_for_test(
         cache_dir, cache_digest, requested_keys, before_identity_check);
 }
 
-/// @brief Loads a complete sealed seed and returns its validated manifest.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Expected cache-build digest.
-/// @param[in] expected_keys Expected shader key membership.
-/// @return Validated manifest or the seed-load diagnostic.
+/// @brief Loads and validates the entire seed, then returns a copy of its manifest.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 load_validated_sealed_shader_cache_manifest(const std::filesystem::path& cache_dir,
                                             std::string_view cache_digest,
@@ -1365,10 +1316,8 @@ load_validated_sealed_shader_cache_manifest(const std::filesystem::path& cache_d
     return seed->manifest();
 }
 
-/// @brief Resolves one borrowed shader key image from a retained process seed.
-/// @param[in] seed Accepted process seed image.
-/// @param[in] requested_key Requested shader variant.
-/// @return Borrowed key image or a membership or metadata diagnostic.
+/// @brief Finds a shader's metadata and library bytes in an accepted seed.
+/// Returns a view borrowing the library bytes. Keep the seed alive while using it.
 [[nodiscard]] inline std::expected<sealed_shader_cache_key_view, std::string>
 make_sealed_shader_cache_key_view(const sealed_shader_cache_seed_image& seed,
                                   const shader_variant_key& requested_key) {
@@ -1414,12 +1363,8 @@ make_sealed_shader_cache_key_view(const sealed_shader_cache_seed_image& seed,
     return view;
 }
 
-/// @brief Loads one owned shader key image from a validated sealed seed.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Expected cache-build digest.
-/// @param[in] expected_keys Expected shader key membership.
-/// @param[in] requested_key Requested shader variant.
-/// @return Owned key image or the seed-load or membership diagnostic.
+/// @brief Loads and validates the seed, then copies the requested shader into an owned image
+/// Returns an error if the shader is absent or its metadata/library is incomplete.
 [[nodiscard]] inline std::expected<sealed_shader_cache_key_image, std::string>
 load_sealed_shader_cache_key_image(const std::filesystem::path& cache_dir,
                                    std::string_view cache_digest,
@@ -1481,8 +1426,7 @@ load_sealed_shader_cache_key_image(const std::filesystem::path& cache_dir,
     return image;
 }
 
-/// @brief Loads a sealed seed for one required key and returns its manifest.
-/// @return Validated manifest or the seed-load or membership diagnostic.
+/// @brief Loads a seed and returns its manifest only if the requested shader  is present.
 [[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 load_sealed_shader_cache_manifest_for_key(const std::filesystem::path& cache_dir,
                                           std::string_view cache_digest,

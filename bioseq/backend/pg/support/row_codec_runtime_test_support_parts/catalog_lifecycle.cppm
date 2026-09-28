@@ -1,6 +1,6 @@
 /**
  * @file catalog_lifecycle.cppm
- * @brief Exercises catalog, TOAST-carrier, context, and subtransaction lifecycles.
+ * @brief Test row codecs aganst catalogs, TOAST data and memory-context cleanup.
  */
 module;
 
@@ -66,8 +66,10 @@ import :contract_core;
 namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
 /**
- * @brief Inserts, reads, updates, and deletes a row in a TOAST carrier relation.
- * @return Count of toastable attributes stored out of line, or zero when @p p_codec has none.
+ * Check row insertion, decoding, updates and deletion using external TOAST data.
+ * Verify decoded values after the original tuple and input memory are released.
+ * @return Number of text and bytea fields verified as stored outside the row,
+ * or zero if the codec has none.
  */
 template <class p_codec,
           class p_live_row_factory,
@@ -205,8 +207,9 @@ exercise_external_toast_lifecycle(Relation relation,
 }
 
 /**
- * @brief Creates a temporary unindexed table LIKE the source relation for TOAST probing.
- * @return Open carrier relation locked in RowExclusive mode.
+ * Create a temporary copy of the source table's columns and defaults for TOAST tests.
+ * The copy has no indexes and is dropped at commit.
+ * @return Open  test table held with RowExclusiveLock.
  */
 template <class p_codec>
 [[nodiscard]] Relation create_unindexed_toast_carrier(Relation source_relation) {
@@ -259,8 +262,10 @@ template <class p_codec>
 }
 
 /**
- * @brief Runs the generated row-codec runtime contract for one descriptor and optional carriers.
- * @return Receipt summarizing field counts and which lifecycle checks completed.
+ * Test a codec's tuple conversion, NULL checks and decoded-value lifetimes.
+ * Table codecs also insert, update and delete catalog rows. Text and bytea
+ * fields are checked, with values stored in external TOAST tables
+ * @return Field counts and the checks completed for this codec.
  */
 template <class p_codec,
           class p_null_row_factory,
@@ -575,8 +580,9 @@ exercise_codec_with_external(TupleDesc descriptor,
 }
 
 /**
- * @brief Runs exercise_codec_with_external without an external carrier relation.
- * @return Receipt from the codec runtime contract for @p descriptor.
+ * Test a codec without a caller-supplied TOAST test table. For table codecs,
+ * the shared test function creates a temporary table when one is needed.
+ * @return Field counts and completed checks.
  */
 template <class p_codec,
           class p_null_row_factory,
@@ -613,8 +619,8 @@ template <class p_codec,
 }
 
 /**
- * @brief Opens a catalog relation and invokes @p exercise with its tuple descriptor.
- * @return Receipt produced by @p exercise.
+ * Open a catalog table and pass its descriptor and relation to `exercise`.
+ * @return The callback's test report.
  */
 template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
@@ -641,8 +647,9 @@ with_relation_descriptor(const char* schema_name, const char* relation_name, p_e
 }
 
 /**
- * @brief Resolves a composite type descriptor and invokes @p exercise without a live relation.
- * @return Receipt produced by @p exercise.
+ * Pass a composite type's descriptor to `exercise`, with a null relation.
+ * `$extension` selects the installed Bioseq schema.
+ * @return The callback's test  report.
  */
 template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
@@ -676,7 +683,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
     return result;
 }
 
-/** @brief Serializes runtime receipt entries into a stable semicolon-separated report string. */
+/** Sort reports by codec identity and join them into a semicolon-separated string. */
 [[nodiscard]] std::string render_receipt(std::vector<runtime_receipt_entry> entries) {
     std::ranges::sort(entries, {}, &runtime_receipt_entry::identity);
     std::string result;
@@ -727,11 +734,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
     try {
         transaction.rollback();
     } catch (...) {
-        /*
-         * rollback() repairs the outer backend state before throwing.
-         * Preserve the original row-codec failure instead of replacing it
-         * with a cleanup diagnostic.
-         */
+        /* Keep the original codec failure if rollback also reports an ermor. */
     }
     std::rethrow_exception(original);
 }

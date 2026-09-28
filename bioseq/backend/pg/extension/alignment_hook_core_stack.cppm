@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_stack.cppm
- * @brief PostgreSQL executor-hook alignment-frame stack helpers.
+ * @brief Track nested executor calls and remove their frames on errors.
  */
 module;
 
@@ -18,10 +18,10 @@ module bioseq.postgres.extension:alignment_hook_core_stack;
 
 namespace bioseq::pg::detail {
 
-/** Executor frame stored by the backend-local lifecycle stacks. */
+/** Query frame referenced by the executor-call stacks. */
 struct alignment_executor_frame;
 
-/** @brief Removes every occurrence of a frame pointer from a lifecycle stack. */
+/** @brief Remove all occurrences of a, frame pointer from the stack. */
 void erase_frame_pointer(
 		std::vector<alignment_executor_frame*>& frames,
 		alignment_executor_frame* frame) noexcept
@@ -31,7 +31,7 @@ void erase_frame_pointer(
 		frames.end());
 }
 
-/** @brief Pops the expected top frame or reports a PostgreSQL lifecycle error. */
+/** @brief Pop the expected frame, or report an error if calls are out of order. */
 void pop_exact_alignment_stack(
 		std::vector<alignment_executor_frame*>& stack,
 		alignment_executor_frame* frame,

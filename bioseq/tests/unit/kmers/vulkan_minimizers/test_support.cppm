@@ -37,31 +37,25 @@ export namespace bioseq::simd::HWY_NAMESPACE::vulkan_minimizers_test_support {
 
 namespace vk = ::bioseq::gpu::vulkan;
 
-/** @brief Canonical position, hash, and strand tuple used by parity checks. */
+/** Position, hash, and strand used when comparing minimizer results. */
 using minimizer_tuple_type = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
 
-/**
- * @brief Reports whether a hardware Vulkan device can execute the tests.
- * @return `true` when hardware-backed Vulkan is available.
- */
+/** @return Whether the Vulkan runtime has a usable hardware device. */
 [[nodiscard]] inline bool vulkan_ready() {
     return vk::hardware_device_available(vk::runtime::instance());
 }
 
-/**
- * @brief Reports whether the active Vulkan runtime uses a software device.
- * @return `true` when a usable software Vulkan device is active.
- */
+/** @return Whether the usable Vulkan runtime is using a software device. */
 [[nodiscard]] inline bool software_vulkan_ready() {
     auto& runtime = vk::runtime::instance();
     return runtime.is_usable() && runtime.features().software_device;
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Lazy dna4 facade used to exercise backend lifetime ownership. */
+/** Lazy dna4 view used to test how long source data stays  alive. */
 using vulkan_lifetime_facade = bioseq::storage::lazy_sequence_view<seq::dna4>;
 
-/** @brief Owns packed test data and records lazy-backend access and destruction. */
+/** Own test ranks and packed words, and count reads, borrows, and destsuction. */
 struct vulkan_lifetime_source_state {
     std::vector<std::uint8_t> ranks;
     std::vector<std::uint32_t> packed;
@@ -73,7 +67,7 @@ struct vulkan_lifetime_source_state {
     mutable std::atomic<std::uint64_t> resident_borrows{0u};
     mutable std::atomic<bool> wrong_thread{false};
 
-    /** @brief Records destruction through the optional external counter. */
+    /** Increment the external destruction counter when one was supplied. */
     ~vulkan_lifetime_source_state() {
         if (destructions != nullptr) {
             destructions->fetch_add(1u, std::memory_order_relaxed);
@@ -82,14 +76,14 @@ struct vulkan_lifetime_source_state {
 };
 
 /**
- * @brief Reads a logical range from the lifetime fixture into caller storage.
- * @tparam p_is_reversed Selects reverse-complement traversal.
- * @tparam p_write_reversed Selects descending output order.
- * @param opaque_state Fixture state.
- * @param start_position First logical symbol.
+ * Read test ranks into the buffer and detect reads from another thread.
+ * @tparam p_is_reversed Read the reverse complement.
+ * @tparam p_write_reversed Reverse the requested output order.
+ * @param opaque_state Source fixture kept, alive by the caller.
+ * @param start_position First symbol in the requested orientation.
  * @param symbol_count Number of symbols to read.
- * @param scratch_bytes Destination bytes.
- * @return Pointer to the populated scratch storage.
+ * @param scratch_bytes Buffer with room for those symbols.
+ * @return Pointer to the filled  buffer.
  */
 template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t*
@@ -119,9 +113,8 @@ vulkan_lifetime_read_at(const void* opaque_state,
 }
 
 /**
- * @brief Reports the logical length of a lifetime fixture.
- * @param opaque_state Fixture state.
- * @return Number of biological symbols.
+ * @return Number of letters in the source fixture.
+ * @param opaque_state Source fixture kept alive by the caller
  */
 [[nodiscard]] bioseq::storage::sequence_size_t
 vulkan_lifetime_bp_size(const void* opaque_state) noexcept {
@@ -129,12 +122,13 @@ vulkan_lifetime_bp_size(const void* opaque_state) noexcept {
 }
 
 /**
- * @brief Borrows a resident packed window when the fixture exposes one.
- * @param opaque_state Fixture state.
- * @param start_position First logical symbol.
- * @param end_position Exclusive logical end.
- * @param requested_storage_width Requested packed word width.
- * @return Resident descriptor, or no value when the request cannot be borrowed.
+ * Borrow packed words from the fixture when it exposes resident storage.
+ * @param opaque_state Source fixture kept alive while the result is used.
+ * @param start_position First letter, counted from zero.
+ * @param end_position Exclusive end of the requested interval.
+ * @param requested_storage_width Required word width in bytes. Only uint32_t is supported.
+ * @return Borrowed packed view with its offsets and padding, or no value for
+ * an unavailable represkntation or invalid range.
  */
 [[nodiscard]] vulkan_lifetime_facade::resident_packed_result
 vulkan_lifetime_resident_probe(const void* opaque_state,
@@ -186,10 +180,7 @@ vulkan_lifetime_resident_probe(const void* opaque_state,
     };
 }
 
-/**
- * @brief Declares that the lifetime fixture cannot be shared across workers.
- * @return Always `false`.
- */
+/** @return False. This  source fixture must stay on its backend thread. */
 [[nodiscard]] bool vulkan_lifetime_worker_shareable(const void*) noexcept {
     return false;
 }
@@ -210,9 +201,9 @@ inline const vulkan_lifetime_facade::backend_ops vulkan_lifetime_ops{
 };
 
 /**
- * @brief Creates a non-owning lazy facade over a lifetime fixture.
- * @param source_state Fixture state that outlives the returned facade.
- * @return Lazy sequence view backed by `source_state`.
+ * Borrow a lazy view of the source fixture.
+ * @param source_state Keep this state alive while the view is used.
+ * @return View holding pointers to the state and its shared callback table.
  */
 [[nodiscard]] vulkan_lifetime_facade
 vulkan_lifetime_view(const vulkan_lifetime_source_state& source_state) noexcept {
@@ -222,10 +213,10 @@ vulkan_lifetime_view(const vulkan_lifetime_source_state& source_state) noexcept 
 #endif
 
 /**
- * @brief Converts minimizers to sorted position, hash, and strand tuples.
+ * Convert minimizers to sorted position/hash/strand tuples, keeping duplicates.
  * @tparam p_minimizer_type Packed minimizer record.
- * @param minimizers Records to convert.
- * @return Sorted tuples suitable for parity comparison.
+ * @param minimizers Records to copy.
+ * @return Tuples ready for comparison.
  */
 template <class p_minimizer_type>
 [[nodiscard]] inline std::vector<minimizer_tuple_type>
@@ -240,10 +231,10 @@ triples(const std::vector<p_minimizer_type>& minimizers) {
 }
 
 /**
- * @brief Formats a bounded tuple sample for failed parity diagnostics.
- * @param values Sorted tuple values.
- * @param maximum_count Maximum tuples to include.
- * @return Human-readable tuple sample.
+ * Format a short sample for failed result comparisons.
+ * @param values Tuples to display in their supplied order.
+ * @param maximum_count Maximum number of tuples to include.
+ * @return Position, hash, and strand values, followed by an ellipsis if truncated.
  */
 [[nodiscard]] inline std::string tuple_examples(const std::vector<minimizer_tuple_type>& values,
                                                 std::size_t maximum_count = 6) {
@@ -261,13 +252,14 @@ triples(const std::vector<p_minimizer_type>& minimizers) {
 }
 
 /**
- * @brief Requires scalar tuples to appear in the GPU result with bounded tile extras.
+ * Check  that the GPU returned every scalar minimizer, including duplicates.
+ * Limit the number of extra records using the tile count and window size.
  * @param scalar_tuples Scalar reference tuples.
  * @param vulkan_tuples GPU tuples.
- * @param tile_plan Dispatch tiling used by the GPU result.
- * @param kmer_size K-mer length.
+ * @param tile_plan Tile count used to bound extra output.
+ * @param kmer_size K-mer length used in that bound
  * @param window_size Minimizer window length.
- * @param biological_position_offset Biological offset used by callers.
+ * @param biological_position_offset Unused.
  */
 inline void
 require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type> scalar_tuples,
@@ -318,14 +310,14 @@ require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type
 }
 
 /**
- * @brief Applies tuple-superset checks to packed minimizer records.
- * @tparam p_minimizer_type Packed minimizer record.
+ * Check packed GPU records against the scalar records, allowing bounded extras.
+ * @tparam p_minimizer_type Packed minimizer, record.
  * @param scalar_minimizers Scalar reference records.
  * @param vulkan_minimizers GPU records.
- * @param tile_plan Dispatch tiling used by the GPU result.
+ * @param tile_plan Tile count used to bound extra output.
  * @param kmer_size K-mer length.
  * @param window_size Minimizer window length.
- * @param biological_position_offset Biological offset used by callers.
+ * @param biological_position_offset Forwarded but  unused by the comparison.
  */
 template <class p_minimizer_type>
 inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
@@ -344,13 +336,13 @@ inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
 }
 
 /**
- * @brief Applies tuple-superset checks to hash and encoded-position pairs.
- * @param scalar_pairs Scalar reference pairs.
- * @param vulkan_pairs GPU pairs.
- * @param tile_plan Dispatch tiling used by the GPU result.
+ * Decode positions and strands from hash/encoded-position pairs, then compare results.
+ * @param scalar_pairs Scalar hash and encoded-gosition pairs.
+ * @param vulkan_pairs GPU hash and encoded-position pairs.
+ * @param tile_plan Tile count used to bound extra output.
  * @param kmer_size K-mer length.
  * @param window_size Minimizer window length.
- * @param biological_position_offset Biological offset used by callers.
+ * @param biological_position_offset Forwarded but unused by the comparison.
  */
 inline void require_gpu_pair_superset_with_bounded_tile_extras(
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& scalar_pairs,
@@ -376,13 +368,13 @@ inline void require_gpu_pair_superset_with_bounded_tile_extras(
 }
 
 /**
- * @brief Computes the scalar minimizer reference for a fixture sequence.
+ * Calculate scalar minimizers for the test sequence.
  * @tparam p_minimizer_type Packed minimizer record.
  * @tparam p_alphabet Sequence alphabet.
- * @param sequence_data Fixture symbols.
+ * @param sequence_data Input letters, packed into uint64_t words for this call.
  * @param window_size Minimizer window length.
  * @param kmer_size K-mer length.
- * @return Scalar minimizer records in source order.
+ * @return Records in the order emitted by the scalar  collector.
  */
 template <class p_minimizer_type, class p_alphabet>
 [[nodiscard]] inline std::vector<p_minimizer_type>
@@ -400,13 +392,13 @@ cpu_sketch(std::vector<p_alphabet>& sequence_data, std::size_t window_size, std:
 }
 
 /**
- * @brief Computes Vulkan minimizers for a resident fixture sequence.
+ * Calculate Vulkan minimizers for a packed copy of the test sequence.
  * @tparam p_minimizer_type Packed minimizer record.
  * @tparam p_alphabet Sequence alphabet.
- * @param sequence_data Fixture symbols.
+ * @param sequence_data Input letters.
  * @param window_size Minimizer window length.
  * @param kmer_size K-mer length.
- * @return GPU minimizers, or an empty vector when dispatch declines.
+ * @return GPU records copied to the host, or an empty vector if dispatch declines.
  */
 template <class p_minimizer_type, class p_alphabet>
 [[nodiscard]] inline std::vector<p_minimizer_type>
@@ -422,25 +414,26 @@ gpu_sketch(std::vector<p_alphabet>& sequence_data, std::size_t window_size, std:
     return std::move(result->host_minimizers);
 }
 
-/** @brief Deterministic dna4 fixture shared by parity and segmented tests. */
+/** Fixed dna4 input shared by result-comparison and segmint tests. */
 inline std::vector<seq::dna4> dna4_fixture{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"
     "GGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGC"_dna4};
-/** @brief Deterministic dna5 fixture containing thymine without ambiguity. */
+/** dna5 input with T and no N. */
 inline std::vector<seq::dna5> dna5_with_t{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5};
-/** @brief Deterministic dna5 fixture containing ambiguity resets. */
+/** dna5 input with runs of N that interrupt valid k-mers. */
 inline std::vector<seq::dna5> dna5_with_n{
     "ACGTACGTGGCATTACGNNNNNATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATC"
     "GTTACGATNNCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACG"_dna5};
 
 /**
- * @brief Requires device-only batch output to match host materialization exactly.
+ * Check that GPU-only batch output matches the version also copied to the  host
+ * Compare record order, per-query ranges, and the memory held by each result.
  * @tparam p_alphabet Sequence alphabet.
- * @param first_data First batch record.
- * @param second_data Second batch record.
+ * @param first_data First input sequence.
+ * @param second_data Second input sequence.
  */
 template <class p_alphabet>
 inline void require_exact_device_only_batch_parity(std::vector<p_alphabet> first_data,
@@ -457,9 +450,8 @@ inline void require_exact_device_only_batch_parity(std::vector<p_alphabet> first
         vk::make_sequence_upload_view(second_sequence),
     };
     if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-        // Batch tiles carry their own logical bp_count and sequence-word
-        // offset.  Tail padding is therefore allowed to differ between
-        // records and must not cause the whole GPU batch to decline.
+        // Each batch record has its own length and word offset. Different tail
+        // padding must still allow, both sequences in the same GPU batch.
         REQUIRE(uploads[0].padding_letters != uploads[1].padding_letters);
     }
     const auto rank_lut = vk::make_vulkan_rank_lut<decltype(first_sequence)>();
@@ -552,9 +544,8 @@ inline void require_exact_device_only_batch_parity(std::vector<p_alphabet> first
     }
     REQUIRE(query_cursor == device_only->device_minimizer_count);
 
-    // Test-only readback: production device-only mode never creates a host
-    // hash vector, but this focused oracle downloads its exact resident bytes
-    // and checks byte/order parity with the ordinary materialized call.
+    // Download the GPU-only result for this comparison. Production keeps it on
+    // the device. Compare every record with the ordinary host result in order.
     const std::size_t minimizer_count =
         static_cast<std::size_t>(device_only->device_minimizer_count);
     std::vector<std::byte> downloaded_bytes(minimizer_count * sizeof(minimizer_type));

@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/vulkan_target_routes.cppm
- * @brief Adapts MPF and MPS Vulkan seed results to the shared host suffix.
+ * @brief Prepare GPU target indexes, collect seed hits, and finish each alignment.
  */
 module;
 
@@ -55,14 +55,14 @@ import bioseq.postgres.storage.indexing.minimizer_read_stats;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Logical target representation selected by the active read policy. */
+/** Target index format selected by the active  read policy. */
 enum class gpu_seed_target_layout : std::uint8_t {
     invalid = 0,
     minimizers_per_fragment,
     minimizers_per_sequence,
 };
 
-/** Physical owner topology selected independently of campaign policy flags. */
+/** Whether the target index belongs to a BatchJoin or to one scan row. */
 enum class vulkan_seed_target_ownership : std::uint8_t {
     invalid = 0,
     shared_mpf,
@@ -72,11 +72,9 @@ enum class vulkan_seed_target_ownership : std::uint8_t {
 };
 
 /**
- * Authenticate one and only one owner topology for the selected target layout.
- *
- * Shared BatchJoin owners and the ordinary per-row preparation hook are
- * mutually exclusive.  This classifier intentionally has no benchmark or
- * campaign input: an ordinary SQL scan cannot be disabled by campaign shape.
+ * Choose the target owner for the selected MPF or MPS format.
+ * BatchJoin supplies one shared target. An ordinary scan supplies a hook that
+ * prepares a target for each row. Reject missing or competing owners.
  */
 [[nodiscard]] constexpr vulkan_seed_target_ownership
 classify_vulkan_seed_target_ownership(
@@ -125,7 +123,7 @@ static_assert(classify_vulkan_seed_target_ownership(
                   false,
                   true) == vulkan_seed_target_ownership::invalid);
 
-/** Resolve MPF/MPS without accepting aliases or inferring from owner shape. */
+/** Read the MPF or MPS format from its exact index name. */
 [[nodiscard]] constexpr gpu_seed_target_layout
 classify_gpu_seed_target_layout(const std::string_view index_name) noexcept {
     if (index_name == bioseq::indexing::k_minimizers_per_fragment_index_name) {
@@ -144,7 +142,7 @@ static_assert(classify_gpu_seed_target_layout(
                   bioseq::indexing::k_minimizers_per_sequence_index_name) ==
               gpu_seed_target_layout::minimizers_per_sequence);
 
-/** Return true only for aliases of the exact immutable statement control block. */
+/** Check that both pointers share the same statement object and lietime. */
 [[nodiscard]] inline bool same_statement_owner(
     const pipe::statement_execution_plan_owner& lhs,
     const pipe::statement_execution_plan_owner& rhs) noexcept {
@@ -152,7 +150,7 @@ static_assert(classify_gpu_seed_target_layout(
            !rhs.owner_before(lhs);
 }
 
-/** Append one completed collection while retaining scheduler query-id order. */
+/** Append a completed alignment collection to its query ID in arrival  order */
 inline void append_canonical_results(
     match_result_map& results,
     const std::int32_t query_id,
@@ -178,7 +176,7 @@ inline void append_canonical_results(
     collection.results.clear();
 }
 
-/** One completed suffix job retained until every job in its GPU-seed wave succeeds. */
+/** Keep one row's results private until every row in the GPU batch succeeds. */
 struct canonical_suffix_row_completion {
     std::size_t row = 0u;
     std::int32_t query_id = 0;
@@ -194,9 +192,9 @@ struct canonical_suffix_row_completion {
 };
 
 /**
- * One ordinary row's private Vulkan proof set, retained until ROOT commits the
- * wave's result publication.  Owners are declared before one-shot authorities
- * so reverse destruction always releases tokens before their backing objects.
+ * Keep a scan row's GPU completion records until its results are published.
+ * Declare the backing owners first so operation tokens are destroyed before
+ * the objects they refer to.
  */
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 struct ordinary_vulkan_row_proof {
@@ -223,7 +221,7 @@ struct ordinary_vulkan_row_proof {
 };
 #endif
 
-/** Completed ordinary-route state that remains private through result commit. */
+/** Hold scan timing and row completion records until results can be published. */
 struct ordinary_vulkan_scan_route_completion {
     std::uint64_t query_sketch_host_ns = 0u;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -233,7 +231,7 @@ struct ordinary_vulkan_scan_route_completion {
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Validate that an ordinary target carries exactly the source-owned read class. */
+/** Check that target read counters agree with its stored or temporary source. */
 [[nodiscard]] constexpr bool ordinary_persisted_read_receipt_matches_source(
     const bioseq::storage::indexing::minimizer_generation_read_stats& read,
     const bool persisted) noexcept {
@@ -268,7 +266,7 @@ static_assert([] {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Project an authenticated MPF completion without moving its causal token. */
+/** Describe the completed MPF seed step while leaving its operation token owned. */
 [[nodiscard]] inline vulkan_seed_frontend_job_execution
 make_mpf_seed_frontend_execution(
     const bioseq::seeding::vulkan_seed_lookup_decline& decline,
@@ -341,7 +339,7 @@ make_mpf_seed_frontend_execution(
     };
 }
 
-/** Project one MPS job from the completed shared runtime operation audit. */
+/** Read one MPS job's seed counts from the completed GPU operation. */
 [[nodiscard]] inline vulkan_seed_frontend_job_execution
 make_mps_seed_frontend_execution(
     const bioseq::gpu::vulkan::runtime_pipeline_operation_token& operation,
@@ -398,7 +396,7 @@ make_mps_seed_frontend_execution(
     };
 }
 
-/** Project the exact retained MPF target receipt without relabelling host construction. */
+/** Check the MPF target  and report how its GPU index was built or loaded. */
 template <class p_target_owner>
 [[nodiscard]] vulkan_seed_target_execution
 make_mpf_target_execution(const p_target_owner& owner) {
@@ -439,7 +437,7 @@ make_mpf_target_execution(const p_target_owner& owner) {
     return proof;
 }
 
-/** Project the exact retained MPS producer and physical resident receipts. */
+/** Check the MPS target and report its index build and GPU buffer allocations. */
 template <class p_target_owner>
 [[nodiscard]] vulkan_seed_target_execution
 make_mps_target_execution(const p_target_owner& owner) {
@@ -485,7 +483,7 @@ make_mps_target_execution(const p_target_owner& owner) {
 }
 #endif
 
-/** Translate the direct GPU owner's failure into the publisher's fixed error ABI. */
+/** Convert a GPU buffer loading error to the index encoder's error type. */
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_encoding_error
 direct_grouped_soa_encoding_error(
     bioseq::indexing::gpu_grouped_soa_ingest_error error) noexcept {
@@ -516,13 +514,10 @@ direct_grouped_soa_encoding_error(
 }
 
 /**
- * Statement-local direct sink from canonical publisher rows to final GPU buffers.
- *
- * Payload bytes are callback-scoped: each row is checksummed, authenticated,
- * and copied directly to its final mapped buffer before the callback returns.
- * This sink retains only directory/manifest counters; the encoder continues
- * to own its bounded plan/directory metadata. Publication is withheld until
- * the encoder supplies the finalized metadata seal.
+ * Copy encoded payload rows directly inho their final GPU buffers.
+ * The row bytes are available during the callback, so validate and copy them
+ * before returning. Keep directory counts and checksums to, check the final
+ * manifest before making the resident index available
  */
 struct transient_grouped_soa_direct_gpu_sink {
     bioseq::gpu::vulkan::runtime* runtime = nullptr;
@@ -691,7 +686,7 @@ static_assert(bioseq::indexing::grouped_soa_minimizer_payload_sink<
 static_assert(bioseq::indexing::direct_grouped_soa_generation_sink<
               transient_grouped_soa_direct_gpu_sink>);
 
-/** Bind an immutable grouped-SoA resident to its existing runtime view ABI. */
+/** Create  a borrowed runtime view of the loaded grouped-SoA GPU buffers. */
 template <class p_owner>
 void bind_grouped_soa_resident_view(p_owner& owner) {
     if (owner.resident == nullptr) {
@@ -718,7 +713,7 @@ void bind_grouped_soa_resident_view(p_owner& owner) {
     owner.canonical_empty = owner.resident_view.position_count == 0u;
 }
 
-/** Build the canonical MPS grouped-SoA resident once from the real target view. */
+/** Build a temporary MPS index from the target sequence directly into GPU buffers. */
 template <class p_sequence, class p_minimizer_type, class p_target_view, class p_owner>
 void prepare_transient_mps_resident(
     bioseq::gpu::vulkan::runtime& runtime,
@@ -840,9 +835,9 @@ void prepare_transient_mps_resident(
 }
 
 /**
- * Resolve exact row views and run one canonical job through the existing
- * chain/region/alignment/MAPQ suffix. No coordinate reducer, GPU CIGAR, or GPU
- * MAPQ stage is constructible below this boundary.
+ * Resolve the query and target for one completed seed job, then run chaining
+ * and the remaining alignment steps. Use the common post-seed pipeline so
+ * GPU seed collection produces the same result format as other routes.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -977,10 +972,9 @@ void run_canonical_suffix_row(
 }
 
 /**
- * Copy the complete authenticated GPU query partition into one native-width union.
- *
- * This is shared by persisted and transient MPF target preparation. The caller
- * retains the matching admission permit until target projection completes.
+ * Collect the hashes from every prepared GPU query, then sort  and deduplicate
+ * them for MPF target filtering. The caller holds the memory permit until
+ * target preparation finishes.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -1046,7 +1040,7 @@ void prepare_statement_mpf_query_hash_union(
         std::ranges::unique(selected_hashes).begin(), selected_hashes.end());
 }
 
-/** Collect selected Vulkan target cores into 572's qualified segmented spill. */
+/** Sketch the target with Vulkan and spill only hashes used by the queries. */
 template <class p_storage, sequence_alphabet p_alphabet, class p_hash>
 [[nodiscard]] auto spill_selected_vulkan_mpf_target(
     p_storage& storage,
@@ -1091,12 +1085,10 @@ template <class p_storage, sequence_alphabet p_alphabet, class p_hash>
 }
 
 /**
- * Build one statement-local MPF resident for the exact physical query-hash union.
- *
- * Every query record is already GPU-generated and host-authenticated. Target
- * collection remains the selected Vulkan producer; filtering happens only after
- * each canonical core has been collected and deduplicated. The qualified spill
- * is replayed twice into one global sorted-dense resident.
+ * Build a emporary MPF GPU index containing the hashes used by this query batch.
+ * Vulkan sketches the target, then the spill writer filters those minimizers
+ * against the query hashes. Replay the sorted spill twice to size and fill the
+ * final GPU buffers.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -1162,10 +1154,9 @@ void prepare_transient_mpf_query_union_resident_for_hash(
 
     opportunistic_sequence_index_storage storage;
     bioseq::indexing::minimizer_sequence_generation_execution_receipt spill_receipt{};
-    // The selected Vulkan producer remains bounded to its 32,768-bp cores. One
-    // target-wide spill segment keeps the number of retained sorted-run writer
-    // owners constant while the store's admitted merge-reader compaction and
-    // position batches preserve bounded replay memory and global ordering.
+    // Use one spill segment for the target to  keep the number of active
+    // writers fixed. Vulkan still sketches bounded cores, and the spill store
+    // limits merge buffers while preserving the global minimizer order.
     const std::uint64_t spill_segment_span_bp =
         static_cast<std::uint64_t>(prepared_target.target_bp_size);
     auto spill = spill_selected_vulkan_mpf_target(
@@ -1291,7 +1282,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
     prepared_target.resident = std::move(materialized->resident);
 }
 
-/** Select the exact generated record/hash width before the no-index target instantiation. */
+/** Choose the query record's hash width, before building the temporary MPF index */
 template <class p_sequence,
           std::size_t p_batch_capacity,
           class p_minimizer_type,
@@ -1366,11 +1357,10 @@ void prepare_transient_mpf_query_union_resident(
 }
 
 /**
- * Project one authenticated persisted MPF source onto the complete query union.
- *
- * The reader remains the only target owner. Its control stream is traversed to
- * compute global selected counts, then its posting stream is traversed once to
- * fill the exact final resident; target minimizers are never regenerated.
+ * Copy the stored MPF positions needed by this query batch into GPU buffers.
+ * First scan the mapped control records to count selected positions, then
+ * copy their postings into the allocated resident index. The mapped reader
+ * stays alive through both passes.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -1513,7 +1503,7 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
     prepared_target.resident = std::move(materialized->resident);
 }
 
-/** Select the native persisted hash lane after the physical query record is fixed. */
+/** Choose the stored MPF hash width after validating the query record  format. */
 template <class p_sequence,
           std::size_t p_batch_capacity,
           class p_minimizer_type,
@@ -1578,8 +1568,9 @@ void prepare_persisted_mpf_query_union_resident(
 }
 
 /**
- * Execute MPF Vulkan seeding against one statement query-selected resident built
- * from either the mapped READY source or the real no-index target view.
+ * Collect Vulkan seed hits against an MPF index selected for this query batch,
+ * then finish each alignment through the common post-seed pipeline. The target
+ * index comes from stored positions or a temporary build from the sequesce.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -1662,10 +1653,9 @@ void process_vulkan_mpf_seed_route(
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "MPF Vulkan target contains a partial prior materialization");
         }
-        // Query-selected target ownership is sealed only from the complete statement
-        // union. This route currently supports exactly one nonempty scheduler wave
-        // (including a singleton); a split or replayed statement is rejected before
-        // target traversal, so no undispatched query can be omitted from the union.
+        // Building the filtered target requires every query hash up front. Reject
+        // a split or repeated first batch before reading the target, so its index
+        // cannot leave out hashes needed by a query that has not run yet.
         if (prepared_target.dispatched_query_count != 0u ||
             prepared_target.query_count != batch_size) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
@@ -1683,9 +1673,8 @@ void process_vulkan_mpf_seed_route(
                     prepared_target,
                     state);
             }
-            // Both complete mapped traversals and every copy into the independent,
-            // host-coherent resident have returned synchronously. End the borrowing
-            // reader reference before releasing its reader and then its mmap lease.
+            // The selected positions have  been copied into separate GPU buffers.
+            // Release the borrowed reader before closing its mapped file.
             if (!prepared_target.seal_persisted_resident_and_release_source()) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     "persisted MPF resident could not seal its completed source proof");
@@ -1890,8 +1879,9 @@ void process_vulkan_mpf_seed_route(
 }
 
 /**
- * Execute grouped-SoA MPS seed-only once for the wave, authenticate its jobs,
- * and run the identical host suffix once per job (including empty jobs).
+ * Collect MPS seed hits for the whole GPU batch and check the returned jobs.
+ * Finish each job through the common post-seed pipeline, including jobs with
+ * no seed hits.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -2136,14 +2126,10 @@ void process_vulkan_mps_seed_route(
 }
 
 /**
- * Run an ordinary scan as independently owned one-row canonical submissions.
- *
- * Unlike BatchJoin, an ordinary scan has no statement-wide target: each row
- * names a different target and therefore receives a different MPF/MPS owner.
- * MPS additionally consumes its query authorization, so a checked singleton
- * query partition is prepared for every row.  Both layouts still enter the
- * same `process_vulkan_*_seed_route` functions and `dispatch_post_seed_job`
- * suffix used by the shared-target route.
+ * Process each ordinary scan row with its own MPF or MPS target index
+ * Prepare a one-row query batch as MPS consumes the query authorization, then
+ * use the same seed and  post-seed functions as BatchJoin. Keep, each row's
+ * results until the entire scan batch succeeds.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,

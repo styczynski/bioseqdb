@@ -259,7 +259,7 @@ TEST_CASE("dependency fingerprint material includes the dependency epoch guard",
         newer_definition_material, envelope, newer_definition_span));
     REQUIRE(newer_definition_material != definition_material);
 
-    // No raw transaction-completion counter enters this canonical material.
+    // Changing the record generation keeps the fingerprint input the same size.
     REQUIRE(newer_record_material.size() == guarded.size());
 }
 

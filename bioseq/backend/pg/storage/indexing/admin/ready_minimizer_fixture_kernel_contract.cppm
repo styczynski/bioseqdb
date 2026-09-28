@@ -1,6 +1,6 @@
 /**
  * @file admin/ready_minimizer_fixture_kernel_contract.cppm
- * @brief Declares the cold kernel-binding boundary used by READY fixtures.
+ * @brief Select minimizer kernels for index-generation tests.
  */
 module;
 
@@ -12,7 +12,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing {
 
-/** Bind the exact minimizer table once at the integration-fixture operation root. */
+/** Select the SIMD kernel table used by the requested test backend. */
 [[nodiscard]] const bioseq::minimizers::minimizer_kernels*
 bind_ready_minimizer_fixture_kernels(
     bioseq::minimizers::minimizer_sketch_backend backend,

@@ -1,6 +1,6 @@
 /**
  * @file external/json/simdjson.cppm
- * @brief simdjson conversion into the provider-owned JSON value model.
+ * @brief Copies simdjson values into the JSON model used by providers.
  */
 module;
 
@@ -17,7 +17,7 @@ module bioseq.external.json;
 namespace bioseq::external::json {
 namespace {
 
-/// Recursively converts one simdjson DOM element into the owned value model.
+/// Copies a simdjson value and its children so they outlive the  parser.
 [[nodiscard]] value convert_element(simdjson::dom::element element) {
     value converted;
     switch (element.type()) {

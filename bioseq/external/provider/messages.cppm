@@ -1,6 +1,6 @@
 /**
  * @file external/provider/messages.cppm
- * @brief Owning messages exchanged by provider planning and retrieval stages.
+ * @brief Provider results and download plans passed between workers.
  */
 module;
 
@@ -22,20 +22,18 @@ import bioseq.external.provider.errors;
 import bioseq.external.provider.model;
 import bioseq.common.sink_control;
 
-/// Provider diagnostics, retrieval plans, and owning messages.
+/// Provider messages and the views used to read them.
 ///
-/// Diagnostic and plan views remain valid for one sink callback. Owning forms
-/// retain the corresponding data while moving through channels.
+/// Views borrow their data for one callback. Owning messages keep that data
+/// alive while it passes through a channel.
 export namespace bioseq::external::provider {
 
-// ===========================================================================
 // Diagnostics.
-// ===========================================================================
 
 /// Severity of a provider diagnostic that does not abort the whole query.
 enum class diagnostic_severity : std::uint8_t { warning, item_error };
 
-/// Callback-scoped provider diagnostic.
+/// Diagnostic whose text is borrowed for one callback.
 struct provider_diagnostic_view {
     diagnostic_severity severity;
     provider_id provider;
@@ -46,7 +44,7 @@ struct provider_diagnostic_view {
     bool is_retryable;
 };
 
-/// Owning bounded provider diagnostic.
+/// Diagnostic that owns its text within fixed byte limits.
 struct owning_provider_diagnostic {
     diagnostic_severity severity;
     provider_id provider;
@@ -57,7 +55,7 @@ struct owning_provider_diagnostic {
     bounded_string<maximum_diagnostic_bytes> message;
     bool is_retryable{};
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the diagnostic and its text.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -68,7 +66,7 @@ struct owning_provider_diagnostic {
         return total;
     }
 
-    /// Returns a callback-scoped view backed by this diagnostic.
+    /// Borrow this diagnostic's text for a callback.
     [[nodiscard]] provider_diagnostic_view view() const noexcept {
         provider_diagnostic_view result;
         result.severity = severity;
@@ -82,10 +80,8 @@ struct owning_provider_diagnostic {
     }
 };
 
-// ===========================================================================
-// Retrieval plan model with callback-scoped views.
-// (locator_policy_id lives in bioseq.external.provider.base.)
-// ===========================================================================
+// Download plans borrowed for one callback.
+// locator_policy_id is defined in bioseq.external.provider.base.
 
 /// HTTP method used for a transfer candidate.
 enum class transfer_method : std::uint8_t { get, post };
@@ -93,7 +89,7 @@ enum class transfer_method : std::uint8_t { get, post };
 /// URL scheme accepted by a locator policy.
 enum class locator_scheme : std::uint8_t { https, http, ftps, ftp };
 
-/// Callback-scoped candidate for one remote transfer.
+/// Download request  whose URL, body, and metadata are borrowed.
 struct candidate_transfer_request_view {
     transfer_method method;
     std::string_view url;
@@ -112,7 +108,7 @@ struct candidate_transfer_request_view {
     std::optional<integrity_check_view> integrity;
 };
 
-/// Retrieval strategy selected for a sequence asset.
+/// How to retrieve a sequence file or collection of records.
 enum class retrieval_plan_kind : std::uint8_t {
     direct_asset,
     archive_manifest,
@@ -130,7 +126,7 @@ enum class sequence_content_kind : std::uint8_t {
     protein_fasta
 };
 
-/// Callback-scoped archive manifest selection rules.
+/// Borrowed rules for choosing sequence content from an archive.
 struct retrieval_manifest_rules_view {
     std::span<const sequence_content_kind> selected_content;
     std::optional<std::string_view> dataset_catalog_member;
@@ -138,7 +134,7 @@ struct retrieval_manifest_rules_view {
     std::optional<std::string_view> checksum_manifest_member;
 };
 
-/// Callback-scoped request for one biological record.
+/// Borrowed identiuy and expected properties of one requested sequence.
 struct retrieval_record_request_view {
     record_key_view key;
     molecule_kind molecule;
@@ -154,7 +150,7 @@ enum class record_association_rule : std::uint8_t {
     manifest_catalog
 };
 
-/// Callback-scoped sequence retrieval plan.
+/// Download plan borrowed for one callback.
 struct sequence_retrieval_plan_view {
     external_execution_key execution;
     provider_id provider;
@@ -168,14 +164,10 @@ struct sequence_retrieval_plan_view {
     row_audit_view audit;
 };
 
-// ===========================================================================
-// Retrieval plan model — OWNING mirrors.
-// ===========================================================================
+// Download plans with owned storage.
 
-/// Owning mirror of a candidate transfer request.
-///
-/// The immutable replay body is stored as raw bytes. Plans omit credentials and
-/// secret headers.
+/// Download request that owns its URL, body, and metadata.
+/// Credentials and secret headers must be supplied separately
 struct owning_candidate_transfer_request {
     transfer_method method{};
     bounded_string<maximum_url_bytes> url;
@@ -193,7 +185,7 @@ struct owning_candidate_transfer_request {
     std::optional<bounded_string<maximum_identifier_bytes>> container;
     std::optional<owning_integrity_check> integrity;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the request body and metadata.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += url.measure_deep_size_bytes() - sizeof(url);
@@ -226,7 +218,7 @@ struct owning_candidate_transfer_request {
         return total;
     }
 
-    /// Returns a callback-scoped view backed by this request.
+    /// Borrow the request body and metadata for a callback.
     [[nodiscard]] candidate_transfer_request_view view() const noexcept {
         candidate_transfer_request_view result;
         result.method = method;
@@ -258,14 +250,14 @@ struct owning_candidate_transfer_request {
     }
 };
 
-/// Owning archive manifest selection rules.
+/// Archive content selection  with owned member names.
 struct owning_retrieval_manifest_rules {
     std::vector<sequence_content_kind> selected_content;
     std::optional<bounded_string<maximum_archive_member_name_bytes>> dataset_catalog_member;
     std::optional<bounded_string<maximum_archive_member_name_bytes>> fetch_manifest_member;
     std::optional<bounded_string<maximum_archive_member_name_bytes>> checksum_manifest_member;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for content selections and manifest member names.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += selected_content.capacity() * sizeof(sequence_content_kind);
@@ -284,7 +276,7 @@ struct owning_retrieval_manifest_rules {
         return total;
     }
 
-    /// Returns a callback-scoped view backed by these rules.
+    /// Borrow these archive selection rules for a callback.
     [[nodiscard]] retrieval_manifest_rules_view view() const noexcept {
         retrieval_manifest_rules_view result;
         result.selected_content = std::span<const sequence_content_kind>(selected_content.data(),
@@ -302,9 +294,8 @@ struct owning_retrieval_manifest_rules {
     }
 };
 
-/// Owning request for one record and its accepted header aliases.
-///
-/// The owning plan reconstructs record views with its alias storage.
+/// Requested sequence with owned identity and accepted FASTA header aliases.
+/// The parent plan builds views backed by this alias storage.
 struct owning_retrieval_record_request {
     owning_record_key key;
     molecule_kind molecule{};
@@ -313,7 +304,7 @@ struct owning_retrieval_record_request {
     std::vector<owning_record_key> accepted_header_aliases;
     owning_sequence_audit_seed audit_seed;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the record identity, aliases, and audit data.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += key.measure_deep_size_bytes() - sizeof(key);
@@ -327,9 +318,8 @@ struct owning_retrieval_record_request {
     }
 };
 
-/// Owning sequence retrieval plan and callback-view storage.
-///
-/// Nested alias, request, and candidate views remain valid for one callback.
+/// Download plan that owns its data and temporary callback views.
+/// Keep each view within its callback because the next view rebuilds that, storage.
 struct owning_sequence_retrieval_plan {
     external_execution_key execution{};
     provider_id provider;
@@ -342,13 +332,13 @@ struct owning_sequence_retrieval_plan {
     std::optional<owning_retrieval_manifest_rules> manifest;
     owning_row_audit audit;
 
-    // Transient reconstruction storage, rebuilt for each callback view.
+    // Temporary arrays rebuilt  when a callback view is requested.
     mutable std::vector<std::vector<record_key_view>> requested_alias_scratch_;
     mutable std::vector<retrieval_record_request_view> requested_records_scratch_;
     mutable std::vector<candidate_transfer_request_view> candidates_scratch_;
     mutable row_audit_view_storage audit_view_storage_;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the plan, including its temporary view arrays.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         if (container_key) {
@@ -375,7 +365,7 @@ struct owning_sequence_retrieval_plan {
         return total;
     }
 
-    /// Reconstructs a callback-scoped retrieval-plan view.
+    /// Build a callback view backed by this plan and its temporary arrays.
     [[nodiscard]] sequence_retrieval_plan_view view() const noexcept {
         sequence_retrieval_plan_view result;
         result.execution = execution;
@@ -426,13 +416,10 @@ struct owning_sequence_retrieval_plan {
     }
 };
 
-// ===========================================================================
-// Erased owning-message protocol.
-// ===========================================================================
+// Messages passed to provider consumers.
 
-/// Per-execution identity for one decoded sequence asset.
-///
-/// The terminal asset event is emitted after decoding and integrity validation.
+/// Identifies a downloaded sequence asset within one execution.
+/// An asset completion message follows decoding and integrity validation.
 struct sequence_asset_id {
     external_execution_key execution{}; // 256-bit execution identity
     std::uint64_t index{};              // per-execution monotonic asset ordinal
@@ -448,10 +435,10 @@ struct owning_sequence_asset_end {
     sequence_asset_id asset_id;
     std::uint64_t record_count{};
     std::uint64_t decoded_bytes{};
-    // The MD5 is provider integrity metadata rather than a signature.
+    // MD5 records the provider's checksum for detecting changed data.
     owning_integrity_result integrity;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate stwrage for the completion message and its integrity result.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += integrity.measure_deep_size_bytes() - sizeof(integrity);
@@ -467,21 +454,21 @@ using owning_provider_message = std::variant<owning_taxonomy_row,
                                              owning_provider_diagnostic,
                                              owning_sequence_asset_end>;
 
-/// Measures the charged memory footprint of an owning provider message.
+/// Estimate the memory charged for a provider message.
 [[nodiscard]] inline std::size_t
 measure_deep_size_bytes(const owning_provider_message& message) noexcept {
     return std::visit([](const auto& value) noexcept { return value.measure_deep_size_bytes(); },
                       message);
 }
 
-/// Sink contract for moving provider messages across an execution boundary.
+/// A message sink takes ownership of each  message and can return an error.
 template <class p_sink_type>
 concept provider_message_sink_compatible =
     requires(p_sink_type& sink, owning_provider_message&& message) {
         { sink.push(std::move(message)) } -> std::same_as<std::expected<void, external_error>>;
     };
 
-/// Non-owning type-erased sink for provider messages.
+/// Borrowed callback for passing an owned message to its consumer
 struct provider_message_sink_ref {
     void* object{};
     std::expected<void, external_error> (*push_fn)(void*, owning_provider_message&&){};

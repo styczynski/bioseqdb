@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns SliceProject DSM, runtime, state, and plan access contracts.
+ * @brief Defines SliceProject execution  state and shared-memory records.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -123,9 +123,9 @@ export {
 #endif
     };
 
-    /* slice_async_max_live_jobs is the one normative concurrency bound. Released
-     * slots advance their generation and are reused across arbitrarily many
-     * batches without multiplying every trace boundary by dispatch capacity. */
+    /* slice_async_max_live_jobs bounds the live jobs. Reusing released slots
+     * keeps counter storage fixed as more batches are submitted. Advancing each
+     * slot generation lets the owner reject handles from its previous use. */
 
     struct slice_project_state {
         CustomScanState custom_scan_state;
@@ -137,10 +137,9 @@ export {
     [[nodiscard]] bool
     slice_project_rearm_worker_for_rescan_noexcept(slice_project_state* state) noexcept;
 
-    /* A nested SliceProject must initialize its child's trace before it can bind
-     * the parent projector, while child initialization calls back through the
-     * parent-aware binding path. This forward declaration closes that genuine
-     * initialization cycle without moving either executor stage out of order. */
+    /* A parent SliceProject needs its nested child trace before binding source
+     * routes. Trace initialization also uses that, binding code, so declare the
+     * initializer here for both call paths. */
     void slice_project_ensure_trace_initialized(CustomScanState* custom);
     void slice_project_reinitialize_dsm(CustomScanState* custom,
                                         ParallelContext* pcxt,
@@ -193,4 +192,4 @@ export {
         return bindings != nullptr && IsA(bindings, List) ? reinterpret_cast<List*>(bindings) : NIL;
     }
 
-} // export custom-scan partition declarations
+} // export

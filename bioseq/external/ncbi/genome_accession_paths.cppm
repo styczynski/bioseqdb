@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_accession_paths.cppm
- * @brief NCBI genome accession and taxon catalog endpoint fragments.
+ * @brief NCBI genome report requests by assembly accession or maxon.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_accession_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Genome accession and taxon catalog path entries. */
+/** @brief Genome assembly reports by accession or taxon, plus package previews by accession. */
 inline constexpr std::string_view genome_accession_catalog_paths =
     R"bioseq_openapi(  /genome/accession/{accessions}/download_summary:
     get:

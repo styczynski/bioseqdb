@@ -1,9 +1,9 @@
 /**
  * @file wire_test.cpp
- * @brief Verifies binary sequence transport and malformed-input rejection.
+ * @brief Tests binary sequence transport and rejection of invalid input.
  *
- * COPY BINARY must preserve sequence values. Direct receive calls must reject
- * invalid payloads without damaging the PostgreSQL connection.
+ * COPY BINARY must preserve sequences and their lengths. Failed receive
+ * calls must leave the PostgreSQL connection, usble.
  */
 
 #include <fmt/format.h>
@@ -45,7 +45,7 @@ TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
     auto ctx = fresh_context({k_source_table, k_destination_table});
     seed_pair(ctx);
 
-    // Best-effort cleanup prevents an existing file from affecting the run.
+    // Try to remove a file left by an earlier COPY test.
     std::error_code cleanup_error;
     std::filesystem::remove(std::filesystem::path(k_binary_path), cleanup_error);
 
@@ -72,16 +72,14 @@ TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
 TEST_CASE("seq_recv rejects malformed wire payloads (or refuses to be invoked)",
           "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
     auto ctx = fresh_context();
-    // A wire layout with bp_size=99 but unit_count=0 must
-    // not match the alphabet/width-derived bp_size. Some builds declare
-    // seq_recv as `internal`-only. In that case the call itself fails. Both
-    // outcomes are acceptable — we only require that the connection stays
-    // healthy and the call does not silently succeed.
+    // This attempted seq_recv call must fail. PostgreSQL may reject the call
+    // before decoding because its first argument is an internal value.
+    // Check that  the connection remains usable afterwards.
     REQUIRE(sql_fails(ctx,
                       "SELECT bioseq.seq_recv("
                       "    e'\\\\x0000000000000000630000000000'::bytea, 0::oid, -1);"));
 
-    // Sanity check: connection is still usable after the failed call.
+    // Verify that another statement succeeds after the failed call.
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 

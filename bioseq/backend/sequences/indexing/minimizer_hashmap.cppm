@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap.cppm
- * @brief Public facade for fragment and persisted minimizer indexes.
+ * @brief Exports minimizer indexes and the modules that build and read them.
  */
 export module bioseq.indexing.minimizer_hashmap;
 
@@ -17,6 +17,6 @@ export import :fragment_producer;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 namespace bioseq::indexing::detail {
-/// @brief Declares the private fragment-index table shared by implementation partitions.
+/// Private hash-table type used by the fragment index implementation.
 struct minimizer_hashmap_fragment_index_table;
 }

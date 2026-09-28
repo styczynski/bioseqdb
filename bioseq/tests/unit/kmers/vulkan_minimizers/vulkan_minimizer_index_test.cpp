@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_index_test.cpp
- * @brief Vulkan minimizer target-index admission tests.
+ * @brief Check GPU index memory reservations and buffer ownership through construction and reuse.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -94,9 +94,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     auto& runtime = vk::runtime::instance();
     auto& arena = runtime.reusable_gpu_arena();
 
-    // A live slice makes trim fail closed.  Once its mark is rewound, trim
-    // destroys the backing allocation.  This directly guards the cursor rule
-    // used by the request-boundary cleanup below.
+    // Keep the aena allocation while a slice is live. Rewinding its mark
+    // makes the arena idle, allowing cleanup to free the  allocation.
     REQUIRE(arena.release_idle_capacity());
     constexpr std::uint64_t arena_probe_bytes = std::uint64_t{1} << 20u;
     REQUIRE(arena.ensure_capacity(arena_probe_bytes, 0u, 0u));
@@ -111,8 +110,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(arena.release_idle_capacity());
     REQUIRE_FALSE(arena.device_buffer().is_valid());
 
-    // The same cleanup must run during stack unwinding, before a caller can
-    // release or shrink its admission permit.
+    // An exception must also free arena buffers before the caller releases
+    // their memory reservation.
     bool exception_observed = false;
     try {
         vk::gpu_arena_trim_guard trim_on_exception{arena};
@@ -170,8 +169,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
-    // The build's count/radix/mark/emit route must not discover any pipeline
-    // metadata after the caller has acquired its transient allocation permit.
+    // Prepare every index-build pipeline before reserving temporary memory
+    // Building the index must leave the pipeline-cache allocation unchanged.
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes() == target_index_pipeline_metadata);
     REQUIRE(built->ownership.count_submit_admissions == 1u);
     REQUIRE(built->ownership.execution_peak_admissions == 1u);
@@ -232,9 +231,9 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(cache_metadata_at_adoption >= cache_metadata_before);
 
-    // Seed twice through the same resident buffers.  Each completed fence copies
-    // anchors to owned host storage and then trims only the arena; the adopted
-    // standalone slot/position allocations must retain identity and ownership.
+    // Run seeding twice with the same index buffers. Each call copies anchors
+    // to the host and frees its temporary arena. The index keeps its own slot
+    // and position allocations for the next call.
     const auto query = cpu_sketch<minimap_sketch_data>(dna4_fixture, 10u, 15u);
     REQUIRE_FALSE(query.empty());
     const vk::gpu_seed_inputs inputs{

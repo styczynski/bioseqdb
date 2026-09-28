@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Analyzes volatility, mmsearch calls, and coarse operand shape.
+ * @brief Finds mmsearch calls and checks options and operands before full planning.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -32,7 +32,7 @@ export import :custom_scan_oid_expression_support_expression_analysis_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Carries cached stub OIDs through the raw-query validation walk. */
+    /** @brief Passes the Bioseq function OIDs through the options-validation walk. */
     struct raw_mmsearch_options_validation {
         const bioseq_stub_oids* oids = nullptr;
     };
@@ -49,7 +49,7 @@ export {
         return result;
     }
 
-    /** @brief Visits expression nodes while delegating nested queries to the query walker. */
+    /** @brief Searches expressions for volatile SQL functions and visits nested queries. */
     inline bool contains_volatile_sql_function_node(Node* node, void* context);
 
     /** @brief Searches a query tree and its range-table expressions for volatile SQL calls. */
@@ -81,11 +81,11 @@ export {
         return contains_volatile_sql_function_node(expression, nullptr);
     }
 
-    /** @brief Validates mmsearch option expressions while walking non-query nodes. */
+    /** @brief Checks mmsearch options while walking expressions and nested queries. */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation);
 
-    /** @brief Validates raw mmsearch options throughout one query and its nested queries. */
+    /** @brief Checks mmsearch option expressions throughout a query and its nested queries. */
     inline void validate_raw_mmsearch_options_query(Query* query,
                                                     raw_mmsearch_options_validation* validation) {
         if (query == nullptr) {
@@ -96,8 +96,8 @@ export {
     }
 
     /**
-     * @brief Rejects volatile options on a three-argument mmsearch expression.
-     * @throws PostgreSQL ERROR when a volatile SQL wrapper occurs in the options argument.
+     * @brief Rejects volatile SQL calls in the options argument of mmsearch.
+     * @throws PostgreSQL ERROR if the three-argument form contains such a  call.
      */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation) {
@@ -131,11 +131,13 @@ export {
         return expression_tree_walker(node, validate_raw_mmsearch_options_node, validation);
     }
 
-    /** @brief Reject volatile raw options before planner simplification removes their provenance.
+    /**
+     * @brief Checks volatile SQL options before the planber can simplify them away.
      *
-     * Called by the top-level planner hook while the analyzed Query still retains
-     * SQL-function volatility.  standard_planner simplification may erase that
-     * provenance by replacing the wrapper with its constant body. */
+     * A volatile SQL wrapper may be replaced by its constant body during planning.
+     * Inspect the analyzed query while that function call is still present, so
+     * simplification cannot hide its volatility declaration.
+     */
     void bioseq_validate_raw_mmsearch_options(Query* query) {
         const bioseq_stub_oids* oids = try_get_cached_stub_oids();
         if (query == nullptr || oids == nullptr) {
@@ -145,14 +147,14 @@ export {
         validate_raw_mmsearch_options_query(query, &validation);
     }
 
-    /** @brief Carries stub OIDs through the mmsearch-presence expression walk. */
+    /** @brief Passes the mmsearch function OIDs through the expression search. */
     struct mmsearch_qualifier_walker {
         const bioseq_stub_oids* oids = nullptr;
     };
 
     /** @brief Stops an expression walk at the first mmsearch call. */
     struct mmsearch_qualifier_visitor {
-        /** @brief Classifies the current node for the mmsearch-presence walk. */
+        /** @brief Stops at an mmsearch call and otherwise visits the node's children. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               mmsearch_qualifier_walker& data) const {
@@ -172,7 +174,7 @@ export {
         return walk_pg_expression_including_root(node, data, visitor);
     }
 
-    /** @brief Accumulates the number of mmsearch calls in an expression tree. */
+    /** @brief Keeps the function OIDs and running count for the mmsearch walk. */
     struct mmsearch_occurrence_counter {
         const bioseq_stub_oids* oids = nullptr;
         std::size_t count = 0;
@@ -180,7 +182,7 @@ export {
 
     /** @brief Counts every mmsearch node while descending through an expression tree. */
     struct mmsearch_occurrence_visitor {
-        /** @brief Records a call at the current node and continues traversal. */
+        /** @brief Counts an mmsearch call  at this node and keeps searching its children. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               mmsearch_occurrence_counter& data) const {
@@ -201,10 +203,12 @@ export {
     }
 
     /**
-     * @brief Applies the inexpensive base-local shape filter used before full operand validation.
+     * @brief Quickly checks whether a sequence operand can belong to this base scan.
      *
-     * Volatile subexpressions remain admissible because the authoritative expression state
-     * evaluates them at the original base-relation frontier.
+     * Require its column references to come from the current relation, and reject
+     * set-returning expressions and subplans. The caller may also require a sequence
+     * column Volatile functions pass this initial check because the scan evaluates
+     * the expression at its original, row position. Full validation follows.
      */
     [[nodiscard]] bool coarse_base_mmsearch_operand_candidate(Node* expression,
                                                               RelOptInfo* rel,

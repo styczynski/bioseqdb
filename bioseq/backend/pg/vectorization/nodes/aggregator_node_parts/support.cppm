@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines shared vector-aggregate state and spill contracts.
+ * @brief Shared aggregate executor state and records for spilled groups.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -9,10 +9,8 @@ extern "C" {
 }
 #include <cstdint>
 
-/**
- * Complete PostgreSQL's HashAggSpill declaration in the global module
- * fragment so its layout and linkage match execnodes.h.
- */
+/** Complete PostgreSQL's HashAggSpill type before the module declaration
+ * so, it has the same linkage as the declaration in execnodes.h. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL ABI type name
 struct HashAggSpill {
     /** Number of spill partitions. */
@@ -25,13 +23,13 @@ struct HashAggSpill {
     uint32_t mask;
     /** Hash shift applied after the partition mask. */
     int shift;
-    /** Cardinality estimate for each spill partition. */
+    /** HyperLogLog state used to estimate distinct groups in each partition. */
     hyperLogLogState* hll_card;
 };
 
 export module bioseq.postgres.vectorization.aggregator_node:support;
 
-/** Module-visible alias for PostgreSQL's completed spill descriptor. */
+/** Module alias for PostgreSQL's spill record. */
 export using hash_aggregate_spill = HashAggSpill;
 
 export {
@@ -49,7 +47,7 @@ export {
         double input_card;
     };
 
-    /** Accumulates aggregate and grouping-column references during plan walking. */
+    /** Track input columns referenced inside and outside aggregate calls. */
     struct find_columns_context {
         /** Whether traversal is inside an aggregate reference. */
         bool is_aggref;
@@ -61,15 +59,15 @@ export {
 
     /** Holds the PostgreSQL aggregate executor owned by a vector custom scan. */
     struct vector_aggregate_state {
-        /** PostgreSQL custom-scan prefix. */
+        /** First field required for PostgreSQL custom-scan callbacks. */
         CustomScanState custom_scan_state;
-        /** Aggregate executor copied from the wrapped plan. */
+        /** Aggregate executor initialized from the wrapped plan. */
         AggState* aggregate_state;
     };
 
-    /** Target groups per spill partition relative to the memory estimate. */
+    /** Extra space allowed for estimation error when choosing  spill partitions. */
     inline constexpr double hash_aggregate_partition_factor = 1.50;
-    /** Minimum spill partition count. */
+    /** Preferred minimum partition count while enough unused hash bits remain. */
     inline constexpr int hash_aggregate_min_partitions = 4;
     /** Maximum spill partition count. */
     inline constexpr int hash_aggregate_max_partitions = 1024;
@@ -79,10 +77,10 @@ export {
     /** Logical-tape write buffer size. */
     inline constexpr int hash_aggregate_write_buffer_bytes = BLCKSZ;
 
-    /** HyperLogLog precision used for spill cardinality. */
+    /** HyperLogLog precision used to estimate groups in a spill partition. */
     inline constexpr int hash_aggregate_hll_bit_width = 5;
 
-    /** Allocation-set chunk header included in entry estimates. */
+    /** Estimated allocator header bytes inclued for each hash-entry allocation. */
     inline constexpr Size aggregate_chunk_header_bytes = 16;
 
 }

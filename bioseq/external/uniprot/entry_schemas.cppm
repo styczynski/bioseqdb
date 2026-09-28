@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/entry_schemas.cppm
- * @brief UniProt entry schema fragments.
+ * @brief UniProt entry schemas for client generation.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:entry_schemas;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Components prefix and core UniProt entry schemas. */
+/** @brief Start the components section and define UniProt entry schemas. */
 inline constexpr std::string_view entry_schemas = R"bioseq_openapi(components:
   schemas:
     AlternativeSequence:

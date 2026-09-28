@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates shared, batched, and per-row custom-join execution.
+ * @brief Public callbacks for batched and per-row sequence joins.
  */
 export module bioseq.postgres.table:custom_scan_join_execution;
 

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns SliceProject DSM layout, merge validation, and diagnostic fixtures.
+ * @brief Lays out shared SliceProject counters and checks worker results before merging them.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -30,14 +30,14 @@ import :custom_scan_slice_path_runtime_contract;
 
 export {
 
-    /** @brief Byte offsets for one SliceProject DSM segment layout. */
+    /** @brief Byte sizes of the shared header, each worker slot and the whole segment. */
     struct slice_project_dsm_layout {
         Size header_bytes;
         Size slot_stride;
         Size total_bytes;
     };
 
-    /** @brief Counters and flags recorded while merging one DSM cycle into trace state. */
+    /** @brief Records which shared headers and counters a merge inspected or accepted. */
     struct slice_project_dsm_merge_audit {
         std::uint32_t slot_headers_read = 0u;
         std::uint32_t counter_records_read = 0u;
@@ -48,7 +48,7 @@ export {
         bool merged = false;
     };
 
-    /** @brief Computes aligned header, slot stride, and total bytes for a DSM layout. */
+    /** @brief Calculates aligned shared-memory space for the header and worker counters. */
     [[nodiscard]] slice_project_dsm_layout make_slice_project_dsm_layout(std::uint32_t recipe_count,
                                                                          std::uint32_t slot_count) {
         const Size header_bytes = MAXALIGN(sizeof(slice_dsm_header));
@@ -82,7 +82,7 @@ export {
         return true;
     }
 
-    /** @brief Fills layout from recipe and slot counts without throwing on overflow. */
+    /** @brief Calculates the shared-memory layout, returning false on invalid  size or overflow. */
     [[nodiscard]] bool
     slice_project_dsm_layout_noexcept(std::uint32_t recipe_count,
                                       std::uint32_t slot_count,
@@ -110,7 +110,7 @@ export {
         return true;
     }
 
-    /** @brief Returns the worker header at slot_index bytes after header->header_bytes. */
+    /** @brief Returns the header of worker slot @p slot_index using the saved slot stride. */
     [[nodiscard]] slice_dsm_worker_header*
     slice_project_worker_slot(slice_dsm_header* header, std::uint32_t slot_index) noexcept {
         return reinterpret_cast<slice_dsm_worker_header*>(
@@ -133,7 +133,7 @@ export {
         attachment->runtime->overflowed = true;
     }
 
-    /** @brief Checks header magic, version, and layout fields against the expected cycle and counts. */
+    /** @brief Checks the shared header against the expected scan cycle and counter layout. */
     [[nodiscard]] bool
     slice_project_validate_dsm_header_noexcept(slice_dsm_header const* header,
                                                std::uint32_t recipe_count,
@@ -150,7 +150,14 @@ export {
                header->cycle == cycle && header->slot_stride == layout->slot_stride;
     }
 
-    /** @brief Merges published-complete slot counters for expected_cycle into the trace cumulative sink. */
+    /**
+     * @brief Adds completed worker counters for one parallel scan cycle.
+     *
+     * Checks mapped memory bounds and every completed record before changing totals.
+     * Running and incomplete workers contribute only to the incomplete-worker count.
+     * Rejects malformed data by marking the trace invalid, and skips a cycle that
+     * was already merged.
+     */
     void slice_project_merge_dsm_cycle_noexcept(
         slice_dsm_header* header,
         std::uintptr_t map_base,
@@ -186,10 +193,9 @@ export {
         }
         if (audit != nullptr)
             audit->mapping_valid = true;
-        /* First pass validates every published-complete slot before a single
-         * counter is merged.  Running and incomplete slots own tentative deltas:
-         * never dereference those payloads, because a valid-looking prefix is not a
-         * completed materialization. */
+        /* Validate  all completed records before merging any totals. Running
+         * and incomplete workers still own their counters, so leave those
+         * payloads unread */
         for (std::uint32_t slot_index = 0u; slot_index < slot_count; ++slot_index) {
             auto* worker = slice_project_worker_slot(header, slot_index);
             if (audit != nullptr)
@@ -214,9 +220,8 @@ export {
                 slice_project_mark_trace_invalid_noexcept(attachment);
                 return;
             }
-            /* Running slots still belong to one exact generation.  Their tentative
-             * counter payload remains unread, but accepting a stale slot header would
-             * count an earlier cycle as incomplete work in this one. */
+            /* Even a running slot must belong to this ccle. A stale header would
+             * otherwise count old work as an incomplete worker in the current scan. */
             if (state == slice_dsm_publish_state::attached_running)
                 continue;
             if (state == slice_dsm_publish_state::published_incomplete)
@@ -273,7 +278,7 @@ export {
         }
     }
 
-    /** @brief Merges a DSM cycle using map bounds from a parallel context segment. */
+    /** @brief Merges a scan cycle using the mapped segment bounds from PostgreSQL's parallel context. */
     void slice_project_merge_dsm_cycle_noexcept(
         slice_dsm_header* header,
         ParallelContext* pcxt,
@@ -294,7 +299,7 @@ export {
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
-    /** @brief Single-field corruption modes exercised by corrupt DSM merge tests. */
+    /** @brief Malformed header and worker states tested by the merge checks. */
     enum class slice_project_dsm_corruption : std::uint8_t {
         version = 0u,
         recipe_count,
@@ -304,7 +309,7 @@ export {
         stale_cycle,
     };
 
-    /** @brief Outcome of one corrupt DSM merge test run and its merge audit. */
+    /** @brief Holds the result and, read counts from one malformed-data test. */
     struct slice_project_dsm_test_case_result {
         bool validated = false;
         slice_project_dsm_merge_audit audit{};
@@ -325,7 +330,7 @@ export {
         header->slot_stride = layout.slot_stride;
     }
 
-    /** @brief Returns whether every worker slot and counter matches a fresh DSM reset. */
+    /** @brief Checks that the shared header  and all worker counters match a fresh scan cycle. */
     [[nodiscard]] bool
     slice_project_test_dsm_payload_is_reset(slice_dsm_header* header,
                                             slice_project_dsm_layout const& layout,
@@ -358,7 +363,7 @@ export {
         return true;
     }
 
-    /** @brief Applies one corruption, runs merge, and checks that counters stayed unread. */
+    /** @brief Corrupts one shared-memory field and checks that merging rejects it before reading counters. */
     [[nodiscard]] slice_project_dsm_test_case_result
     slice_project_run_corrupt_dsm_test(slice_project_runtime const& source,
                                        slice_project_dsm_corruption corruption) {
@@ -443,7 +448,7 @@ export {
         return result;
     }
 
-    /** @brief Invocation counts for async-owner test callbacks. */
+    /** @brief Counts cleanup and publication callbacks in asynchronous-job tests. */
     struct slice_project_async_test_callbacks {
         std::uint32_t cancelled = 0u;
         std::uint32_t joined = 0u;
@@ -452,32 +457,32 @@ export {
         std::uint32_t incomplete_published = 0u;
     };
 
-    /** @brief Test cancel callback that increments cancelled on the shared callback record. */
+    /** @brief Records a cancellation callback during the cleanup test. */
     void slice_project_test_cancel(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->cancelled;
     }
 
-    /** @brief Test join callback that increments joined on the shared callback record. */
+    /** @brief Records a join callback during the cleanup test. */
     void slice_project_test_join(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->joined;
     }
 
-    /** @brief Test backing-release callback that increments backings_released on the shared record. */
+    /** @brief Records release of a job's backing data during the cleanup test. */
     void slice_project_test_release_backing(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->backings_released;
     }
 
-    /** @brief Test publish-complete callback that increments complete_published on the shared record. */
+    /** @brief Records publication of a completed test job. */
     void slice_project_test_publish_complete(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->complete_published;
     }
 
-    /** @brief Test publish-incomplete callback that increments incomplete_published on the shared record. */
+    /** @brief Records publication of an incomplete test job. */
     void slice_project_test_publish_incomplete(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->incomplete_published;
     }
 
-    /** @brief Exercises shutdown of one scheduled async job that never published complete. */
+    /** @brief Checks cleanup of a scheduled job that  never reports completion. */
     [[nodiscard]] bool slice_project_run_incomplete_async_test(slice_project_runtime const& source,
                                                                std::uint32_t* cleanup_callbacks) {
         if (cleanup_callbacks != nullptr)
@@ -521,8 +526,8 @@ export {
             update_slice_dsm_counter_noexcept(
                 guard.jobs[handle.slot_index].counters[0], 1u, 1u, 8u, false, 8u, 0u);
         }
-        /* Exact executor teardown order: Shutdown drains an unpublished scheduled
-         * job, End makes the owner terminal, and a later context reset is a no-op. */
+        /* Follow executor cleanup order. Shutdown cancels and joins the unfinished
+         * job, End closes its owner, and the later context reset must do nothing. */
         quiesce_slice_async_owner_noexcept(&guard, slice_shutdown_disposition::complete);
         const bool stale_rejected = !mark_slice_async_job_finished_noexcept(&guard, handle);
         const bool lifecycle_valid =
@@ -548,7 +553,7 @@ export {
                callbacks.complete_published == 0u && callbacks.incomplete_published == 1u;
     }
 
-    /** @brief Calls DSM reinitialize under PG_TRY and reports ERRCODE_DATA_CORRUPTED rejection. */
+    /** @brief Checks that shared-memory reinitialization rejects a bad clcle with DATA_CORRUPTED. */
     [[nodiscard]] bool slice_project_reinitialize_rejects_test_cycle(slice_project_state* state,
                                                                      ParallelContext* pcxt,
                                                                      slice_dsm_header* header) {
@@ -572,7 +577,7 @@ export {
         return rejected;
     }
 
-    /** @brief Runs DSM diagnostic fixtures selected by runtime.dsm_test_fixture_mode. */
+    /** @brief Runs the selected shared-memory test once for this SliceProject scan */
     void slice_project_apply_dsm_test_fixture(slice_project_state* state) {
         if (state == nullptr)
             return;
@@ -612,10 +617,9 @@ export {
             return;
         }
 
-        /* Exercise the real leader ReInitializeDSM callback twice over a real DSM
-         * mapping.  The first cycle contains complete, attached-running,
-         * published-incomplete, and never-launched slots.  Only the complete delta
-         * may merge; both incomplete lifecycle states count exactly once. */
+        /* Test two leader rescans using a real shared-memory segment. The first
+         * cycle mixes completed, running, incomplete and unlaunched workers. Only
+         * completed counters enter the totals. */
         constexpr std::uint32_t slot_count = 4u;
         constexpr std::uint64_t first_cycle = 23u;
         constexpr std::uint64_t second_cycle = first_cycle + 1u;
@@ -685,9 +689,8 @@ export {
             reinitialize_runtime.dsm_test_reinitialize_audit = nullptr;
         };
 
-        /* The shared header may not nominate its own generation.  Exercise both
-         * directions of header drift and a running slot from an earlier cycle
-         * through the production callback before the two successful rescans. */
+        /* Check stale and future shared cycle IDs against the executor's saved
+         * cycle. A  running worker from an earlier cycle must also be rejected. */
         reset_reinitialize_case(first_cycle);
         header->cycle = first_cycle - 1u;
         const bool stale_header_rejected = slice_project_reinitialize_rejects_test_cycle(
@@ -724,8 +727,8 @@ export {
         old_cycle_attached->publish_state = slice_dsm_publish_state::attached_running;
         auto* old_cycle_tentative = slice_project_worker_counters(old_cycle_attached);
         for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
-            /* Poison a valid-looking tentative prefix.  Attached payloads must never
-             * be inspected or merged, even when their bytes are malformed. */
+            /* Give running workers invalid counter fields so validating or merging
+             * their tentative results fails the test. */
             old_cycle_tentative[index].calls = 99u;
             old_cycle_tentative[index].bytes = 990u;
             old_cycle_tentative[index].overflowed = 2u;
@@ -737,8 +740,8 @@ export {
         first_incomplete->overflowed = 1u;
         auto* first_incomplete_counters = slice_project_worker_counters(first_incomplete);
         for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
-            /* Published-incomplete payloads are tentative too.  Poisoning their
-             * records distinguishes that branch from published-complete validation. */
+            /* Incomplete workers also have unread tentative counters. Corrupt
+             * them so accidental validation or merging fails the test. */
             first_incomplete_counters[index].calls = 101u;
             first_incomplete_counters[index].bytes = 1010u;
             first_incomplete_counters[index].overflowed = 2u;
@@ -792,9 +795,9 @@ export {
                 slice_project_test_dsm_payload_is_reset(
                     header, layout, runtime.boundary_count, slot_count, reset_cycle);
 
-        /* Worker ExecReScan is a separate production transition from leader DSM
-         * reinitialization.  Complete cumulative records survive rearm, whereas an
-         * incomplete tentative record is cleared before its stable slot is reused. */
+        /* A worker rescan reuses its slot within the same cycle. Preserve
+         * completed totals, but clear tentative counters from an incomplete run
+         * before the slot can publish complete results again. */
         auto* complete_rearm = slice_project_worker_slot(header, 0u);
         complete_rearm->cycle = reset_cycle;
         complete_rearm->publish_state = slice_dsm_publish_state::published_complete;

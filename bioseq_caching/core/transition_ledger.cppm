@@ -1,12 +1,11 @@
 /**
  * @file bioseq_caching/core/transition_ledger.cppm
- * @brief Pointer-free bounded owners for dependency transition handshakes.
+ * @brief Tracks transactions while they change cache dependencies.
  *
- * The shared region stores offsets and fixed-width values only.  PostgreSQL
- * ownership, liveness, locking, epoch mutation, and wakeup mechanics are
- * supplied by process-local callbacks.  In particular, a copied dependency
- * reference cannot resolve a transition: callbacks receive the authoritative
- * reference stored in the owner slot and mutate its linear transition flag.
+ * Shared storage contains fixed-width values and offsets. Local callbacks
+ * provide PostgreSQL locks, backend checks and dependency updates. They must
+ * update the reference in the owner slot so each started transition is finished
+ * once. Updating a copied reference would lose that bookkeeping.
  */
 module;
 
@@ -35,7 +34,7 @@ inline constexpr std::uint32_t k_maximum_transition_references =
 inline constexpr std::uint32_t k_invalid_transition_offset =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** Every result is deterministic and safe to expose in diagnostics. */
+/** Error codes for operations and  diagnostic rows. */
 enum class transition_ledger_error : std::uint32_t {
     none = 0,
     invalid_argument,
@@ -67,7 +66,7 @@ enum class transition_ledger_error : std::uint32_t {
 enum class transition_resolution : std::uint8_t {
     aborted = 0,
     committed = 1,
-    /** Resolution is proven not to have made the write visible. */
+    /** The, write is known to have aborted before becoming visible. */
     known_aborted = 2,
 };
 
@@ -88,7 +87,7 @@ enum class transition_repair_disposition : std::uint8_t {
     fatal_transition_owner = 3,
 };
 
-/** Full backend identity; ProcNumber alone never establishes ownership. */
+/** Identifies a backend and transaction even after PostgreSQL reuses its process slot. */
 struct transition_owner_identity {
     std::uint32_t proc_number = 0;
     std::int32_t pid = 0;
@@ -99,7 +98,7 @@ struct transition_owner_identity {
     [[nodiscard]] bool operator==(const transition_owner_identity&) const noexcept = default;
 };
 
-/** ABA-safe claim for one fixed ProcNumber slot and one top transaction. */
+/** Identifies one transaction claim on a backend slot, including its reuse counter. */
 struct transition_owner_claim {
     transition_owner_identity owner{};
     std::uint64_t claim_sequence = 0;
@@ -117,12 +116,12 @@ struct transition_owner_claim {
 };
 
 /**
- * Exact dependency capability retained by an owner slot.
+ * A dependency referece held by an owner slot.
  *
- * `active` represents the directory owner reference. `transition_active` is
- * a linear capability: begin sets it only after incrementing the dependency,
- * finish clears it only after decrementing that exact contribution, and
- * release must refuse it while set.
+ * `active` records ownership of the directory reference. `transition_active`
+ * records a dependency counter increment that still needs a matching decrement.
+ * Begin sets that flag after incrementing. Finish clears it after decrementing.
+ * The reference must remain held until the transition finishes.
  */
 struct transition_dependency_reference {
     dependency_key key{};
@@ -152,7 +151,7 @@ struct transition_dependency_reference {
     [[nodiscard]] bool operator==(const transition_dependency_reference&) const noexcept = default;
 };
 
-/** Fixed preload configuration; one additional binding stores the emergency. */
+/** Startup limits, with  one extra reference per owner reserved for fallback. */
 struct transition_ledger_config {
     std::uint32_t owner_capacity = 1;
     std::uint32_t precise_reference_capacity = k_maximum_transition_references;
@@ -178,7 +177,7 @@ struct transition_ledger_preload_result {
     }
 };
 
-/** One shared slot. references_offset is relative to the ledger region. */
+/** Shared owner state. Reference offsets are measured from the start of the ledger. */
 struct shared_transition_owner_slot {
     alignas(4) std::uint32_t state = static_cast<std::uint32_t>(transition_owner_state::free);
     std::uint32_t references_offset = 0;
@@ -198,7 +197,7 @@ struct shared_transition_owner_slot {
     std::uint32_t collection_generation = 0;
 };
 
-/** Saturating shared counters; snapshots never expose process-local pointers. */
+/** Shared event counters stop at their maximum value instead of wrapping. */
 struct shared_transition_ledger_metrics {
     alignas(8) std::uint64_t successful_claim_count = 0;
     std::uint64_t coarse_fallback_count = 0;
@@ -226,7 +225,7 @@ struct transition_ledger_header {
     shared_transition_ledger_metrics metrics{};
 };
 
-/** Process-local attachment; its pointer is never persisted in shared bytes. */
+/** A local view of the shared region. Its pointer stays in this process */
 struct transition_ledger_attachment {
     std::span<std::byte> region{};
 
@@ -245,16 +244,12 @@ struct transition_ledger_attach_result {
 };
 
 /**
- * Result of one dependency-directory callback.
+ * Reports whether a dependency callback applied its change and whether later checks succeeded.
  *
- * `applied` describes the correctness mutation separately from diagnostics.
- * A finish with `applied=true, diagnostic_success=false` has completed every
- * correctness mutation and must not be retried.  For finish callbacks,
- * `applied=true` specifically means that, under the dependency partition lock,
- * the callback published the conservative epoch, decremented this exact
- * owner's transition contribution, advanced change_generation, broadcast the
- * dependency condition variable, and cleared `transition_active`, in that
- * order.  Mandatory publication and wakeup are never merely diagnostics.
+ * For finish, `applied=true` means this owner's transition count was removed
+ * and `transition_active` was cleared. Do not retry that decrement after an
+ * error. Version  publication and waiter notification run under the partition
+ * lock. A later failure requests broader invalidation.
  */
 struct transition_callback_result {
     bool applied = false;
@@ -264,13 +259,13 @@ struct transition_callback_result {
     std::uint32_t error = 0;
 };
 
-/** No lock or callback address is stored in the shared region. */
+/** Process-local callbacks for locks, dependency updates and backend checks. */
 struct transition_ledger_callbacks {
     void* context = nullptr;
     void (*lock_owner_slot)(void*, std::uint32_t) noexcept = nullptr;
     void (*unlock_owner_slot)(void*, std::uint32_t) noexcept = nullptr;
     bool (*lock_partitions)(void*, std::span<const std::uint32_t>) noexcept = nullptr;
-    /** Receives ascending unique partitions and must release them in reverse. */
+    /** Release these uorted, distinct partitions in reverse order. */
     void (*unlock_partitions_reverse)(void*, std::span<const std::uint32_t>) noexcept = nullptr;
     transition_callback_result (*begin_transition_locked)(
         void*, transition_dependency_reference*) noexcept = nullptr;
@@ -327,7 +322,7 @@ struct transition_repair_result {
     }
 };
 
-/** Bounded, text-free public diagnostic row. */
+/** Fixed-size diagnostic data for one owner slot. */
 struct transition_owner_diagnostic {
     std::uint32_t slot_index = 0;
     transition_owner_state state = transition_owner_state::free;
@@ -773,7 +768,7 @@ struct drain_result {
     bool contract_failure = false;
 };
 
-/** Drain every binding; diagnostic failure never short-circuits cleanup. */
+/** Finish each active transition and, if requested, release its owner reference. Continue after diagnostic failures. */
 [[nodiscard]] inline drain_result
 drain_locked(transition_ledger_attachment ledger,
              transition_ledger_header& header_value,
@@ -913,7 +908,7 @@ structural_validate(std::span<std::byte> region,
 
 } // namespace transition_ledger_detail
 
-/** Compute exact fixed shared bytes; no runtime allocation follows preload. */
+/** Calculate, the shared memory and owner locks needed for  the configured limits. */
 [[nodiscard]] inline transition_ledger_preload_result
 transition_ledger_preload_request(transition_ledger_config config = {}) noexcept {
     using namespace transition_ledger_detail;
@@ -954,7 +949,7 @@ transition_ledger_preload_request(transition_ledger_config config = {}) noexcept
     return result;
 }
 
-/** Initialize caller-owned bytes and publish Ready only after all offsets exist. */
+/** Initialize the supplied memory and mark it ready after all owner slots have valid offsets. */
 [[nodiscard]] inline transition_ledger_error
 initialize_transition_ledger(std::span<std::byte> region,
                              const transition_ledger_preload_result& request) noexcept {
@@ -1001,7 +996,7 @@ initialize_transition_ledger(std::span<std::byte> region,
     return transition_ledger_error::none;
 }
 
-/** Attach only after validating every immutable owner/reference slice. */
+/** Validate the shared layout and owner slots before returning a local view. */
 [[nodiscard]] inline transition_ledger_attach_result
 attach_transition_ledger(std::span<std::byte> region) noexcept {
     using namespace transition_ledger_detail;
@@ -1029,7 +1024,7 @@ attach_transition_ledger(std::span<std::byte> region) noexcept {
     return result;
 }
 
-/** Claim the ProcNumber-indexed slot and retain its emergency owner reference. */
+/** Claim the backend slot and transfer its initial dependency reference into the ledger. */
 [[nodiscard]] inline transition_ledger_operation_result
 claim_transition_owner(transition_ledger_attachment ledger,
                        const transition_owner_identity& owner,
@@ -1119,11 +1114,9 @@ claim_transition_owner(transition_ledger_attachment ledger,
 }
 
 /**
- * Add one precise owner reference while the slot is collecting.
- *
- * The coarse marker is set before validation and restored only after the full
- * exact binding is durable.  Capacity or ABA trouble therefore cannot leave a
- * partial precise promise.
+ * Add a dependency reference while the owner is collecting writes.
+ * The slot uses coarse fallback until validation and storage succeed. A full
+ * slot, duplicate  reference or reused dependency record leaves fallback enabled.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 record_transition_dependency(transition_ledger_attachment ledger,
@@ -1228,7 +1221,7 @@ record_transition_dependency(transition_ledger_attachment ledger,
     return result;
 }
 
-/** Make the preallocated emergency dependency sticky for this transaction. */
+/** Keep the owner on its reserved fallback dependency for the rest of this transaction. */
 [[nodiscard]] inline transition_ledger_operation_result
 force_transition_owner_coarse(transition_ledger_attachment ledger,
                               const transition_owner_claim& claim,
@@ -1263,13 +1256,11 @@ force_transition_owner_coarse(transition_ledger_attachment ledger,
 }
 
 /**
- * Replace the precise Collecting set with an exact retained subset.
- *
- * This is the bounded savepoint/subtransaction rollback primitive.  Every
- * retained capability must already belong to this owner slot.  Removed owner
- * references are released under ascending dependency partition locks, which
- * the callback releases in reverse.  Any invalid input, overflow, ABA, lock,
- * release, or diagnostic failure makes the emergency coarse binding sticky.
+ * Remove dephndency references discarded by a subtransaction rollback
+ * The initial reference stays in place. Each supplied reference must already
+ * belong to this owner. Removed references are released with partition locks
+ * acquired in ascending order and released in reverse. A validation or cleanup
+ * failure keeps coarse fallback enabled.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 rebuild_transition_dependencies(transition_ledger_attachment ledger,
@@ -1524,9 +1515,11 @@ rebuild_transition_dependencies(transition_ledger_attachment ledger,
 }
 
 /**
- * Publish a bounded transition prefix without holding an owner lock while
- * dependency partitions are acquired.  Any begin failure rolls back every
- * applied prefix member before returning to sticky coarse collection.
+ * Start transitions for  the owner's collected dependencies.
+ * Release the owner lock before acquiring partition locks. If a begin callback
+ * fails, finish the transitions already started and return to collection with
+ * coarse fallback. Failed rollback leaves the owner in REPAIRING and reports
+ * bootstrap failure.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 begin_owner_transitions(transition_ledger_attachment ledger,
@@ -1629,8 +1622,7 @@ begin_owner_transitions(transition_ledger_attachment ledger,
         };
     }
 
-    // Global mutation order is dependency partitions, then owner slot.  The
-    // owner lock was not held while acquiring partitions and is released first.
+    // Acquire the owner lock after the partition locks, and release it first.
     callbacks.lock_owner_slot(callbacks.context, claim.owner.proc_number);
     slot = owner_slot(ledger, claim.owner.proc_number);
     const bool cancelled_by_finish =
@@ -1778,9 +1770,9 @@ begin_owner_transitions(transition_ledger_attachment ledger,
 }
 
 /**
- * Resolve every durable transition and release every retained owner reference.
- * The loop never stops on diagnostic/sequence trouble after an applied
- * decrement.  A true unapplied decrement leaves REPAIRING and fails bootstrap.
+ * Finish the owner's transitions and release its dependency references.
+ * Diagnostic failures do not stop cleanup. If a transition or reference, cannot
+ * be released, leave the owner  in REPAIRING and report bootstrap failure.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 finish_owner_transitions(transition_ledger_attachment ledger,
@@ -1954,9 +1946,10 @@ finish_owner_transitions(transition_ledger_attachment ledger,
 }
 
 /**
- * Sample liveness outside every cache lock, then revalidate the full token.
- * Dead COLLECTING owners with no transition are aborted safely.  Any dead
- * TRANSITIONING/ACTIVE/REPAIRING owner fails bootstrap without guessed repair.
+ * Check whether the owner died, without holding cache locks during the check.
+ * Recheck its identity before cleanup. A dead owner can be cleared only while
+ * collecting with no active transitions. Later states report bootstrap failure
+ * because their unfiished changes cannot be safely reconstructed
  */
 [[nodiscard]] inline transition_repair_result
 repair_dead_transition_owner(transition_ledger_attachment ledger,
@@ -2052,7 +2045,7 @@ repair_dead_transition_owner(transition_ledger_attachment ledger,
     };
 }
 
-/** Copy non-FREE slots in increasing ProcNumber order. */
+/** Copy occupied owner slots in process-slot order, stopping output when the buffer fills. */
 [[nodiscard]] inline transition_owner_diagnostics_result
 transition_owner_diagnostics(transition_ledger_attachment ledger,
                              std::span<transition_owner_diagnostic> output,
@@ -2109,7 +2102,7 @@ transition_owner_diagnostics(transition_ledger_attachment ledger,
     return result;
 }
 
-/** Lock-free bounded aggregate snapshot; individual fields may advance. */
+/** Read aggregate counters without locks. Fields may reflect different instants. */
 [[nodiscard]] inline transition_ledger_metrics_result
 transition_ledger_metrics(transition_ledger_attachment ledger) noexcept {
     using namespace transition_ledger_detail;
@@ -2160,7 +2153,7 @@ transition_ledger_metrics(transition_ledger_attachment ledger) noexcept {
     };
 }
 
-/** Bounded structural oracle; takes exactly one owner lock at a time. */
+/** Check owner states and  reference counts, holding one owner lock at a time. */
 [[nodiscard]] inline transition_ledger_error
 deep_validate_transition_ledger(transition_ledger_attachment ledger,
                                 const transition_ledger_callbacks& callbacks) noexcept {

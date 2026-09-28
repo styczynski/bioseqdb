@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa/contracts.cppm
- * @brief Declares persisted grouped-SoA profiles and storage records.
+ * @brief Defines the saved minimizer profiles, index records and layout checks.
  */
 export module bioseq.indexing.minimizer_hashmap:grouped_soa_contracts;
 
@@ -33,14 +33,13 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-// Persisted minimizer codecs stay in this storage owner. Their shared CRC
-// implementation is imported from the lower chunk-storage module so row,
-// manifest, fake, and PostgreSQL paths cannot drift.
+// Index metadata uses the chunk-storage CRC implementation so writers, readers
+// and tests calculate the same checksums.
 
-/// Canonical minimap-style hash/tie/strand semantics used by persisted indexes.
+/// Revision of the minimap hash, tie-breaking and strand rules used by saved indexes.
 inline constexpr std::uint32_t k_minimizer_hash_semantics_revision = 1u;
 
-/// Segment-local `(local_bp << 1) | strand` persisted encoding semantics.
+/// Revision of the saved segment-local position encoding: `(local_bp << 1) | strand`.
 inline constexpr std::uint32_t k_minimizer_segment_local_position_encoding_revision = 2u;
 /// Revision of the grouped-SoA payload byte layout.
 inline constexpr std::uint16_t k_grouped_soa_payload_layout_abi_revision = 1u;
@@ -52,15 +51,14 @@ inline constexpr std::uint32_t k_grouped_soa_extension_magic = 0x42494f53u;
 inline constexpr std::uint16_t k_grouped_soa_extension_layout_revision = 2u;
 /// Exact byte length of the grouped-SoA manifest extension.
 inline constexpr std::uint16_t k_grouped_soa_extension_bytes = 48u;
-/// Persisted supported_alphabets pack index for DNA4. This is an on-wire code,
-/// not the alphabet cardinality.
+/// DNA4 identifier in the saved format. It is the index in supported_alphabets.
 inline constexpr std::uint16_t k_minimizer_persisted_dna4_alphabet_code = 0u;
-/// DNA5 wire identity comes from the same generated profile registry as queries.
+/// DNA5 identifier from the minimizer profile registry used by queries.
 inline constexpr std::uint16_t k_minimizer_persisted_dna5_alphabet_code =
     ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna5>();
 static_assert(k_minimizer_persisted_dna4_alphabet_code ==
               ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>());
-/// Maximum producer-local position extent used by minimizer-fragment generation.
+/// Maximum position range, in bases, handled by one minimizer producer fragment.
 inline constexpr std::uint64_t k_minimizer_fragment_algorithm_position_extent_bp = 32'768u;
 /// Largest hash produced by the persisted minimap k15 profile.
 inline constexpr std::uint32_t k_minimap_k15_max_hash = 0x3fffffffu;
@@ -69,9 +67,9 @@ inline constexpr std::uint32_t k_minimap_k15_max_hash = 0x3fffffffu;
 inline constexpr std::uint16_t k_minimap_scheme_id = 0u;
 /// Persisted minimap scheme revision.
 inline constexpr std::uint16_t k_minimap_scheme_revision = 0u;
-/// Persisted identifier for the bounded u32 ntHash r7 sum scheme.
+/// Saved identifier for  the 32-bit ntHash r7 sum scheme.
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_id = 1u;
-/// Persisted revision for the bounded u32 ntHash r7 sum scheme.
+/// Saved revision of the 32-bit ntHash r7 sum scheme.
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_revision = 1u;
 /// Sentinel used when no persisted minimizer scheme is selected.
 inline constexpr std::uint16_t k_invalid_minimizer_scheme_id =
@@ -80,7 +78,7 @@ inline constexpr std::uint16_t k_invalid_minimizer_scheme_id =
 inline constexpr std::uint16_t k_invalid_minimizer_scheme_revision =
     (std::numeric_limits<std::uint16_t>::max)();
 
-/// Frozen biological scheme identity shared by producers, writers and readers.
+/// Hash and minimizer selection rules shared by index builders and readers.
 struct minimizer_scheme_identity {
     std::uint16_t id = k_invalid_minimizer_scheme_id;
     std::uint16_t revision = k_invalid_minimizer_scheme_revision;
@@ -88,12 +86,10 @@ struct minimizer_scheme_identity {
     [[nodiscard]] bool operator==(const minimizer_scheme_identity&) const = default;
 };
 
-/// Storage-issued incarnation of one minimizer-sequence canonical replay set.  The token
-/// changes on every begin operation. The revision changes whenever a caller can
-/// alter the qualified logical replay (including rerouting or physical-run
-/// injection). Internal compaction that preserves the exact canonical replay
-/// is representation-only and leaves this binding stable. A zero token is
-/// never authoritative.
+/// Identifies the spill data that a replay check applies to. Storage assigns a
+/// new token when a spill set begins and advances the revision when a caller
+/// changes its data or routing. Compaction that preserves the replay keeps both
+/// values. A zero token is invapid.
 struct direct_minimizer_spill_storage_binding {
     std::uint64_t generation_token = 0;
     std::uint64_t mutation_revision = 0;
@@ -112,20 +108,17 @@ inline constexpr minimizer_scheme_identity k_minimap_scheme_identity{
     .id = k_minimap_scheme_id,
     .revision = k_minimap_scheme_revision,
 };
-/// Persisted identity of the bounded u32 ntHash r7 sum scheme.
+/// Saved identity of the 32-bit ntHash r7 sum scheme
 inline constexpr minimizer_scheme_identity k_bounded_nthash_u32_r7_sum_scheme_identity{
     .id = k_bounded_nthash_u32_r7_sum_scheme_id,
     .revision = k_bounded_nthash_u32_r7_sum_scheme_revision,
 };
 
-/// Frozen physical producer identifiers persisted in manifest byte 126.
-/// These values identify the implementation that actually produced the
-/// canonical event stream. They are intentionally independent of biological
-/// scheme identity because `scalar`, `exact_simd`, and `vulkan_segment` share
-/// the minimap scheme. The full-resident `vector_stream` exact-SIMD
-/// route has distinct selection semantics and must never be persisted or
-/// consumed under this identity. It remains confined to paired transient
-/// no-index work. Persisted consumers require continuation/index route stats.
+/// Identifies the implementation that  produced a saved index, in manifest byte 126.
+/// Scalar, exact SIMD and Vulkan share the minimap scheme but keep separate IDs.
+/// The exact_simd ID covers the continuation/index path. The vector_stream path
+/// selects minimizers differently and is restricted to paired searches without
+/// a saved index.
 enum class minimizer_producer_backend : std::uint8_t {
     invalid = 0u,
     scalar = 1u,
@@ -134,10 +127,10 @@ enum class minimizer_producer_backend : std::uint8_t {
     vulkan_segment = 4u,
 };
 
-/// Revision of the producer identity namespace persisted in manifest byte 127.
+/// Version of the producer IDs, stored in manifest byte 127.
 inline constexpr std::uint8_t k_minimizer_producer_identity_revision = 1u;
 
-/// Frozen producer identifier and its namespace revision.
+/// Identifies a minimizer implementation and the version of its saved ID.
 struct minimizer_producer_identity {
     minimizer_producer_backend id = minimizer_producer_backend::invalid;
     std::uint8_t revision = 0u;
@@ -145,7 +138,7 @@ struct minimizer_producer_identity {
     [[nodiscard]] bool operator==(const minimizer_producer_identity&) const = default;
 };
 
-/// Return whether a producer identity is valid for persisted generation data.
+/// Check that a saved producer ID and revision are supported.
 [[nodiscard]] constexpr bool
 is_supported_minimizer_producer_backend_identity(minimizer_producer_identity identity) noexcept {
     if (identity.revision != k_minimizer_producer_identity_revision) {
@@ -163,11 +156,10 @@ is_supported_minimizer_producer_backend_identity(minimizer_producer_identity ide
     return false;
 }
 
-/// Bind a runtime route to its frozen physical producer identity. Adding a
-/// route without extending this switch is fail-closed.
+/// Get the saved producer identity for a runtime backend. Unknown backends return  an invalid identity.
 [[nodiscard]] constexpr minimizer_producer_identity
 minimizer_producer_backend_identity_for_backend(minimizer_sketch_backend backend) noexcept {
-    // Translate the runtime route while keeping an unmatched value fail-closed.
+    // Keep unknown runtime values invalid.
     const auto identity = [backend] {
         switch (backend) {
         case minimizer_sketch_backend::scalar:
@@ -198,10 +190,8 @@ is_supported_minimizer_scheme_identity(std::uint16_t scheme_id,
             scheme_revision == k_bounded_nthash_u32_r7_sum_scheme_revision);
 }
 
-/// Bind every persistable sketch producer to its persisted semantics. `exact_simd`
-/// names its continuation/index producer, not the optional paired-resident
-/// `vector_stream` sub-route. Adding a backend without extending
-/// this switch is a fail-closed operation.
+/// Get the hash and selection scheme used by a backend. For exact_simd this
+/// describes the continuation/index path. Unknown backends return, an invalid identity.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept {
     switch (backend) {
@@ -216,11 +206,9 @@ minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept
 }
 
 /**
- * Return the algorithm genuinely executed by an explicitly named sketch backend.
- *
- * This mapping is for backend-oriented fixtures whose request surface predates
- * the algorithm selector. Production plans carry their requested algorithm
- * directly, including their generated requested/effective algorithm binding.
+ * Get the algorithm for callers that select a sketch backend directly.
+ * Unknown backends return nullopt. Production plans carry the requested and
+ * effective algorithms separately.
  */
 [[nodiscard]] constexpr std::optional<::bioseq::simd::minimizer_algorithm>
 minimizer_algorithm_for_explicit_sketch_backend(minimizer_sketch_backend backend) noexcept {
@@ -238,9 +226,8 @@ minimizer_algorithm_for_explicit_sketch_backend(minimizer_sketch_backend backend
     return std::nullopt;
 }
 
-/// Biological scheme implied by one frozen physical producer identity. This
-/// retains the scheme mapping while preventing shared-scheme
-/// backends from relabelling one another.
+/// Get the hsh and selection scheme for a saved producer identity.
+/// Unsupported IDs or revisions return  an invalid scheme.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity identity) noexcept {
     if (!is_supported_minimizer_producer_backend_identity(identity)) {
@@ -259,37 +246,35 @@ minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity ident
     return {};
 }
 
-/// Uniform fixed-core segment geometry plus disjoint control/position extent
-/// namespaces encoded in persisted manifests.
+/// Revision for equal-sized position segments with separate control and position storage keys.
 inline constexpr std::uint16_t k_minimizer_segment_geometry_revision = 2u;
 
-/// Preferred immutable core span. Overflow retries halve this power of two.
+/// Starting segment span, in bases. The builder halves it when a segment exceeds its limits.
 inline constexpr std::uint64_t k_minimizer_preferred_segment_span_bp = 8u * 1024u * 1024u;
 
-/// Deterministic hash-partition payload target used by the grouped-SoA encoder.
+/// Target payload size used when dividing hashes into grouped-SoA partitions.
 inline constexpr std::uint64_t k_minimizer_partition_target_bytes = 256u * 1024u;
 
-/// PostgreSQL S1 page-dense quantum selected by grouped-SoA storage.
+/// Bytes of grouped-SoA payload stored in one PostgreSQL extent
 inline constexpr std::uint32_t k_grouped_soa_extent_payload_bytes = 8064u;
 
-/// Production grouped-SoA count saturation threshold.  The value preserves a
-/// 16-bit count lane while reserving 65,535 as the persisted "cap exceeded"
-/// sentinel.
+/// Default occurrence limit. Counts fit in 16 bits, with 65,535 reserved to mean
+/// that a hash occurs too many times.
 inline constexpr std::uint64_t k_grouped_soa_default_max_occurrence_cap = 65'534u;
 
-/// Return whether a non-negative unsigned key fits a PostgreSQL BIGINT key.
+/// Check whether an unsigned value fits a nonnegative PostgreSQL BIGINT.
 [[nodiscard]] constexpr bool sql_bigint_can_represent(std::uint64_t value) noexcept {
-    // Key axes are non-negative numeric values. CRC words persisted through a
-    // signed SQL column use an explicit bit-preserving conversion instead.
+    // Storage keys use nonnegative numbers. CRC values use a  separate conversion
+    // that preserves all bits when storing them in signed SQL columns.
     return value <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
 }
 
-/// Return whether a non-negative unsigned key fits a PostgreSQL INTEGER key.
+/// Check whether an unsigned value fits a nonnegative PostgreSQL INTEGER.
 [[nodiscard]] constexpr bool sql_integer_can_represent(std::uint64_t value) noexcept {
     return value <= static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)());
 }
 
-/// Error classes reported by fixed-width storage codecs and geometry checks.
+/// Errors from index encoding, layout validation and generation replay checks.
 enum class minimizer_generation_encoding_error : std::uint8_t {
     encoded_size,
     magic,
@@ -326,14 +311,13 @@ enum class minimizer_generation_encoding_error : std::uint8_t {
     row_count,
 };
 
-/// Frozen persisted wire/profile selector encoded in every fixed metadata row.
+/// Identifies the layout of a saved grouped minimizer index.
 enum class minimizer_generation_layout : std::uint16_t {
     invalid = 0u,
     grouped_soa_segment_local = 5u,
 };
 
-/// Return the immutable physical row quantum selected by the storage layout.
-/// The value selects the fixed 8,064-byte physical row quantum.
+/// Return the payload bytes per extent, or zero for an unsupported layout.
 [[nodiscard]] constexpr std::uint32_t
 minimizer_extent_payload_bytes(minimizer_generation_layout layout) noexcept {
     return layout == minimizer_generation_layout::grouped_soa_segment_local
@@ -344,23 +328,18 @@ minimizer_extent_payload_bytes(minimizer_generation_layout layout) noexcept {
 static_assert(minimizer_extent_payload_bytes(
                   minimizer_generation_layout::grouped_soa_segment_local) == 8064u);
 
-/// Return whether a persisted layout selector has a canonical local profile.
+/// Check whether this reader supports the saved layout.
 [[nodiscard]] constexpr bool
 is_supported_minimizer_generation_layout(minimizer_generation_layout layout) noexcept {
     return layout == minimizer_generation_layout::grouped_soa_segment_local;
 }
 
-/// Shared exact scalar-width tags; persisted ordinals remain 2, 4, and 8 bytes.
+/// Integer widths shared by grouped index records and GPU readers.
 using ::bioseq::minimizers::minimizer_scalar_width;
 
-/**
- * Closed READY identity selected from the generated minimizer registry.
- *
- * Existing manifest fields carry alphabet, packed-input width, runtime k/w,
- * and hash width on wire.  Keeping those axes here as well makes producer
- * handoff and receipt comparisons value-complete; the codec reconstructs the
- * duplicated values and standalone validation rejects any disagreement.
- */
+/// Records the requested algmrithm, the  selected, implementation, and its input
+/// and output formats. Builders pass this identity to readers so a saved index
+/// can be checked against the algorithm used for the query.
 struct minimizer_generation_algorithm_identity {
     ::bioseq::simd::minimizer_algorithm requested_algorithm =
         ::bioseq::simd::minimizer_algorithm::scalar;
@@ -390,11 +369,7 @@ static_assert(k_grouped_soa_payload_layout_abi_revision ==
 static_assert(k_minimizer_producer_identity_revision ==
               ::bioseq::minimizers::minimizer_profile_producer_identity_revision);
 
-/// Resolve the runtime sketch route from an already selected effective algorithm.
-///
-/// Persisted callers must select the complete generated identity against the
-/// source alphabet and packed width first. The effective algorithm selects the
-/// producer while the complete identity preserves the original request.
+/// Get the sketch backend for an effective algorithm, or nullopt if it is unknown.
 [[nodiscard]] constexpr std::optional<minimizer_sketch_backend>
 minimizer_sketch_backend_for_effective_algorithm(
     ::bioseq::simd::minimizer_algorithm effective_algorithm) noexcept {
@@ -413,7 +388,7 @@ minimizer_sketch_backend_for_effective_algorithm(
     return std::nullopt;
 }
 
-/// Map one completed algorithm to the physical generation producer that may attest it.
+/// Get the saved producer identity for an effective algorithm.
 [[nodiscard]] constexpr minimizer_producer_backend
 minimizer_producer_backend_for_effective_algorithm(
     ::bioseq::simd::minimizer_algorithm algorithm) noexcept {
@@ -422,12 +397,7 @@ minimizer_producer_backend_for_effective_algorithm(
                    : minimizer_producer_backend::invalid;
 }
 
-/// Validate the exact kernel slot required by one generated effective identity.
-///
-/// `exact_simd` is the persisted producer family shared by the generated
-/// minimap2-reference owner and the continuation-based two-stack owner.  The
-/// effective algorithm, never the requested name alone, selects the concrete
-/// table slot. Scalar and Vulkan owners do not consume a Highway table.
+/// Check that the backend matches the algorithm and has any required SIMD function.
 [[nodiscard]] constexpr bool minimizer_generation_kernel_binding_is_valid(
     minimizer_sketch_backend backend,
     const minimizer_generation_algorithm_identity& identity,
@@ -456,7 +426,8 @@ minimizer_producer_backend_for_effective_algorithm(
     return false;
 }
 
-/// Convert one generated selector result into the complete persisted identity.
+/// Build the saved algorithm identity after checking the  selected physical layout
+/// and runtime implementation against the generated profile registry
 [[nodiscard]] constexpr std::expected<minimizer_generation_algorithm_identity,
                                       minimizer_generation_encoding_error>
 make_minimizer_generation_algorithm_identity(
@@ -508,7 +479,7 @@ make_minimizer_generation_algorithm_identity(
     };
 }
 
-/// Validate all generated-registry and producer axes without deriving from names.
+/// Check an algorithm identity against the profile registry and the saved producer.
 [[nodiscard]] constexpr bool is_valid_minimizer_generation_algorithm_identity(
     const minimizer_generation_algorithm_identity& identity,
     minimizer_producer_identity producer) noexcept {
@@ -542,7 +513,8 @@ make_minimizer_generation_algorithm_identity(
                producer.id;
 }
 
-/** Select one generated physical layout against its actual input width and position extent. */
+/// Select a physical minimizer layout for this alphabet and input range.
+/// Unsupported input widths or profile choices return a storage-contract error.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::expected<::bioseq::minimizers::minimizer_physical_layout_selection,
                                    minimizer_generation_encoding_error>
@@ -575,7 +547,7 @@ select_minimizer_generation_physical_layout(
     return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
 }
 
-/** Select and validate one producer-specific identity against its actual position extent. */
+/// Select a minimizer layout and return the checked algorithm identitn for this  alphabet.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
                                    minimizer_generation_encoding_error>
@@ -597,7 +569,7 @@ select_minimizer_generation_algorithm_identity(
     return make_minimizer_generation_algorithm_identity(*selection);
 }
 
-/** Select through the generated registry from a persisted runtime alphabet/width pair. */
+/// Select and check an algorithm identity using the runtime alphabet code.
 [[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
                                    minimizer_generation_encoding_error>
 select_minimizer_generation_algorithm_identity_runtime(
@@ -620,7 +592,8 @@ select_minimizer_generation_algorithm_identity_runtime(
     }
 }
 
-/** Select one generated identity for the algorithm actually owned by a sketch backend. */
+/// Select an algorithm identity for callers that choose a sketch backend directly.
+/// Reject a selection whose effective producer differs from that backend.
 [[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
                                    minimizer_generation_encoding_error>
 select_minimizer_generation_algorithm_identity_for_backend(
@@ -649,31 +622,27 @@ select_minimizer_generation_algorithm_identity_for_backend(
     return identity;
 }
 
-/// Selects how each grouped-SoA extent chooses its prefix width.
+/// Store each extent's position offsets in the smallest width that holds them.
 enum class grouped_soa_offset_policy : std::uint8_t {
     per_extent_narrowest = 1u,
 };
 
-/// Selects the byte arrangement of grouped-SoA control arrays.
+/// Store hashes, position-list offsets and occurrence counts in separate arrays.
 enum class grouped_soa_control_layout : std::uint8_t {
     soa_hash_prefix_offset_count = 1u,
 };
 
-/// Selects how counts above the configured cap are represented.
+/// Saturate each occurrence count at the configured limit plus one.
 enum class grouped_soa_count_semantics : std::uint8_t {
     saturating_cap_plus_one = 1u,
 };
 
-/// Selects the persisted position coordinate system.
+/// Store every position as a base offset within its segment plus a  strand bit.
 enum class grouped_soa_position_semantics : std::uint8_t {
     all_segment_local_bp_strand = 2u,
 };
 
-/**
- * Complete grouped-SoA payload contract derived from persisted identity.
- * Required scalar widths and semantics live directly in this profile. There
- * is no optional shape wrapper or alternate layout profile.
- */
+/// Describes the, hash scheme and packed arrays of a grouped minimizer index.
 struct grouped_soa_minimizer_profile {
     minimizer_generation_layout layout = minimizer_generation_layout::grouped_soa_segment_local;
     minimizer_scheme_identity minimizer_scheme{};
@@ -701,13 +670,13 @@ struct grouped_soa_minimizer_profile {
 struct minimizer_generation_manifest;
 struct grouped_soa_bucket_directory_entry;
 
-/// Return whether a scalar-width tag is supported by grouped-SoA codecs.
+/// Check whether an integer width is 16, 32 or 64 bits.
 [[nodiscard]] constexpr bool is_minimizer_scalar_width(minimizer_scalar_width width) noexcept {
     return width == minimizer_scalar_width::u16 || width == minimizer_scalar_width::u32 ||
            width == minimizer_scalar_width::u64;
 }
 
-/// Return the largest integer representable by a grouped-SoA scalar width.
+/// Return the largest unsigned integer for this width, or zero for an unknown width.
 [[nodiscard]] constexpr std::uint64_t
 minimizer_scalar_width_max(minimizer_scalar_width width) noexcept {
     switch (width) {
@@ -721,7 +690,8 @@ minimizer_scalar_width_max(minimizer_scalar_width width) noexcept {
     return 0u;
 }
 
-/// Select the canonical persisted hash width for one scheme and biological shape.
+/// Choose the hash width for the alphabet, k-mer size and hash scheme
+/// Minimap hashes need two bits per base. The bounded ntHash scheme always uses 32 bits.
 [[nodiscard]] constexpr std::expected<minimizer_scalar_width, minimizer_generation_encoding_error>
 select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
                               std::uint16_t alphabet_code,
@@ -746,7 +716,9 @@ select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
     return minimizer_scalar_width::u64;
 }
 
-/// Derive the one admitted grouped-SoA profile from scheme and shape constraints.
+/// Derive the packed index format from the hash scheme, segment span and occurrence limit.
+/// Position widths inclue the strand  bit. Count widths also leave room for the
+/// value that marks a hash above the occurrence limit.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
 derive_grouped_soa_minimizer_profile(minimizer_scheme_identity scheme,
@@ -786,7 +758,7 @@ derive_grouped_soa_minimizer_profile(minimizer_scheme_identity scheme,
     };
 }
 
-/** Reject profiles that disagree with canonical grouped-SoA derivation. */
+/// Check that every field agrees with the format derived from this profile's scheme and widths.
 [[nodiscard]] constexpr std::expected<void, minimizer_generation_encoding_error>
 validate_grouped_soa_minimizer_profile(const grouped_soa_minimizer_profile& profile) noexcept {
     const std::uint64_t representative_span =
@@ -815,24 +787,24 @@ validate_grouped_soa_minimizer_profile(const grouped_soa_minimizer_profile& prof
     return {};
 }
 
-/// Derive the grouped-SoA profile encoded by a generation manifest.
+/// Reconstruct and check the grouped index profile recorded in a manifest.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
 derive_grouped_soa_minimizer_profile(const minimizer_generation_manifest& manifest) noexcept;
 
-/// Return the exact manifest byte count for a supported layout.
+/// Return the encoded manifest size, or zero for an unsupported layout.
 [[nodiscard]] constexpr std::size_t
 minimizer_manifest_encoded_bytes(minimizer_generation_layout layout) noexcept {
     return layout == minimizer_generation_layout::grouped_soa_segment_local ? 176u : 0u;
 }
 
-/// Return the exact directory-entry byte count for a validated profile.
+/// Return the directory-record size for this layout, or zero if it is  unsupported.
 [[nodiscard]] constexpr std::size_t
 minimizer_directory_entry_encoded_bytes(const grouped_soa_minimizer_profile& profile) noexcept {
     return profile.layout == minimizer_generation_layout::grouped_soa_segment_local ? 128u : 0u;
 }
 
-/// Select the narrowest offset width that represents a terminal prefix.
+/// Choose the smallest offset width that holds the end of the position array.
 [[nodiscard]] constexpr minimizer_scalar_width
 select_grouped_soa_offset_width(std::uint64_t terminal_prefix) noexcept {
     return terminal_prefix <= (std::numeric_limits<std::uint16_t>::max)()
@@ -842,7 +814,7 @@ select_grouped_soa_offset_width(std::uint64_t terminal_prefix) noexcept {
                : minimizer_scalar_width::u64;
 }
 
-/// Byte offsets and total size of one grouped-SoA control plane.
+/// Byte offsets and total size of the hash, prefix and count arrays in one control payload.
 struct grouped_soa_control_plane_offsets {
     std::uint64_t hash_offset = 0;
     std::uint64_t prefix_offset = 0;
@@ -852,7 +824,9 @@ struct grouped_soa_control_plane_offsets {
     [[nodiscard]] bool operator==(const grouped_soa_control_plane_offsets&) const = default;
 };
 
-/// Plan aligned hash, prefix, and count arrays for one control plane.
+/// Lay out a control payload with aligned hash, prefix and count arrays.
+/// The prefix array has one extra entry marking the end of the positions.
+/// Return an error if a, width is invalid or the size calculation overflows.
 [[nodiscard]] constexpr std::expected<grouped_soa_control_plane_offsets,
                                       minimizer_generation_encoding_error>
 plan_grouped_soa_control_plane(std::uint64_t control_count,
@@ -863,7 +837,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         !is_minimizer_scalar_width(count_width)) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
-    // Multiply two control-plane dimensions without unsigned wraparound.
+    // Check array sizes before multiplying them
     const auto checked_mul = [](std::uint64_t lhs,
                                 std::uint64_t rhs) -> std::optional<std::uint64_t> {
         if (rhs != 0 && lhs > (std::numeric_limits<std::uint64_t>::max)() / rhs) {
@@ -871,7 +845,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         }
         return lhs * rhs;
     };
-    // Align one array boundary without unsigned wraparound.
+    // Check alignment padding before adding it to the  offset.
     const auto align_up = [](std::uint64_t value,
                              std::uint64_t alignment) -> std::optional<std::uint64_t> {
         const std::uint64_t remainder = value % alignment;
@@ -915,9 +889,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
     };
 }
 
-/// Derive the physical position-extent key from one authoritative logical /
-/// control key.  The checked boundary keeps both payload namespaces below the
-/// temporary-run reservation without changing the directory wire.
+/// Get the position-stream key for a control-stream key, rejecting keys outside the cotrol range.
 [[nodiscard]] constexpr std::expected<index_sub_key_t, minimizer_generation_encoding_error>
 derive_minimizer_position_extent_sub_key(index_sub_key_t control_sub_key) noexcept {
     if (control_sub_key < 0 || control_sub_key >= k_position_extent_sub_key_base) {
@@ -926,8 +898,8 @@ derive_minimizer_position_extent_sub_key(index_sub_key_t control_sub_key) noexce
     return k_position_extent_sub_key_base + control_sub_key;
 }
 
-/// Project one physical extent key back into the authoritative logical /
-/// control namespace without performing unchecked signed arithmetic.
+/// Convert a control or position stream key to its control-stream key.
+/// Reject keys outside the range for the selected stream.
 [[nodiscard]] constexpr std::expected<index_sub_key_t, minimizer_generation_encoding_error>
 project_minimizer_extent_sub_key(index_sub_key_t physical_sub_key, bool position_extent) noexcept {
     if (position_extent) {
@@ -943,7 +915,7 @@ project_minimizer_extent_sub_key(index_sub_key_t physical_sub_key, bool position
     return physical_sub_key;
 }
 
-/// Fixed 64-byte generation publication head stored at k_generation_head_sub_key.
+/// Points to a published index generation and records the checksums needed to reopen it.
 struct minimizer_generation_head {
     static constexpr std::uint32_t magic = 0x42494F48u; // BIOH numeric tag
     static constexpr std::size_t encoded_bytes = 64u;
@@ -958,7 +930,8 @@ struct minimizer_generation_head {
     [[nodiscard]] bool operator==(const minimizer_generation_head&) const = default;
 };
 
-/// Immutable grouped-SoA generation manifest with its persisted shape fields.
+/// Describes a saved index generation, including its source, minimizer profile,
+/// segment layout and payload checksums.
 struct minimizer_generation_manifest {
     static constexpr std::uint32_t magic = 0x42494F47u; // BIOG numeric tag
     static constexpr std::size_t header_bytes = 128u;
@@ -1008,7 +981,7 @@ struct minimizer_generation_manifest {
     [[nodiscard]] bool operator==(const minimizer_generation_manifest&) const = default;
 };
 
-/// Caller-owned storage contract checked before consuming one generation.
+/// The profile and algorithm a reader expects when opening  a saved index.
 struct expected_minimizer_generation_identity {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
     std::uint16_t alphabet_code = 0;
@@ -1026,8 +999,8 @@ struct expected_minimizer_generation_identity {
     [[nodiscard]] bool operator==(const expected_minimizer_generation_identity&) const = default;
 };
 
-/// Construct an independent persisted-read contract from the selected sketch
-/// backend. No manifest field participates in this selection.
+/// Build the reader's expected identity from the chosen backend, algorithm and query settings.
+/// Reject missing occurrence limits or settings that disagree with the algorithm identity.
 [[nodiscard]] constexpr std::expected<expected_minimizer_generation_identity,
                                       minimizer_generation_encoding_error>
 expected_grouped_soa_generation_identity_for_backend(
@@ -1076,10 +1049,8 @@ expected_grouped_soa_generation_identity_for_backend(
     };
 }
 
-/// Logical directory entry. Persistence always uses the fixed codec.
-/// `sub_key` is the logical/control key. Position rows use the checked derived
-/// key k_position_extent_sub_key_base + sub_key. Both extent-local chunk sequences start
-/// at zero and use the fixed 128-byte directory ABI.
+/// Describes one hash bucket within a position segment. The directory records its
+/// hash bounds, control and position streams, counts, byte sizes and checksums.
 struct grouped_soa_bucket_directory_entry {
     static constexpr std::size_t header_bytes = 96u;
     static constexpr std::size_t encoded_bytes = 128u;
@@ -1104,55 +1075,52 @@ struct grouped_soa_bucket_directory_entry {
     [[nodiscard]] bool operator==(const grouped_soa_bucket_directory_entry&) const = default;
 };
 
-/// Variable-size fixed-record wrapper. Its unused suffix is always zero. The
-/// byte_count is the only exposed range so stored checksums and golden bytes remain
-/// exactly 128/96 bytes.
-/// @tparam p_maximum_bytes Capacity of the fixed backing array.
+/// Fixed-capacity buffer for an encoded record. byte_count marks the valid prefix
+/// used for storage and checksums. The byte array starts filled with zeros.
 template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     std::array<std::byte, p_maximum_bytes> storage{};
     std::size_t byte_count = 0;
 
-    /// Return a read-only pointer to the fixed storage prefix.
+    /// Return a pointer to the record bytes.
     [[nodiscard]] constexpr const std::byte* data() const noexcept {
         return storage.data();
     }
-    /// Return a writable pointer to the fixed storage prefix.
+    /// Return  a writable pointer to the record bytes.
     [[nodiscard]] constexpr std::byte* data() noexcept {
         return storage.data();
     }
-    /// Return the encoded prefix length in bytes.
+    /// Return the number of valid encoded bytes.
     [[nodiscard]] constexpr std::size_t size() const noexcept {
         return byte_count;
     }
-    /// Return a read-only iterator to the first encoded byte.
+    /// Return the beginning of the valid byte ranfe
     [[nodiscard]] constexpr const std::byte* begin() const noexcept {
         return storage.data();
     }
-    /// Return a read-only iterator one past the encoded prefix.
+    /// Return the end of the valid byte range.
     [[nodiscard]] constexpr const std::byte* end() const noexcept {
         return storage.data() + byte_count;
     }
-    /// Return a writable iterator to the first encoded byte.
+    /// Return a writable iterator to the beginning of the valid byte range.
     [[nodiscard]] constexpr std::byte* begin() noexcept {
         return storage.data();
     }
-    /// Return a writable iterator one past the encoded prefix.
+    /// Return, a writable iterator past the last valid byte.
     [[nodiscard]] constexpr std::byte* end() noexcept {
         return storage.data() + byte_count;
     }
-    /// Access one encoded byte without bounds checking.
+    /// Read a byte without checking the index.
     [[nodiscard]] constexpr const std::byte& operator[](std::size_t index) const noexcept {
         return storage[index];
     }
-    /// Access one writable encoded byte without bounds checking.
+    /// Access a writable byte without checking the index.
     [[nodiscard]] constexpr std::byte& operator[](std::size_t index) noexcept {
         return storage[index];
     }
 
     [[nodiscard]] constexpr bool operator==(const encoded_minimizer_fixed_record&) const = default;
 
-    /// Compare the encoded prefix with an exact-width byte array.
-    /// @tparam p_size Compared byte-array width.
+    /// Compare the valid record bytes with an array. Their lengths must also match.
     template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool
     operator==(const encoded_minimizer_fixed_record& lhs,
@@ -1166,8 +1134,7 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
         return true;
     }
 
-    /// Compare an exact-width byte array with the encoded prefix.
-    /// @tparam p_size Compared byte-array width.
+    /// Compare an array with the valid bytes of  an encoded record.
     template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool
     operator==(const std::array<std::byte, p_size>& lhs,
@@ -1176,14 +1143,14 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     }
 };
 
-/// Bounded byte container for any supported minimizer manifest record.
+/// Buffer for the 176-byte grouped-SoA manifest.
 using encoded_minimizer_manifest =
     encoded_minimizer_fixed_record<minimizer_generation_manifest::encoded_bytes>;
-/// Bounded byte container for one grouped-SoA directory entry.
+/// Buffer for a 128-byte grouped-SoA directory entry.
 using encoded_grouped_soa_bucket_directory_entry =
     encoded_minimizer_fixed_record<grouped_soa_bucket_directory_entry::encoded_bytes>;
 
-/// Derive the grouped-SoA profile encoded by a generation manifest.
+/// Derive the grouped index profile and check the widths and rules saved in the manifest.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
 derive_grouped_soa_minimizer_profile(const minimizer_generation_manifest& manifest) noexcept {
@@ -1213,10 +1180,10 @@ derive_grouped_soa_minimizer_profile(const minimizer_generation_manifest& manife
     return profile;
 }
 
-/// Half-open ordinal interval covering a requested base-pair range.
+/// Consecutive position segments in [begin, end).
 struct minimizer_position_segment_range {
     std::uint32_t begin = 0;
-    std::uint32_t end = 0; // half-open
+    std::uint32_t end = 0; // First segment outside the range.
 
     [[nodiscard]] bool operator==(const minimizer_position_segment_range&) const = default;
 };

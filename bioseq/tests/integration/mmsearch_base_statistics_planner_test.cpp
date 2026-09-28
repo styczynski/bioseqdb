@@ -1,4 +1,7 @@
-/** @file Base, statistics, and planner mmsearch integration scenarios. */
+/**
+ * @file mmsearch_base_statistics_planner_test.cpp
+ * @brief Tests mmsearch plans, alignment helpers, and execution statistics.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -85,9 +88,9 @@ TEST_CASE("Locator output survives every multi-match context reset",
         "SET bioseq.aligner.secondary.maximum_count=5;"
         "SET bioseq.aligner.vulkan.enabled=off;");
 
-    /* Row five produces three MatchResult values. The homogeneous suffix
-     * cannot add the diverse 29-base probe, but makes
-     * the stored value unambiguously locator-backed. */
+    /* Extend a row with several probe matches so its sequence is stored
+     * through, a locator. The all-A suffix adds length without adding a copy
+     * of the mixes-base probe. */
     const auto canonical_rows = hoe_seed_rows();
     std::string target = canonical_rows.back().sequences.front();
     target.append(16384u, 'A');
@@ -104,10 +107,8 @@ TEST_CASE("Locator output survives every multi-match context reset",
         {seq_row{.pk = 5, .sequences = {
             target, projected_source, std::string{k_hoe_probe_sequence}}}});
 
-    /* Coordinate-only plans retain chain-only candidates, whose absent base
-     * alignment may carry the documented 0/0 sentinel. Request has_cigar so
-     * only the three usable alignments reach output promotion; the dispatch
-     * cursor rejects every degenerate candidate first. */
+    /* Request has_cigar to force base alignment. The output checks need
+     * valid alignment coordinates for each match. */
     const std::string output_sql = fmt::format(
         "SELECT pk, bioseq.target_start(seq0), "
         "       bioseq.target_end(seq0), seq0::text, "
@@ -224,18 +225,15 @@ TEST_CASE("Locator output survives every multi-match context reset",
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_restore_mismatches") == 0);
     REQUIRE(mmsearch_source_counter(ctx, "scan_providers_created") == 1);
-    /* Source domains are keyed by physical attribute.  The three projected
-     * sequence columns therefore establish three reusable domains under the
-     * one scan provider. */
+    /* Each projected sequence column gets its  own source domain. All three
+     * domains share this scan provider and can be reused for later matches. */
     REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 3);
     REQUIRE(mmsearch_source_counter(ctx, "domains_reused")
         >= static_cast<std::int64_t>(baseline.size() - 1u));
     require_mmsearch_source_resources_balanced(ctx);
 
-    /* Raw target, raw per-row query, and an unrelated BSS3 output occupy
-     * three distinct physical columns.  Their locator snapshots form one
-     * duplicate-free output union and every multi-match row sees the same
-     * stable values after per-output restoration. */
+    /* Read the target and query from different columns while also projecting
+     * seq1. Every match must preserve all three column values. */
     reset_mmsearch_source_counters(ctx);
     const rowset_t raw_var_pair = query_rows(ctx, raw_var_pair_output_sql);
     REQUIRE(raw_var_pair == baseline);
@@ -250,10 +248,8 @@ TEST_CASE("Locator output survives every multi-match context reset",
         ctx, "mmsearch_output_restore_mismatches") == 0);
     require_mmsearch_source_resources_balanced(ctx);
 
-    /* The transformed target consumes seq0 before submission while seq1 is
-     * output-only.  The same seq0 locator is also needed by an independent
-     * output slice.  Both physical columns must be restored into the buffered
-     * row and promoted under each MatchResult's fresh output context. */
+    /* seq0 is needed both for the search and an output slice. Keep it and
+     * the output-only seq1 available after each match resets the output context */
     reset_mmsearch_source_counters(ctx);
     const rowset_t evaluated = query_rows(ctx, evaluated_output_sql);
     REQUIRE(evaluated.size() == baseline.size());
@@ -270,9 +266,8 @@ TEST_CASE("Locator output survives every multi-match context reset",
         ctx, "mmsearch_output_restore_mismatches") == 0);
     require_mmsearch_source_resources_balanced(ctx);
 
-    /* Evaluated submission executes ExprStates for both operands.  Exercise
-     * each asymmetric shape so the raw-Var side is promoted too, then restored
-     * with the transformed side before the stable locator row is buffered. */
+    /* Test both mixed cases: a sliced target  with a raw query, and a raw
+     * target with a sliced query. Both operands must survive output resets. */
     for (const auto& mixed_operand_sql : {
             transformed_target_raw_query_sql,
             raw_target_transformed_query_sql}) {
@@ -291,9 +286,9 @@ TEST_CASE("Locator output survives every multi-match context reset",
         require_mmsearch_source_resources_balanced(ctx);
     }
 
-    /* This one-shot ERROR occurs after the locator Datum was replaced by an
-     * EOH and before ExecProject.  The PG_CATCH path must put the exact
-     * MinimalTuple Datum back before ordinary statement-error cleanup. */
+    /* Fail after replacing stored locators with expanded sequence values.
+     * PostgreSQL error cleanup must restore the original buffered row before
+     * releasing the statement resources. */
     reset_mmsearch_source_counters(ctx);
     exec_sql(ctx,
         "SELECT bioseq_internal.arm_sequence_source_failure("
@@ -314,8 +309,8 @@ TEST_CASE("Locator output survives every multi-match context reset",
     require_mmsearch_source_resources_balanced(ctx);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 
-    /* Keep the failure injection armed through this replay so it is consumed
-     * before raising and cannot poison a later scan in the backend. */
+    /* Replay without disarming the fault. It must have been consumed before
+     * the error, so the same query can succeed now. */
     const rowset_t replay = query_rows(ctx, raw_var_pair_output_sql);
     REQUIRE(replay == raw_var_pair);
     require_exact_outputs(replay, target);
@@ -639,20 +634,15 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
         REQUIRE(row[3].has_value());
         REQUIRE(row[4].has_value());
         REQUIRE(row[5].has_value());
-        /* Alignment scores are legitimately zero for this tiny exact fixture, so
-         * adjusted_score=1 is valid.  The direct-call score stub returns -1 and
-         * would instead produce the excluded sentinel value zero. */
+        /* Zero is a valid score for ths fixture. Adding one still distinguishes
+         * it from the unbound helper value of -1. */
         REQUIRE(std::stoll(*row[2]) >= 1);
-        /* query_end() and query_start() have the same BIGINT result type but
-         * must occupy distinct executor-owned helper slots.  Aliasing helpers
-         * by result type (or leaving the SQL stubs to execute) collapses this
-         * positive aligned span to zero. */
+        /* query_end and query_start share a SQL type  but need separate values.
+         * Reusing one helper slot for both would make this span zero. */
         REQUIRE(std::stoll(*row[3]) > 0);
-        /* has_cigar is both an unprunable Block Aligner consumer and a separate
-         * no-stub guard: the SQL rendezvous stub returns false. */
+        /* has_cigar requests base alignment and must read the match result. */
         REQUIRE(*row[4] == "t");
-        /* Identical query/target fixtures require BatchJoin to request and
-         * publish the exact edit count instead of executing the SQL stub. */
+        /* Identical sequences must report zero edits from the alignment result. */
         REQUIRE(std::stoll(*row[5]) == 0);
     }
     require_batch_join_stats(ctx, 1, 2);
@@ -671,10 +661,9 @@ TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context();
 
-    /* SQL normally moves an unrelated target expression to an upper
-     * projection, so an EXPLAIN-only negative does not exercise the dangerous
-     * base ProjectionPath shape. This seam constructs PostgreSQL's real
-     * PathTarget/PlaceHolderVar nodes and calls the production finder. */
+    /* SQL planning can move these expressions into an upper projection.
+     * Use the probe to construct the base ProjectionPath directly and test
+     * which expressions the production, finder accepts. */
     const auto guard_diagnostics = query_one(
         ctx,
         "SELECT accepts_exact_helper::text, "
@@ -708,8 +697,7 @@ TEST_CASE("BioseqBatchJoin headline metrics are one target crossed with 16 queri
         zero_placeholder_plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(
         zero_placeholder_plan, "Bioseq Batch ABI Version: 3"));
-        /* count(*) has no match-result helper. NIL is the encoded empty placeholder
-         * list. This shape elides base alignment, so only plan structure is checked. */
+        /* count(*) uses no alignment helpers, so its plan needs no helper slots. */
     REQUIRE(plan_contains(
         zero_placeholder_plan, "Bioseq Match Placeholder Sites: 0"));
 
@@ -719,8 +707,8 @@ TEST_CASE("BioseqBatchJoin headline metrics are one target crossed with 16 queri
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
     REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
-    /* Ownership is structural; all exposed cost metrics remain finite and
-     * nonnegative. */
+    /* Check that EXPLAIN includes the cost fields and a nonnegative incumbent
+     * cost  floor */
     REQUIRE(plan_contains(plan, "Bioseq Honest Startup Cost"));
     REQUIRE(plan_contains(plan, "Bioseq Honest Total Cost"));
     REQUIRE(plan_contains(plan, "Bioseq Incumbent Cost Floor"));
@@ -753,9 +741,8 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
     const std::string target = high_entropy_sequence(320u);
     const std::string logical_query = target.substr(80u, 96u);
     seed_batch_join_target(ctx, target);
-    /* Build exactly the grouped-SoA minimizers_per_fragment payload used by
-     * scalar and Exact-SIMD prepared-target routes. Query-source indexes remain
-     * disabled. */
+    /* Build the target index for the scalar and exact SIMD cases. Leave
+     * automatic index creation off for the query tables. */
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass,"
         "'minimizers_per_fragment');", k_batch_join_target)) == 1);
@@ -892,10 +879,8 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         }
         REQUIRE(batch_line < plan.size());
         REQUIRE(slice_count == 1u);
-        /* A two-baserel PlannerInfo cannot install a base-local SliceProject.
-         * The final-output recipe therefore has one upper owner; its private
-         * path walk tags q's BioseqScan so BatchJoin receives and retains the
-         * source-backed expanded Datum before the upper recipe is evaluated. */
+        /* The output slice must run above BatchJoin. The query sequence must
+         * remain available until that upper projection evaluates it. */
         REQUIRE(slice_line < batch_line);
         REQUIRE(slice_indent < batch_indent);
         REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
@@ -978,10 +963,9 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         }
         REQUIRE(std::stoll(*diagnostics[2]) > 0);
         REQUIRE(diagnostics[3] == std::optional<std::string>{"0"});
-        /* The build-set identity is published only after every prepared
-         * parameter group has built a target index.  Bounded ntHash rejects the
-         * incompatible minimizers_per_fragment payload, so its query-union identity remains
-         * valid while target-build activity is intentionally absent. */
+        /* A compatible stored index is repared once and reused for the other
+         * queries. Bounded ntHash cannot use this payload, so it must report
+         * no prepared builds or build-set checksum. */
         if (route.consumes_persisted_prepared_target) {
             REQUIRE(diagnostics[0] == std::optional<std::string>{"1"});
             REQUIRE(std::stoll(*diagnostics[1]) == expected_jobs - 1);
@@ -1004,19 +988,16 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         REQUIRE(diagnostics[11] == std::optional<std::string>{"persisted"});
         REQUIRE(diagnostics[13] == std::optional<std::string>{"0"});
         if (route.consumes_persisted_prepared_target) {
-            /* The persisted reader records real prepared build/reuse work but
-             * has no READY-generation/source identity, so job attestation fails
-             * closed even when every selected CPU stage was accepted. */
+            /* The reader cannot identify a ready index generation. Count these jobs
+             * in unattested_alignment_jobs even  though the stored index was used. */
             REQUIRE(diagnostics[12] == std::optional<std::string>{"persisted"});
             REQUIRE(diagnostics[14] == std::optional<std::string>{"1"});
             REQUIRE(diagnostics[15] == std::optional<std::string>{"0"});
             REQUIRE(diagnostics[16] == std::optional<std::string>{"0"});
         } else {
-            /* Bounded ntHash cannot consume the incompatible
-             * minimizers_per_fragment payload. The
-             * allow/read-on request is persisted while execution recomputes,
-             * and the requested/actual source mismatch is intentionally
-             * unattested rather than laundered as a prepared build. */
+            /* Bounded ntHash recomputes the target index because this stored payload
+             * is incompatible. Report the requested and actual index sources separately,
+             * and count these jobs in unattested_alignment_jobs. */
             REQUIRE(diagnostics[12] == std::optional<std::string>{"recomputed"});
             REQUIRE(diagnostics[14] == std::optional<std::string>{"0"});
             REQUIRE(diagnostics[15] == std::optional<std::string>{"1"});
@@ -1106,10 +1087,9 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         }
     }
 
-    /* One exact-SIMD, cross-width execution forces ERROR during the query
-     * recipe's first source callback.  The prepared plan, read session,
-     * retained expanded attributes, permits, and provider leases must unwind
-     * together, and the same generic plan must be reusable immediately. */
+    /* Fail on a source read while using the prepared SIMD plan with a
+     * 64-bit query sequence. Release its source resources, then reuse the
+     * same plan successfully. */
     exec_sql(ctx,
         "SET bioseq.aligner.minimizer.algorithm='two_stack_nthash';"
         "SET bioseq.aligner.chaining.algorithm='simd_minimap2';"
@@ -1194,8 +1174,7 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
         1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
     require_batch_join_aligned_query_rows(ctx, sql, 8193, "t");
     require_batch_join_stats(ctx, 1, 8193);
-    // This TEST build checks the broad timing receipt. Automatic exact-owner
-    // checkpoint proof is E2E-only and is qualified by the real campaign SQL.
+    // Check that execution statistics include downstream wall-clock timing.
     REQUIRE(query_scalar(
         ctx,
         "SELECT (simd_execution_stats->>'downstream_active_wall_available')::boolean "
@@ -1208,8 +1187,8 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
     REQUIRE(plan_contains(
         analyzed, "attempted=8193 fully_attested=8193 unattested=0"));
 
-    // A later much smaller preparation in the same backend must neither retain
-    // nor inherit the 8193-query union's outer/inner vector capacities.
+    // Run a one-query preparation  in the same backend after the large batch.
+    // It must return its match and release its reserved index memory
     exec_sqlf(ctx, "DROP TABLE {};", k_batch_join_queries);
     load_batch_join_queries(ctx, 1);
     require_batch_join_aligned_query_rows(
@@ -1241,11 +1220,9 @@ TEST_CASE("BioseqBatchJoin emits a match after a zero-match full first wave",
         REQUIRE(*row[1] == "t");
     }
 
-    /* The first wave deliberately uses 10-bp queries, shorter than k=15. They
-     * cannot produce the non-empty sketch/chain/Block activity required for a
-     * simd_cpu attestation, so the aggregate must stay diagnostic rather than
-     * laundering those 8192 jobs. The final eligible query still has to carry
-     * positive end-to-end SIMD counters and zero fallback counters. */
+    /* The first 8192 queries are shorter than k=15 and cannot produce seeds.
+     * Keep the aggregate marked mixed_invalid, while checking that the final
+     * matching query performs SIMD work without falling back. */
     const auto stats = last_alignment_stats(ctx);
     REQUIRE(stats.size() == 20);
     REQUIRE(stats.front()[16].value_or("") == "simd_cpu");
@@ -1327,8 +1304,7 @@ TEST_CASE("no-index BatchJoin prepares native queries once and reuses one transi
         std::string_view index_name;
     };
     constexpr std::array cases{
-        // SQL campaign profiles use uint64 storage; native u32/fragmented
-        // adapters are covered by the direct minimizer producer contracts.
+        // Exercise the, registered SQL profiles wieh 64-bit storage.
         route_case{"dna4_k15_mpf", "dna4", 64, 15, 10, "two_stack_nthash",
                    "minimizers_per_fragment"},
         route_case{"dna4_k15_mps", "dna4", 64, 15, 10, "simd_minimap2_reference",

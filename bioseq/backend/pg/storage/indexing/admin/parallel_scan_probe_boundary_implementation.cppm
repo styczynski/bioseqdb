@@ -1,6 +1,6 @@
 /**
  * @file admin/parallel_scan_probe_boundary_implementation.cppm
- * @brief Implements cold boundaries for hash-major inspection SQL diagnostics.
+ * @brief Connect SQL diagnostics to hash-major inspection and parallel-read probes.
  */
 module;
 

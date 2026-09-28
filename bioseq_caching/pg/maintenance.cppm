@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- * Static maintenance worker for the generic PostgreSQL cache storage tier.
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief PostgreSQL background worker that cleans cache entries and storage.
  */
 module;
 
@@ -35,19 +35,19 @@ export namespace bioseq::cache::pg::maintenance {
 inline constexpr char janitor_worker_name[] = "bioseq_cache janitor";
 inline constexpr char janitor_worker_function[] = "bioseq_cache_storage_janitor_main";
 
-/** Bounded registry maintenance invoked before each physical storage sweep. */
+/** Registry cleanup callback run before each storage sweep. */
 using reusable_janitor_callback = void (*)() noexcept;
 
-/** Register exactly one postmaster-managed worker during shared preload. */
+/** Register the janitor with PostgreSQL during shared preload. Repeated calls are harmless. */
 [[nodiscard]] bool register_static_janitor_worker() noexcept;
 
-/** Return whether this process registered the static worker already. */
+/** Report whether this process has registered the janitor. */
 [[nodiscard]] bool static_janitor_registered() noexcept;
 
-/** Install one reusable-registry janitor owner, refusing replacement. */
+/** Set the registry cleanup callback if none  is set, or accept the same callback again */
 [[nodiscard]] bool register_reusable_janitor_callback(reusable_janitor_callback callback) noexcept;
 
-/** Clear the reusable janitor callback only when the owner matches exactly. */
+/** Clear the registry cleanup callback only if it matches the supplied function. */
 void unregister_reusable_janitor_callback(reusable_janitor_callback callback) noexcept;
 
 } // namespace bioseq::cache::pg::maintenance
@@ -74,7 +74,7 @@ void janitor_sighup(SIGNAL_ARGS) {
     errno = saved_errno;
 }
 
-/** Invoke at most one allocation-free reusable-registry maintenance owner. */
+/** Run the registered registry cleanup callback, if present. */
 void run_reusable_janitor_callback() noexcept {
     const reusable_janitor_callback callback = g_reusable_janitor_callback;
     if (callback != nullptr) {
@@ -167,9 +167,8 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
     run_reusable_janitor_callback();
     static_cast<void>(janitor_sweep());
     publish_worker_lifecycle(worker_lifecycle::stopped, 0);
-    /* The janitor is the sole owner of the boot-wide area pin.  Its existing
-     * before_shmem_exit callbacks detach storage references and then the
-     * session-pinned mapping after this orderly unpin. */
+    /* The janitor releases the pin thaj keeps shared storage alive for this server
+     * run. Exit callbacks then detach the storage references and local mapping. */
     static_cast<void>(bioseq::cache::pg::shared_registry::orderly_unpin_shared_registry());
     proc_exit(0);
 }

@@ -1,11 +1,9 @@
 /**
  * @file vulkan_test.cpp
- * @brief Vulkan seed-hit lookup parity tests.
+ * @brief Compare Vulkan and CPU seed hits, including order and large target positions.
  *
- * Test 6: `collect_seed_hits_vulkan` emits anchors with the same `ref_bits()`
- * ordering and the same anchor multiset as the CPU `collect_seed_hits` for
- * forward/reverse hits and target positions above 2^32. Skips cleanly when no
- * hardware Vulkan device exists.
+ * Also check mapped-index validation, GPU sort planning, and reasons for
+ * declining a,  lookup. GPU cases skip when hardware Vulkan is unavailable.
  */
 #include <vulkan/vulkan_core.h>
 
@@ -38,20 +36,17 @@ namespace vk = bioseq::gpu::vulkan;
 namespace idx_ns = bioseq::indexing;
 
 /**
- * @brief Encodes a target position and strand in the minimizer-index scalar form.
- * @param[in] position Target position in base pairs.
+ * @brief Pack a target position with its strand in the low bit.
+ * @param[in] position Target position in bases.
  * @param[in] strand Zero for forward and one for reverse.
- * @return Packed position and strand scalar.
+ * @return The index's encoded position.
  */
 [[nodiscard]] static std::uint64_t encode_position_strand(std::uint64_t position,
                                                           std::uint64_t strand) {
     return (position << 1) | (strand & 1u);
 }
 
-/**
- * @brief Builds a target index with strand repeats and one position above 2^32.
- * @return Populated minimizer index.
- */
+/** Build an index with repeated hashes on both strands and a position above 2^32. */
 [[nodiscard]] static minimizer_hashmap_fragment_index build_target() {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
     pairs.emplace_back(0x111ULL, encode_position_strand(5u, 0u));
@@ -67,7 +62,7 @@ namespace idx_ns = bioseq::indexing;
     return target_index;
 }
 
-/** @brief Returns the deterministic query minimizers used by parity cases. */
+/** Make query minimizers covering repeated hits, both strands, and a missing hash */
 [[nodiscard]] static std::vector<minimap_sketch_data> build_query() {
     return {
         minimap_sketch_data{0x222ULL, 17u, 0u},
@@ -78,9 +73,8 @@ namespace idx_ns = bioseq::indexing;
 }
 
 /**
- * @brief Converts an arena slab to comparable explicit-field anchor tuples.
- * @param[in] slab Anchor slab to copy.
- * @return Anchor fields in slab order.
+ * @brief Copy anchor fields into tuples for CPU/GPU comparison.
+ * @return Tuples in the slab's order.
  */
 [[nodiscard]] static std::vector<std::tuple<std::uint64_t, std::uint64_t,
                                             std::uint32_t, std::uint8_t,
@@ -105,11 +99,7 @@ anchor_tuples(const ch::arena_slab<anchor>& slab) {
     return tuples;
 }
 
-/**
- * @brief Reports whether slab anchors are ordered by reference sort key.
- * @param[in] slab Anchor slab to inspect.
- * @return `true` when keys are nondecreasing.
- */
+/** Return whether acchor reference sort keys are in nondecreasing order. */
 [[nodiscard]] static bool nondecreasing_reference_sort_keys(
         const ch::arena_slab<anchor>& slab) {
     for (std::size_t index = 1; index < slab.size(); ++index) {
@@ -120,7 +110,7 @@ anchor_tuples(const ch::arena_slab<anchor>& slab) {
     return true;
 }
 
-/** Build an authenticated MPF readback from explicit wire records. */
+/** Build readback bytes and record  whether the anchors follow the required order. */
 [[nodiscard]] static vk::seed_lookup_result make_seed_anchor_readback(
     std::span<const vk::seed_anchor_wire> wires) {
     vk::seed_lookup_result readback{};
@@ -428,9 +418,8 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE(validation.is_valid);
     REQUIRE(validation.covered_position_count == positions.size());
 
-    // Both present hashes share their low four bits. The mapped route must use
-    // sorted-dense binary search, handle a normal miss, and count duplicate
-    // query hashes exactly.
+    // These hashes share their low four bits, so lookup must compare full
+    // hashes. Check a missing hash and count repeated query hashes separately.
     const std::vector<minimap_sketch_data> query{
         minimap_sketch_data{0x10u, 1u, 0u},
         minimap_sketch_data{0x20u, 2u, 0u},
@@ -476,10 +465,8 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE(mapped_prefix.mapped_lookup_count == query.size());
     REQUIRE(mapped_prefix.mapped_comparison_count >= query.size());
 
-    // A nonempty resident paired with an empty minimizer span is still a
-    // source-direct operation, not the generic empty-query shortcut.  Both
-    // calls reconstruct and validate the complete mapped payload; the absence
-    // of query hashes legitimately produces zero binary-search activity.
+    // Validate the mapped target in both passes even when the query has no
+    // minimizers. The resulting prefix contains one zero, with no hash lookups.
     const std::span<const minimap_sketch_data> empty_query{};
     const auto empty_mapped_plan = seed::count_seed_prefix_plan(
         empty_query,
@@ -556,8 +543,8 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
         mutated_controls, positions, 100u, checksum).is_valid);
 
-    // The second pass revalidates the whole mapped payload, so mutation after
-    // the count receipt fails before any prefix can be published.
+    // Recheck the mapped target before building the prefix. A change after
+    // counting must fail before any prefix is returned.
     const auto mutated_second_pass = [
         &controls,
         &mutated_positions,
@@ -610,8 +597,8 @@ TEST_CASE("vulkan seeding: sort plan validates local-key offset order and typed 
     REQUIRE(offset_plan.max_absolute_ref_position
             == (std::uint64_t{1} << 32u)
                 + (std::uint64_t{1} << 29u) - 1u);
-    // Adding the one segment offset preserves local ordering; the shader can
-    // sort local keys while the surrounding segment contract owns rebasing.
+    // Adding the same segment offset preserves position order, so anchors
+    // can be  sorted locally before conversion to target coordinates.
     constexpr std::uint64_t lhs = 17u;
     constexpr std::uint64_t rhs = 99u;
     REQUIRE(lhs < rhs);
@@ -897,12 +884,12 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
         cache.clear();
     };
 
-    // target_len=2^24 -> 24 local ref bits + strand bit -> four radix passes.
+    // Four radix passes return the sorted values to the original buffer.
     run_case(/*target_position=*/123u,
              /*target_length=*/std::uint64_t{1} << 24u,
              /*expected_passes=*/4u);
-    // >2^32 reference plus strand bit requires five passes and leaves the
-    // sorted value array in scratch, exercising both ping-pong parities.
+    // The larger position needs five passes, leaving the result in the
+    // scratch buffer. Check that this result is read back in the same mrder.
     run_case(/*target_position=*/(std::uint64_t{1} << 32u) + 5u,
              /*target_length=*/std::uint64_t{1} << 33u,
              /*expected_passes=*/5u);
@@ -985,7 +972,7 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
     const auto query = build_query();
     const auto idx = build_target();
 
-    // Keep the context installation alive for any canonical arena allocation.
+    // Keep the context installed while seed batches may allocate arena, storage.
     context::context ctx;
     context::installed_context_scope install{ctx};
     bioseq::simd::canonical_seed_batch batch{};

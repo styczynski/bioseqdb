@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies logging sinks, fallback files, argument packing, and lifetimes.
+ * @brief Checks log destinations, queued argument lifetimes and formatting.
  */
 
 #include <cstdio>
@@ -10,7 +10,7 @@
 import std;
 import bioseq.common.logging;
 
-/** @brief Tracks copies, moves, and destruction of queued custom arguments. */
+/** Counts copies, moves and live objects while log arguments wait in the queue. */
 struct alignas(64) logging_tracked_argument {
     int value = 0;
 
@@ -19,30 +19,30 @@ struct alignas(64) logging_tracked_argument {
     inline static int move_count = 0;
     inline static int destructor_count = 0;
 
-    /** @brief Constructs a tracked value and records its live instance. */
+    /** Creates a value and increments the live-object count. */
     explicit logging_tracked_argument(int initial_value) : value(initial_value) {
         ++live_count;
     }
 
-    /** @brief Copies a tracked value and records the retained queue instance. */
+    /** Copies the value and increments the copy and live-object counts. */
     logging_tracked_argument(const logging_tracked_argument& other) : value(other.value) {
         ++live_count;
         ++copy_count;
     }
 
-    /** @brief Moves a tracked value while preserving its formatted value. */
+    /** Moves the value and increments the move and live-object counts. */
     logging_tracked_argument(logging_tracked_argument&& other) noexcept : value(other.value) {
         ++live_count;
         ++move_count;
     }
 
-    /** @brief Records destruction of one tracked instance. */
+    /** Records one destruction and decrements the live-object count. */
     ~logging_tracked_argument() {
         --live_count;
         ++destructor_count;
     }
 
-    /** @brief Resets all lifetime counters before one isolated assertion group. */
+    /** Clears the counters before a test with no live tracked arguments. */
     static void reset_counts() {
         live_count = 0;
         copy_count = 0;
@@ -51,7 +51,7 @@ struct alignas(64) logging_tracked_argument {
     }
 };
 
-/** @brief Formats the tracked test argument through its retained integer value. */
+/** Formats the test argument as tracked(value). */
 template <> struct fmt::formatter<logging_tracked_argument> {
     constexpr auto parse(fmt::format_parse_context& context) {
         return context.begin();
@@ -63,11 +63,7 @@ template <> struct fmt::formatter<logging_tracked_argument> {
     }
 };
 
-/**
- * @brief Formats retained integer ownership through fmtlog's decoded pointer value.
- *
- * This test-only formatter matches the asynchronous decoder's smart-pointer contract.
- */
+/** Formats a shared pointer by printing the integer it owns. */
 template <> struct fmt::formatter<std::shared_ptr<int>> : fmt::formatter<int> {
     template <typename p_format_context>
     auto format(const std::shared_ptr<int>& value, p_format_context& context) const {
@@ -77,7 +73,7 @@ template <> struct fmt::formatter<std::shared_ptr<int>> : fmt::formatter<int> {
 
 namespace {
 
-/** @brief Captured fields from one message-sink callback. */
+/** Copies a log message, level and  source location for later checks. */
 struct captured_sink_log {
     logging_level level = logging_level::disabled;
     int postgres_error_level = 0;
@@ -88,7 +84,7 @@ struct captured_sink_log {
     std::uint_least32_t column = 0;
 };
 
-/** @brief Captured fields from one structured-report callback. */
+/** Keeps a report's message, detail, hint, error codes and source location */
 struct captured_sink_report {
     logging_level level = logging_level::disabled;
     int postgres_error_level = 0;
@@ -106,23 +102,12 @@ struct captured_sink_report {
 std::vector<captured_sink_log> captured_sink_logs;
 std::vector<captured_sink_report> captured_sink_reports;
 
-/**
- * @brief Checks whether a string ends with a suffix.
- * @param[in] value String to inspect.
- * @param[in] suffix Required trailing text.
- * @return `true` when `suffix` matches the end of `value`.
- */
+/** Returns whether value ends with suffix. */
 [[nodiscard]] bool ends_with(std::string_view value, std::string_view suffix) {
     return value.size() >= suffix.size() && value.substr(value.size() - suffix.size()) == suffix;
 }
 
-/**
- * @brief Checks for an encoded source file and line in fallback output.
- * @param[in] location Formatted location text.
- * @param[in] file_name Expected source filename.
- * @param[in] line Expected source line.
- * @return `true` when the exact location prefix occurs.
- */
+/** Looks for file_name:line: in formatted log output. */
 [[nodiscard]] bool contains_location_line(std::string_view location,
                                           std::string_view file_name,
                                           std::uint_least32_t line) {
@@ -130,7 +115,7 @@ std::vector<captured_sink_report> captured_sink_reports;
     return location.find(expected) != std::string_view::npos;
 }
 
-/** @brief Polls fmtlog until queued test records have been consumed. */
+/** Polls and flushes fmtlog several times to consume queued test messages. */
 void drain_fmtlog() {
     for (int poll_index = 0; poll_index < 4; ++poll_index) {
         fmtlog::poll(true);
@@ -139,17 +124,17 @@ void drain_fmtlog() {
     fmtlog::poll(true);
 }
 
-/** @brief Enables every project logging level for the capture fixture. */
+/** Accepts every project log level for the capture sink. */
 bool is_logging_level_enabled(logging_level) {
     return true;
 }
 
-/** @brief Enables every PostgreSQL error level for the capture fixture. */
+/** Accepts every PostgreSQL error level for the capture sink. */
 bool is_postgres_error_level_enabled(int) {
     return true;
 }
 
-/** @brief Copies one typed project log into the capture vector. */
+/** Saves a project log mjssage and its source location. */
 void capture_level_log(logging_level level,
                        bioseq_source_location location,
                        std::string_view message) {
@@ -164,7 +149,7 @@ void capture_level_log(logging_level level,
     });
 }
 
-/** @brief Copies one raw PostgreSQL log into the capture vector. */
+/** Saves a log message with its numeric PostgreSQL error level. */
 void capture_raw_sink_log(int postgres_error_level,
                           bioseq_source_location location,
                           std::string_view message) {
@@ -179,7 +164,7 @@ void capture_raw_sink_log(int postgres_error_level,
     });
 }
 
-/** @brief Copies one structured report into the capture vector. */
+/** Copies a report's fields so tests can inspect them after the callback. */
 void capture_report(const bioseq_report_view& report) {
     captured_sink_reports.push_back(captured_sink_report{
         .level = report.level,
@@ -196,7 +181,7 @@ void capture_report(const bioseq_report_view& report) {
     });
 }
 
-/** @brief Installs the capture sink for one lexical test scope. */
+/** Clears captured records, installs the test sink and removes it on scope  exit. */
 struct sink_guard {
     sink_guard() {
         captured_sink_logs.clear();
@@ -216,9 +201,8 @@ struct sink_guard {
 };
 
 /**
- * @brief Redirects fallback logging to a temporary file for one lexical scope.
- *
- * Destruction drains the queue before restoring the sink and closing the file.
+ * Sends fallback logs to a temporary file during the test.
+ * On scope exit, flushes the queue, restores logging levels and sends output to stderr.
  */
 struct fallback_file_guard {
     FILE* file = nullptr;
@@ -249,10 +233,7 @@ struct fallback_file_guard {
         }
     }
 
-    /**
-     * @brief Reads all fallback bytes emitted so far and restores append position.
-     * @return Complete temporary-file contents.
-     */
+    /** Flushes queued logs, reads the temporary file and returns its position to the end. */
     [[nodiscard]] std::string contents() const {
         if (file == nullptr) {
             return {};
@@ -353,9 +334,8 @@ TEST_CASE("logging byte-packed arguments decode odd-offset scalars safely",
     fallback_file_guard guard;
     REQUIRE(guard.file != nullptr);
 
-    // The terminating NUL makes this first encoded field five bytes long, so
-    // both the u32 immediately after it and the u64 after the bool start at
-    // deliberately unaligned queue offsets.
+    // Including its NUL, this string takes five bytes. The following integers
+    // therefore test decoding from queue offsets that lack natural alignment.
     const char odd_prefix[] = "odd!";
     const auto emit_packed =
         [&odd_prefix](std::uint32_t scalar32, bool flag, std::uint64_t scalar64) {
@@ -419,8 +399,8 @@ TEST_CASE("logging checked argument sizing enforces queue record bounds",
             alignof(logging_tracked_argument) - 1 + sizeof(logging_tracked_argument);
         static_assert(fmtlog::MAX_ARGUMENT_STORAGE_SIZE > tracked_storage_bound + 1);
 
-        // The string's terminating NUL plus the custom object's maximum
-        // padding and storage consume the argument budget exactly.
+        // Fill the argument budget with the string, its NUL and the custom object
+        // including the maximum alignment padding.
         std::string prefix(fmtlog::MAX_ARGUMENT_STORAGE_SIZE - tracked_storage_bound - 1, 'x');
         std::array<std::size_t, 1> cstring_sizes{};
         std::size_t remaining = fmtlog::MAX_ARGUMENT_STORAGE_SIZE;
@@ -433,9 +413,8 @@ TEST_CASE("logging checked argument sizing enforces queue record bounds",
         CHECK_FALSE(fmtlog::getArgSizes<0>(
             cstring_sizes.data(), remaining, std::string_view(prefix), tracked));
 
-        // Exercise the noexcept public enqueue path as well: sizing rejects
-        // this record before the tracked argument is copied or constructed in
-        // queue storage.
+        // The public enqueue call must reject the oversized record before copying
+        // the  tracked object into the queue.
         std::uint32_t oversized_log_id = 0;
         fmtlog_wrapper<>::instance.log(oversized_log_id,
                                        fmtlog_wrapper<>::instance.tscns.rdtsc(),

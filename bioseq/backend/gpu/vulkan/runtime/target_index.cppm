@@ -1,6 +1,6 @@
 /**
  * @file target_index.cppm
- * @brief Builds resident target indexes and stable sorted minimizer pairs on Vulkan.
+ * @brief Builds GPU target indexes and downloads sorted minimizers for storage.
  */
 module;
 
@@ -22,13 +22,12 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Prepares every pipeline used by the complete target-index route while locked.
-/// @param[in] params Sketch geometry that selects the ordered-sketch variant.
+/// @brief Loads the pipelines needed to build a target index. The caller holds the runtime lock.
+/// @param[in] params Selects the sketch shader for the packed sequence forfat.
 void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& params) {
-    // Keep this list identical to the complete target-index route. Pipeline
-    // owners and their exact metadata permits remain process-lived in runtime;
-    // later getters in count, radix, mark, and bucket stages are cache hits
-    // under the operation's transient allocation permit.
+    // Load every pipeline used below before reserving the build workspace.
+    // The runtime keeps these pipelines and their memory permits, so later
+    // lookups during, counting, sorting, and bucket  creation use the cache
     (void)get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
                                       k_sketch_local_size,
                                       choose_ordered_sketch_window_capacity(params.window_size));
@@ -41,9 +40,9 @@ void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& 
     (void)get_compute_pipeline_locked(shader_kind::target_index_emit_buckets, 128u, 1u);
 }
 
-/// @brief Validates the sketch shape and prepares target-index pipelines under queue ownership.
-/// @param[in] params Sketch geometry that selects the ordered-sketch variant.
-/// @throws vulkan_runtime_error When the runtime is unavailable or the window is zero.
+/// @brief Locks the runtime and loads the target-index pipelines before the build reserves memory.
+/// @param[in] params Selects the sketch shader for the packed sequence format.
+/// @throws vulkan_runtime_error If the runtime is unavailable or the window is zero.
 void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -55,21 +54,14 @@ void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params)
     prepare_target_index_pipelines_locked(params);
 }
 
-/// @brief Builds and validates a resident target index without materializing it on the host.
-/// @param[in] packed_sequence Borrowed logical sequence bytes copied before execution.
-/// @param[in] padded_sequence_bytes Arena size including required zero padding.
-/// @param[in] owned_sequence_staging_bytes Host staging capacity released after the arena copy.
-/// @param[in] release_owned_sequence_staging Optional one-shot release callback. It is not called
-///            when validation fails before the arena copy.
-/// @param[in] rank_lut Rank translation table copied into the device arena.
-/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
-/// @param[in] max_target_minimizers Pessimistic target minimizer capacity.
-/// @param[in] query_gate_words Canonical query-position gate words.
-/// @param[in] query_gate_mask Mask for the final gate word.
-/// @param[in] query_gate_identity Immutable identity moved into a successful result.
-/// @param[in,out] peak_permit Borrowed permit grown to each observed execution peak.
-/// @return Move-owned index buffers, admission statistics, and a precise failure reason.
-/// @throws vulkan_runtime_error When runtime, identity, allocation, submission, or policy checks fail.
+/// @brief Builds GPU target buckets sorted by minimizer hash.
+/// Counts minimizers before allocating the large buffers. An optional query-hash
+/// bitmap filters the output and must match query_gate_identity.
+/// Copies packed_sequence into zero-padded arena storage, then calls
+/// release_owned_sequence_staging. Nonzero staging size requires this callback.
+/// Early validation failures skip it. peak_permit must cover each allocation peak.
+/// @return Owned buffers and statistics, or an  invalid result with a failure reason.
+/// @throws vulkan_runtime_error If runtime, bitmap, allocation, or GPU checks fail.
 gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_sequence,
                                             std::uint64_t padded_sequence_bytes,
                                             std::uint64_t owned_sequence_staging_bytes,
@@ -96,7 +88,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     if (bp == 0u || window_size == 0u || kmer_size == 0u || bp < kmer_size ||
         max_target_minimizers == 0u) {
         out.failure_reason = gpu_index_build_failure::invalid_shape;
-        return out; // empty/invalid shape; selected GPU callers throw.
+        return out; // The selected GPU route reports this invalid result to its caller.
     }
     if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) {
         out.failure_reason = gpu_index_build_failure::minimizer_capacity_exceeds_u32;
@@ -130,10 +122,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     if (!gate_shape_matches) {
         throw vulkan_runtime_error("gpu index query gate lacks matching immutable identity");
     }
-    // Fail-safe for direct runtime callers. The production wrapper prepares
-    // this same set before reserving target-index memory, so these are normally
-    // cache hits. Keeping the invariant here prevents a future caller from
-    // reintroducing a cold miss under the much larger exact execution peak below.
+    // Direct callers also need the pipelines ready before allocating the build
+    // workspace. The production wrapper has already loaded them at this point.
     prepare_target_index_pipelines_locked(params);
     out.gate_identity = std::move(query_gate_identity);
     out.ownership.query_gate_enabled = query_gate_word_count != 0u ? 1u : 0u;
@@ -174,15 +164,13 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     out.ownership.execution_submit_host_transient_bytes = host_scratch_plan.execution_submit_bytes;
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    // The sketch shader grid-strides, so the physical dispatch is device-capped.
+    // Limit the dispatch to the delice maximum. Each workgroup can process several tiles.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
     const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
-    // Small per-call scaffolding lives in the shared arena (seq + lut + tiles +
-    // tile counts/offsets). The large minimizer/sort/index arrays are sized from
-    // the EXACT minimizer count (downloaded after the count pass) as standalone
-    // device buffers — never a single 14 GB arena buffer that Metal cannot
-    // allocate for the XXL_HIFI 500 Mbp target.
+    // Keep sequence data and tile bookkeeping in the shared arena. Allocate
+    // minimizer and  sort buffers separately after counting the output, so
+    // a large target does not require one oversized arena allocation
     gpu_arena& arena = reusable_gpu_arena();
     out.ownership.idle_arena_trim_attempts_before_count = 1u;
     const std::uint64_t idle_arena_bytes = bioseq::common::saturating_add(
@@ -308,13 +296,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const compute_pipeline scan_add_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
 
-    // Count every target build on device first.  Query-gated segment indexes
-    // usually retain only a tiny subset, while the ungated 500-Mbp row emits
-    // 93,308,896 minimizers from a pessimistic capacity of 150,000,192.  Sizing
-    // all four emit/sort streams from that pessimistic capacity made the main
-    // peak C*40 bytes (6,000,007,680 bytes) even though the adopted resident
-    // index is only exact-T/exact-D.  The count fence makes T authoritative
-    // before any large standalone buffer exists.
+    // Count minimizers before allocating the large output and sort buffers.
+    // Query filtering can remove most target minimizers, leaving the initial
+    // upper bound much larger than the actual output.
     std::uint64_t emit_capacity = 0u;
     const gpu_arena_slice& gate_binding_s = query_gate_bytes == 0u ? counters_s : query_gate_s;
     {
@@ -511,7 +495,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
-    // Queries the physical allocation for one storage-and-transfer workspace.
+    // Find, the physical size Vulkan will allocate for a workspace buffer.
     const auto allocation_requirement = [this](std::uint64_t bytes) {
         return buffer_memory_requirement_locked(bytes, k_compute_buffer_usage);
     };
@@ -587,9 +571,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
 
     buffer keys = create_device_buffer(
         std::max<std::uint64_t>(emit_capacity * 8u, emit_flag_scan_bytes),
-        k_compute_buffer_usage); // out_words: u64 hash/min; later flags+scan alias
+        k_compute_buffer_usage); // Minimizer hashes. The unused key buffer later holds flags and prefix sums.
     buffer vals = create_device_buffer(emit_capacity * 8u,
-                                       k_compute_buffer_usage); // out_pair_vals: u64 pos_strand/min
+                                       k_compute_buffer_usage); // Encoded target positions and strands.
     if (keys.mapped == nullptr || vals.mapped == nullptr ||
         keys.allocation_bytes != initial_key_requirement ||
         vals.allocation_bytes != initial_value_requirement) {
@@ -627,10 +611,10 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
             {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
             {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
             {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
-            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size}, // out_words
+            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size}, // Minimizer hash  output.
             {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
             {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
-            {vals_s.buffer->buffer_handle, vals_s.offset, vals_s.size}, // out_pair_vals
+            {vals_s.buffer->buffer_handle, vals_s.offset, vals_s.size}, // Encoded position output.
             {gate_binding_s.buffer->buffer_handle, gate_binding_s.offset, gate_binding_s.size},
         }};
         sketch_push_constants push{1u,
@@ -657,9 +641,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_idx_emit)");
         record_host_to_shader(command_buffer_);
-        // Prefix offsets/counts were produced by the prior submit. Establish
-        // explicit shader-write -> shader-read visibility before mode 1 reads
-        // them; queue order and a host fence alone are not a memory barrier.
+        // Make the previous submission's tile counts and offsets visible to the
+        // emit shader. Queue order and waiting for a fence do not provide this
+        // shader memory barrier.
         record_compute_barrier(command_buffer_);
         record_compute_dispatch_locked(
             command_buffer_, sketch_pipe, infos, &push, sizeof(push), sketch_groups);
@@ -726,8 +710,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const std::uint64_t tm_scan_block_requirement = allocation_requirement(
         std::uint64_t{bioseq::common::ceil_div(tm, k_prefix_scan_block_size)} * 4u);
 
-    // Exact-T sort scratch.  Lifetimes are split at GPU fences below so the
-    // bucket stage never overlaps the histogram and the unused value buffer.
+    // Allocate srt buffers for the counted minimizers. Release temporary
+    // values and the histogram before allocating the final buckets.
     const workgroup_plan swg = plan_workgroups(tm, features_.max_workgroup_count_x);
     const std::uint64_t flag_bytes = tm * 4u;
     const std::uint64_t scanned_offset =
@@ -742,7 +726,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         auto _alloc_s = bioseq::instrumentation::region(_alloc_d);
         keys_scr = create_device_buffer(std::max<std::uint64_t>(tm * 8u, flag_scan_bytes),
                                         k_compute_buffer_usage);
-        // This buffer becomes the CPU-searched resident position stream.
+        // Keep the final positions in host-visible memory for CPU seed lookup.
         vals_scr = create_host_buffer(tm * 8u, k_compute_buffer_usage);
         hist = create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u,
                                     k_compute_buffer_usage);
@@ -782,9 +766,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         return out;
     }
 
-    // --- Submit 2a: radix sort pairs by hash. ---
-    // Only sort the significant hash bytes: for K=15 dna4 the stored hash is
-    // ~30 bits → 4 passes, not 8, roughly halving the sort.
+    // Sort pairs by hash, one byte per pass. Only the significant hash bytes
+    // need sorting, so a 30-bit hash takes four passes.
     const std::uint32_t hash_passes =
         std::clamp<std::uint32_t>((params.hash_bits + 7u) / 8u, 1u, 8u);
     gpu_sort_plan sort_plan{tm, 8u, 8u, 8u, hash_passes};
@@ -848,10 +831,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx2_sort)");
     }
 
-    // Preserve the sorted value run in its exact-T allocation. Four K=15 hash
-    // passes may finish in the source value buffer; copying once here makes the
-    // sorted allocation the sole resident position owner and lets the other
-    // ping-pong allocation die.
+    // Move sorted positions into the buffer that  the index will keep.
+    // The last radix pass may leave them in the other buffer, which can be
+    // freed after this copy finishes.
     buffer positions_exact;
     buffer flag_scan;
     if (sorted_in_scratch) {
@@ -914,7 +896,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const VkDescriptorBufferInfo dummy{
         counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size};
 
-    // --- Submit 2b: mark runs and scan flags after sort scratch is released. ---
+    // Mark the start of each hash group and count groups with a prefix sum
     {
         static const auto* _rd =
             bioseq::instrumentation::register_static_region("target_index_mark_scan");
@@ -984,14 +966,11 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         return out;
     }
 
-    // The dense bucket array is built sorted by hash (the pairs were radix-sorted
-    // by hash), so the seed lookup binary-searches it directly — no open-addressed
-    // slot table. Building a 134 M-slot table with 50 M atomicCompSwap probes
-    // tripped the macOS GPU watchdog (VK_ERROR_DEVICE_LOST) at XXL_HIFI; the
-    // sorted-bucket form removes that whole submit. `buckets` becomes the resident
-    // index ("slots"); `positions` is the hash-run-ordered pos_strand array.
+    // Make one bucket per hash group, in hash order. Seed lookup can then
+    // binary-search the buckets. The index keeps these buckets in slots and
+    // keeps the matching encoded positions in positions.
     iblocks.reset();
-    // Prefix lookup binary-searches these resident controls on the CPU.
+    // CPU seed lookup reads these buckets directly.
     buffer buckets = create_host_buffer(std::uint64_t{num_buckets} * 16u, k_compute_buffer_usage);
     if (buckets.mapped == nullptr) {
         out.failure_reason = gpu_index_build_failure::device_buffer_allocation_failed;
@@ -1010,8 +989,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         static const auto* _bd =
             bioseq::instrumentation::register_static_region("target_index_bucket_memory");
         auto _bs = bioseq::instrumentation::region(_bd);
-        // Touch the complete allocation, including Vk padding, so resident
-        // accounting never fabricates full-touch coverage.
+        // Write the whole  allocation, including Vulkan padding, so the recorded
+        // touched bytes match the memory written here.
         std::memset(buckets.mapped, 0, static_cast<std::size_t>(buckets.allocation_bytes));
     }
 
@@ -1033,7 +1012,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         return out;
     }
 
-    // --- Submit 3: emit dense sorted buckets (single light dispatch). ---
+    // Write the final buckets from the sorted hash groups.
     {
         static const auto* _rd =
             bioseq::instrumentation::register_static_region("target_index_slots");
@@ -1067,9 +1046,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx3_buckets)");
     }
 
-    out.slots = std::move(buckets);             // exact-D sorted dense buckets
-    out.positions = std::move(positions_exact); // exact-T sorted pos_strand
-    out.slot_mask = 0u;                         // 0 ⇒ seed binary-searches `occupied_slots` buckets
+    out.slots = std::move(buckets);             // One bucket per distinct hash.
+    out.positions = std::move(positions_exact); // One encoded position per minimizer.
+    out.slot_mask = 0u;                         // Zero selects binary search over occupied_slots buckets.
     out.occupied_slots = num_buckets;
     out.position_count = static_cast<std::uint32_t>(tm);
     out.ownership.peak_observed_bytes = std::max(
@@ -1094,13 +1073,13 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     return out;
 }
 
-/// @brief Sketches a target and returns stable value-then-key sorted minimizer pairs.
-/// @param[in] packed_sequence Borrowed packed sequence bytes copied before submission.
-/// @param[in] rank_lut Rank translation table copied into the arena.
-/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
-/// @param[in] max_target_minimizers Maximum pair count covered by the allocation.
-/// @return Resident sorted pairs and the exact host download used for persistence.
-/// @throws vulkan_runtime_error When runtime, allocation, submission, or policy checks fail.
+/// @brief Sketches a target and sorts minimizers by hash, then encoded position.
+/// The sort orders positions first, then stably sorts hashes. Packed sequence
+/// bytes and rank_lut are copied bfore submission. params selects the sequence
+/// format and minimizer settings. max_target_minimizers bounds output capacity.
+/// @return Sorted GPU buffers and host copies, or an invalid result  if the shape
+/// or capacity is unsuitable. Empty output is valid.
+/// @throws vulkan_runtime_error If runtime, allocation, or GPU checks fail.
 gpu_sorted_pair_result
 runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_sequence,
                                          const vulkan_rank_lut& rank_lut,
@@ -1147,7 +1126,7 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     if (num_tiles == 0u) {
         return out;
     }
-    // The sketch shader grid-strides, so the physical dispatch is device-capped.
+    // Limit the dispatch to the device maximum. Each workgroup can process several tiles.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
 
@@ -1260,10 +1239,9 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     std::uint32_t pair_count32 = 0;
     std::memcpy(&pair_count32, base + counters_s.offset, sizeof(pair_count32));
     const std::uint64_t pair_count = pair_count32;
-    // A window with zero minimizers (for example, an all-N region) is a
-    // LEGITIMATE empty result, not a GPU failure: return valid + empty so the
-    // caller emits no pairs rather than throwing vulkan_runtime_error. Only an
-    // actual capacity overshoot (count > the worst-case bound) is a real decline.
+    // A sequence can, produce no minimizers, for example when every base is N.
+    // Return a valid empty result so the caller writes no pairs. A count beyond
+    // the allocated capacity is reported as a failed build
     if (pair_count == 0u) {
         out.pair_count = 0u;
         out.valid = true;
@@ -1356,11 +1334,6 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     return out;
 }
 
-// — GPU sequence sort. Two submits (modelled on the index build):
-//  1: upload seq+descs -> extract 64-bit canonical key per row -> radix sort.
-//  host: build equal-key run ranges; seed `index` from the sorted row ids.
-//  2: per-run bitonic tie-break over the full canonical compare; if any run is
-//     oversized, continue in the same submit with global full-compare bitonic
-//     stages over the padded permutation. Then download the permutation.
+// Sequence sorting is implemented in sequence_sort.cppm.
 
 } // namespace bioseq::gpu::vulkan

@@ -1,16 +1,10 @@
 /**
  * @file tam_helpers.cppm
- * @brief Cycle-free table-access-method identity helpers.
+ * @brief Identify Bioseq tables and convert logical row numbers to PostgreSQL TIDs.
  *
- * Leaf module for the small Bioseq table-AM helper functions that several
- * modules (the scheduler dispatch buffer, the *_pg storage-indexing
- * modules, the extension entry module, and the custom-scan partition)
- * need to reach without importing the full bioseq_table module — which
- * would otherwise create an import cycle.
- *
- * The TableAmRoutine identity used by relation_oid_uses_column_table_access_method is supplied
- * by the table-AM initializer. Comparing the registered routine pointer keeps
- * this leaf independent from the full table-access implementation.
+ * The table-access initializer supplies its routine pointer Other modules
+ * can compare that pointer without importing the full table implementation,
+ * avoiding circular imports.
  */
 module;
 
@@ -57,9 +51,9 @@ validate_row_number(uint64_t row_number)
 }
 
 
-/// @brief Encodes a column row number as a PostgreSQL item pointer.
-/// @param[in] row_number Valid one-based column row number.
-/// @return PostgreSQL item pointer containing the row identity.
+/// @brief Encode a logical column row number in a PostgreSQL tuple id (TID).
+/// @param[in] row_number One-based row number within the supported range.
+/// @return Item pointer identifying the logical  row, independent of its data page.
 export ItemPointerData
 row_number_to_tid(uint64_t row_number)
 {
@@ -91,23 +85,21 @@ tid_to_row_number(ItemPointerData tid)
 // Registered once during table-AM initialization and compared by identity.
 static const TableAmRoutine* registered_column_table_access_method = nullptr;
 
-/// @brief Records the installed Bioseq table-access routine identity.
-/// @param[in] routine Process-lifetime routine whose address identifies Bioseq relations.
+/// @brief Save the routine pointer used to recognize Bioseq columnar tables.
+/// @param[in] routine Table-access routine tnat remains alive for this process.
 export void
 register_column_table_access_method(const TableAmRoutine* routine) noexcept
 {
 	registered_column_table_access_method = routine;
 }
 
-/** @brief Tests an already-open relation for the Bioseq table-access method.
+/** @brief Check an open relation for the Bioseq table-access method.
  *
- * Callers retain their existing relcache pin and relation lock. Reusing that
- * exact handle is essential during dependency deletion: reopening an OID from
- * PostgreSQL's precomputed DROP list can fail after an earlier recursive drop
- * has already removed the catalog row.
+ * Reuse the caller's handle during DROP. An earlier recursive drop may have
+ * removed the catalog row, making a second lookup by OID fail.
  *
- * @param[in] relation Borrowed relation handle, or `nullptr`.
- * @return `true` when the handle uses the registered Bioseq routine.
+ * @param[in] relation Borrowed relation handle, or nullptr.
+ * @return true if the relation uses the registered Bioseq routine.
  */
 export bool
 relation_uses_column_table_access_method(Relation relation) noexcept
@@ -118,9 +110,10 @@ relation_uses_column_table_access_method(Relation relation) noexcept
 }
 
 
-/// @brief Opens an OID and tests it for the Bioseq table-access method.
-/// @param[in] relation_oid Relation to inspect without retaining a lock or relcache pin.
-/// @return False for invalid OIDs or relations using another access method.
+/// @brief Open a relation and check for  the Bioseq table-access method.
+/// @param[in] relation_oid Relation OID. InvalidOid returns false.
+/// @return true if the relation uses Bioseq. Release the relation handle,
+/// keeping AccessShareLock until transaction end. A missing relation raises an error.
 export bool
 relation_oid_uses_column_table_access_method(Oid relation_oid)
 {
@@ -130,10 +123,7 @@ relation_oid_uses_column_table_access_method(Oid relation_oid)
 		return false;
 	}
 
-	/*
-	 * Lock relation to prevent it from being dropped &
-	 * avoid race conditions.
-	 */
+	/* Keep the relation from being dropped during this check. */
 	Relation relation = bioseq::postgres::support::open_postgres_relation(
 		relation_oid, AccessShareLock);
 	const bool result = relation_uses_column_table_access_method(relation);

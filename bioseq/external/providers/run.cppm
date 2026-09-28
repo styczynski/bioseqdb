@@ -1,8 +1,8 @@
 /**
  * @file external/providers/run.cppm
- * @brief Synchronous bridge from callers to the configured provider pack.
+ * @brief Run a configured provider and colect its result messages.
  */
-/// Synchronous owning-message bridge over the configured provider pack.
+/// Run providers on the calling thread and keep their messages.
 module;
 
 #include <cstddef>
@@ -36,7 +36,7 @@ struct external_query_result {
     prov::provider_statistics statistics{};
     std::optional<prov::external_error> error;
 
-    /// Return whether planning, opening, and session execution all succeeded.
+    /// Return true when the result has no recorded error.
     [[nodiscard]] bool is_successful() const noexcept {
         return !error.has_value();
     }
@@ -54,10 +54,8 @@ collect_message(void* self, prov::owning_provider_message&& message) {
 
 } // namespace detail
 
-/// Run one configured provider synchronously and collect its owning messages.
-///
-/// Unknown providers and unsupported targets return a bounded error instead of
-/// falling through to another adapter.
+/// Run  the named provider synchronously and collect its messages.
+/// Return its planning or execution error, keeping any messages already received.
 inline external_query_result run_external_query(context::context& memory,
                                                 const bioseq::parallelism::global_pool& pool,
                                                 prov::external_runtime_services& runtime,
@@ -71,8 +69,7 @@ inline external_query_result run_external_query(context::context& memory,
                                          .push_fn = &detail::collect_message};
     std::stop_source stop;
 
-    // Generic handler: the pack invokes handler.operator()<p_provider_type>()
-    // exactly once, for the adapter whose stable id equals `provider`.
+    // The pack calls this handler for the provider whose ID matches the request.
     auto handler = [&memory,
                     &pool,
                     &runtime,

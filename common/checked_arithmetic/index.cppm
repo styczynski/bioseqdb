@@ -1,6 +1,6 @@
 /**
  * @file common/checked_arithmetic/index.cppm
- * @brief Dependency-free canonical checked unsigned arithmetic.
+ * @brief Unsigned arithmetic with overflow checks and helpers for byte limits.
  */
 module;
 
@@ -15,9 +15,10 @@ export module bioseq.common.checked_arithmetic;
 export namespace bioseq::common {
 
 /**
- * Stable error vocabulary shared by checked arithmetic and bounded byte
- * consumers. The final two values let a consumer preserve its public
- * range/decoding diagnostics without defining a second arithmetic error type.
+ * Errors shared by arithmetic checks and byte readers.
+ *
+ * Readers can also  report a range outside the buffer or truncated input through
+ * this type.
  */
 enum class checked_arithmetic_error : std::uint8_t {
     overflow,
@@ -26,7 +27,7 @@ enum class checked_arithmetic_error : std::uint8_t {
     truncated,
 };
 
-/** Add two unsigned integers without wrapping. */
+/** Add unsigned integers, returning no value if the sum would overflow. */
 template <class p_left_type, class p_right_type>
     requires(
         std::is_unsigned_v<p_left_type>
@@ -45,7 +46,7 @@ std::optional<std::common_type_t<p_left_type, p_right_type>> checked_add(
     return converted_left + converted_right;
 }
 
-/** Multiply two unsigned integers without wrapping. */
+/** Multiply unsigned integers, returning no value if the product would overflow. */
 template <class p_left_type, class p_right_type>
     requires(
         std::is_unsigned_v<p_left_type>
@@ -69,10 +70,8 @@ std::optional<std::common_type_t<p_left_type, p_right_type>> checked_mul(
 }
 
 /**
- * Divide two unsigned integers and round toward positive infinity.
- *
- * A zero divisor returns zero. The quotient/remainder formulation avoids the
- * overflow possible in `(dividend + divisor - 1) / divisor`.
+ * Divide unsigned integers and qound up. A zero divisor returns zero.
+ * Using the remainder avoids the overflow that adding divisor - 1 could cause.
  */
 template <class p_dividend_type, class p_divisor_type>
     requires(
@@ -112,7 +111,7 @@ std::expected<std::uint64_t, checked_arithmetic_error> checked_align_up(
     return *adjusted & ~(alignment - 1);
 }
 
-/** Validate a half-open byte range against a containing size. */
+/** Check that offset and length describe a byte range wholly within total. */
 [[nodiscard]] constexpr bool checked_range(
     std::uint64_t offset,
     std::uint64_t length,
@@ -121,7 +120,7 @@ std::expected<std::uint64_t, checked_arithmetic_error> checked_align_up(
     return end.has_value() && *end <= total;
 }
 
-/** Subtract unsigned integers without wrapping below zero. */
+/** Subtract unsigned integers, returning no  value if the result would be negative. */
 [[nodiscard]] constexpr std::optional<std::uint64_t> checked_sub(
     std::uint64_t left,
     std::uint64_t right) noexcept {
@@ -147,7 +146,7 @@ std::expected<std::uint64_t, checked_arithmetic_error> checked_align_up(
         (std::numeric_limits<std::uint64_t>::max)());
 }
 
-/** Integer expansion ratio and fixed grace allowance. */
+/** Allowed decoded-to-encoded size ratio, plus a fixed allowance in bytes. */
 struct expansion_ratio_limit {
     std::uint32_t numerator;
     std::uint32_t denominator;
@@ -155,8 +154,9 @@ struct expansion_ratio_limit {
 };
 
 /**
- * Compute grace_bytes + floor(encoded * numerator / denominator), rejecting
- * a zero denominator and every intermediate overflow.
+ * Compute the allowed decoded size from the encoded size and expansion ratio
+ * Add grace_bytes after rounding the scaled size down. Return no value for a
+ * zero denominator or overflow, including overflow before division.
  */
 [[nodiscard]] constexpr std::optional<std::uint64_t> scaled_limit(
     std::uint64_t encoded_bytes,

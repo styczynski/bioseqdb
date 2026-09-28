@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/virus_download_paths.cppm
- * @brief NCBI virus package download endpoint fragments.
+ * @brief NCBI downloads for virus genomes and SARS-CoV-2 proteins.
  */
 module;
 

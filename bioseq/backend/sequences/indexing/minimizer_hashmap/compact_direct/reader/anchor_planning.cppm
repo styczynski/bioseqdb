@@ -1,10 +1,10 @@
 /**
  * @file compact_direct/reader/anchor_planning.cppm
- * @brief Query-wave anchor planning for grouped-SoA control scans and compact-direct lookup.
+ * @brief Prepare chaining anchors from a batch of query minimizers.
  *
- * Implements the shared preparation pipeline selected by @c prepare_fragment_anchor_batch
- * route dispatch: occurrence packing, unique-hash planning, and either grouped-SoA
- * multi-pass control/orientation/emission or compact-H32 direct anchor materialization.
+ * Group query occurrences by hash, reject hashes above max_occ, and allocate the
+ * final anchor arrays. The selected route uses grouped-SoA scans or the
+ * compact-direct index to fill those arrays in chaining order.
  */
 
 module;
@@ -50,51 +50,31 @@ import bioseq.parallelism.pipeline_ops;
 export namespace bioseq::indexing {
 
 /**
- * Prepares one immutable anchor batch for a single query wave.
+ * Build a query batch's anchors in canonical_anchor_less order.
  *
- * Route is fixed at compile time by the template flags. Exactly one of three
- * geometries is selected:
- * - @c p_compact_direct: one compact-H32 lookup per unique query hash, then direct
- *   layout, allocation, emission, and per-query local ordering.
- * - @c p_oracle: grouped-SoA control scans indexed by explicit native-width query-plan rows
- *   (baseline matcher for testing).
- * - neither flag: production bucket-direct matcher with membership filter, radix, and
- *   group offsets over hash-sorted occurrence references.
+ * For  grouped-SoA queries, count, target occurrences across fragments, read
+ * positions for accepted hashes, then count forward and reverse anchors before
+ * writing them into the final arrays. Compact-direct queries get counts from
+ * selected descriptors and decode positions once. Sort each route's output slices.
  *
- * @tparam p_oracle When @c true, builds native-width query-plan rows and radix cursors for
- *     the oracle matcher. Mutually exclusive with @c p_compact_direct.
- * @tparam p_compact_direct When @c true, skips grouped-SoA control scans and delegates
- *     anchor materialization to @c prepare_compact_direct_anchors_. Requires an attached
- *     compact-direct index on the reader.
- *
- * @param admission Controller used to admit the returned batch permit and any scratch
- *     growth during preparation. Must match @c scratch.admission_.
- * @param queries Per-query minimizer views and geometry. Each @c minimizers span must
- *     outlive the returned batch because @c prepared_query_anchors stores raw pointers.
- *     Descriptors are validated against the reader profile (@c kmer_size, @c max_hash) and
- *     representable minimizer coordinates.
- * @param max_occ Per-hash posting cap for this wave. Must equal the reader's configured
- *     @c max_occ_. For compact-direct, @c 0 selects the empty-postings fast path without
- *     touching grouped-SoA payload or direct postings.
- * @param scratch Reusable wave planner state. Must be @c idle and bound to @p admission.
- *     On success the state becomes @c outstanding until the caller joins and completes
- *     the wave. On failure @c reset_failed_wave_ restores @c idle.
- * @param verify_compositional_order_for_testing When @c true, checks that each query's
- *     emitted anchors are non-decreasing under @c canonical_anchor_less. Forced @c true
- *     in debug builds regardless of this argument.
- *
- * @return A @c prepared_fragment_anchor_batch with @c ready_ @c true, per-query anchor
- *     arrays owned by the batch permit, and @c sortedness_receipt_ stamped on every query.
- *     Grouped-SoA routes fill forward then reverse slices per block before composing query
- *     order. Compact-direct routes emit one forward and one reverse slice per query.
- *
- * @pre Reader @c ready_ is @c true and backing payload matches the selected route.
- * @pre @c scratch.wave_state_ is @c idle (single-wave exclusivity).
- *
- * @throws persisted_minimizer_lookup_error On reader readiness or route-state mismatch,
- *     invalid query descriptors or occurrence layout, scratch identity or busy-state
- *     conflict, admission or allocation failure, wire decode errors surfaced from grouped
- *     passes, stats pass-equation disagreement, or compositional order verification failure.
+ * @tparam p_oracle Use explcit query plans for the test matcher.
+ * @tparam p_compact_direct Use the attached compact-direct index Cannot be
+ *     combined with p_oracle.
+ * @param admission Memory controller shared by scratch and the returned batch.
+ * @param queries Query minimizers and lengths. The minimizer storage must
+ *     outlive the returned batch.
+ * @param max_occ Per-hash  target occurrence limit. Must equal the reader's
+ *     configured limit. Zero produces empty anchors on the compact-direct route.
+ * @param scratch Reusable storage for one batch at a time. Must be idle and use
+ *     admission. After success, call complete_wave_after_join once all users
+ *     have joined. Failures after claiming scratch restore its idle state.
+ * @param verify_compositional_order_for_testing Check every adjacent anchor
+ *     pair. Debug builds always run this check.
+ * @return A ready batch owning its anchor arrays and their memory permit.
+ * @pre The reader is ready and has the backing storage for the selected route.
+ * @throws persisted_minimizer_lookup_error If query or reader state is invalid,
+ *     memory cannot be admitted or allocated, or decoding, counts, or ordering
+ *     checks fail.
  */
 template <bool p_oracle, bool p_compact_direct>
 [[nodiscard]] inline prepared_fragment_anchor_batch
@@ -142,18 +122,16 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         throw persisted_minimizer_lookup_error(
             "fragment-native grouped-SoA query policy is inconsistent");
     }
-    // Freeze the manifest-selected wire route once for the complete wave.
-    // Offset width remains an entry-local dispatch inside the fixed leaf family.
+    // Choose the hash, count, and position widths once for this batch.
+    // Each entry still selects its own prefix offset width.
     [[maybe_unused]] const bool use_fixed_h32_c16_p16 =
         wire_dispatch_ == fragment_encoding_dispatch::h32_c16_p16;
     static_assert(!(p_oracle && p_compact_direct));
     constexpr bool use_bucket_direct_matcher = !p_oracle && !p_compact_direct;
 
-    // Acquire the reusable scratch before reading or mutating any of its
-    // non-atomic owners. The busy state remains published through the
-    // synchronous joins that borrow the prepared batch and is cleared by
-    // complete_wave_after_join. A failed preparation clears it in the
-    // catch path below, so there is no reentrant vector/permit race.
+    // Claim scratch before touching its arrays or permit. It  stays busy
+    // until complete_wave_after_join, which the caller invokes after all
+    // users finish. The catch block releases this claim if preparation fails.
     query_wave_scratch::wave_state expected_state = query_wave_scratch::wave_state::idle;
     if (!scratch.wave_state_.compare_exchange_strong(expected_state,
                                                      query_wave_scratch::wave_state::preparing,
@@ -170,10 +148,9 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         scratch.clear_wave_storage_noexcept_();
         scratch.select_occurrence_hash_width_(profile_.hash_width);
         if constexpr (p_compact_direct) {
-            // This route never probes grouped-SoA controls.  Retained Bloom,
-            // radix, group-directory, and atomic-counter owners from a
-            // preceding control-scan wave are released before direct planning
-            // so they cannot overlap the accepted-only direct plan.
+            // Direct lookup needs none of the control-scan filter, radix,
+            // group offsets, or counters. Free these buffers before
+            // allocating the plan of accepted direct-index hashes.
             {
                 std::vector<std::uint32_t> no_group_offsets;
                 std::vector<std::uint32_t> no_radix;
@@ -296,10 +273,9 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         }
 
         if constexpr (p_compact_direct) {
-            // Ordinary seed lookup treats max_occ==0 as selecting no
-            // postings.  Preserve that policy without calling the compact
-            // codec's positive-cap query API and without touching either
-            // grouped-SoA payload or direct postings.
+            // A zero occurrence limit selects no postings. Return empty
+            // anchors here because the compact index  ljokup requires a
+            // positive limit.
             if (max_occ == 0) {
                 batch.stats_.compact_direct_waves = 1u;
                 batch.stats_.compositional_sortedness_receipts = queries.size();
@@ -642,7 +618,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             const std::uint32_t max_occ_u32 = static_cast<std::uint32_t>(max_occ);
             std::atomic<std::uint32_t> first_error{0u};
 
-            // Pass 1: controls and saturated counts only.
+            // Pass 1 counts target occurrences from hashes and stored counts.
             const std::uint64_t control_count_started_ns = stage_now_ns_();
             parallel_entries_(
                 block_count_,
@@ -795,9 +771,9 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     return query.anchor_count != 0u;
                 });
             if (!have_accepted_anchors) {
-                // Matched heavy controls still require prefix/count
-                // authentication, but no layout, position walk, final
-                // allocation, emission pass, or sort is needed.
+                // Every matched hash exceeded max_occ. Check its prefix offsets
+                // against the stored count, then, return empty anchors.
+                // Position reads and layout allocation are unnecessary
                 if (have_matched_controls) {
                     const std::uint64_t rejected_validation_started_ns = stage_now_ns_();
                     first_error.store(0u, std::memory_order_relaxed);
@@ -894,9 +870,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 }
             } else {
 
-                // Layout state is activated only after Pass 1 establishes the
-                // exact accepted anchor counts. This keeps failed count waves
-                // from publishing/zeroing partially active layout owners.
+                // Allocate and clear layout state after Pass 1 succeeds and
+                // establishes how many anchors each query needs.
                 const std::uint64_t orientation_layout_started_ns = stage_now_ns_();
                 if (queries.size() != 0u &&
                     block_count_ > (std::numeric_limits<std::size_t>::max)() / queries.size()) {
@@ -926,7 +901,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                           scratch.block_stats_.end(),
                           fragment_block_wave_stats{});
 
-                // Pass 2: accepted positions only, counting orientation.
+                // Pass 2 counts forward and reverse anchors from accepted positions.
                 first_error.store(0u, std::memory_order_relaxed);
                 parallel_entries_(
                     block_count_,
@@ -1083,7 +1058,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                         std::to_string(static_cast<unsigned>(*error)));
                 }
 
-                // Prefix [all forward blocks][all reverse blocks].
+                // Place all forward block slices before all reverse block slices.
                 for (std::size_t query_ordinal = 0u; query_ordinal < queries.size();
                      ++query_ordinal) {
                     std::uint64_t cursor = 0u;
@@ -1133,9 +1108,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                             "fragment-native exact anchor size overflow");
                     }
                 }
-                // Reserve the complete immutable result before allocating its
-                // first per-query array. A later query can therefore never
-                // discover an admission failure after earlier anchors exist.
+                // Admit all final anchor arrays before allocating the first one,
+                // so memory  admission covers the complete result.
                 if (!batch.permit_.grow_to(final_owned_bytes)) {
                     throw persisted_minimizer_lookup_error(
                         "fragment-native exact anchor admission failed");
@@ -1150,8 +1124,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                             static_cast<std::size_t>(query.anchor_count));
                     }
                 } catch (const std::bad_alloc&) {
-                    // Batch destruction releases every earlier query array
-                    // before returning the aggregate permit.
+                    // Destruction frees any arrays already allocated before
+                    // releasing the batch's memory permit.
                     throw persisted_minimizer_lookup_error(
                         "fragment-native exact anchor allocation failed");
                 }
@@ -1160,9 +1134,9 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 batch.stats_.orientation_layout_ns =
                     elapsed_stage_ns_(orientation_layout_started_ns);
 
-                // Pass 3: direct exact emission. Primary and tie sorting use
-                // separate joined fragment barriers below so their wall times
-                // remain independently attributable.
+                // Pass 3 writes accepted anchors into the allocated slices.
+                // Primary sorting and tie sorting run after emission joins,
+                // with separate timers for each stage.
                 const std::uint64_t direct_emission_started_ns = stage_now_ns_();
                 first_error.store(0u, std::memory_order_relaxed);
                 parallel_entries_(
@@ -1517,14 +1491,12 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             }
         }
 
-        // Compositional sortedness authority: the control-scan route fills
-        // forward/reverse slices inside strictly ordered disjoint blocks;
-        // the compact-direct route fills one exact forward and one exact
-        // reverse slice per query. Both routes apply the same primary and
-        // tie stages inside every resulting slice. canonical_anchor_less
-        // encodes orientation as the ref_bits MSB, so the forward slices
-        // followed by the reverse slices compose without a further O(A)
-        // production traversal.
+        // Grouped scans sort each block's forward and reverse slices.
+        // The blocks cover disjoint qeference intervals in increasing order.
+        // Direct lookup sorts one full slice per orientation for each query.
+        // Since canonical_anchor_less orders forward anchors first, joining
+        // these slices gives the final order. Debug builds check every adjacent
+        // pair  below. Release builds run this check when the caller requests it.
         batch.stats_.compositional_sortedness_receipts = queries.size();
 #ifndef NDEBUG
         verify_compositional_order_for_testing = true;

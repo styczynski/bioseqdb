@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies storage bucket math, locator bytes, and fragment geometry.
+ * @brief Check sequence-size buckets, stored locator bytes, and fragment boundaries.
  */
 
 #include <cstring>
@@ -15,31 +15,31 @@ using bioseq::storage::make_sequence_bucket_bit_thresholds;
 using bioseq::storage::sequence_locator;
 using bioseq::storage::sequence_size_bit_width;
 
-/// Lowest bit-width threshold in the default sequence bucket table.
+/// Upper bit-width limit of the first default bucket.
 constexpr std::size_t minimum_bits = 8;
-/// First bit width represented by the default table's tail bucket.
+/// First bit width placed in the final default bucket.
 constexpr std::size_t maximum_bits = 42;
 
 /**
- * @brief Resolves a sequence size through the default bucket configuration.
- * @param[in] size Logical sequence length in symbols.
- * @return Zero-based storage bucket index.
+ * @brief Find  the default storage bucket for a sequence length
+ * @param[in] size Number of symbols.
+ * @return Zero-based bucket index.
  */
 [[nodiscard]] std::size_t bucket_of(std::uint64_t size) {
     return bioseq::storage::sequence_bucket_index<std::uint64_t, minimum_bits, maximum_bits>(size);
 }
 
 /**
- * @brief Computes the bucket oracle without consulting the table under test.
- * @param[in] length_bits Bit width returned by `sequence_size_bit_width`.
- * @return Expected bucket for the default threshold window.
+ * @brief Calculate the expected default bucket independently of its threshold table.
+ * @param[in] length_bits Width returned by sequence_size_bit_width.
+ * @return Expected bucket index.
  */
 [[nodiscard]] std::size_t expected_bucket_for_bits(std::size_t length_bits) {
     if (length_bits <= 8u)
-        return 0u; // bucket 0 covers bits in [0, 8]
+        return 0u; // The first bucket covers widths through 8 bits.
     if (length_bits <= 41u)
         return length_bits - 8u;
-    return 34u; // bucket 34 covers L in [42, 64]
+    return 34u; // The final bucket covers widths from 42 through 64 bits.
 }
 
 } // namespace
@@ -49,11 +49,11 @@ TEST_CASE("bucket threshold table has 35 entries with the canonical cut-points",
     constexpr auto thresholds =
         make_sequence_bucket_bit_thresholds<std::uint64_t, minimum_bits, maximum_bits>();
     REQUIRE(thresholds.size() == 35u);
-    REQUIRE(thresholds[0] == 8u); // first bucket: everything up to 8 bits
+    REQUIRE(thresholds[0] == 8u); // First bucket.
     REQUIRE(thresholds[1] == 9u);
-    REQUIRE(thresholds[33] == 41u); // last single-bit bucket
-    REQUIRE(thresholds[34] == 64u); // tail bucket: [42, 64] bits
-    // Strictly increasing.
+    REQUIRE(thresholds[33] == 41u); // Last bucket covering a single bit width.
+    REQUIRE(thresholds[34] == 64u); // Final bucket covers widths 42 through 64.
+    // Thresholds must increase strictly.
     for (std::size_t i = 1; i < thresholds.size(); ++i) {
         REQUIRE(thresholds[i] > thresholds[i - 1]);
     }
@@ -61,7 +61,7 @@ TEST_CASE("bucket threshold table has 35 entries with the canonical cut-points",
 
 TEST_CASE("sequence_size_bit_width matches ceil-log2 boundary semantics",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // need = (size > 1 ? size - 1 : 1); L = bit_width(need).
+    // Use enough bits for  the last, zero-based position, with a miimum of one bit.
     REQUIRE(sequence_size_bit_width(0u) == 1u);
     REQUIRE(sequence_size_bit_width(1u) == 1u);
     REQUIRE(sequence_size_bit_width(2u) == 1u);
@@ -73,8 +73,7 @@ TEST_CASE("sequence_size_bit_width matches ceil-log2 boundary semantics",
 
 TEST_CASE("sequence_bucket_index routes every L in [1, 63] to the expected bucket",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // size = 2^L gives sequence_size_bit_width(2^L) = bit_width(2^L - 1) = L, so we
-    // can sweep every reachable length-log2 by powers of two.
+    // Powers of two exercise each position width from 1 through 63 bits.
     for (std::size_t length_bits = 1; length_bits <= 63u; ++length_bits) {
         const std::uint64_t size = std::uint64_t{1} << length_bits;
         INFO("length_bits=" << length_bits << " size=" << size);
@@ -85,15 +84,15 @@ TEST_CASE("sequence_bucket_index routes every L in [1, 63] to the expected bucke
 
 TEST_CASE("bucket boundaries 8/9 and 41/42 land in adjacent buckets",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // L = 8 -> bucket 0, L = 9 -> bucket 1.
+    // Check the transition out of the first bucket.
     REQUIRE(bucket_of(std::uint64_t{1} << 8) == 0u);
     REQUIRE(bucket_of(std::uint64_t{1} << 9) == 1u);
-    // L = 41 -> bucket 33, L = 42 -> bucket 34 (the tail bucket).
+    // Check the transition into the final bucket.
     REQUIRE(bucket_of(std::uint64_t{1} << 41) == 33u);
     REQUIRE(bucket_of(std::uint64_t{1} << 42) == 34u);
-    // Saturation: the largest representable size stays in the tail bucket.
+    // The largest representable length belongs to the final bucket.
     REQUIRE(bucket_of(~std::uint64_t{0}) == 34u);
-    // Tiny sizes collapse into bucket 0.
+    // Empty and short sequences share the first bucket.
     REQUIRE(bucket_of(0u) == 0u);
     REQUIRE(bucket_of(1u) == 0u);
     REQUIRE(bucket_of(256u) == 0u);
@@ -122,8 +121,7 @@ TEST_CASE("sequence_locator is a 40-byte standard-layout POD that round-trips th
     loc.first_fragment_row = 0xFEDCBA9876543210ull;
     loc.source_epoch = 0x1020304050607080ull;
 
-    // memcpy out and back — the encode/decode helpers in
-    // the persisted locator codec uses for the sequence stub payload.
+    // Round-trip the locator through the bytes stored in a sequence stub.
     std::array<unsigned char, sizeof(sequence_locator)> bytes{};
     std::memcpy(bytes.data(), &loc, sizeof(loc));
 
@@ -138,7 +136,7 @@ TEST_CASE("sequence_locator is a 40-byte standard-layout POD that round-trips th
     REQUIRE(decoded.first_fragment_row == loc.first_fragment_row);
     REQUIRE(decoded.source_epoch == loc.source_epoch);
 
-    // The fixed offsets the pg_compact_sequence stub reader depends on.
+    // The stored locator reader depends on these field offsets.
     REQUIRE(offsetof(sequence_locator, fragment_count) == 8u);
     REQUIRE(offsetof(sequence_locator, logical_length) == 16u);
     REQUIRE(offsetof(sequence_locator, first_fragment_row) == 24u);

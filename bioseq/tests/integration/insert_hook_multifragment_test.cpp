@@ -1,9 +1,9 @@
 /**
  * @file insert_hook_multifragment_test.cpp
- * @brief Verifies insert-time indexing for multi-fragment sequences.
+ * @brief Checks insert-time indexing for sequences spanning several fragments.
  *
- * One insert must build every fragment and both default indexes. Stored
- * assembly must match recomputation for the single-segment DNA4 fixture.
+ * One insert must populate fragment minimizers and symbol counts. Searching
+ * with stored minimizers must return the same coordinates as recomputing them
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -53,7 +53,7 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
     exec_sql(ctx,
              "CREATE TABLE insert_hook_multifragment (pk int, target bioseq.seq('dna4',32), "
              "query bioseq.seq('dna4',32)) USING bioseq;");
-    const std::string target = generate_dna4(200000, 1234567); // ~7 fragments @ 32768 bp
+    const std::string target = generate_dna4(200000, 1234567); // spans seven fragments
     const std::string query = target.substr(60000, 2000);      // an exact 2 kbp substring
     exec_sqlf(ctx,
               "INSERT INTO insert_hook_multifragment VALUES (1, '{}'::bioseq.seq('dna4',32), "
@@ -65,15 +65,15 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
         query_scalar_int(ctx,
                          "SELECT bioseq.column_row_number('insert_hook_multifragment'::regclass, "
                          "ctid) FROM insert_hook_multifragment LIMIT 1");
-    // One sub_key is written per fragment: ceil(200000/32768) = 7.
+    // The 200,000-base target needs seven fragment sub-keys at this fragment size.
     REQUIRE(index_distinct_sub_keys(
                 ctx, "minimizers_per_fragment", "insert_hook_multifragment", sequence_row_number) >=
             7);
-    // Both default on-insert indexes materialise from the single insert.
+    // This insert must populate both indexes with an UPDATE_ON_INSERT policy.
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "insert_hook_multifragment") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_multifragment") > 0);
 
-    // dna4, single whole-sequence segment => assemble == recompute exactly.
+    // Stored and recomputed minimizers cust produce the same target coordinates.
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = match_set(ctx, "insert_hook_multifragment");
     REQUIRE(!assembled.empty());
@@ -95,14 +95,12 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     exec_sql(ctx,
              "INSERT INTO insert_hook_manual_symbol_counts VALUES (1, "
              "'AAAACCCCGGGGTTTT'::bioseq.seq('dna4',32));");
-    // Per-fragment chunks materialise. The manual symbol_counts policy does not.
+    // Fragment minimizers are stored on insert. Symbol counts stay absent under the manual policy.
     REQUIRE(index_table_row_count(
                 ctx, "minimizers_per_fragment", "insert_hook_manual_symbol_counts") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_manual_symbol_counts") == 0);
-    // symbol_count returns the exact tally through the recompute fallback.
-    // Row admission is checked separately from projection. Scalar and vector
-    // executors must see the same inserted pk=1 row. EXPLAIN ANALYZE must show
-    // that chunk pruning retained its only chunk.
+    // Check that both scalar and vector scans return  the row before checking its
+    // computed symbol counts. EXPLAIN ANALYZE should report no removed chunk groups.
     guc_scope sequence_read_off(ctx, "bioseq.index.sequence_read.enabled", "off");
     ctx.clear_notices();
     constexpr std::string_view row_count_query =
@@ -133,7 +131,6 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     REQUIRE(query_scalar_int(ctx,
                              "SELECT bioseq.symbol_count(seq0,'T') FROM "
                              "insert_hook_manual_symbol_counts WHERE pk=1") == 4);
-    // Repeated calls must retain one copy of the sequence relation and
-    // registered snapshot in the ResourceOwner.
+    // Repeated symbol-count calls must, release their PostgreSQL resources cleanly.
     REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 }

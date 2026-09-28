@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_maintenance_test.cpp
- * @brief Exercises metadata intervals, shard maintenance, and orphan reaping.
+ * @brief Tests metadata ages, shard cleanup, and races while removing orphan tables.
  */
 
 #include <libpq-fe.h>
@@ -327,9 +327,8 @@ TEST_CASE(
   auto ctx = fresh_context({k_reaper_missing_relation_table});
   seed_small_bioseq_column(ctx, k_reaper_missing_relation_table);
 
-  // A catalog row whose physical sub-table OID no longer exists is reported
-  // with its exact logical key and removed. Rollback must restore
-  // both the row mutation and the reaper's catalog/relation work.
+  // Point a catalog row at a missing table and check that the reaper reports
+  // its full key. Rolling back must  restore the row and leave its table intact.
   exec_sql(ctx, "BEGIN;");
   const row_t stale_key = query_one(
       ctx,
@@ -403,8 +402,8 @@ TEST_CASE(
                   stale_key[3].value(),
                   stale_key[4].value())) == 1);
 
-  // Direction B: DROP work follows the caller's transaction, so abort restores
-  // the relation and commit makes the exact same sweep durable.
+  // Removing an orphan table belongs to the caller's transaction.
+  // Rollback restores the table, while commit keeps it removed
   exec_sqlf(ctx, "CREATE TABLE {} (id integer);", k_transactional_orphan_table);
   exec_sql(ctx, "BEGIN;");
   REQUIRE(
@@ -530,8 +529,8 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
   auto ctx = fresh_context();
   exec_sqlf(ctx, "DROP TABLE IF EXISTS {};", k_reaper_race_table);
-  // Remove the orphan table before arming the one-shot
-  // barrier, so the target below is the candidate stopped at the seam.
+  // Clear existing orphans before arming the barrir, so it pauses the reaper
+  // on the table created below.
   static_cast<void>(query_rows(
       ctx,
       "SELECT action, target "
@@ -830,9 +829,8 @@ TEST_CASE(
           "AccessExclusiveLock",
           false);
 
-  // The production writer order is physical shard first, catalog row second.
-  // Once the reaper is waiting for the physical relation, publish the
-  // reference and commit; revalidation must then preserve both objects.
+  // Follow the writer's lock order: lock the shard, then add its catalog row.
+  // After this commit, the waiting reaper must see the reference and keep both.
   exec_sql(
       writer,
       fmt::format(

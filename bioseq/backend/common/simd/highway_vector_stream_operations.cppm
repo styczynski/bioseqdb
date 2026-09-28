@@ -1,6 +1,6 @@
 /**
  * @file highway_vector_stream_operations.cppm
- * @brief Defines lifted Highway operation adapters for vector streams.
+ * @brief Highway operations called once for each vector-stream slot.
  */
 module;
 #include <hwy/highway.h>
@@ -15,10 +15,10 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace vector_stream_detail {
 
-// The structural generator inserts a target attribute into every callable in
-// this namespace. Keep adapter bodies directly source-spelled so Clang exposes
-// one writable declaration/body geometry instead of macro expansion locations.
-/** @brief Adapts Highway addition for stream lifting. */
+// The generator adds a CPU target  attribute to each function herg.
+// Write the bodies directly so it can edit their source locations
+// without, following macro expansions.
+/** @brief Adds corresponding SIMD lanes. */
 struct add_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -27,7 +27,7 @@ struct add_operation {
     }
 };
 
-/** @brief Adapts Highway subtraction for stream lifting. */
+/** @brief Subtracts corresponding SIMD lanes. */
 struct subtract_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -36,7 +36,7 @@ struct subtract_operation {
     }
 };
 
-/** @brief Adapts Highway multiplication for stream lifting. */
+/** @brief Multiplies corresponding SIMD lanes. */
 struct multiply_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -45,7 +45,7 @@ struct multiply_operation {
     }
 };
 
-/** @brief Adapts Highway lane-wise minimum for stream lifting. */
+/** @brief Selects the smaller value in each pair of lanes. */
 struct minimum_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -54,7 +54,7 @@ struct minimum_operation {
     }
 };
 
-/** @brief Adapts Highway lane-wise maximum for stream lifting. */
+/** @brief Selects the larger value in each pair of lanes. */
 struct maximum_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -63,7 +63,7 @@ struct maximum_operation {
     }
 };
 
-/** @brief Adapts Highway bitwise AND for stream lifting. */
+/** @brief Applies bitwise AND to vectors or masks. */
 struct bit_and_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -72,7 +72,7 @@ struct bit_and_operation {
     }
 };
 
-/** @brief Adapts Highway bitwise OR for stream lifting. */
+/** @brief Applies bitwise OR to vectors or masks. */
 struct bit_or_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -81,7 +81,7 @@ struct bit_or_operation {
     }
 };
 
-/** @brief Adapts Highway bitwise XOR for stream lifting. */
+/** @brief Applies bitwise XOR to vectors or masks. */
 struct bit_xor_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -90,7 +90,7 @@ struct bit_xor_operation {
     }
 };
 
-/** @brief Adapts Highway bitwise AND-NOT for stream lifting. */
+/** @brief Computes (~first) & second for vectors or masks. */
 struct bit_and_not_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -99,7 +99,7 @@ struct bit_and_not_operation {
     }
 };
 
-/** @brief Adapts Highway bitwise complement for stream lifting. */
+/** @brief Complements vector or mask bits. */
 struct bit_not_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -108,7 +108,7 @@ struct bit_not_operation {
     }
 };
 
-/** @brief Adapts Highway arithmetic negation for stream lifting. */
+/** @brief Negates each lane. */
 struct negate_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -117,7 +117,7 @@ struct negate_operation {
     }
 };
 
-/** @brief Adapts Highway absolute value for stream lifting. */
+/** @brief Takes the absolute value of each lane. */
 struct absolute_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -126,7 +126,7 @@ struct absolute_operation {
     }
 };
 
-/** @brief Adapts Highway equality comparison for stream lifting. */
+/** @brief Returns masks for equal lanes. */
 struct equal_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -135,7 +135,7 @@ struct equal_operation {
     }
 };
 
-/** @brief Adapts Highway inequality comparison for stream lifting. */
+/** @brief Returns masks for unequal lanes. */
 struct not_equal_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -144,7 +144,7 @@ struct not_equal_operation {
     }
 };
 
-/** @brief Adapts Highway less-than comparison for stream lifting. */
+/** @brief Returns masks for lanes where the first value is smaller. */
 struct less_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -153,7 +153,7 @@ struct less_operation {
     }
 };
 
-/** @brief Adapts Highway greater-than comparison for stream lifting. */
+/** @brief Returns masks for lanes where  the first value is larger. */
 struct greater_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -162,7 +162,7 @@ struct greater_operation {
     }
 };
 
-/** @brief Adapts Highway less-than-or-equal comparison for stream lifting. */
+/** @brief Returns masks for lanes where the first value is at most the second. */
 struct less_equal_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -171,7 +171,7 @@ struct less_equal_operation {
     }
 };
 
-/** @brief Adapts Highway greater-than-or-equal comparison for stream lifting. */
+/** @brief Returns masks for lanes where the first value is at least the second. */
 struct greater_equal_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -180,7 +180,7 @@ struct greater_equal_operation {
     }
 };
 
-/** @brief Adapts Highway variable-count left shift for stream lifting. */
+/** @brief Shifts each lane left by the same runtime bit count. */
 struct shift_left_same_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -190,7 +190,7 @@ struct shift_left_same_operation {
     }
 };
 
-/** @brief Adapts Highway variable-count right shift for stream lifting. */
+/** @brief Shifts each lane right by the same runtime bit count. */
 struct shift_right_same_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -200,7 +200,7 @@ struct shift_right_same_operation {
     }
 };
 
-/** @brief Adapts Highway vector-to-mask conversion for stream lifting. */
+/** @brief Converts a vector containing mask bits to a Highway mask. */
 struct mask_from_vector_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -210,14 +210,14 @@ struct mask_from_vector_operation {
     }
 };
 
-/** @brief Preserves a target-native predicate for conditional Highway operations. */
+/** @brief Forwards a Highway mask to conditional operations unchanged. */
 template <class p_mask_type>
 [[gnu::always_inline]] HWY_INLINE decltype(auto)
 native_predicate(p_mask_type&& mask_bits) {
     return std::forward<p_mask_type>(mask_bits);
 }
 
-/** @brief Adapts Highway's three-argument conditional selection. */
+/** @brief Selects yes where the mask is true and no elsewhere. */
 struct if_then_else_operation {
     template <class p_mask_type, class p_yes_type, class p_no_type>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -231,7 +231,7 @@ struct if_then_else_operation {
     }
 };
 
-/** @brief Adapts Highway's two-argument true-or-zero selection. */
+/** @brief Selects yes where the mask is true and zerp elsewhere */
 struct if_then_else_zero_operation {
     template <class p_mask_type, class p_yes_type>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -243,7 +243,7 @@ struct if_then_else_zero_operation {
     }
 };
 
-/** @brief Adapts Highway's two-argument zero-or-false selection. */
+/** @brief Selects zero where the mask is true and no elsewhere. */
 struct if_then_zero_else_operation {
     template <class p_mask_type, class p_no_type>
     [[gnu::always_inline]] HWY_INLINE static auto apply(

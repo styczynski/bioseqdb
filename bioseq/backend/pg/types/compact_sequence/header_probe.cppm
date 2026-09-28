@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exposes metadata-only sequence length inspection without the compact-sequence type graph.
+ * Expose sequence length inspection without importing the  sequence implementation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -11,9 +11,9 @@ export module bioseq.postgres.types.compact_sequence.header_probe;
 export namespace bioseq::postgres {
 
 /**
- * @brief Reads the logical sequence length through the compact-sequence header validator.
- * @param input PostgreSQL datum containing a bioseq sequence value.
- * @return The validated logical length in letters.
+ * @brief Validate the sequence header and read its length without reading letters.
+ * @param input PostgreSQL Datum containing a sequence.
+ * @return Number of letters recorded in the validated header
  */
 [[nodiscard]] std::uint64_t compact_sequence_header_bp_length(Datum input);
 

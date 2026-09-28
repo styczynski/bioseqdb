@@ -1,6 +1,6 @@
 /**
  * @file vulkan_shader_cache_test.cpp
- * @brief Tests shader variants, seed-job ABI, and cache-key construction.
+ * @brief Checks shader variants, GPU buffer layouts and cache keys.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -203,7 +203,7 @@ TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-pos
         };
         const auto spirv = gv::compile_shader_spirv(request);
         REQUIRE_FALSE(spirv.empty());
-        CHECK(spirv_opcode_count(spirv, 241u) > 0u); // OpAtomicOr status.
+        CHECK(spirv_opcode_count(spirv, 241u) > 0u); // OpAtomicOr records shader status flags.
         const auto layout = gv::scan_spirv_layout(spirv);
         CHECK(layout.has_binding_array_stride(0u, 1u, 104u));
         CHECK(layout.has_binding_struct_offsets(0u,
@@ -417,7 +417,8 @@ TEST_CASE("seed jobs require strict XOR resident representation",
 
 TEST_CASE("grouped-SoA bindings window large aggregates without payload copies",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
-    // Metadata alone represents a 6-GB aggregate; the test allocates 208 bytes.
+    // Two 104-byte descriptors describe about 6 GB of controls and 2 GB of positions.
+    // The test checks buffer windows without allocating those payloads.
     const auto partition = [](std::uint32_t ordinal, std::uint64_t controls,
                               std::uint64_t positions, std::uint32_t count) {
         return gv::gpu_grouped_soa_resident_partition_descriptor{
@@ -1113,9 +1114,8 @@ TEST_CASE("fixed radix workgroups have one authoritative cache ABI",
         CAPTURE(gv::cache_file_stem(key));
         REQUIRE(gv::is_shader_variant_key_valid(key));
 
-        // The established key uses local_size=1 as a selector, while the
-        // algorithm has one invocation per radix bin. Reflection, validation,
-        // and archive selection must agree on the compiled 256-lane geometry.
+        // The key's local_size=1 selects this radix variant. It still launches
+        // 256 threads, one, per radix bin, and the compiled workgroup metadata must agree.
         const gv::shader_workgroup_size expected = gv::expected_shader_workgroup_size(key);
         REQUIRE(expected == (gv::shader_workgroup_size{256u, 1u, 1u}));
 

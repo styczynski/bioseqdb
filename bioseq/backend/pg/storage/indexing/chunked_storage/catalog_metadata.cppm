@@ -1,6 +1,6 @@
 /**
  * @file catalog_metadata.cppm
- * @brief Defines physical catalog naming, metadata-age tracking, locks, and generation identifiers.
+ * @brief Name index tables, record update times, and allocate generation IDs.
  */
 module;
 
@@ -42,8 +42,8 @@ import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_
 
 import :catalog_contracts;
 export namespace bioseq::storage::indexing {
-/// Compile-time-ish abbreviation for an index name (keeps the physical name
-/// inside NAMEDATALEN). Unknown names fall back to a stable short hash.
+/// Shorten an index name for PostgreSQL table names. Known indexes have fixed
+/// abbreviations. Other names contribute up to four lowercase letters or digits.
 [[nodiscard]] inline std::string short_index_for(std::string_view name) {
     if (name == k_minimizers_per_fragment_index_name)
         return "mpf";
@@ -53,7 +53,7 @@ export namespace bioseq::storage::indexing {
         return "sc";
     if (name == "test_table_rowcount")
         return "ttr";
-    // generic fallback: first 4 chars + length, still deterministic
+    // Prefix the first four lowercase letters or digits wth ix.
     std::string out = "ix";
     for (char c : name) {
         if (out.size() >= 6)
@@ -64,7 +64,7 @@ export namespace bioseq::storage::indexing {
     return out;
 }
 
-/// Stable 64-bit FNV-1a over the logical identity tuple, hex-rendered.
+/// Hash the database, storage location, column, and index name into a stable 64-bit value.
 [[nodiscard]] inline std::uint64_t
 identity_hash64(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view name) {
     std::uint64_t hash_value = 1469598103934665603ull;
@@ -100,7 +100,7 @@ identity_hash64(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view
     pg_unreachable();
 }
 
-/// Format one canonical per-sequence index relation name.
+/// Build the per-sequence index table name, checking PostgreSQL's name-length limit.
 [[nodiscard]] inline std::string format_seqidx_name(std::string_view name,
                                                     Oid db,
                                                     Oid spc,
@@ -117,7 +117,7 @@ identity_hash64(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view
         derived_index_name_too_long(out);
     return out;
 }
-/// Format one canonical table-wide index relation name.
+/// Build the table-wide  index name, checking PostgreSQL's name-length limit.
 [[nodiscard]] inline std::string format_seqidxtab_name(
     std::string_view name, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::int32_t shard) {
     std::string out = fmt::format("seqidxtab_{}_{:016x}_{}",
@@ -129,17 +129,18 @@ identity_hash64(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view
     return out;
 }
 
-/// Resolve the internal schema from within an existing PostgreSQL boundary.
+/// Look up bioseq_internal. Call this inside invoke_pg_as_cpp() so
+/// PostgreSQL errors become C++ exceptions.
 [[nodiscard]] inline Oid bioseq_internal_ns_pg_leaf() {
     return get_namespace_oid("bioseq_internal", false);
 }
 
-/// Resolve the internal schema through the C++ PostgreSQL boundary.
+/// Look up bioseq_internal and translate PostgreSQL failures into C++ exceptions.
 [[nodiscard]] inline Oid bioseq_internal_ns() {
     return bioseq::postgres::support::invoke_pg_as_cpp([] { return bioseq_internal_ns_pg_leaf(); });
 }
 
-/// Runs one DDL statement inside a rollback-safe SQL subtransaction.
+/// Run internal DDL in a subtransaction and commit it only after SPI succeeds.
 inline void run_internal_ddl(const char* ddl) {
     auto subtransaction = bioseq::postgres::support::subtransaction::begin();
     bioseq::postgres::support::spi_session spi;
@@ -158,7 +159,7 @@ inline void run_internal_ddl(const char* ddl) {
     subtransaction.commit();
 }
 
-/// Persistence keyword inherited from the user relation (UNLOGGED if parent is).
+/// Return UNLOGGED for an unlogged parent, or an empty keyword otherwise.
 [[nodiscard]] inline const char* persistence_kw_for(Oid user_relid) {
     char persist = 'p';
     Relation r = bioseq::postgres::support::try_open_postgres_relation(user_relid, AccessShareLock);
@@ -169,7 +170,7 @@ inline void run_internal_ddl(const char* ddl) {
     return persist == 'u' ? "UNLOGGED" : "";
 }
 
-/// Raise a generation-storage error from within a PostgreSQL leaf.
+/// Raise a PostgreSQL storage error. Call this inside invoke_pg_as_cpp().
 [[noreturn]] inline void minimizer_generation_storage_error_pg_leaf(std::string_view message) {
     ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -179,20 +180,20 @@ inline void run_internal_ddl(const char* ddl) {
     pg_unreachable();
 }
 
-/// Translate a generation-storage PostgreSQL error for C++ unwinding.
+/// Convert a PostgreSQL storage error into a C++ exception for normal unwinding
 [[noreturn]] void minimizer_generation_storage_error_as_cpp(std::string_view message) {
     bioseq::postgres::support::invoke_pg_as_cpp(
         [message] { minimizer_generation_storage_error_pg_leaf(message); });
     pg_unreachable();
 }
 
-/// Re-enter PostgreSQL only after all owning C++ values have unwound.
+/// Report a storage error through the C++ exception wrapper.
 [[noreturn]] void minimizer_generation_storage_error(std::string_view message) {
     minimizer_generation_storage_error_as_cpp(message);
     pg_unreachable();
 }
 
-/// Validate the exact metadata-age-log primary-key descriptor.
+/// Require a valid, unique primary key on the four metadata-age  identity columns.
 inline void validate_metadata_age_log_primary_key(Relation relation) {
     const Oid primary_oid = bioseq::postgres::support::invoke_pg_as_cpp(
         [relation] { return bioseq::postgres::support::find_primary_key_oid(relation); });
@@ -217,9 +218,8 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
 }
 
 /**
- * Insert or refresh one metadata-age row using the generated row codec as the
- * sole C++/Datum boundary. SPI owns only the fixed SQL statement. No value is
- * string-formatted into SQL.
+ * Record the current time for an index, inserting its metadata-age row if needed.
+ * Check the catalog schema first and pass values as typed SQL parameters.
  */
 [[nodiscard]] inline std::uint64_t upsert_metadata_age_log_pg(Oid user_relid,
                                                               Oid main_relfilenode,
@@ -339,9 +339,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
     }
 }
 
-/**
- * Delete one metadata-age row through generated codec-encoded key Datums.
- */
+/** Delete an index's metadata-age row and, return whether a row was removed. */
 [[nodiscard]] inline std::uint64_t delete_metadata_age_log_pg(Oid user_relid,
                                                               Oid main_relfilenode,
                                                               std::int16_t column_attno,
@@ -456,8 +454,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
     }
 }
 
-/// Stable administration-lock key shared by reset and publication. The hash
-/// remains byte-for-byte identical across both operations.
+/// Derive the same transaction-lock key for cpearing and publishing one logical index.
 [[nodiscard]] inline std::uint64_t
 index_advisory_xact_lock_key(Oid db,
                              Oid tablespace,
@@ -484,8 +481,8 @@ index_advisory_xact_lock_key(Oid db,
     return hash;
 }
 
-/// Acquire the one existing transaction-scoped logical-index administration
-/// lock. Read sessions deliberately never call this helper.
+/// Hold the index administration lock until transaction end so clears and
+/// publications cannot run concurrently for the same index.
 inline void acquire_index_advisory_xact_lock(
     Oid db, Oid tablespace, Oid relfilenode, std::int16_t attno, std::string_view index_name) {
     const std::int64_t signed_key = std::bit_cast<std::int64_t>(
@@ -495,7 +492,7 @@ inline void acquire_index_advisory_xact_lock(
     });
 }
 
-/// Sequence-generator relation mismatch observed before ID allocation.
+/// Reason the generation-ID sequence failed validation.
 enum class minimizer_generation_sequence_error : std::uint8_t {
     none,
     missing,
@@ -543,7 +540,8 @@ struct minimizer_generation_sequence_inspection {
     }
 };
 
-/// Validate the SQL installation object's exact non-wrapping BIGINT contract.
+/// Require a  permanent BIGINT sequence configured to start at one,
+/// advance by one, and stop at the largest positive BIGINT without cycling.
 [[nodiscard]] inline minimizer_generation_sequence_inspection
 inspect_minimizer_generation_sequence_contract() {
     const Oid internal_namespace =
@@ -594,8 +592,8 @@ inspect_minimizer_generation_sequence_contract() {
                 error == minimizer_generation_sequence_error::none ? sequence_oid : InvalidOid};
 }
 
-/// Allocate a positive signed-SQL generation ID. This helper never creates the
-/// sequence. Installation owns that atomic DDL step.
+/// Allocate the next positive generation ID from the validated installed sequence.
+/// A missing or changed sequence is an error.
 [[nodiscard]] std::uint64_t allocate_minimizer_generation_id_pg() {
     const minimizer_generation_sequence_inspection sequence =
         inspect_minimizer_generation_sequence_contract();

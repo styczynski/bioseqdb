@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Preserves seed-to-coordinate execution behind the runtime partition identity.
+ * @brief Exports the single-query and batched GPU coordinate pipelines.
  */
 
 export module bioseq.gpu.vulkan.runtime:coordinate_pipeline;

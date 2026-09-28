@@ -1,6 +1,6 @@
 /**
  * @file external/tests/io/gzip_decode_test.cpp
- * @brief Gzip decoding, truncation, expansion-limit, and cancellation tests.
+ * @brief Check gzip decoding and the decoded-byte limit.
  */
 
 // Exercise gzip decoding from an arbitrary io_source, including the
@@ -24,7 +24,7 @@ namespace exio = bioseq::external::io;
 
 namespace {
 
-// A minimal in-memory io_source over a byte vector (satisfies bioseq::io::io_source).
+// Read test bytes from an owned vector.
 class memory_source {
 public:
     explicit memory_source(std::vector<std::uint8_t> data)
@@ -100,7 +100,7 @@ TEST_CASE("gzip_decode_source inflates a gzip stream from an arbitrary source",
         plain += "ACGTACGTACGTNNNNACGTACGTACGTACGT\n";
     }
     const std::vector<std::uint8_t> compressed = gzip_compress(plain);
-    REQUIRE(compressed.size() < plain.size());  // actually compressed
+    REQUIRE(compressed.size() < plain.size());  // Fixture compresses to fewer bytes.
 
     SECTION("round-trip equals the original") {
         exio::gzip_decode_limits limits;
@@ -116,12 +116,12 @@ TEST_CASE("gzip_decode_source inflates a gzip stream from an arbitrary source",
     SECTION("decoded-byte cap is enforced (gzip-bomb guard)") {
         exio::gzip_decode_limits limits;
         limits.maximum_decoded_bytes = 1024;  // far below the decoded size
-        limits.expansion_numerator = 1000000; // don't trip the ratio first
+        limits.expansion_numerator = 1000000; // Keep the expansion-ratio check from failing first.
         exio::gzip_decode_source<memory_source> source(
             memory_source(compressed), limits);
         bool error = false;
         const std::string decoded = decode_all(source, error);
-        REQUIRE(error);                 // must fail rather than over-inflate
+        REQUIRE(error);                 // Decoding must report the exceeded size limit.
         REQUIRE(decoded.size() <= 1024 + 4096);
     }
 }

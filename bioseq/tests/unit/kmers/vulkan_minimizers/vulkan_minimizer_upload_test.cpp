@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_upload_test.cpp
- * @brief Vulkan minimizer upload and typed failure tests.
+ * @brief Check packed uploads, source lifetimes through GPU completion, and reported failures.
  */
 #include <hwy/highway.h>
 #include <cstring>

@@ -15,14 +15,14 @@ namespace fs = std::filesystem;
 
 export namespace bioseq::codegen {
 
-/// @brief Non-owning identifier for the component emitting an artifact.
+/// @brief Borrowed name  of the component that generates a file.
 struct artifact_owner_view {
     std::string_view identifier;
 };
 
-/// @brief Reads an entire artifact without text-mode byte translation.
+/// @brief Reads a file as binary data
 /// @param path File to read.
-/// @return Exact file contents.
+/// @return File contents without newline conversion.
 [[nodiscard]] std::string read_artifact_bytes(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -42,8 +42,8 @@ struct artifact_owner_view {
     return result;
 }
 
-/// @brief Atomically publishes content only when the destination differs.
-/// @param path Destination artifact.
+/// @brief Replaces a generated file only when its contents, change.
+/// @param path Destination fize.
 /// @param content Desired bytes.
 void publish_artifact_if_changed(
     const fs::path& path, std::string_view content) {
@@ -78,7 +78,7 @@ void publish_artifact_if_changed(
     }
 }
 
-/// @brief Creates or retimestamps the build completion stamp.
+/// @brief Creates a completion stamp or updates its modification time.
 /// @param path Stamp path.
 void mark_artifact_complete(const fs::path& path) {
     fs::create_directories(path.parent_path());
@@ -91,10 +91,10 @@ void mark_artifact_complete(const fs::path& path) {
     fs::last_write_time(path, fs::file_time_type::clock::now());
 }
 
-/// @brief Normalizes and confines an owner-attributed path to the output root.
+/// @brief Normalizes a generated path and rejects absolute paths or remaining .. components.
 /// @param path Candidate relative path.
-/// @param owner Typed artifact owner used in validation diagnostics.
-/// @return Safe normalized relative path.
+/// @param owner Component name to include in errors.
+/// @return Checked relative path.
 [[nodiscard]] fs::path validate_owned_artifact_path(
     fs::path path,
     artifact_owner_view owner) {

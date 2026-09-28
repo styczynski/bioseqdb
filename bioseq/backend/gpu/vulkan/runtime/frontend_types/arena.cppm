@@ -1,6 +1,6 @@
 /**
  * @file arena.cppm
- * @brief Defines runtime-owned arena slices, reservations, and trimming guards.
+ * @brief Reusable GPU buffer slices and cleanup after a request
  */
 module;
 
@@ -21,16 +21,18 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// Maximum immutable descriptor sets retained by one frontend submission.
+/// Maximum descriptor sets available to one frontend submission.
 inline constexpr std::uint32_t k_gpu_dispatch_descriptor_set_capacity = 4096u;
-/// Maximum storage-buffer descriptors retained by that pool.
+/// Maximum storage-buffer descriptors available in that pool.
 inline constexpr std::uint32_t k_gpu_dispatch_storage_descriptor_capacity =
     k_gpu_dispatch_descriptor_set_capacity * 9u;
 
-/// @brief Maximum whole jobs fitting both descriptor-set and descriptor budgets.
-/// @param[in] descriptor_sets_per_job Fresh descriptor sets recorded for one job.
-/// @param[in] storage_descriptors_per_job Storage descriptors recorded for one job.
-/// @return Zero for an invalid zero-cost shape; otherwise the smaller pool quotient.
+/**
+ * @brief Returns how many jobs fit in the descriptor pool.
+ * @param[in] descriptor_sets_per_job Descriptor sets needed by one job.
+ * @param[in] storage_descriptors_per_job Storage-buffer descriptors needed by one job.
+ * @return The smaller capacity, or zero if either per-job cunt is zero.
+ */
 [[nodiscard]] inline constexpr std::uint32_t gpu_dispatch_job_capacity(
     std::uint32_t descriptor_sets_per_job,
     std::uint32_t storage_descriptors_per_job) noexcept {
@@ -42,17 +44,17 @@ inline constexpr std::uint32_t k_gpu_dispatch_storage_descriptor_capacity =
         k_gpu_dispatch_storage_descriptor_capacity / storage_descriptors_per_job);
 }
 
-// ===========================================================================
 // Runtime-owned GPU arena
-// ===========================================================================
 
-/// @brief A view into one arena buffer: `(buffer, offset, size)`. Descriptor writes
-/// bind exactly this sub-range, so several logical resources can share one
-/// physical arena buffer.
+/**
+ * @brief A byte range within an arena buffer.
+ *
+ * Each descriptor binds this range, so several shader inputs can share one allocation.
+ */
 struct gpu_arena_slice {
     buffer* buffer = nullptr;       ///< Arena backing buffer, or null when invalid.
     std::uint64_t offset = 0;       ///< Byte offset from the buffer base.
-    std::uint64_t size = 0;         ///< Sub-range byte length bound into descriptors.
+    std::uint64_t size = 0;         ///< Number of bytes in this slice.
 
     /// @brief Reports whether the slice refers to an arena buffer.
     /// @return `true` when the buffer pointer is non-null.
@@ -63,15 +65,18 @@ struct gpu_arena_slice {
 
 /// @brief A snapshot of the three arena cursors. `rewind(mark)` restores all three.
 struct gpu_arena_mark {
-    std::uint64_t device_cursor = 0;   ///< Device-local bump cursor at `mark()`.
-    std::uint64_t upload_cursor = 0;    ///< Host-visible upload bump cursor at `mark()`.
-    std::uint64_t download_cursor = 0;  ///< Host-visible download bump cursor at `mark()`.
+    std::uint64_t device_cursor = 0;   ///< Next free byte in the device  buffer when marked.
+    std::uint64_t upload_cursor = 0;    ///< Next free byte in the upload buffer when marked.
+    std::uint64_t download_cursor = 0;  ///< Next free byte in the download buffer when marked.
 };
 
-/// @brief Per-runtime arena with three geometrically-grown, persistently-mapped
-/// buffers (device-local, host-visible upload, host-visible download). Slices
-/// are bump-allocated with alignment. `rewind` frees everything past a mark.
-/// Growth is allowed only outside an active count and execution submission pair.
+/**
+ * @brief Reuses three mapped buffers for device work, uploads, and downloads.
+ *
+ * Slices share the buffers and consume space from the current cursors. Rewinding
+ * allows that space to be reused. Grow the buffers before an operation starts,
+ * while no live slice depends on their addresses.
+ */
 class gpu_arena {
   public:
     /// @brief Associates an empty arena with its owning runtime.
@@ -91,41 +96,46 @@ class gpu_arena {
         download_cursor_ = mark.download_cursor;
     }
 
-    /// @brief Reserve worst-case capacity for one count and execution submission pair
-    /// before count submit,
-    /// so no buffer is reallocated between the two submits. Returns false if any
-    /// grow failed (caller declines GPU frontend).
-    /// @param[in] device_bytes Worst-case device-local bytes for the pair.
-    /// @param[in] upload_bytes Worst-case host-visible upload bytes for the pair.
-    /// @param[in] download_bytes Worst-case host-visible download bytes for the pair.
-    /// @return `true` when every arena buffer satisfies the requested capacity.
+    /**
+     * @brief Prepares enough buffer space for the count and, execution submissions.
+     *
+     * Call this before creating slices. Growing a buffer invalidates its old slices.
+     * A failure may leave  some buffers resized.
+     * @param[in] device_bytes Required device-buffer capacity.
+     * @param[in] upload_bytes Required upload-buffer capacity.
+     * @param[in] download_bytes Required download-buffer capacity.
+     * @return True when all three capacities are sufficient
+     */
     [[nodiscard]] bool ensure_capacity(std::uint64_t device_bytes,
                                        std::uint64_t upload_bytes,
                                        std::uint64_t download_bytes);
 
-    /// @brief Establishes allocator-reported physical admission for every requested
-    /// backing buffer before MPS seed/readback slices are created. Existing admitted
-    /// storage and its permit stay live until a replacement has fully materialized.
-    /// No reservation is charged for later bump suballocations.
-    /// @return `true` when all requested physical backings are live and admitted.
+    /**
+     * @brief Reserves memory budget and prepares the requested arena buffers.
+     *
+     * The reservbtion covers the allocation size reported by Vulkan. An existing
+     * admitted buffer stays alive until its replacement has been allocated and fully
+     * touched. Later slices use this reservation without charging the same bytes again.
+     * @return True when all requested buffers have enough admitted  capacity.
+     */
     [[nodiscard]] bool ensure_admitted_capacity(std::uint64_t device_bytes,
                                                 std::uint64_t upload_bytes,
                                                 std::uint64_t download_bytes);
 
-    /// @brief Bump-allocates an aligned slice from device-local storage.
-    /// @param[in] bytes Logical byte size to reserve.
-    /// @param[in] alignment Alignment requirement in bytes.
-    /// @return Allocated device slice, or an invalid slice on failure.
+    /// @brief Reserves an aligned slice at the current device-buffer cursor.
+    /// @param[in] bytes Slice size in bytes.
+    /// @param[in] alignment Required byte alignment.
+    /// @return The reserved slice, or an invalid slice if it does not fit.
     [[nodiscard]] gpu_arena_slice allocate_device(std::uint64_t bytes, std::uint64_t alignment);
-    /// @brief Bump-allocates an aligned slice from host-visible upload storage.
-    /// @param[in] bytes Logical byte size to reserve.
-    /// @param[in] alignment Alignment requirement in bytes.
-    /// @return Allocated upload slice, or an invalid slice on failure.
+    /// @brief Reserves an aligned slice at the current upload-buffer cursor.
+    /// @param[in] bytes Slice size in bytes.
+    /// @param[in] alignment Required byte alignment.
+    /// @return The reserved slice, or an invalid slice if it does not fit.
     [[nodiscard]] gpu_arena_slice allocate_upload(std::uint64_t bytes, std::uint64_t alignment);
-    /// @brief Bump-allocates an aligned slice from host-visible download storage.
-    /// @param[in] bytes Logical byte size to reserve.
-    /// @param[in] alignment Alignment requirement in bytes.
-    /// @return Allocated download slice, or an invalid slice on failure.
+    /// @brief Reserves an aligned slice at the current download-buffer cursor.
+    /// @param[in] bytes Slice size in bytes.
+    /// @param[in] alignment Required byte alignment.
+    /// @return The reserved slice, or an invalid slice if it does not fit.
     [[nodiscard]] gpu_arena_slice allocate_download(std::uint64_t bytes, std::uint64_t alignment);
 
     /// @brief Binds an arena slice to one storage-buffer descriptor write.
@@ -140,8 +150,7 @@ class gpu_arena {
                             VkDescriptorSet dst_set,
                             const gpu_arena_slice& slice) const noexcept;
 
-    /// @brief Returns the device-local backing buffer.
-    /// @return Mutable device-local buffer owner.
+    /// @brief Returns the  mutable buffer used for GPU work.
     [[nodiscard]] buffer& device_buffer() noexcept {
         return device_;
     }
@@ -156,18 +165,20 @@ class gpu_arena {
         return download_;
     }
 
-    /// @brief Destroy every retained backing buffer after an operation has rewound all
-    /// of its slices. Seed lookup is a useful full-lifetime boundary: its output
-    /// is copied to owned host storage, while adopted target-index buffers are
-    /// standalone allocations and therefore cannot alias this arena. Releasing
-    /// the idle arena prevents large transient high-water from leaking across
-    /// otherwise independent benchmark/production requests.
-    /// @return `true` when all idle backing capacity was released.
+    /**
+     * @brief Frees the buffers when every allocation cursor is zero.
+     *
+     * Use this after a request has copied its results out of the arena. It frees the
+     * allocated capacity between requests. Target-index buffers adopted as separate
+     * allocations remain valid.
+     * @return True if the areba was idle and its buffers were released.
+     */
     [[nodiscard]] bool release_idle_capacity() noexcept;
 
   private:
-    /// @brief Rounds a byte offset up to the requested alignment without overflow.
-    /// @return Aligned offset, or the maximum `uint64_t` value on overflow.
+    /// @brief Rounds a byte offset up to the requested alignment
+    /// @return The input for alignment zero or one. Otherwise, the aligned offset,
+    /// or UINT64_MAX for overflow or alignment that, is not a power of two.
     [[nodiscard]] static std::uint64_t align_up(std::uint64_t value,
                                                 std::uint64_t alignment) noexcept {
         if (alignment <= 1u)
@@ -179,24 +190,27 @@ class gpu_arena {
     runtime* runtime_ = nullptr;             ///< Owning runtime that allocates backing buffers.
     // Every permit precedes its allocation so reverse destruction frees storage first.
     bioseq::parallelism::memory_permit device_permit_{};
-    buffer device_;                          ///< Device-local arena backing buffer.
+    buffer device_;                          ///< Arena buffer used  for GPU work.
     bioseq::parallelism::memory_permit upload_permit_{};
     buffer upload_;                          ///< Host-visible upload arena backing buffer.
     bioseq::parallelism::memory_permit download_permit_{};
     buffer download_;                        ///< Host-visible download arena backing buffer.
-    std::uint64_t device_cursor_ = 0;       ///< Current device-local bump offset.
-    std::uint64_t upload_cursor_ = 0;       ///< Current upload bump offset.
-    std::uint64_t download_cursor_ = 0;     ///< Current download bump offset.
-    std::uint64_t device_capacity_ = 0;     ///< Reserved device-local capacity in bytes.
+    std::uint64_t device_cursor_ = 0;       ///< Next free byte in the device buffer.
+    std::uint64_t upload_cursor_ = 0;       ///< Next free byte in the upload buffer.
+    std::uint64_t download_cursor_ = 0;     ///< Next free byte in the download buffer.
+    std::uint64_t device_capacity_ = 0;     ///< Device-buffer capacity in bytes.
     std::uint64_t upload_capacity_ = 0;     ///< Reserved upload capacity in bytes.
     std::uint64_t download_capacity_ = 0;   ///< Reserved download capacity in bytes.
-    bool device_admission_established_ = false;   ///< Physical device backing was transacted.
-    bool upload_admission_established_ = false;   ///< Physical upload backing was transacted.
-    bool download_admission_established_ = false; ///< Physical download backing was transacted.
+    bool device_admission_established_ = false;   ///< Device allocation has passed memory admission.
+    bool upload_admission_established_ = false;   ///< Upload allocation has passed memory admission.
+    bool download_admission_established_ = false; ///< Download allocation has passed memory admission.
 };
 
-/// @brief RAII arena reservation: holds the admission permit, marks the arena on
-/// construction, and rewinds on destruction. Spans count submit + execution submit.
+/**
+ * @brief Holds a memory permit while a count and execution submission use the arena.
+ *
+ * Destruction rewinds the arena to the saved mark, then releases the permit.
+ */
 class gpu_arena_reservation {
   public:
     /// @brief Takes an admission permit and records the arena rewind point.
@@ -227,7 +241,7 @@ class gpu_arena_reservation {
     ~gpu_arena_reservation() {
         release();
     }
-    /// @brief Rewinds the arena once and relinquishes the reservation.
+    /// @brief Rewinds the arena once. The  memory permit remains held by this object.
     void release() noexcept {
         if (arena_ != nullptr) {
             arena_->rewind(mark_);
@@ -242,26 +256,27 @@ class gpu_arena_reservation {
 
   private:
     gpu_arena* arena_ = nullptr;                         ///< Reserved arena, or null after `release`.
-    bioseq::parallelism::memory_permit permit_;          ///< Peak admission held across both submits.
+    bioseq::parallelism::memory_permit permit_;          ///< Memory permit held until destruction or move assignment.
     gpu_arena_mark mark_{};                            ///< Cursor snapshot restored on rewind.
 };
 
-/// @brief Request-boundary cleanup for operations whose result never aliases the
-/// shared GPU frontend arena.  Rewinding alone leaves the arena's allocator-rounded
-/// high-water live. This guard also destroys all idle backing buffers. It is
-/// intentionally independent of an admission permit so it can be installed
-/// before arena growth and covers every return and exception path.
+/**
+ * @brief Rewinds and frees an idle arena when a request leaveu its scope.
+ *
+ * Use this when the result owns its storage outside the arena. Rewinding alone
+ * keeps the buffers allocated. The guard can be created before buffer growth,
+ * so early returns and exceptions also release idle capacity.
+ */
 class gpu_arena_trim_guard {
   public:
-    /// @brief Records an arena mark for request-boundary trimming.
-    /// @param[in] arena Arena trimmed and rewound at guard destruction.
+    /// @brief Saves the arena cursors for cleanup on destruction.
     explicit gpu_arena_trim_guard(gpu_arena& arena) noexcept
         : arena_(&arena), mark_(arena.mark()) {}
     /// @brief Prevents copying a trim guard.
     gpu_arena_trim_guard(const gpu_arena_trim_guard&) = delete;
     /// @brief Prevents copy-assignment of a trim guard.
     gpu_arena_trim_guard& operator=(const gpu_arena_trim_guard&) = delete;
-    /// @brief Prevents moving a trim guard away from its lexical scope.
+    /// @brief Prevents moving cleanup out of this scope.
     gpu_arena_trim_guard(gpu_arena_trim_guard&&) = delete;
     /// @brief Prevents move-assignment of a trim guard.
     gpu_arena_trim_guard& operator=(gpu_arena_trim_guard&&) = delete;

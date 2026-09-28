@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/direct_execution.cppm
- * @brief Compact-direct selection traversal and exact anchor emission.
+ * @brief Build chaining anchors from selected compact-direct index postings.
  */
 module;
 
@@ -42,8 +42,8 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-/// Builds one chaining anchor from a packed target position and stores it in the shard
-/// query layout slice for compact-direct emission.
+/// Pair one  taget position with a query occurrence and write the anchor
+/// into its reserved forward or reverse slice.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::emit_compact_direct_anchor_(
     std::uint64_t packed_target_position,
@@ -92,8 +92,8 @@ prepared_minimizer_fragment_reader::emit_compact_direct_anchor_(
     return std::nullopt;
 }
 
-/// Validates compact-hash32 selection spans and binds the query occurrence group from
-/// the query hash plan. Sets context.error on failure.
+/// Check selected posting spans against the lookup plan and find their query
+/// occurrence group. Store any validation error in context.error.
 template <class p_context>
 [[nodiscard]] inline bool prepared_minimizer_fragment_reader::bind_compact_direct_selection_(
     p_context& context,
@@ -139,8 +139,8 @@ template <class p_context>
         return false;
     }
 
-    // Compact selections deliberately retain only dense and query
-    // ordinals. The query-wave owner remains the single hash authority.
+    // Selections store index and query-plan ordinals. Read the hash
+    // from the query plan, which also owns its occurrence range
     const query_wave_scratch::query_hash_plan& query_plan =
         context.scratch->query_plans_[selection.query_ordinal];
     if (query_plan.occurrence_ref_count == 0u) {
@@ -156,7 +156,8 @@ template <class p_context>
     return true;
 }
 
-/// Accumulates inverted-index page advice for each posting span in one selected hash.
+/// Collect page ranges for selected  posting spans and pass, them to the page
+/// adviser. Inline descriptor positions need no posting-page advice.
 [[nodiscard]] inline bool
 prepared_minimizer_fragment_reader::accumulate_compact_direct_selected_page_advice_(
     compact_direct_layout_pass_context& context,
@@ -189,8 +190,8 @@ prepared_minimizer_fragment_reader::accumulate_compact_direct_selected_page_advi
     return true;
 }
 
-/// Layout-pass selection visitor that binds the group, accumulates page advice, and
-/// tallies orientation counts for the selected postings.
+/// Count forward and reverse anchors from descriptor strand counts and request
+/// page advice for their posting spans. This pass reads no posting positions.
 [[nodiscard]] inline bool
 prepared_minimizer_fragment_reader::visit_compact_direct_layout_selection_(
     compact_direct_layout_pass_context& context,
@@ -221,8 +222,8 @@ prepared_minimizer_fragment_reader::visit_compact_direct_layout_selection_(
     return true;
 }
 
-/// Emission-pass selection visitor that decodes compact-direct posting spans and writes
-/// fragment anchors into the prepared batch.
+/// Decode each selected target posting and pair it with the matching query
+/// occurrences, writing anchors into the batch's allocated slices.
 [[nodiscard]] inline bool
 prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
     compact_direct_emission_pass_context& context,
@@ -248,9 +249,8 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
         .batch = context.batch,
     };
 
-    // Bind the packed/wide occurrence representation once per selected
-    // hash. The fixed occurrence span then stays in registers while all of
-    // that descriptor's postings are decoded and expanded into anchors.
+    // Select packed or wide query references once for this hash,
+    // before decoding and expanding its target postings.
     context.error = with_query_group_occurrences_<true>(
         occurrence_context,
         group,
@@ -292,10 +292,9 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                      ++span_ordinal) {
                     const compact_hash32_posting_span_view& span = selected.spans[span_ordinal];
 
-                    // Target strand is invariant for one authoritative
-                    // span. Build the query-dependent anchor fields once
-                    // at reference position zero; the typed posting loop
-                    // below supplies only the changing reference position.
+                    // Every posting in this span has the same strand. Compute
+                    // the  query position and orientation once, then fill
+                    // in each target posiion as it is decoded.
                     const auto prepared_anchor =
                         make_fragment_anchor_(static_cast<std::uint64_t>(span.target_strand_one),
                                               *position_strand,
@@ -360,9 +359,8 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                             return true;
                         });
 
-                    // The per-anchor path advances after every
-                    // successful store. Commit the same partial progress
-                    // before propagating a later decode/visitor error.
+                    // Keep the cursor consistent with anchors already written,
+                    // including when a later position fails validation.
                     *cursor = initial_cursor + emitted;
                     if (!decoded_positions) {
                         if (decode_visitor_error) {
@@ -466,11 +464,15 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
 }
 
 /**
- * Runs the compact-H32 direct anchor pipeline: unique lookup, layout pass, anchor
- * allocation, emission pass, and per-query local ordering.
+ * Build anchors through compact-direct lookup.
  *
- * \throws persisted_minimizer_lookup_error when admission, lookup, layout, emission,
- *     or stats reconciliation fails.
+ * Look up each unique query hash and use accepted descriptors to count anchors
+ * by orientation. Admit the complete result before allocating its arrays.
+ * Decode accepted postings once into those arrays, then  sort each query's
+ * forward and reverse slices.
+ *
+ * @throws persisted_minimizer_lookup_error If lookup, memory admission,
+ *     allocation, decoding, or count and ordering checks fail.
  */
 inline void prepared_minimizer_fragment_reader::prepare_compact_direct_anchors_(
     bioseq::parallelism::memory_admission_controller& admission,
@@ -667,8 +669,8 @@ inline void prepared_minimizer_fragment_reader::prepare_compact_direct_anchors_(
             });
     }
 
-    // Every shard binds authenticated descriptors and span geometry, but
-    // deliberately does not load one encoded posting position.
+    // Layout used descriptor counts and span bounds. It read no
+    // encoded posting positions.
     batch.stats_.compact_direct_layout_postings_visited = 0u;
     std::uint64_t layout_logical_postings = 0u;
     std::size_t layout_selection_end = 0u;

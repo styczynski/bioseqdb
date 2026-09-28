@@ -1684,11 +1684,9 @@ pg_allowlist_for(
         location = caller;
     }
 
-    // Clang gives forwarded arguments distinct MacroID frames for the macro
-    // body and each argument substitution.  In ereport -> ereport_domain,
-    // those raw frames can describe the same located ereport expansion more
-    // than once.  Raw identities above prove the traversal is acyclic; now
-    // retain the outermost copy of each semantic expansion.
+    // Clang may report the same ereport expansion through several macro
+    // frames when arguments pass through ereport_domain. The traversal above
+    // checks for cycles. Keep the outermost copy of each expansion here.
     std::ranges::reverse(inner_to_outer);
 
     using semantic_macro_identity = std::tuple<
@@ -5181,10 +5179,9 @@ extract_runtime_probe_facts(
         const runtime_frontier false_frontier =
             runtime_event_frontier_from(
                 cfg, markers, branches.false_branch);
-        // Clang conservatively retains the post-catch ReThrowError
-        // branch for the injected std::exception path.  Only the exact
-        // generated boundary may carry those authenticated tail markers
-        // beside the visit on its true-path frontier.
+        // Clang keeps a possible ReThrowError branch after the catch, even for
+        // the injected std::exception path. Allow those extra error markers only
+        // in the verified generated wrapper, alongside its visit marke.
         const bool true_routes_to_visit = [
                                               generated_boundary,
                                               &marker_storage,
@@ -5720,8 +5717,8 @@ struct analyzed_function {
                     "generated callback does not resolve to one "
                     "exact specialization");
             }
-            // Keep the selected specialization: getDefinition() may return
-            // the shared function-template pattern for an implicit instance.
+            // Keep, the selected specialization. For an implicit instance,
+            // getDefinition() may  return the shared function-template definition.
             body_targets.push_back(direct);
         }
         materialized_calls.push_back({
@@ -5741,9 +5738,9 @@ struct analyzed_function {
             });
     std::unique_ptr<clang::CFG> normal_cfg;
     if (needs_normal_cfg) {
-        // The authoritative CFG retains EH edges for injected
-        // throw/catch routing.  A separate projection is required to
-        // prove what follows a PostgreSQL call only when it returns.
+        // Keep exception edges in the main control-flow graph for throw/catch
+        // checks. This second graph follows normal returns so we can check which
+        // probe runs after a successful PostgreSQL call.
         options.AddEHEdges = false;
         normal_cfg = clang::CFG::buildCFG(
             function,

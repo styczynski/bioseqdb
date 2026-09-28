@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides the build-configuration generator command.
+ * @brief Runs the build-configuration generator and writes its outputs.
  */
 module;
 

@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Re-exports Vulkan runtime receipt partitions under one module name.
+ * @brief Exports shared Vulkan types and records used to check completed GPU work.
  */
 
 export module bioseq.gpu.vulkan.runtime:receipts;

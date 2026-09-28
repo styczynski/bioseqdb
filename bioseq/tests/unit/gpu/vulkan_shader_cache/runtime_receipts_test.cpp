@@ -1,6 +1,6 @@
 /**
  * @file runtime_receipts_test.cpp
- * @brief Tests immutable Metal archive configuration and runtime receipts.
+ * @brief Checks cached Metal configuration and records of GPU pipeline preparation and use.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -216,9 +216,8 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
         accepted.seed_image->receipt().retained_capacity_bytes();
     const std::uint64_t reserved_with_seed = admission.reserved_bytes();
     REQUIRE(reserved_with_seed >= retained_seed_bytes);
-    // The first qualification also process-retains the installed helper. Keep
-    // that intentional singleton reservation in the baseline while proving
-    // that this configuration's seed and derived image release independently.
+    // Loading the helper keeps it in the process cache. Include that reservation
+    // in the baseline when checking that the seed and configuration release their memory.
     const std::uint64_t process_qualification_baseline = reserved_with_seed - retained_seed_bytes;
     const auto identity = gv::make_runtime_metal_archive_set_identity(accepted.archives);
     CHECK(identity.is_valid());
@@ -240,10 +239,8 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
         invalid.seed_image.reset();
         CHECK_FALSE(invalid.is_valid());
 
-        // Device identities may be unknown to the supervisor before runtime
-        // selects VkPhysicalDevice/MTLDevice. Zero is an explicit request for
-        // runtime to seal the actual identities; the receipt never accepts
-        // zero after that sealing step.
+        // Zero device identities ask the runtime to fill them in after selecting a device.
+        // Completed runtime records must contain the selected identities.
         auto runtime_sealed = accepted;
         runtime_sealed.vulkan_device_uuid = {};
         runtime_sealed.metal_device_registry_id = 0u;
@@ -557,9 +554,8 @@ TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const auto base_audit = accepted_runtime_metal_archive_audit();
     REQUIRE(base_audit.is_internally_consistent());
-    // Constructing the first audit also once-qualifies and process-retains the
-    // installed helper executable. That reservation intentionally lives until
-    // process shutdown, so leak checks begin after this process-wide baseline.
+    // The first audit loads the helper into the process cache. Take  the memory
+    // baseline afterwards so the leak checks measure only the operations under test.
     const std::uint64_t reserved_after_process_qualification = admission.reserved_bytes();
     CHECK(gv::runtime_pipeline_operation_token::self_test_causal_collector_contract(base_audit));
     CHECK(admission.reserved_bytes() == reserved_after_process_qualification);
@@ -733,18 +729,18 @@ TEST_CASE("grouped-SoA radix pass count is exact at byte boundaries",
     const auto passes = [](std::uint64_t target_end) {
         return gv::runtime_grouped_soa_radix_pass_count(0u, target_end + 1u);
     };
-    CHECK(passes(0u) == 1u);                      // 1 coord + strand
-    CHECK(passes(0x7fu) == 1u);                   // 7 coord + strand
-    CHECK(passes(0x80u) == 2u);                   // 8 coord + strand
-    CHECK(passes(0xffu) == 2u);                   // 8 coord + strand
-    CHECK(passes(0x100u) == 2u);                  // 9 coord + strand
-    CHECK(passes(0x7fffu) == 2u);                 // 15 coord + strand
-    CHECK(passes(0x8000u) == 3u);                 // 16 coord + strand
-    CHECK(passes(0xffffu) == 3u);                 // 16 coord + strand
-    CHECK(passes(0x10000u) == 3u);                // 17 coord + strand
-    CHECK(passes(9'999'999u) == 4u);              // FAST_LONG: 24 + strand
-    CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI: 29 + strand
-    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 coord + strand
+    CHECK(passes(0u) == 1u);                      // One coordinate bit and one strand bit.
+    CHECK(passes(0x7fu) == 1u);                   // Seven coordinate bits and one strand bit.
+    CHECK(passes(0x80u) == 2u);                   // Eight coordinate bits and one strand bit.
+    CHECK(passes(0xffu) == 2u);                   // Eight coordinate bits and one strand bit.
+    CHECK(passes(0x100u) == 2u);                  // Nine coordinate bits and one sqrand bit.
+    CHECK(passes(0x7fffu) == 2u);                 // Fifteen coordinate bits and one strand bit.
+    CHECK(passes(0x8000u) == 3u);                 // Sixteen coordinate bits and one strand bit.
+    CHECK(passes(0xffffu) == 3u);                 // Sixteen coordinate bits and one strand bit.
+    CHECK(passes(0x10000u) == 3u);                // Seventeen coordinate bits and one strand bit
+    CHECK(passes(9'999'999u) == 4u);              // FAST_LONG needs 24 coordinate bits and one strand bit.
+    CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI needs 29 coordinate bits and one strand  bit.
+    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // Sixty-three coordinate bits and one strand bit.
     CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, 0u));
     CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, (std::uint64_t{1} << 63u) + 1u));
     CHECK_FALSE(

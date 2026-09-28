@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates join ownership analysis and Bioseq join path construction.
+ * @brief Join planning and checks that  assign mmsearch calls to a Bioseq scan.
  */
 export module bioseq.postgres.table:custom_scan_join_paths;
 

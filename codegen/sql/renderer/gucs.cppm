@@ -382,7 +382,7 @@ inline void render_condition_end(
     }
 }
 
-/// Emits a sentinel-terminated PostgreSQL enum table with fixed storage.
+/// Generates a static PostgreSQL enum table ending with a null-name entry.
 inline void render_enum_table(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -457,7 +457,7 @@ inline void render_plan_cache_assign_hook(
            << "}\n\n";
 }
 
-/// Emits compile-time checks for PostgreSQL planner log-level wire values.
+/// Generates checks that the planner log-level enum matches PostgreSQL constants.
 inline void render_planner_assertions(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -483,7 +483,7 @@ inline void render_planner_assertions(
     output << "\n";
 }
 
-/// Emits one idempotent primitive GUC registration function.
+/// Generates a  function that registers a scalar setting once.
 inline void render_primitive_registration(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -567,7 +567,7 @@ inline void render_primitive_registration(
            << "}\n\n";
 }
 
-/// Emits one enum GUC registration wired to its stable table storage.
+/// Generates enum-setting registration using the statoc value table.
 inline void render_enum_registration(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -604,7 +604,7 @@ inline void render_enum_registration(
            << "}\n\n";
 }
 
-/// Renders one GUC owner module without changing provider cardinality.
+/// Generates the registration module for one configured settings owner.
 [[nodiscard]] inline rendered_guc_owner_module render_owner(
     const guc_inventory& inventory,
     std::string_view owner_key,

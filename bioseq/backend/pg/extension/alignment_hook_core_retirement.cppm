@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_retirement.cppm
- * @brief PostgreSQL executor-hook escaped-binding retirement helper.
+ * @brief Stop nested queries from using a finished  root query's statistics.
  */
 module;
 
@@ -20,8 +20,9 @@ import bioseq.postgres.table.alignment_execution;
 namespace bioseq::pg::detail {
 
 /**
- * @brief Invalidates nested collector bindings that outlive their root frame.
- * @param[in,out] root Root frame whose collector is being retired.
+ * @brief Invalidate nested frames that still refer to this root collector.
+ * A later scan through an escaped portal then reports an error instead of
+ * accessing the root's released state. Ignore null and non-root frames.
  */
 void retire_escaped_nested_bindings(alignment_executor_frame* root) noexcept
 {

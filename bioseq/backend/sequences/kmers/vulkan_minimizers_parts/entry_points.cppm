@@ -1,6 +1,6 @@
 /**
  * @file entry_points.cppm
- * @brief Lazy-sequence Vulkan minimizer facade entry points.
+ * @brief Vulkan sketching and index building for lazy  sequence views.
  */
 module;
 
@@ -56,20 +56,17 @@ import :segmented;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Selects an intermediate GPU pair record without truncating its hash.
+ * @brief Chooses the GPU record layout for a segment-pair sketch
  *
- * Preserve the established compact record whenever its generated capability
- * and physical capacity fit. Other K/W and position shapes use the same
- * generated registry as query execution; no numerical kernel is specialized
- * here. Positions are local to the upload and are rebased by the caller.
- * @tparam p_alphabet Registered logical nucleotide alphabet.
- * @tparam p_callable Callable accepting a physical record template argument.
- * @param window_size Runtime minimizer window size.
- * @param kmer_size Runtime biological k-mer size.
- * @param maximum_window_bp Upper bound for every upload in this operation.
- * @param callable Operation instantiated with the admitted physical record.
- * @return The callable's result, preserving its reference category.
- * @throws vulkan_runtime_error When the shape has no admitted GPU record.
+ * Uses minimap_sketch_data when its registered profile and field widths fit.
+ * Otherwise, asks the generated registry for a layozt and checks that the
+ * selected algorithm remains Vulkan sketching.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param maximum_window_bp Maximum upload length in symbols.
+ * @param callable Called with the chosen record type as a template argument.
+ * @return Callback result.
+ * @throws vulkan_runtime_error If no supported record layout fits.
  */
 template <sequence_alphabet p_alphabet, class p_callable>
 [[nodiscard]] auto with_vulkan_segment_pair_record(
@@ -136,15 +133,15 @@ template <sequence_alphabet p_alphabet, class p_callable>
 }
 
 /**
- * @brief Sketches a lazy sequence through its admitted contiguous window.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy source sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param decline_out Optional rejection record.
- * @param host_ownership_route Host allocation ownership contract.
- * @return Sketch result, or no value when shape or resources are rejected.
+ * @brief Sketches a lazy sequence and returns host and device minimizer buffers.
+ *
+ * Borrows compatible packed input or reserves memory for a packed copy.
+ * @param sequence Source sequence.
+ * @param window_size K-mers per  window.
+ * @param kmer_size Symbols per k-mer.
+ * @param decline_out Optional rejection details.
+ * @param host_ownership_route How the caller will keep the host buffer alive.
+ * @return Sketch result, or no value when input or memory checks reject it.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<vulkan_sketch_result<p_minimizer_type>>
@@ -179,16 +176,13 @@ collect_minimizers_vulkan_result(
 }
 
 /**
- * @brief Collects a lazy-sequence Vulkan sketch through an existing collector.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_collector_type Collector accepting individual records.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param collector Destination collector.
- * @param sequence Lazy source sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param decline_out Optional rejection record.
- * @return Completed dispatch token, or no value when dispatch is rejected.
+ * @brief Sketches a lazy sequence and sends downloaded records to a collector.
+ * @param collector Receives each minimizer.
+ * @param sequence Source sequence.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param decline_out Optional rejection details.
+ * @return Completion token, or no value when sketching is rejected.
  */
 template <class p_minimizer_type, class p_collector_type, sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<vulkan_sketch_dispatch_token>
@@ -215,15 +209,15 @@ collect_minimizers_vulkan(
 }
 
 /**
- * @brief Builds a device-resident index from one lazy target sequence.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy target sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional rejection record.
- * @return Resident index, or no value when construction is rejected.
+ * @brief Builds a target minimizer index in device memory from a lazy sequence.
+ *
+ * Borrows compatible packed input or reserves memory for a packed copy.
+ * @param sequence Target sequence.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering  target hashes.
+ * @param decline_out Optional, rejection details.
+ * @return Device index, or no value when construction is rejected.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<gpu_built_index> build_gpu_index_on_device(
@@ -256,17 +250,18 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Builds a device-resident index from one lazy target interval.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy target sequence.
- * @param lo_bp Inclusive biological interval boundary.
- * @param hi_bp Exclusive biological interval boundary.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional rejection record.
- * @return Resident index with local positions, or no value when rejected.
+ * @brief Builds a GPU target index for a lazy sequence ingerval
+ *
+ * Index positions are relative to lo_bp. The interval is packed or borrowed
+ * as contiguous input before the synchronous build.
+ * @param sequence Target sequence.
+ * @param lo_bp First symbol, inclusive.
+ * @param hi_bp Last symbol, exclusive.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering target hashes.
+ * @param decline_out Optional rejection details.
+ * @return Device index, or no value when the interval or build is rejected.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<gpu_built_index> build_gpu_segment_index_on_device(
@@ -310,18 +305,19 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Collects a strict Vulkan sketch for one lazy sequence interval.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_collector_type Collector accepting individual records.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param collector Destination collector.
- * @param sequence Lazy source sequence.
- * @param lo_bp Inclusive biological interval boundary.
- * @param hi_bp Exclusive biological interval boundary.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @throws vulkan_runtime_error For every selected-Vulkan rejection.
+ * @brief Sketches a lazy sequence interval on the GPU and sends records to a collector.
+ *
+ * Positions are relative to lo_bp. Input is borrowed or packed before  dispatch,
+ * and large intervals can be split into overlapping uploads. A query gate requires
+ * a single upload.
+ * @param collector Receives minimizers.
+ * @param sequence Source sequence.
+ * @param lo_bp First symbol, inclusive.
+ * @param hi_bp Last symbol, exclusive.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering hashes.
+ * @throws vulkan_runtime_error If input checks or Vulkan execution fail.
  */
 template <class p_minimizer_type, class p_collector_type, sequence_alphabet p_alphabet>
 void collect_minimizers_vulkan_segment_or_throw(
@@ -365,19 +361,22 @@ void collect_minimizers_vulkan_segment_or_throw(
 }
 
 /**
- * @brief Collects sorted minimizer pairs for one lazy sequence interval.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy source sequence.
- * @param lo_bp Inclusive uploaded interval boundary.
- * @param hi_bp Exclusive uploaded interval boundary.
- * @param emit_base_bp Global biological offset of the uploaded interval.
- * @param core_lo_bp Inclusive global core boundary.
- * @param core_hi_bp Exclusive global core boundary.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param execution_stats_out Optional segment execution counters.
- * @return Sorted global position and hash pairs owned with their permit.
- * @throws vulkan_runtime_error For every selected-Vulkan rejection.
+ * @brief Returns sorted minimizer hash-position pairs for a lazy sequence interval.
+ *
+ * Chooses a record layout that fits the k-mer and upload length, then sketches
+ * overlapping GPU windows and keeps unique pairs in the requested global  core.
+ * @param sequence Source sequence.
+ * @param lo_bp First uploaded symbol, inclusive.
+ * @param hi_bp Last uploaded symbol, exclusive.
+ * @param emit_base_bp Global symbl offset assigned to the upload start.
+ * @param core_lo_bp First global output position, inclusive.
+ * @param core_hi_bp Last global output position, exclusive.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer
+ * @param execution_stats_out Optional completed-dispatch and split counts.
+ * @return Pairs of hash and (global position << 1 | strand), sorted in that order,
+ * with their memory reservation.
+ * @throws vulkan_runtime_error If input checks or Vulkan execution fail.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] vulkan_owned_segment_pairs

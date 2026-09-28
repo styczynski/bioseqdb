@@ -1,6 +1,6 @@
 /**
  * @file aggregate.cppm
- * @brief Provides checked aggregate-state and Numeric fmgr boundaries.
+ * @brief Convert SQL aggregate states and Numeric results to C++ wrappers.
  */
 module;
 
@@ -24,11 +24,9 @@ import bioseq.postgres.vectorization.types;
 export namespace bioseq::postgres::support {
 
 /**
- * Validated view of the two-bigint array state used by smallint/integer AVG.
- *
- * PostgreSQL owns the array storage. Outside an aggregate call the decoder
- * copies the array before a transition mutates it, matching fmgr's normal
- * pass-by-reference convention.
+ * Read or update the two-bigint state used by smallint and integer AVG.
+ * PostgreSQL owns the array. When called outside aggregate evaluation,
+ * `read_argument` copies it so a state update leaves the input value intact.
  */
 class int64_array_aggregate_state final {
 public:
@@ -50,9 +48,7 @@ private:
     ArrayType* array_ = nullptr;
 };
 
-/**
- * Validated non-owning view of PostgreSQL's int8 aggregate transition state.
- */
+/** Borrow PostgreSQL's bigint aggregate state. Argument decoding checks its count and mode. */
 class int128_aggregate_state final {
 public:
     [[nodiscard]] ::int128_aggregate_state_storage& value() const noexcept {
@@ -82,9 +78,7 @@ private:
     ::int128_aggregate_state_storage* state_ = nullptr;
 };
 
-/**
- * Typed, PostgreSQL-owned Numeric result.
- */
+/** Non-null Numeric result  whose memory belongs to PostgreSQL. */
 class numeric_result final {
 public:
     [[nodiscard]] static numeric_result from_numeric(Numeric value) {

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines execution-time placeholder injection context without callback implementations.
+ * @brief Declares the state and functions that fill scan expressions with match results.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -15,10 +15,11 @@ using scheduler_match_result_reference =
     decltype(*bioseq::scheduler::dispatch_next_output{}.match);
 
 /**
- * @brief Carries placeholder and owner metadata through PostgreSQL's mutator callback.
+ * @brief Identifies the match results that this scan may substitute into expressions.
  *
- * Passed to the execution-time injector with the exact scan-owned placeholder,
- * catalog, relation, and finalized match-owner identities.
+ * The expression walker uses the target  expression and finalized helper bindings
+ * to choose replacements. It records symbol-count requests beside the match
+ * placeholders so the executor can fill both for each output row
  */
 export struct var_injector_context {
     placeholder_constants* consts;
@@ -32,11 +33,11 @@ export struct var_injector_context {
     int stable_match_id;
 };
 
-/** @brief Applies execution-time placeholder injection to an expression tree. */
+/** @brief Replaces bound match helpers and supported symbol-count calls with writable Const nodes. */
 export [[nodiscard]] Node* var_injector(Node* node,
                                         var_injector_context* injector_context);
 
-/** @brief Updates all installed placeholder Const nodes from one match result. */
+/** @brief Fills the installed match placeholders from one alignment result. */
 export void populate_placeholder_consts(
     placeholder_constants& consts,
     scheduler_match_result_reference match);

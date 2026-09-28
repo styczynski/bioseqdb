@@ -1,4 +1,7 @@
-/** @file Shared source-domain ownership and lifetime integration coverage. */
+/**
+ * @file source_domain_lifetime_test.cpp
+ * @brief Tests sharing sequence readers and releasing them after scans and transactions.
+ */
 
 #include <libpq-fe.h>
 
@@ -434,7 +437,7 @@ TEST_CASE("cursor-held source registries promote or abort with subxact",
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
         "INSERT INTO source_lifetime_source_subxact VALUES "
         " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));");
-    // Commit setup writes before entering the subtransaction lifecycle under test.
+    // Start the subtransaction test after the setup statements have committed.
     exec_sql(ctx, "BEGIN;");
 
     reset_source_counters(ctx);
@@ -511,7 +514,7 @@ TEST_CASE("empty source registry reaches real prepared commit",
     REQUIRE(source_counter(owner, "pre_prepare_rejections") == 1);
     require_source_quiescent(owner);
 
-    // PREPARE and COMMIT PREPARED must each be their own top-level command.
+    // Send PREPARE TRANSACTION and COMMIT PREPARED as  separate commands.
     exec_sql(owner, prepare_sql);
     cleanup.arm();
     REQUIRE(PQtransactionStatus(owner.raw()) == PQTRANS_IDLE);

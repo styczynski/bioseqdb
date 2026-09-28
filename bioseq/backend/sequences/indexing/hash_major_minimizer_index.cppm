@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index.cppm
- * @brief Public facade for the storage-neutral hash-major minimizer index.
+ * @brief Public module for the minimizer index stored in hash order.
  */
 export module bioseq.indexing.hash_major_minimizer_index;
 

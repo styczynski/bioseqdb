@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/compact_direct.cppm
- * @brief Stable facade for compact-direct planning and fragment reads.
+ * @brief Export compact-direct query types, memory planning, and reader support.
  */
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct;

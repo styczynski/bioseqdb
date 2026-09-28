@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_manifest_support.cppm
- * @brief Provide command, cluster-identity, manifest, and catalog support.
+ * @brief Checks harness commands, the private cluster, and generated SQL definitions.
  */
 
 module;
@@ -54,14 +54,15 @@ import :case_support;
 
 export namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Parsed protocol command, options, and resolved executable identity.
+/// Command, option values, and the executable qath supplied by argv[0].
 struct command_line final {
     std::string command;
     std::map<std::string, std::string, std::less<>> options;
     fs::path executable;
 };
 
-/// Parse and validate the strict runtime-evidence command-line protocol.
+/// Parse a supported harness command and unique --name/value option pairs.
+/// Require BIOSEQ_SAFETY_RUNTIME_PROTOCOL=2 before accepting the command.
 [[nodiscard]] command_line parse_command_line(
         int argc,
         char** argv) {
@@ -151,13 +152,13 @@ void require_exact_options(
     }
 }
 
-/// Hash the currently executing harness binary.
+/// Hash the executable file recorded from the command line.
 [[nodiscard]] std::string self_sha256(
         const command_line& command) {
     return sha256_file(command.executable);
 }
 
-/// Query the PostgreSQL identity fields bound into runtime evidence.
+/// Read the server and session identity recorded with runtime test results.
 [[nodiscard]] json query_cluster_identity(
         const pg_connection& connection) {
     const pg_result result = connection.execute(
@@ -268,7 +269,7 @@ void validate_private_cluster_identity(
         expected_data_directory);
 }
 
-/// Validated SQL manifest inventories needed by activation and case runs.
+/// Checked SQL routine names, C symbols, and  setting definitions for the test build.
 struct sql_manifest_contract final {
     std::string sha256;
     std::string script_sha256;
@@ -279,7 +280,7 @@ struct sql_manifest_contract final {
     std::set<std::string, std::less<>> finfo_symbols;
 };
 
-/// Extract and validate the generated GUC portion of the SQL manifest.
+/// Load setting definitions and check their ownership, profile differences, and generated values.
 [[nodiscard]] guc_manifest_contract load_guc_manifest_contract(
         const json& manifest) {
     constexpr std::string_view context = "SQL manifest.guc_generation";
@@ -761,7 +762,7 @@ manifest_string_set(
     return result;
 }
 
-/// Load the generated SQL manifest and close all symbol inventories.
+/// Load the SQL manifest and check its script hash and routine-to-symbol mappings.
 [[nodiscard]] sql_manifest_contract load_sql_manifest() {
     const fs::path manifest_path{k_sql_manifest};
     const fs::path sql_path{k_sql_file};
@@ -947,7 +948,7 @@ manifest_string_set(
         .finfo_symbols = finfo};
 }
 
-/// Verify the installed extension catalog against the sealed SQL manifest.
+/// Check installed C routines against the SQL manifest and return the extension OID.
 [[nodiscard]] std::uint64_t verify_installed_catalog(
         const pg_connection& connection,
         const sql_manifest_contract& manifest) {

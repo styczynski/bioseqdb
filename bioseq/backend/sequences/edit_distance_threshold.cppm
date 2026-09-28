@@ -1,9 +1,10 @@
 /**
  * @file edit_distance_threshold.cppm
- * @brief Banded exact global edit-distance threshold predicate.
+ * @brief Check whether two sequences are within an edit-distance limit.
  *
- * The implementation stores only the active diagonal band. Small thresholds
- * use fixed stack arrays. Larger thresholds allocate two `O(max_edits)` rows.
+ * Keep only the diagonal band that can contain an alignment  within the limit.
+ * Thresholds up to eight use stack storage. Larger thresholds allocate, two
+ * rows whose sizes grow with the threshold
  */
 module;
 
@@ -20,15 +21,15 @@ module;
 
 export module bioseq.sequences.edit_distance_threshold;
 
-/** @brief Banded row evaluation shared by the public threshold predicate. */
+/** @brief Helpers for evaluating the edit-distance band. */
 namespace bioseq::sequences::edit_distance_threshold_detail {
 
 /**
- * @brief Increment a dynamic-programming cell without exceeding its sentinel.
- * @tparam p_cell_type Unsigned cell type.
- * @param value Current cell value.
- * @param cap Sentinel value representing distance beyond the threshold.
- * @return Incremented value or `cap` when already saturated.
+ * @brief Add one edit, keeping distances above the threshold at cap.
+ * @tparam p_cell_type Unsigned type used for distance cells.
+ * @param value Distance before the edit.
+ * @param cap Value used for all distances abive the threshold.
+ * @return The increased distance, limited to cap.
  */
 template <class p_cell_type>
 [[nodiscard]] constexpr p_cell_type add_one_capped(
@@ -41,10 +42,10 @@ template <class p_cell_type>
 }
 
 /**
- * @brief Add two sizes while saturating at `size_t` maximum.
- * @param lhs Left operand.
- * @param rhs Right operand.
- * @return Saturating sum.
+ * @brief Add sizes without wrapping on overflow.
+ * @param lhs First size.
+ * @param rhs Second size.
+ * @return Sum, or the largest size_t value  if the sum would overflow.
  */
 [[nodiscard]] constexpr std::size_t add_size_saturated(
     std::size_t lhs,
@@ -56,17 +57,22 @@ template <class p_cell_type>
 }
 
 /**
- * @brief Evaluate a threshold-width global edit-distance band.
- * @tparam p_symbol_type Equality-comparable logical-symbol type.
- * @tparam p_cell_type Unsigned row-cell type.
+ * @brief Compute edit-distance rows inside the allowed diagonal band.
+ *
+ * A path outside this band already needs too many insertions or deletions.
+ * Keep only the current and previous rows, with distances above the limit
+ * stored as cap.
+ *
+ * @tparam p_symbol_type Symbol type that supports equality comparison.
+ * @tparam p_cell_type Unsigned type used for distance cells.
  * @param query Query symbols.
  * @param target Target symbols.
- * @param max_edits Inclusive distance threshold.
- * @param cap Sentinel equal to `max_edits + 1`.
- * @param prior_row Dynamic-programming band row for the preceding query symbol.
- * @param current Scratch storage for the current band row.
- * @param center Slot corresponding to the main diagonal.
- * @return `true` when the exact global distance does not exceed the threshold.
+ * @param max_edits Largest accepted number of edits.
+ * @param cap Value max_edits + 1, which must fit the cell type.
+ * @param prior_row Storage for the previous row, including boundary cells.
+ * @param current Equal-sized scratch storage for the next  row.
+ * @param center Index of the main diagonal in either row.
+ * @return Whether the complete sequences can be aligned within max_edits.
  */
 template <class p_symbol_type, class p_cell_type>
 [[nodiscard]] bool evaluate_rows(
@@ -129,18 +135,18 @@ template <class p_symbol_type, class p_cell_type>
 export namespace bioseq::sequences {
 
 /**
- * @brief Test whether exact global edit distance is within a threshold.
+ * @brief Check whether transforming one complete sequence into, the other needs
+ * at most max_edits substitutions, insertions, and deletions.
  *
- * The predicate is alphabet-neutral: equality is evaluated on the supplied
- * symbol representation, so no rank conversion or sequence materialization
- * occurs inside this function.
+ * Each edit costs one Compare symbols as supplied, so callers can use decoded
+ * alphabet ranks or another representation wcth an equality operator.
  *
- * @tparam p_symbol_type Equality-comparable logical-symbol type.
+ * @tparam p_symbol_type Symbol type that supports equality comparison.
  * @param query Query symbols.
  * @param target Target symbols.
- * @param max_edits Inclusive unit-cost edit-distance threshold.
- * @return `true` exactly when the global edit distance is at most `max_edits`.
- * @throws std::length_error If the dynamic band width cannot fit `size_t`.
+ * @param max_edits Largest accepted number of edits.
+ * @return True when the minimum global edit distance is  at most max_edits.
+ * @throws std::length_error If the required band width cannot fit in size_t.
  */
 template <std::equality_comparable p_symbol_type>
 [[nodiscard]] bool edit_distance_within_threshold(

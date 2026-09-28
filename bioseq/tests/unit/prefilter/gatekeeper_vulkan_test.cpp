@@ -1,9 +1,9 @@
 /**
  * @file gatekeeper_vulkan_test.cpp
- * @brief Verifies hardware Vulkan GateKeeper parity, validation, and command replay.
+ * @brief Compare Vulkan GateKeeper with scalar results and check input boundaries.
  *
- * Hardware cases compare every result ABI field with the scalar oracle while retaining production
- * dispatch keys, poisoned slice boundaries, and order-sensitive command replay fixtures.
+ * Repeated submissions keep the same job shapes while changing input bytes
+ * to check that replayed commands see the, new data.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,10 +18,13 @@ using namespace bioseq::prefilter;
 namespace {
 
 /**
- * @brief Computes an independent full-matrix global Levenshtein distance.
- * @param[in] query Query ranks in logical order.
- * @param[in] target Target ranks in logical order.
- * @return Exact insertion, deletion, and substitution distance.
+ * @brief Compute an independent exact edit distance for the GPU tests.
+ *
+ * Insertions, deletions, and substitutions cost one. Two matrix rows are
+ * enough  to keep this test reference small
+ * @param[in] query Query ranks in sequence order.
+ * @param[in] target Target ranks in sequence order.
+ * @return Global Levenshtein distance.
  */
 [[nodiscard]] inline std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
@@ -49,10 +52,8 @@ namespace {
 }
 
 /**
- * @brief Compares every field in the prefilter result ABI.
- * @param[in] lhs First result.
- * @param[in] rhs Second result.
- * @return `true` only when all four result fields are equal.
+ * @brief Compare the lower bound, status, acceptance flag, and diagnostics.
+ * @return True when all four fields match.
  */
 [[nodiscard]] constexpr inline bool same_result(
     const prefilter_result& lhs,
@@ -65,9 +66,9 @@ namespace {
 }
 
 /**
- * @brief Checks diagnostic implications shared by all supported equal-length jobs.
- * @param[in] result Evaluated GateKeeper result.
- * @param[in] max_edits Threshold used for the evaluation.
+ * @brief Check the relationships between GateKeeper's diagnostic flags.
+ * @param[in] result Result from a supported equal-length job.
+ * @param[in] max_edits Edit limit used for the job.
  */
 inline void check_supported_diagnostics(
     const prefilter_result& result,
@@ -109,9 +110,8 @@ TEST_CASE(
             std::uint32_t length,
             std::uint32_t max_edits,
             std::uint32_t variant) {
-        // Deliberately retain non-word-aligned poison bytes around every
-        // logical slice. The shader must address byte ranks from the job
-        // offsets rather than accidentally consuming neighbouring records.
+        // Surround slices with extra bytes at varying offsets. This checks that
+        // shaders read only the requested range when it starts within a word.
         query_ranks.insert(
             query_ranks.end(), 1u + variant % 3u,
             static_cast<std::uint8_t>(0xD0u + variant));
@@ -132,7 +132,7 @@ TEST_CASE(
         target = query;
         const std::uint32_t scenario = variant % 4u;
         if (scenario == 1u) {
-            // A known within-threshold substitution case.
+            // Change at  most max_edits ranks so the pair must pass.
             for (std::uint32_t edit = 0u; edit < max_edits; ++edit) {
                 const std::uint32_t position =
                     (edit * 11u + 3u) % length;
@@ -140,13 +140,13 @@ TEST_CASE(
                     query[position] ^ 0xffu);
             }
         } else if (scenario == 2u) {
-            // Force a mask candidate and exact-guard-confirmed rejection.
+            // Change every ank to trigger a mask rejection and its exact check.
             for (std::uint32_t position = 0u; position < length; ++position) {
                 target[position] = static_cast<std::uint8_t>(
                     query[position] ^ 0xffu);
             }
         } else if (scenario == 3u) {
-            // One insertion/deletion-shaped shift remains within E=2 and E=4.
+            // Shift by one rank. One insertion and one deletion fit both edit limits.
             target[0] = static_cast<std::uint8_t>(query[0] ^ 0x5au);
             std::copy_n(query.begin(), length - 1u, target.begin() + 1u);
         }
@@ -200,9 +200,8 @@ TEST_CASE(
         check_supported_diagnostics(gpu[index], jobs[index].max_edits);
     }
 
-    // Keep the GateKeeper replay key (shape, mode, counts, and groups)
-    // identical, but replace every target slice with fresh mapped bytes.
-    // A recorded command must execute again and observe the new exact matches.
+    // Reuse the same command shape with targets copied from the queries.
+    // Replay must read the new bytes and report exact matches.
     std::vector<std::uint8_t> replay_targets = target_ranks;
     for (const prefilter_job& job : jobs) {
         std::copy_n(
@@ -243,9 +242,9 @@ TEST_CASE(
         SKIP("hardware Vulkan device unavailable");
     }
 
-    // Thirteen logical bytes allocate four packed words. Offsets ten through
-    // thirteen therefore name three poison bytes plus one allocation-padding
-    // byte, but are outside the logical span and must not be inspected.
+    // A four-byte slice starting at offset 10 exceeds the 13 logical bytes,
+    // even though four packed words have room for it. Check bounds before
+    // reading bytes outside the slice or allocation padding.
     std::vector<std::uint8_t> query_ranks(13u, 0xA5u);
     std::vector<std::uint8_t> target_ranks(13u, 0x5Au);
     for (std::size_t index = 0u; index < 9u; ++index) {
@@ -381,8 +380,8 @@ TEST_CASE(
                     query_ranks.end(), query.begin(), query.end());
                 target_ranks.insert(
                     target_ranks.end(), target.begin(), target.end());
-                // Retain poison after each logical slice. The next job pads
-                // independently back to an aligned offset before packed loads.
+                // Add an  extra byte after the slice to catch reads past its end.
+                // The next job pads its start to a packed-word boundary
                 query_ranks.push_back(static_cast<std::uint8_t>(
                     0xE0u + jobs.size()));
                 target_ranks.push_back(static_cast<std::uint8_t>(
@@ -407,9 +406,8 @@ TEST_CASE(
             };
 
             const std::uint32_t boundary = length / 2u;
-            // A terminal rotation of three-symbol runs has edit distance two
-            // but high Hamming distance. It exercises the fast production
-            // mask without allowing the Hamming shortcut to hide the path.
+            // Rotating these three-rank runs costs two edits and creates many
+            // mismatches. It forces the test past the Hamming-distance shortcut.
             std::vector<std::uint8_t> repeated_query(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
                 repeated_query[position] = static_cast<std::uint8_t>(
@@ -426,9 +424,8 @@ TEST_CASE(
                 terminal_rotation,
                 false);
 
-            // Move one unique rank across the 32-bit mask boundary at L=64;
-            // L=32 uses the central nibble boundary and ends exactly at a
-            // packed-word boundary. The two-edit path crosses many bytes.
+            // Move one unique rank across the middle boundary. At length 64 this
+            // crosses a 32-bit mask word, and, at length 32 it crosses a four-bit group.
             std::vector<std::uint8_t> boundary_query(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
                 boundary_query[position] = static_cast<std::uint8_t>(
@@ -450,9 +447,9 @@ TEST_CASE(
                 boundary_move,
                 false);
 
-            // A two-symbol match run straddles the central boundary and is
-            // surrounded by mismatches. Amendment must cross the 32-bit word
-            // seam for L=64 before the exact wavefront confirms rejection.
+            // Leave two matching ranks across the middle boundary, surrounded by
+            // mismatches. At length 64, filling this short match run crosses a  mask
+            // word boundary before the exact check rejects the pair.
             std::vector<std::uint8_t> boundary_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
                 boundary_rejection[position] = static_cast<std::uint8_t>(
@@ -466,9 +463,8 @@ TEST_CASE(
                 boundary_rejection,
                 true);
 
-            // The same bounded two-match run at the logical tail must not be
-            // treated as an internal run by amendment. The remaining high-
-            // error body still has to activate and fail the exact guard.
+            // Keep two matching ranks at the taio. Amendment must leave this end
+            // run intact, while the other mismatches still cause exact rejection.
             std::vector<std::uint8_t> terminal_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
                 terminal_rejection[position] = static_cast<std::uint8_t>(
@@ -533,9 +529,8 @@ TEST_CASE(
                 check_supported_diagnostics(gpu[index], max_edits);
             }
 
-            // Keep the specialized replay key identical while replacing all
-            // target slices with fresh exact-match bytes. This exercises
-            // command replay and mapped-buffer visibility for every L/E key.
+            // Replay each length and edit-limit combination with fresh exact-match
+            // targets. The changed results check that mapped input writes are visible.
             std::vector<std::uint8_t> replay_targets = target_ranks;
             for (const prefilter_job& job : jobs) {
                 std::copy_n(

@@ -1,6 +1,6 @@
 /**
  * @file functions.cppm
- * @brief Declares generated SQL function bodies owned by the PostgreSQL extension.
+ * @brief SQL bodies for storage inspection and per-call aligner options.
  */
 module;
 
@@ -18,8 +18,8 @@ import bioseq.postgres.table.sql_rows;
 export namespace bioseq::sql_functions {
 
 /**
- * @brief Lists storage shard and sidecar relations for a Bioseq table.
- * @return The checked SQL body for the set-returning function.
+ * List a table's sequence shards and sidecar tables in column, bucket, and  shard order.
+ * @return SQL body used to generate the set-returning function.
  */
 [[bioseq_sql::sql_function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -69,8 +69,8 @@ ORDER BY s.column_attno, s.bucket_idx, s.shard_idx;
 }
 
 /**
- * @brief Builds an aligner-options value from nullable per-call settings.
- * @return The checked SQL body that constructs the composite value.
+ * Build an aligner-options SQL value, preserving NULL for unset settings.
+ * @return SQL body used to generate the composite-value constructor.
  */
 [[bioseq_sql::sql_function({
     .create = bioseq::sql::create_mode::or_replace,

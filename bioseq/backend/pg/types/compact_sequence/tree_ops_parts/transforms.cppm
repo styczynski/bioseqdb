@@ -1,6 +1,6 @@
 /**
  * @file transforms.cppm
- * @brief Persistent piece-tree coalescing, joining, splitting, and binding.
+ * @brief Join, slice, and alphabet-bind sequences while sharing unchanged tree nodes.
  */
 module;
 
@@ -45,7 +45,7 @@ namespace {
 
 } // namespace
 
-/** Shared with the piece-tree failure-contract partition. */
+/** Read a rank at a physical position in packed literal storage. */
 template<class p_instance>
 [[nodiscard]] inline std::uint8_t packed_literal_rank_at(
     literal_piece const& literal,
@@ -68,7 +68,7 @@ template<class p_instance>
 
 namespace {
 
-/// Pack two short literal runs into one destination-owned literal leaf.
+/// Copy two compatible short literals into one leaf, keeping their shared transform.
 [[nodiscard]] inline piece_edge copy_small_distinct_literals(
     piece_tree_arena& destination,
     literal_piece const& left,
@@ -189,7 +189,7 @@ namespace {
     return merged;
 }
 
-/// Return a merged leaf only when source/literal ranges are physically contiguous.
+/** Merge compatible  leaf ranges, copying separate literals only when the result is small */
 [[nodiscard]] inline piece_edge try_coalesce_contiguous(
     piece_tree_arena& destination,
     piece_edge left,
@@ -239,7 +239,7 @@ namespace {
 
 } // namespace
 
-/// Coalesce adjacent compatible leaves without changing their logical rank stream.
+/// Consume two edges and return, a merged leaf when possible, otherwise a branch.
 export [[nodiscard]] inline piece_edge coalesce_boundary(
     piece_tree_arena& destination,
     piece_edge left,
@@ -254,7 +254,7 @@ export [[nodiscard]] inline piece_edge coalesce_boundary(
     return make_branch_node(destination, left, right);
 }
 
-/** Select retirement accounting across transform partitions. */
+/** Choose fixed retired-root storage for one join or expandable storage for alphabet binding. */
 enum class retired_join_root_policy : std::uint8_t {
     fixed_trusted_join,
     proportional_binding,
@@ -382,17 +382,17 @@ namespace {
     return true;
 }
 
-/**
- * Rebuild two adjacent subtrees after one height-guided join descent.
- *
- * The caller has already joined the only new sequence boundary.  This helper
- * therefore preserves the remaining internal boundaries with branch nodes and
- * performs the one AVL single or double rotation that may be required.  Both
- * input edges are owning tokens and are consumed on every return path.
- */
+
 } // namespace
 
-/** Shared with the piece-tree failure-contract partition. */
+/**
+ * Restore AVL balance after joining along one path through a tree.
+ *
+ * The new sequence boundary has already been merged where possible. Rebuild
+ * the surrounding branches and avply a single or  double rotation if needed.
+ * Logical child order includes reversal and complement flags. A successful
+ * result consumes both input references and remains tracked by the supplied ledger.
+ */
 [[nodiscard]] inline tracked_piece_edge rebalance_joined_edges(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger* ledger,
@@ -502,7 +502,11 @@ namespace {
 
 namespace {
 
-/// Join tracked operands by descending only the taller tree spine.
+/**
+ * Join at the boundary of two trees, rebuilding only the path through the taller tree.
+ * Reuse the other subtrees and rebalance while returning toward the root.
+ * The ledger keeps intermediate references available for cleanup if a step fails.
+ */
 [[nodiscard]] inline tracked_piece_edge join_edges_impl(
     piece_tree_arena& destination,
     tracked_piece_edge left,
@@ -569,7 +573,7 @@ namespace {
 
 } // namespace
 
-/// Join two owning edges into one balanced persistent tree.
+/// Consume two owned edges and return  their concatenation as a balanced tree.
 export [[nodiscard]] inline piece_edge join_edges(
     piece_tree_arena& destination,
     piece_edge left,
@@ -580,7 +584,7 @@ export [[nodiscard]] inline piece_edge join_edges(
         retired_join_root_policy::fixed_trusted_join).edge;
 }
 
-/// Join ledger-tracked operands and atomically transfer ownership to the result.
+/// Join tracked inputs, leaving the result and unfinished work in the cleanup ledger.
 export [[nodiscard]] inline tracked_piece_edge
 join_tracked_edges_error_atomic(
     piece_tree_arena& destination,
@@ -593,7 +597,7 @@ join_tracked_edges_error_atomic(
         retired_join_root_policy::proportional_binding);
 }
 
-/// Retain and join two edges under cleanup-ledger ownership.
+/// Join borrowed edges while tracking new references for cleanup after a PostgreSQL error.
 export [[nodiscard]] inline tracked_piece_edge join_edges_error_atomic(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger& ledger,
@@ -611,14 +615,14 @@ export [[nodiscard]] inline tracked_piece_edge join_edges_error_atomic(
         retired_join_root_policy::fixed_trusted_join);
 }
 
-/// Retain an edge and adopt the new token into a cleanup ledger.
+/// Add a reference to a borrowed edge and register it in the cleanup ledger.
 export [[nodiscard]] inline tracked_piece_edge retain_piece_edge_error_atomic(
     piece_edge_cleanup_ledger& ledger, piece_edge borrowed)
 {
     return retain_tracked_edge(&ledger, borrowed);
 }
 
-/// Apply a logical transform to a retained edge under cleanup-ledger ownership.
+/// Create an owned transformed view of an edge and track it for cleanup
 export [[nodiscard]] inline tracked_piece_edge
 transform_piece_edge_error_atomic(
     piece_edge_cleanup_ledger& ledger,
@@ -637,7 +641,11 @@ transform_piece_edge_error_atomic(
     return tracked;
 }
 
-/// Split one leaf at a logical symbol offset.
+/**
+ * Split a borrowed leaf into prefix and suffix views at a logical letter offset.
+ * The offset must be inside the leaf. Both results share  the original storag
+ * and are registered in the cleanup ledger. Reversed leaves keep logical order.
+ */
 export [[nodiscard]] inline split_result split_leaf(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger& ledger,
@@ -689,7 +697,11 @@ export [[nodiscard]] inline split_result split_leaf(
     return {left, right};
 }
 
-/// Split a tree at a logical symbol offset while preserving content order.
+/**
+ * Split a borrowed tree into the letters before and after an offset.
+ * Rebuild the path to the split and share unaffected subtrees. An offset at
+ * or beyond the end puts the whole tree on the left. Track both results for cleanup.
+ */
 export [[nodiscard]] inline split_result split_tree(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger& ledger,
@@ -732,7 +744,7 @@ export [[nodiscard]] inline split_result split_tree(
     };
 }
 
-/// Build a ledger-owned tree view for the half-open logical interval.
+/// Return a tracked view, of `[from, to)`, sharing the tree's sequence storage.
 export [[nodiscard]] inline tracked_piece_edge slice_tree(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger& ledger,
@@ -759,7 +771,7 @@ export [[nodiscard]] inline tracked_piece_edge slice_tree(
 
 namespace {
 
-/// Recursively bind literal ranks while reusing source leaves and bound subtrees.
+/// Pack unbound literals for the  chosen alphabet and reuse compatible source or packed leaves.
 [[nodiscard]] inline tracked_piece_edge bind_literals_copy_impl(
     piece_tree_arena& destination,
     piece_edge edge,
@@ -921,7 +933,10 @@ namespace {
 
 } // namespace
 
-/// Copy and alphabet-bind every unbound literal in a tree.
+/**
+ * Return an owned tree with its text literals validated and packed for the chosen alphabet.
+ * Reuse compatible leaves. The input tree remains owned by its caller.
+ */
 export [[nodiscard]] inline piece_edge bind_literals_copy(
     piece_tree_arena& destination,
     piece_edge edge,
@@ -931,7 +946,7 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
         destination, edge, result_type, nullptr).edge;
 }
 
-/// Bind literals and adopt the result into the cleanup ledger before publication.
+/// Bind text literals to an alphabet while tracking every unfinished result for error cleanup.
 export [[nodiscard]] inline tracked_piece_edge
 bind_literals_copy_error_atomic(
     piece_tree_arena& destination,

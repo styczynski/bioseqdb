@@ -1,8 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * PostgreSQL CustomScan registration ownership for bioseq_cache.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Registers PostgreSQL callbacks for cache scans.
  */
 module;
 
@@ -16,10 +14,7 @@ export module bioseq.cache.pg.executor:exact_scan;
 
 export namespace bioseq::cache::pg::executor::exact_scan {
 
-/**
- * Own the exact executor callback table while retaining direct callback
- * pointers (no per-tuple dispatch layer).
- */
+/** Return the executor callbacks for reading or producing an exact cached result. */
 template<
     auto p_begin,
     auto p_execute,
@@ -38,7 +33,7 @@ template<
     return methods;
 }
 
-/** Own the exact planner-to-executor state factory table. */
+/** Return the callback that creates executor state for an exact cache scan */
 template<auto p_create_state>
 [[nodiscard]] const CustomScanMethods& exact_scan_methods() noexcept {
     static const CustomScanMethods methods{
@@ -48,7 +43,7 @@ template<auto p_create_state>
     return methods;
 }
 
-/** Own the companion reusable-coverage executor callback table. */
+/** Return the executor callbacks for combining reusable cached results. */
 template<
     auto p_begin,
     auto p_execute,
@@ -67,7 +62,7 @@ template<
     return methods;
 }
 
-/** Own the reusable-coverage planner-to-executor state factory table. */
+/** Return the callback that creates executor state for a reusable coverage scan. */
 template<auto p_create_state>
 [[nodiscard]] const CustomScanMethods& coverage_scan_methods() noexcept {
     static const CustomScanMethods methods{
@@ -77,7 +72,7 @@ template<auto p_create_state>
     return methods;
 }
 
-/** Register the exact and reusable-coverage scan ABI method tables. */
+/** Register both cache scan types with PostgreSQL. */
 void register_methods(
         const CustomScanMethods& exact,
         const CustomScanMethods& coverage) {

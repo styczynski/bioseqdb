@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares exact parameterized-owner diagnostics without importing traversal code.
+ * @brief Declares the checks and diagnostics for parameterized mmsearch owners.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_parameterized_own
 import std;
 
 export {
-    /** @brief Records exact owner matches and structural rejection diagnostics for one path tree. */
+    /** @brief Owner counts and the path details needed to explain a rejected mmsearch plan */
     struct exact_parameterized_bmo_ownership {
         std::size_t matches = 0u;
         bool invalid = false;
@@ -40,7 +40,7 @@ export {
         std::uint64_t wrapper_child1_relids_low = 0u;
     };
 
-    /** @brief Bit flags describing why exact parameterized owner analysis failed. */
+    /** @brief Reasons a path failed the parameterized mmsearch ownership check. */
     enum exact_parameterized_bmo_owner_rejection : std::uint32_t {
         k_exact_bmo_unknown_custom_path = 1u << 0,
         k_exact_bmo_base_scan_has_children = 1u << 1,
@@ -54,7 +54,7 @@ export {
         k_exact_bmo_known_wrapper_owns_clause = 1u << 9,
     };
 
-    /** @brief Recursively count exact owners while rejecting unmodeled executable path state. */
+    /** @brief Counts valid owners of  the restriction and rejects paths with unchecked or misplaced mmsearch calls. */
     void count_exact_parameterized_bmo_owners(
         PlannerInfo* root,
         Path* path,

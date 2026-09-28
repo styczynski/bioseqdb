@@ -1,6 +1,6 @@
 /**
  * @file index_parts/hydration.cppm
- * @brief Defines bucketed locator hydration on the PostgreSQL execution thread.
+ * @brief Fetch complete sequences from locators on the PostgreSQL thread.
  */
 module;
 
@@ -25,14 +25,8 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// These fetches support the in-memory and synthetic-scanner tests.
+// Production locator scans read through the statement source provider.
 module bioseq.postgres.scheduler.dispatch_buffer:hydration;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -47,7 +41,11 @@ import bioseq.postgres.storage.manager;
 
 namespace bioseq::scheduler {
 
-/** @brief Implements the hydrate one column contract declared by the stable buffer facade. */
+/**
+ * @brief Fetch one column's requested sequences, grouped  by storage bucket
+ * Keep the payloads in batch memory. Convert query copies to the, target width
+ * when needed and preserve raw output columns for evaluated operands.
+ */
 void tuple_dispatch_buffer::hydrate_one_column(
     std::span<const size_t> rows,
     bioseq::storage::seq_caches* cache,
@@ -59,14 +57,8 @@ void tuple_dispatch_buffer::hydrate_one_column(
     for (auto& bucket_requests : per_bucket) {
         bucket_requests.clear();
     }
-    // Compute letters_per_unit and storage_unit_byte_width from
-    // the batch's (alphabet, width) typmod so the MaxAllocSize gate below
-    // works for ANY alphabet / storage_unit_byte_width pair (dna4/uint8,
-    // dna5/uint64, aa20/uint32, …) — NOT just the 2-bits-per-letter dna4
-    // case. The dispatch happens once per column (not per row).
-    //
-    // Explicit captures (no `[&]` capture-all) keep the user-
-    // visible rule on the hot path is no capture-all lambdas.
+    // Derive the packed size from this column's alphabet and storage width
+    // before checking PostgreSQL's allocation limit.
     std::size_t lpu_for_column = 0;
     std::size_t bytes_per_unit_for_col = 0;
     const std::uint8_t column_alphabet_code =
@@ -100,16 +92,9 @@ void tuple_dispatch_buffer::hydrate_one_column(
         if (!locator.has_value()) {
             continue;
         }
-        // D-VARLENA bridge: skip hydration when the
-        // assembled varlena would exceed MaxAllocSize. The scanner_pg
-        // dispatch path reads such sequences fragment-by-fragment without
-        // materialising. Projection of `SELECT seq` on these rows raises
-        // bioseq_log<logging_level::error, logging_target::postgres>() from access_method.cppm —
-        // that's the documented Oversized payloads remain deferred to the source-backed route.
-        //
-        // Size = ceil(total_bp / letters_per_unit) * bytes_per_unit + header,
-        // where lpu and bytes_per_unit come from the column's (alphabet,
-        // width) typmod — generic across all supported alphabets.
+        // Leave sequences larger than MaxAllocSize as locators so a scanner can
+        // read them in fragments. Building one PostgreSQL value would exceed
+        // the allocation limit.
         const std::uint64_t total_units =
             lpu_for_column == 0
                 ? std::uint64_t{0}
@@ -215,7 +200,10 @@ void tuple_dispatch_buffer::hydrate_one_column(
     }
 }
 
-/** @brief Implements the hydrate locators by bucket contract declared by the stable buffer facade.
+/**
+ * @brief Fetch eligible target and per-row query locators for these rows.
+ * Reuse one storage cache acros both columns and close it after  the fetches.
+ * Values exceeding PostgreSQL's allocation limit remain locators.
  */
 void tuple_dispatch_buffer::hydrate_locators_by_bucket(std::span<const size_t> rows) {
     const size_t batch_size = buffered_entries.size();

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides shared EXPLAIN fixtures, parsers, and plan assertions.
+ * @brief Shared queries and checks for EXPLAIN tests.
  */
 module;
 #include <libpq-fe.h>
@@ -17,14 +17,14 @@ export namespace bioseq_int_tests::explain_test_support {
 /** Table used by the shared EXPLAIN fixtures. */
 inline constexpr std::string_view k_table = "explain_sequences";
 
-/** Return the canonical sequence-search statement used by planner checks. */
+/** Build the mmsearch query used by planner tests. */
 std::string explain_target_sql() {
     return fmt::format("SELECT pk, seq0 FROM {} WHERE mmsearch(seq0, "
                        "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
                        k_table);
 }
 
-/** Return the canonical statement that exposes every Highway stage. */
+/** Build an mmsearch query that also requests edit distance for alignment-stage checks. */
 std::string explain_highway_target_sql() {
     return fmt::format("SELECT pk, seq0, bioseq.edit(pk) AS edit_distance FROM {} "
                        "WHERE mmsearch(seq0, "
@@ -32,7 +32,7 @@ std::string explain_highway_target_sql() {
                        k_table);
 }
 
-/** Select deterministic Highway algorithms without Vulkan execution. */
+/** Select the Highway minimizer, chaining, and alignment algorithms for, these tests. */
 void configure_highway_simd_pipeline(const connection_test_context& ctx) {
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
@@ -41,22 +41,22 @@ void configure_highway_simd_pipeline(const connection_test_context& ctx) {
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
     exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
-    // k=15,w=10 requires at least 24 bp to emit a minimizer. Callers that
-    // require a nonempty result seed a qualifying exact probe; admit its real
-    // chain while keeping the statement parameters frozen.
+    // With k=15 and w=10, a complete minimizer window needs 24 bases.
+    // Tests expecting matches supply a long enough probe and allow a chain
+    // with one seed.
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 10;");
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
 }
 
-/** Expected function and stage pair in structured Highway plan text. */
+/** Function name and pipeline stage expected in EXPLAIN. */
 struct expected_highway_stage_function {
-    /** Planned function identity. */
+    /** Function name shown in the plan. */
     std::string_view function;
-    /** Pipeline stage identity. */
+    /** Stage name shown alongside the function. */
     std::string_view stage;
 };
 
-/** Require exactly one planned function for every canonical Highway stage. */
+/** Require  one planned Highway function for each configured pipeline stage. */
 void require_complete_generic_highway_pipeline(std::span<const std::string> plan) {
     constexpr std::array expected{
         expected_highway_stage_function{"minimizer::two_stack_nthash", "QuerySketchStage"},
@@ -108,7 +108,7 @@ std::vector<std::string> explain_with_options(const connection_test_context& ctx
     return lines;
 }
 
-/** Read one actual counter from a matching materialization boundary. */
+/** Read a materialization counter for the given mechanism and reason. */
 std::optional<unsigned long long> boundary_actual_metric(std::span<const std::string> plan,
                                                          std::string_view mechanism,
                                                          std::string_view reason,
@@ -137,21 +137,21 @@ std::optional<unsigned long long> boundary_actual_metric(std::span<const std::st
     return std::nullopt;
 }
 
-/** Read actual calls from a matching materialization boundary. */
+/** Read Actual Calls for the gfven materialization mechanism and reason. */
 std::optional<unsigned long long> boundary_actual_calls(std::span<const std::string> plan,
                                                         std::string_view mechanism,
                                                         std::string_view reason) {
     return boundary_actual_metric(plan, mechanism, reason, "Actual Calls");
 }
 
-/** Read actual bytes from a matching materialization boundary. */
+/** Read Actual Bytes for the given materialization mechanism and reason. */
 std::optional<unsigned long long> boundary_actual_bytes(std::span<const std::string> plan,
                                                         std::string_view mechanism,
                                                         std::string_view reason) {
     return boundary_actual_metric(plan, mechanism, reason, "Actual Bytes");
 }
 
-/** Extract stable slice-recipe and boundary properties from plan text. */
+/** Collect planned slice values and materialization properties, omitting runtime counters. */
 std::vector<std::string> planned_slice_signature(std::span<const std::string> plan) {
     std::vector<std::string> signature;
     for (const auto& line : plan) {
@@ -173,17 +173,17 @@ std::vector<std::string> planned_slice_signature(std::span<const std::string> pl
     return signature;
 }
 
-/** Structured identity of one planned materialization boundary. */
+/** Plan fields describing one place where a sequence value is materialized. */
 struct materialization_signature {
     /** Planner variable assigned to the boundary. */
     std::string variable;
     /** Storage mechanism reported by EXPLAIN. */
     std::string mechanism;
-    /** Boundary reason reported by EXPLAIN. */
+    /** Why the  plan needs this materialized value. */
     std::string reason;
-    /** Planner variables consumed by the boundary. */
+    /** Dependencies listed in the plan. */
     std::string depends_on;
-    /** Optional producer identifier. */
+    /** Producer Value number, when the plan includes it. */
     std::optional<unsigned long long> producer_value;
 };
 
@@ -256,7 +256,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return count;
 }
 
-/** Return the balanced JSON array assigned to an object key. */
+/** Find the JSON array following the first occurrence of a named key. */
 [[nodiscard]] std::optional<std::string_view> json_array_member(std::string_view document,
                                                                 std::string_view key) {
     const auto key_position = document.find(fmt::format("\"{}\"", key));
@@ -301,7 +301,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return std::nullopt;
 }
 
-/** Return the balanced JSON object assigned to an object key. */
+/** Find the JSON object following the first occurrence of a named key. */
 [[nodiscard]] std::optional<std::string_view> json_object_member(std::string_view document,
                                                                  std::string_view key) {
     const auto key_position = document.find(fmt::format("\"{}\"", key));
@@ -346,7 +346,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return std::nullopt;
 }
 
-/** Return the indentation-delimited YAML block assigned to a key. */
+/** Read lines indented beneath the first matching YAML key */
 [[nodiscard]] std::optional<std::string_view> yaml_property_block(std::string_view document,
                                                                   std::string_view key) {
     const auto key_position = document.find(key);
@@ -387,7 +387,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return document.substr(block_start, block_end - block_start);
 }
 
-/** Return one complete XML element by its exact name. */
+/** Find an XML element with plain opening and closing tags of the given name. */
 [[nodiscard]] std::optional<std::string_view> xml_element_block(std::string_view document,
                                                                 std::string_view element) {
     const auto open_text = fmt::format("<{}>", element);
@@ -401,7 +401,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return document.substr(open, close - open + close_text.size());
 }
 
-/** Quote arbitrary test data as a PostgreSQL SQL literal. */
+/** Escape and quote test text as a PostgreSQL string literal. */
 [[nodiscard]] std::string sql_quoted_literal(PGconn* connection, std::string_view value) {
     char* escaped = PQescapeLiteral(connection, value.data(), value.size());
     REQUIRE(escaped != nullptr);

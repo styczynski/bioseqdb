@@ -1,10 +1,6 @@
 /**
  * @file crc32.cppm
- * @brief CRC-32 helpers with zlib-compatible running state.
- *
- * `crc32_update` delegates to zlib's `crc32_z`. The Highway
- * `crc32_iso_hdlc_simd` entry point implements the same reflected polynomial
- * contract for vectorized consumers.
+ * @brief CRC-32 constants and zlib helpers for gzip checksums.
  */
 module;
 
@@ -27,14 +23,12 @@ inline constexpr std::array<std::uint64_t, 23> iso_hdlc_reflected_keys = {
     0x00000000f1da05aaULL, 0x00000001322d1430ULL, 0x000000011542778aULL,
 };
 
-/// Initial state for a fresh gzip member: 0xFFFFFFFF (RFC 1952).
+/// Internal CRC state before the final XOR. The zlib running value starts at zero.
 inline constexpr std::uint32_t iso_hdlc_initial_value = 0xFFFFFFFFu;
 /// Output xor: 0xFFFFFFFF (RFC 1952).
 inline constexpr std::uint32_t iso_hdlc_final_xor = 0xFFFFFFFFu;
 
-/// Cast helpers — bridge bioseq's `std::uint*_t` / `std::size_t` types
-/// to zlib's `uLong` / `z_size_t` / `z_off_t` without scattering casts
-/// at each call site.
+/// Converts CRC values, byte pointers, and sizes to the types used by zlib.
 namespace detail {
 
 /// Convert a fixed-width running CRC value to zlib's unsigned word type.
@@ -78,8 +72,8 @@ crc32_combine(std::uint32_t crc_a, std::uint32_t crc_b, std::size_t length_b) no
         detail::to_zlib_ulong(crc_a), detail::to_zlib_ulong(crc_b), detail::to_zlib_off(length_b)));
 }
 
-/// Highway-accelerated update with zlib-compatible running-state semantics.
-/// The implementation lives in `simd.cppm`.
+/// Declares a CRC update using zlib-compatible running values.
+/// The gzip decoder calls `bioseq::io::simd::crc32_iso_hdlc_simd`.
 [[nodiscard]] std::uint32_t
 crc32_iso_hdlc_simd(std::uint32_t running, const std::uint8_t* bytes, std::size_t size) noexcept;
 

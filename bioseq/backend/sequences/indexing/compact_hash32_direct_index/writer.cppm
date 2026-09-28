@@ -1,6 +1,6 @@
 /**
  * @file writer.cppm
- * @brief Writes direct hash32 images from admitted source data.
+ * @brief Build drect minimizer indexes from sorted runs or unsorted occurrences.
  */
 export module bioseq.indexing.compact_hash32_direct_index:writer;
 
@@ -10,10 +10,10 @@ import :wire_format;
 namespace bioseq::indexing::compact_hash32_detail {
 
 /**
- * @brief Adds one unsigned scalar to the stream checksum in little-endian wire order.
- * @tparam p_unsigned_integer Unsigned scalar type that fixes the encoded width
- * @param[in,out] crc Checksum state to extend
- * @param[in] value Scalar to authenticate
+ * @brief Add an integer's little-endian bytes to the source checksum.
+ * @tparam p_unsigned_integer Unsigned integer type determining the byte count.
+ * @param[in,out] crc Checksum state to update.
+ * @param[in] value Integer to include.
  */
 template <class p_unsigned_integer>
     requires std::is_unsigned_v<p_unsigned_integer>
@@ -21,7 +21,7 @@ void crc_update_le(crc64_state& crc, p_unsigned_integer value) noexcept {
     crc.update_little_endian(value);
 }
 
-/** @brief Holds the mutable image cursor state used only during the emission replay. */
+/** @brief Output positions and counts tracked while writing the compact image. */
 struct compact_hash32_writer_state {
     std::span<std::byte> image{};
     const compact_hash32_image_plan* plan = nullptr;
@@ -32,10 +32,11 @@ struct compact_hash32_writer_state {
 };
 
 /**
- * @brief Validates one replayable sorted stream and optionally emits a compact image.
+ * @brief Check sorted hash lists while counting or writing their accepted positions.
  *
- * A null writer performs the planning scan. A bound writer performs the second scan, checks it
- * against the plan, and writes membership, rank, descriptor, and posting sections in one thread.
+ * Planning uses a null writer. During the second scan, write  into, the planned
+ * sections and reject counts that would exceed them. Both scans checksum the
+ * complete source, including lists excluded by the occurrence limit.
  */
 class compact_hash32_scan_state {
   private:
@@ -64,7 +65,7 @@ class compact_hash32_scan_state {
         return std::unexpected(*error_);
     }
 
-    /** @brief Checks that an emission write lies within both its section and the output image. */
+    /** @brief Check that a write fits inside its planned section and the output image. */
     [[nodiscard]] bool writer_range_within_(std::uint64_t offset,
                                             std::uint64_t bytes,
                                             std::uint64_t section_offset,
@@ -78,7 +79,7 @@ class compact_hash32_scan_state {
                offset >= section_offset && end <= section_end && end <= writer_->image.size();
     }
 
-    /** @brief Checks partial replay counters against the authenticated planning receipt. */
+    /** @brief Stop a replay whose running counts already exceed the planned totals. */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     validate_replay_prefix_(bool accepted,
                             std::uint64_t accepted_hash_before,
@@ -103,7 +104,7 @@ class compact_hash32_scan_state {
         return {};
     }
 
-    /** @brief Closes the active run only after its declared position count was delivered. */
+    /** @brief Finish the current hash only after receiving its declared position count */
     [[nodiscard]] std::expected<void, direct_inverted_index_error> finalize_active_() noexcept {
         if (!active_run_)
             return {};
@@ -115,7 +116,7 @@ class compact_hash32_scan_state {
         return {};
     }
 
-    /** @brief Writes every rank checkpoint through the requested group boundary. */
+    /** @brief Fill rank checkpoints up to this group with the number of earlier accepted hashes. */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     write_rank_through_(std::uint64_t checkpoint, std::uint64_t accepted_before) noexcept {
         if (writer_ == nullptr)
@@ -143,10 +144,10 @@ class compact_hash32_scan_state {
 
   public:
     /**
-     * @brief Creates a planning or emission scan over one fixed geometry.
-     * @param[in] options Identity, filtering, geometry, and image limits
-     * @param[in] geometry Derived hash-domain cardinalities
-     * @param[in,out] writer Optional emission state, with null selecting a planning scan
+     * @brief Prepare a source scan for counting or writing positions.
+     * @param[in] options Source  identity, occurrence cap, and hash domain.
+     * @param[in] geometry Bitmap and rank-table sizes for that domain.
+     * @param[in,out] writer Output state, or null to cunt without writing.
      */
     compact_hash32_scan_state(const compact_hash32_build_options& options,
                               compact_hash32_geometry_counts geometry,
@@ -154,9 +155,9 @@ class compact_hash32_scan_state {
         : options_(options), geometry_(geometry), writer_(writer) {}
 
     /**
-     * @brief Validates and begins the next strictly increasing hash run.
-     * @param[in] header Hash, total count, and strand-zero prefix count
-     * @return Success, or the first source, order, width, or replay error
+     * @brief Start the next hash list and decide whether its occurrence count is accepted.
+     * @param[in] header Hash, total position count, and number on strand zero.
+     * @return Success, or an error for invalid order, counts, or replay data.
      */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     begin_run(const compact_hash32_sorted_run_header& header) noexcept {
@@ -293,9 +294,9 @@ class compact_hash32_scan_state {
     }
 
     /**
-     * @brief Validates and optionally emits the next positions of the active run.
-     * @param[in] encoded_positions Transient strand-major, coordinate-ordered position batch
-     * @return Success, or the first source, order, posting, or replay error
+     * @brief Check each batch and write accepted positions when an output image is supplied.
+     * @param[in] encoded_positions Positions ordered by strand, then coordinate.
+     * @return Success, or the  first count, ordering, coordinate, or replay error.
      */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     consume_positions(std::span<const std::uint64_t> encoded_positions) noexcept {
@@ -371,8 +372,9 @@ class compact_hash32_scan_state {
     }
 
     /**
-     * @brief Finalizes the active run, remaining rank checkpoints, and stream receipt.
-     * @return Complete scan receipt, or the first validation or replay error
+     * @brief Complete the last list and return the source counts and checksum.
+     * Writing also fills the remaining rank checkpoints and checks output totals.
+     * @return Scan result, or the first validation or replay error.
      */
     [[nodiscard]] std::expected<compact_hash32_scan_receipt, direct_inverted_index_error>
     finish() noexcept {
@@ -412,13 +414,13 @@ class compact_hash32_scan_state {
         return receipt_;
     }
 
-    /** @brief Adapts the typed run-begin method to the type-erased receiver callback. */
+    /** @brief Forward the receiver callback to this scanner's begin_run(). */
     [[nodiscard]] static std::expected<void, direct_inverted_index_error>
     begin_thunk(void* context, const compact_hash32_sorted_run_header& header) noexcept {
         return static_cast<compact_hash32_scan_state*>(context)->begin_run(header);
     }
 
-    /** @brief Adapts the typed position consumer to the type-erased receiver callback. */
+    /** @brief Forward the receiver callback to this scanner's consume_positions(). */
     [[nodiscard]] static std::expected<void, direct_inverted_index_error>
     consume_thunk(void* context, std::span<const std::uint64_t> positions) noexcept {
         return static_cast<compact_hash32_scan_state*>(context)->consume_positions(positions);
@@ -426,11 +428,11 @@ class compact_hash32_scan_state {
 };
 
 /**
- * @brief Scans a complete replayable source for planning or image emission.
- * @param[in] source Sorted-run source invoked synchronously
- * @param[in] options Identity, filtering, geometry, and image limits
- * @param[in,out] writer Optional emission state, with null selecting planning only
- * @return Authenticated source counts and stream checksum, or a source or layout error
+ * @brief Read every sorted hash list to size or write a compact index.
+ * @param[in] source Replayable source consumed during this, call.
+ * @param[in] options Source identity, occurrence cap, and hash domain
+ * @param[in,out] writer Output  state, or null to count without writing.
+ * @return Source counts and checksum, or an error from reading or valdation.
  */
 [[nodiscard]] inline std::expected<compact_hash32_scan_receipt, direct_inverted_index_error>
 scan_source(const compact_hash32_sorted_run_source& source,
@@ -456,16 +458,17 @@ scan_source(const compact_hash32_sorted_run_source& source,
 export namespace bioseq::indexing {
 
 /**
- * @brief Replays a planned source into a caller-owned compact hash32 image.
+ * @brief Replay the source into the compact image's planned byte ranges.
  *
- * The function zeroes and may partially modify `image` before returning an error. Success writes
- * all little-endian sections and their checksums and proves the replay matches `planned` exactly.
+ * Clear the destination before writing. An error can leave a partial image.
+ * On success, source counts and checksum match the planning scan, and each
+ * stored section has its own checksum in the completed header.
  *
- * @param[in] source Replayable, strictly hash-monotonic sorted-run source
- * @param[in] options Identity and geometry used for planning
- * @param[in] planned Plan returned for the same source and options
- * @param[out] image Exact-size destination image
- * @return Success, or a contract, replay, source, or encoding error
+ * @param[in] source Replayable hash lists in strictly increasing hash order.
+ * @param[in] options Settings used for the planning scan.
+ * @param[in] planned Layout and source counts from that scan.
+ * @param[out] image Destination with exactly the planned byte count.
+ * @return Success, or  a settings, replay, source, or encoding error.
  */
 [[nodiscard]] inline std::expected<void, direct_inverted_index_error>
 build_compact_hash32_direct_index_into(const compact_hash32_sorted_run_source& source,
@@ -512,7 +515,7 @@ build_compact_hash32_direct_index_into(const compact_hash32_sorted_run_source& s
         return std::unexpected(direct_inverted_index_error::replay_mismatch);
     }
 
-    // Borrows one already planned section for final checksum computation.
+    // Read the completed section bytes to calculate their checksum.
     const auto section = [&image](std::uint64_t offset, std::uint64_t bytes) noexcept {
         return std::span<const std::byte>{image}.subspan(static_cast<std::size_t>(offset),
                                                          static_cast<std::size_t>(bytes));
@@ -573,7 +576,7 @@ build_compact_hash32_direct_index_into(const compact_hash32_sorted_run_source& s
 
 namespace bioseq::indexing::direct_index_detail {
 
-/** @brief Normalizes one input occurrence with its derived fragment ordinal. */
+/** @brief An input occurrence with its target-fragment number added. */
 struct direct_index_prepared_occurrence {
     std::uint32_t hash = 0u;
     std::uint32_t fragment = 0u;
@@ -581,7 +584,7 @@ struct direct_index_prepared_occurrence {
     bool strand_one = false;
 };
 
-/** @brief Describes one hash-major range in the sorted prepared occurrence array. */
+/** @brief One hash's range in the sorted occurrences, with strand and fragment counts. */
 struct direct_index_hash_group {
     std::uint32_t hash = 0u;
     std::uint64_t begin = 0u;
@@ -590,7 +593,7 @@ struct direct_index_hash_group {
     std::uint32_t summary_count = 0u;
 };
 
-/** @brief Owns admitted scratch data, the exact plan, and the bucket-to-group dictionary. */
+/** @brief Temporary sorted data, section sizes, and the bucket-to-group table. */
 struct direct_index_prepared_build {
     direct_index_image_plan plan{};
     std::vector<direct_index_prepared_occurrence> occurrences{};
@@ -599,10 +602,10 @@ struct direct_index_prepared_build {
 };
 
 /**
- * @brief Selects a power-of-two dictionary size with a maximum seven-eighths load.
- * @param[in] unique_hash_count Number of hashes that need dictionary slots
- * @param[in] override_count Optional caller-pinned bucket count, with zero selecting sizing policy
- * @return Selected bucket count, or a bucket or arithmetic error
+ * @brief Choose a power-of-two table with at most 7/8 of its buckets occupied.
+ * @param[in] unique_hash_count Number of distinct hashes to store.
+ * @param[in] override_count Requested table size, or zero to calculate it.
+ * @return Bucket count, or an invalid-size  or overflow error.
  */
 [[nodiscard]] constexpr std::expected<std::uint64_t, direct_inverted_index_error>
 choose_bucket_count(std::uint64_t unique_hash_count, std::uint64_t override_count) noexcept {
@@ -628,10 +631,15 @@ choose_bucket_count(std::uint64_t unique_hash_count, std::uint64_t override_coun
 }
 
 /**
- * @brief Validates, sorts, groups, admits, and assigns dictionary slots for a direct build.
- * @param[in] input Hash occurrences with 64-bit target coordinates
- * @param[in] options Identity, fragment-summary policy, and resource limits
- * @return Prepared owning build state, or a range, admission, allocation, or layout error
+ * @brief Sort occurrences, group equal hashes, and assign their dictionary slots.
+ *
+ * Check coordinates and configured memory limits before buildang the output
+ * image Optional fragment summaries require positions grouped by fragment
+ * within each, hash.
+ *
+ * @param[in] input Hashes, target positions, and strands in any order.
+ * @param[in] options Source identity, fragment settings, and memory limits.
+ * @return Prepared data and image layout, or a validation or allocation error.
  */
 [[nodiscard]] inline std::expected<direct_index_prepared_build, direct_inverted_index_error>
 prepare_build(std::span<const direct_index_occurrence> input,
@@ -678,7 +686,7 @@ prepare_build(std::span<const direct_index_occurrence> input,
             });
         }
         const bool summaries = options.fragment_span_bp != 0u;
-        // Orders each hash by fragment, strand, and coordinate for contiguous wire extents.
+        // Keep each hash's positions together, ordered by optional  fragment, strand, and coordinate.
         std::sort(prepared.occurrences.begin(),
                   prepared.occurrences.end(),
                   [summaries](const direct_index_prepared_occurrence& left,
@@ -795,14 +803,16 @@ prepare_build(std::span<const direct_index_occurrence> input,
 export namespace bioseq::indexing {
 
 /**
- * @brief Builds an owning direct inverted-index image from unsorted occurrences.
+ * @brief Build a direct hash-table index from target occurrences in any order.
  *
- * The returned image uses fixed little-endian fields, an open-addressed hash dictionary, optional
- * fragment summaries, P32 or P64 strand-bit coordinates, and authenticated aligned sections.
+ * Store posting lists beside an open-addressed hash dictionary, with optional
+ * summaries for target fragments. Fields use little-endian byte order. Positions
+ * use 32 or 64 bits depending on target length, with strand in the low bit.
+ * Section checksums detect damage when the image is read.
  *
- * @param[in] input Occurrences borrowed only for the duration of the call
- * @param[in] options Identity, summary geometry, capacity, image, and scratch limits
- * @return Complete image bytes, or a validation, admission, allocation, or encoding error
+ * @param[in] input Occurrences read during this call.
+ * @param[in] options Source identity, fragment settings, and size limits.
+ * @return Owned image bytes, or a validation, size-limit, or  allocation error.
  */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, direct_inverted_index_error>
 build_direct_inverted_index(std::span<const direct_index_occurrence> input,
@@ -928,7 +938,7 @@ build_direct_inverted_index(std::span<const direct_index_occurrence> input,
             return std::unexpected(direct_inverted_index_error::control);
         }
 
-        // Computes a checksum over one already planned and populated section.
+        // Calculate a checksum from the completed section bytes.
         const auto section_crc = [&image](std::uint64_t offset, std::uint64_t count) noexcept {
             return direct_index_detail::crc64(std::span<const std::byte>{image}.subspan(
                 static_cast<std::size_t>(offset), static_cast<std::size_t>(count)));

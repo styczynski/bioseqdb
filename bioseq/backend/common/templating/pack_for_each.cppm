@@ -15,13 +15,11 @@ export module bioseq.common.templating.pack_for_each;
 export namespace bioseq::common::templating {
 
 /**
- * @brief Invokes a callable once for every index in `[0, p_count)`.
- * @tparam p_count Number of compile-time indices.
- * @tparam p_function_type Callable type.
+ * @brief Calls `function` once for each index in `[0, p_count)`.
  * @param[in,out] function Callable accepting an integral-constant index.
  *
- * Highway and compiler force-inline attributes are retained so target-specific
- * callers receive the same attribute propagation as a handwritten expansion.
+ * Force-inlining lets CPU-specific callers expand these calls with their
+ * Highway target settings.
  */
 template <std::size_t p_count, class p_function_type>
 [[gnu::always_inline]] HWY_INLINE
@@ -35,10 +33,7 @@ constexpr void for_each_index(p_function_type&& function)
 }
 
 /**
- * @brief Invokes a templated callable once for every type in a pack.
- * @tparam p_element_types Types to visit.
- * @tparam p_function_type Callable type.
- * @param[in,out] function Callable exposing `operator()<selected_type>()`.
+ * @brief Calls `function.operator()<T>()` for each type in the pack.
  */
 template <class... p_element_types, class p_function_type>
 [[gnu::always_inline]] constexpr void for_each_type(
@@ -48,10 +43,7 @@ template <class... p_element_types, class p_function_type>
 }
 
 /**
- * @brief Invokes a templated callable once for every value in a pack.
- * @tparam p_values Structural values to visit.
- * @tparam p_function_type Callable type.
- * @param[in,out] function Callable exposing `operator()<selected_value>()`.
+ * @brief Calls `function.operator()<value>()` for each value in the pack.
  */
 template <auto... p_values, class p_function_type>
 [[gnu::always_inline]] constexpr void for_each_value(
@@ -61,16 +53,14 @@ template <auto... p_values, class p_function_type>
 }
 
 /**
- * @brief Appends a value to a fixed-capacity prefix when it is not present.
- * @tparam p_element_type Array element type.
- * @tparam p_capacity Array capacity.
- * @param[in,out] buffer Destination array.
- * @param[in,out] live_count Number of initialized prefix elements. Incremented on append.
- * @param[in] value Candidate value.
- *
- * A full buffer is left unchanged. The operation is intended for constant
- * evaluation where the caller owns capacity validation.
+ * @brief Appends a value unless it is already present or  the buffer is full.
+ * @param[in,out] buffer Array whose first `live_count` elements are in use.
+ * @param[in,out] live_count Increases when the value is appended.
+ * @param[in] value Value to add.
  * @pre `live_count <= p_capacity`.
+ *
+ * This helper runs at compile time. The caller must check capacity if silently
+ * leaving a full buffer unchanged would be an error.
  */
 template <class p_element_type, std::size_t p_capacity>
 consteval void append_unique_value(

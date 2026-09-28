@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief SQL owners for streamed sample-table generation and locator inspection.
+ * @brief Create synthetic sequence tables and inspect their  storage locators.
  */
 module;
 
@@ -73,10 +73,10 @@ constexpr std::size_t   k_fragment_storage_units = 1024;
 constexpr std::size_t   k_fragment_bp =
     k_fragment_storage_units * k_dna4_letters_per_unit;  // 32 768
 
-/** @brief Owns a detoasted sequence copy only when PostgreSQL created one. */
+/** Free a detoasted sequence only when PostgreSQL made a separate copy. */
 class detoasted_sequence final {
 public:
-    /** @brief Borrows an inline datum or takes cleanup responsibility for its detoasted copy. */
+    /** Open the sequence and remember whether its detoasted copy ieeds freeing. */
     explicit detoasted_sequence(Datum source)
         : source_{source},
           value_{bioseq::postgres::support::invoke_pg_as_cpp([source] {
@@ -97,7 +97,7 @@ public:
         }
     }
 
-    /** @return The borrowed or RAII-owned sequence header. */
+    /** @return Sequence header. Keep a borrowed input alive while using this wrapper. */
     [[nodiscard]] bioseq::pg_types::seq* get() const noexcept {
         return value_;
     }
@@ -109,10 +109,9 @@ private:
 };
 
 /**
- * @brief Groups PostgreSQL relation and column-writer resources for one sample table.
- *
- * The context borrows transaction-owned relation metadata and explicitly closes
- * its slot, caches, and relation through `close_sample_relation_after_writes`.
+ * Keep the table and sequence writers needed to insert sample rows.
+ * Close, the slot, caches, and relation with close_sample_relation_after_writes
+ * after insertion succeeds or fails.
  */
 struct sample_table_write_context {
     Oid parent_relid = InvalidOid;
@@ -125,7 +124,7 @@ struct sample_table_write_context {
     std::uint64_t main_storage_id = 0;
 };
 
-/** @brief Raises a PostgreSQL internal error with the sample routine's identity. */
+/** Raise a PostgreSQL error that identifies the failing sample-table routine */
 [[noreturn]] void raise_sample_table_error(
         const char* routine,
         std::string message,
@@ -138,10 +137,7 @@ struct sample_table_write_context {
         });
 }
 
-/**
- * @brief Creates a named sample relation through SPI and resolves its OID.
- * @return OID of the relation created in the current creation namespace.
- */
+/** Create a sample table in the current creation namespace and return  its OID. */
 [[nodiscard]] Oid create_sample_relation(
         const char* routine,
         const std::string& table_name,
@@ -198,11 +194,7 @@ struct sample_table_write_context {
     return created_relation;
 }
 
-/**
- * @brief Opens a sample relation and initializes its column-storage writer.
- * @param[in,out] context Empty context populated with transaction-lifetime resources.
- * @param[in] parent_relid OID of the newly created sample relation.
- */
+/** Open the new sample table and prepare its row and sequence-fragment writers. */
 void open_sample_relation_for_writes(
         sample_table_write_context& context,
         Oid parent_relid) {
@@ -275,9 +267,9 @@ void open_sample_relation_for_writes(
 }
 
 /**
- * @brief Closes every acquired writer resource while preserving the first failure.
- * @param[in,out] context Resource bundle to drain.
- * @param[in] commit Whether cached sequence writes should be published.
+ * Close the sample table's acquired resources, trying every cleanup action
+ * before rethrowing the first failure.
+ * @param commit Whether to save pending fragment-table byte counts.
  */
 void close_sample_relation_after_writes(
         sample_table_write_context& context,
@@ -331,9 +323,9 @@ void close_sample_relation_after_writes(
 }
 
 /**
- * @brief Streams one packed dna4 range into sequence-fragment storage.
- * @tparam p_sequence_config Packed sequence configuration with 64-bit storage units.
- * @return A pending source whose locator can be published after its parent row.
+ * Write a packed dna4 sequence in storage fragments.
+ * @tparam p_sequence_config Sequence configuration using 64-bit packed units.
+ * @return Pending source to publish after writing its parent row.
  */
 template <bioseq::sequences::generation::packed_sequence_config p_sequence_config>
 [[nodiscard]] bioseq::storage::pending_sequence_source insert_compact_range_streamed(
@@ -403,8 +395,8 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
 }
 
 /**
- * @brief Estimates peak transient memory for one generated query-target pair.
- * @return Saturating byte estimate used by memory admission.
+ * Estimate temporary query-generation memory from the  mean fragment length.
+ * Use the estimate to choose a batch size within the memory budget.
  */
 [[nodiscard]] std::uint64_t estimate_query_pair_peak_bytes(
     const bioseq::sequences::generation::generator_params& params) noexcept {
@@ -428,15 +420,14 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     .create = bioseq::sql::create_mode::or_replace,
 })]]
 /**
- * @brief Creates a Bioseq table containing streamed synthetic dna4 sequences.
- * @param[in] table_name Unqualified relation name in the active creation namespace.
- * @param[in] n_sequences Number of non-null sequence rows to generate.
- * @param[in] sequence_bp_size Length of every generated sequence in base pairs.
- * @param[in] alphabet Required `dna4` alphabet spelling.
- * @param[in] seed Deterministic random seed, defaulting to 42.
- * @return OID of the created table after all sequence sources are published.
- *
- * The function creates one relation and inserts exactly `n_sequences` rows.
+ * Create a Bioseq table of random dna4 sequences, writing each seqence in
+ * fragments as it is generated.
+ * @param table_name Unqualified table name in the current creation namespace.
+ * @param n_sequences Number of rows, from 1 to 100 million.
+ * @param sequence_bp_size Nonnegative length of each sequence in base pairs.
+ * @param alphabet Must be dna4.
+ * @param seed Random seed, defaulting to 42.
+ * @return Created table OID.
  */
 [[nodiscard]] Oid create_sample_table(
         std::optional<std::string> table_name,
@@ -529,7 +520,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         for (std::int32_t seq_no = 0;
              seq_no < sequence_count;
              ++seq_no) {
-            /* Fill each storage fragment with deterministic packed dna4 letters. */
+            /* Generate packed dna4 letters directly in the next storage fragment. */
             auto producer =
                 [&rng, total_bp, last_fragment_padding](
                     std::size_t frag_no,
@@ -666,20 +657,24 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     .create = bioseq::sql::create_mode::or_replace,
 })]]
 /**
- * @brief Creates synthetic query-target pairs with ground-truth coordinates.
- * @param[in] table_name Unqualified relation name in the active creation namespace.
- * @param[in] fragment_count Number of query-target rows to generate.
- * @param[in] fragment_length_mean Mean query length in base pairs.
- * @param[in] fragment_length_stddev Standard deviation of query length in base pairs.
- * @param[in] reference_length Generated reference length in base pairs.
- * @param[in] substitution_rate Per-base substitution probability.
- * @param[in] insertion_rate Per-base insertion probability.
- * @param[in] deletion_rate Per-base deletion probability.
- * @param[in] insertion_length_mean Mean inserted run length in bases.
- * @param[in] deletion_length_mean Mean deleted run length in bases.
- * @param[in] reverse_complement_rate Probability of reverse-complementing a query.
- * @param[in] seed Deterministic generator seed.
- * @return OID of the created table after every query and target source is published.
+ * Create dna4 query-target pairs with known source coordinates. Generate  one
+ * reference, sample, query fragments, and add substitutions or indels using
+ * the supplied rates. Each row stores the reference as its target, plus the
+ * query's original interval and strand Null generator settings use
+ * generator_params defaults.
+ * @param table_name Unqualified table name in the current creation namespace.
+ * @param fragment_count Number of query-target rows.
+ * @param fragment_length_mean Mean query length before edits, in bases.
+ * @param fragment_length_stddev Standard deviation of that length, in bases.
+ * @param reference_length Reference length in bases.
+ * @param substitution_rate Substitution  probability per source base.
+ * @param insertion_rate Insertion-event probability per source base.
+ * @param deletion_rate Deletion-event probability per source base.
+ * @param insertion_length_mean Mean inserted run length in baser.
+ * @param deletion_length_mean Mean deleted run length in bases.
+ * @param reverse_complement_rate Probability of reverse-complementing a query.
+ * @param seed Random seed.
+ * @return Created table OID after publishing each query and target source.
  */
 [[nodiscard]] Oid create_query_target_sample_table(
         std::optional<std::string> table_name,
@@ -956,9 +951,9 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     .volatility = bioseq::sql::volatility::immutable,
 })]]
 /**
- * @brief Decodes locator version, shard, fragment range, source epoch, and padding.
- * @param[in] seq Sequence datum, detoasted for the duration of this call.
- * @return Exactly one metadata row for an inline sequence or locator stub.
+ * Return one row describing the sequence's stored locator and padding.
+ * For an inline sequence, return its length and padding with  zero locator
+ * fields. Detoast the input only for this call.
  */
 [[nodiscard]]
 bioseq::postgres::support::table_rows<

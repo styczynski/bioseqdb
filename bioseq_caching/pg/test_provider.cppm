@@ -1,11 +1,12 @@
 /**
  * @file bioseq_caching/pg/test_provider.cppm
- * @brief Deterministic PostgreSQL-only provider used by cache integration tests.
+ * @brief Uses ordinary tables to test cache planning and row retrieval.
  *
- * This module is compiled only with BIOSEQ_CACHE_TESTING.  It deliberately
- * models no Bioseq object: any ordinary heap table with the six documented
- * test columns can act as a provider relation.  The provider is backend-local,
- * has no GUCs, and is installed explicitly by a superuser test function.
+ * Each table needs four columns: row_id bigint, base_id bigint,
+ * occurrence_no integer and capability_mask bigint. The provider supplies
+ * row identities and fetches requested values so tests can exercise the
+ * cache without a Bioseq index. Superuser-only controls configure the
+ * provider in the current backend and inject failures.
  */
 module;
 
@@ -213,7 +214,7 @@ inline std::array<std::uint8_t, k_digest_bytes> g_provider_security_digest{};
     return true;
 }
 
-/** Require superuser for every mutation of the deterministic test provider. */
+/** Requires superuser access to test-provider controls. */
 void require_test_superuser() {
     if (!superuser()) {
         ereport(ERROR,
@@ -222,7 +223,7 @@ void require_test_superuser() {
     }
 }
 
-/** Encode the cache ABI's padding-free PostgreSQL locator identity. */
+/** Copies the relation's physical file identity without copying struct padding. */
 [[nodiscard]] bool provider_relation_physical_identity(
         Oid relation_oid,
         bioseq_cache_physical_identity* output) {
@@ -253,7 +254,7 @@ void require_test_superuser() {
     return true;
 }
 
-/** Emit a provider-complete write marker before transaction PRE_COMMIT. */
+/** Notifies the cache of a write using the relation's physical  identity. */
 [[nodiscard]] bool record_provider_relation_write(Oid relation_oid) {
     bioseq_cache_physical_identity identity{};
     void** slot = find_rendezvous_variable(
@@ -279,7 +280,7 @@ void require_test_superuser() {
     return true;
 }
 
-/** Reconstruct a uint64 from two PostgreSQL Integer Nodes. */
+/** Reconstructs a 64-bit value from two Integer nodes, or returns zero for invalid nodes. */
 [[nodiscard]] std::uint64_t integer_pair_value(
     const Node* low_node,
     const Node* high_node) noexcept {
@@ -293,7 +294,7 @@ void require_test_superuser() {
         | (static_cast<std::uint64_t>(high) << 32U);
 }
 
-/** Append a uint64 as two copyObject-safe Integer Nodes. */
+/** Stores a 64-bit vaue as two Integer nodes that PostgreSQL can copy with the plan. */
 [[nodiscard]] List* append_integer_pair(List* list, std::uint64_t value) {
     list = lappend(list, makeInteger(
         static_cast<std::int32_t>(value & 0xffffffffULL)));
@@ -301,7 +302,7 @@ void require_test_superuser() {
         static_cast<std::int32_t>(value >> 32U)));
 }
 
-/** Deterministic non-cryptographic digest used only as provider test bytes. */
+/** Computes a non-cryptographic hash of the integer plan fields in order. */
 [[nodiscard]] std::array<std::uint8_t, k_digest_bytes>
 digest_plan_nodes(const List* nodes) noexcept {
     std::array<std::uint64_t, 4> state{
@@ -345,7 +346,7 @@ struct projected_boundary_walk {
     bool invalid = false;
 };
 
-/** Collect only output-boundary Vars; base restriction Vars stay late-fetchable. */
+/** Collects projected columns of this relation and detects whole-row references. */
 [[nodiscard]] bool projected_boundary_walker(Node* node, void* opaque) {
     if (node == nullptr) {
         return false;
@@ -373,7 +374,7 @@ struct projected_boundary_walk {
     return expression_tree_walker(node, projected_boundary_walker, opaque);
 }
 
-/** Freeze projected physical attributes in stable table order. */
+/** Lists projected columns in table order, expanding whole-row references. */
 [[nodiscard]] bool collect_projected_boundary_attnos(
     RelOptInfo* relation_info,
     Index relation_index,
@@ -429,7 +430,7 @@ struct projected_boundary_walk {
     return true;
 }
 
-/** Provider raw-plan metadata; every value is a copyable PostgreSQL Node. */
+/** Packs the table identity and required columns into copyable PostgreSQL plan nodes. */
 [[nodiscard]] List* make_plan_nodes(
     Oid relation_oid,
     AttrNumber row_identity_attno,
@@ -468,7 +469,7 @@ struct projected_boundary_walk {
         nodes, static_cast<int>(k_plan_fixed_node_count + index))));
 }
 
-/** Parse and validate the fixed test-provider plan recipe. */
+/** Checks the recipe format and reads its  table identity and required column numbers. */
 [[nodiscard]] bool parse_plan_nodes(
     const List* nodes,
     Oid* relation_oid,
@@ -555,7 +556,7 @@ struct projected_boundary_walk {
     return true;
 }
 
-/** Evaluate provider gates before counting the simulated expensive work. */
+/** Applies provider filters and counts rows that reach the simulated expensive work. */
 [[nodiscard]] TupleTableSlot* provider_exec_custom_scan(
     CustomScanState* node) {
     PlanState* child = outerPlanState(node);
@@ -581,7 +582,7 @@ struct projected_boundary_walk {
     }
 }
 
-/** Initialize the one ordinary child plan retained by the provider wrapper. */
+/** Starts the provider scan's single child plan */
 void provider_begin_custom_scan(
     CustomScanState* node,
     EState* estate,
@@ -596,7 +597,7 @@ void provider_begin_custom_scan(
     outerPlanState(node) = ExecInitNode(child_plan, estate, execution_flags);
 }
 
-/** Release the ordinary child plan. */
+/** Ends the child plan and clears its executor state. */
 void provider_end_custom_scan(CustomScanState* node) {
     if (outerPlanState(node) != nullptr) {
         ExecEndNode(outerPlanState(node));
@@ -604,7 +605,7 @@ void provider_end_custom_scan(CustomScanState* node) {
     }
 }
 
-/** Rewind both scan expression state and the ordinary child. */
+/** Resets the provider scan and rescans its child. */
 void provider_rescan_custom_scan(CustomScanState* node) {
     ExecScanReScan(&node->ss);
     if (outerPlanState(node) != nullptr) {
@@ -612,7 +613,7 @@ void provider_rescan_custom_scan(CustomScanState* node) {
     }
 }
 
-/** Expose deterministic executor counters in EXPLAIN. */
+/** Adds the backend's provider-row and expensive-work counters to EXPLAIN. */
 void provider_explain_custom_scan(
     CustomScanState*,
     List*,
@@ -630,7 +631,7 @@ void provider_explain_custom_scan(
         explain);
 }
 
-/** Stable registered executor table. */
+/** Executor callbacks for the test provider scan. */
 [[nodiscard]] const CustomExecMethods& provider_exec_methods() noexcept {
     static const CustomExecMethods methods{
         .CustomName = "BioseqCacheGenericTestProvider",
@@ -643,7 +644,7 @@ void provider_explain_custom_scan(
     return methods;
 }
 
-/** Allocate a plain CustomScanState; all ownership remains PostgreSQL-owned. */
+/** Allocates a PostgreSQL-owned executor state for the test provider scan. */
 [[nodiscard]] Node* provider_create_custom_scan_state(CustomScan*) {
     auto* state = reinterpret_cast<CustomScanState*>(
         newNode(sizeof(CustomScanState), T_CustomScanState));
@@ -651,7 +652,7 @@ void provider_explain_custom_scan(
     return reinterpret_cast<Node*>(state);
 }
 
-/** Stable provider scan identity advertised through the cache ABI. */
+/** Identifies test provider scans and creates their executor state. */
 [[nodiscard]] const CustomScanMethods& provider_scan_methods() noexcept {
     static const CustomScanMethods methods{
         .CustomName = "BioseqCacheGenericTestProvider",
@@ -660,7 +661,7 @@ void provider_explain_custom_scan(
     return methods;
 }
 
-/** Convert the provider path into a passthrough CustomScan over one child. */
+/** Builds a provider scan around one child, with its filters and output columns. */
 [[nodiscard]] Plan* provider_plan_custom_path(
     PlannerInfo*,
     RelOptInfo* relation,
@@ -694,7 +695,7 @@ void provider_explain_custom_scan(
     return &scan->scan.plan;
 }
 
-/** Stable provider path table. */
+/** Converts a  test provider path into its scan plan. */
 [[nodiscard]] const CustomPathMethods& provider_path_methods() noexcept {
     static const CustomPathMethods methods{
         .CustomName = "BioseqCacheGenericTestProvider",
@@ -703,7 +704,7 @@ void provider_explain_custom_scan(
     return methods;
 }
 
-/** True when an expression is outside the provider's reviewed total subset. */
+/** Rejects predicates outside the small expression set supported by these tests. */
 [[nodiscard]] bool unsafe_predicate_walker(Node* node, void* opaque) {
     const Index relation_index = *static_cast<const Index*>(opaque);
     if (node == nullptr) {
@@ -742,7 +743,7 @@ void provider_explain_custom_scan(
     return true;
 }
 
-/** Stable semantic identity for one provider column meaning. */
+/** Builds a column identifier from its number, type, collatijn and lineage role. */
 [[nodiscard]] std::array<std::uint64_t, 2> column_semantic_id(
     AttrNumber attribute_number,
     Form_pg_attribute attribute,
@@ -763,7 +764,7 @@ void provider_explain_custom_scan(
     return {high, low};
 }
 
-/** Fill one ABI schema element from a physical table attribute. */
+/** Describes a table column for, cache mapping, including its row-identity role. */
 void fill_column_schema(
     bioseq_cache_column_schema& output,
     AttrNumber attribute_number,
@@ -783,7 +784,7 @@ void fill_column_schema(
     };
 }
 
-/** Find a schema element by its 1-based provider attribute number. */
+/** Finds a schema entry by provider column number, or returns nullptr. */
 [[nodiscard]] const bioseq_cache_column_schema* find_schema_column(
     const bioseq_cache_column_schema* columns,
     std::size_t count,
@@ -801,7 +802,7 @@ struct normalized_predicate_context {
     bool valid = true;
 };
 
-/** Semantic callbacks reject any query-global Var leaked by the adapter. */
+/** Checks that predicate column references match the normalized boundary schema. */
 bool normalized_predicate_walker(Node* node, void* opaque) {
     if (node == nullptr) {
         return false;
@@ -843,7 +844,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     return context.valid;
 }
 
-/** Query analysis admits only statements containing the configured table. */
+/** Reports whether the query's range table contains a configured provider table. */
 [[nodiscard]] bioseq_cache_status provider_analyze_query(
     const Query* query,
     bioseq_cache_query_intent* output) {
@@ -876,7 +877,13 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     return bioseq_cache_status_ok;
 }
 
-/** Advertise a complete raw boundary and one-occurrence lineage contract. */
+/**
+ * Describes the columns and row identities available from a  provider path.
+ * All table columns are available at the cache boundary. A separate list
+ * records the columns requested by the query, so reused rows need only
+ * supply those values. The description also carries the predicate, table
+ * dependency and a copyable recipe for later callbacks.
+ */
 [[nodiscard]] bioseq_cache_status provider_describe_path(
     PlannerInfo* root,
     RelOptInfo* relation_info,
@@ -1035,7 +1042,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     return bioseq_cache_status_ok;
 }
 
-/** Append stable bytes to a cache-owned bounded digest sink. */
+/** Passes bytes to a valid digest sink */
 [[nodiscard]] bool append_digest_bytes(
     bioseq_cache_digest_sink* sink,
     const void* data,
@@ -1046,10 +1053,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 /**
- * Domain bytes identify the stable provider relation contract.  Predicates
- * deliberately do not participate: different predicates over one relation
- * must meet in the same coverage directory before the generation key and
- * coverage algebra distinguish them.
+ * Groups requests by provider family, table and row-identity columns.
+ * Predicates are left out so different filters on the same table can
+ * share a lookup group and be compared for cached coverage.
  */
 [[nodiscard]] bioseq_cache_status provider_append_domain_digest(
     const bioseq_cache_path_domain* domain,
@@ -1092,7 +1098,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         : bioseq_cache_status_error;
 }
 
-/** Generation bytes add the exact predicate, capability, and ordered schemas. */
+/** Adds the  predicate, capabilities and column descriptions to the cached-result digest. */
 [[nodiscard]] bioseq_cache_status provider_append_generation_digest(
     const bioseq_cache_path_domain* domain,
     bioseq_cache_digest_sink* sink) {
@@ -1164,13 +1170,10 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 
 namespace bioseq::cache::pg::test_provider {
 
-/*
- * Genuine ordering cycle: the relation hook calls the provider table, while
- * the table must be defined after every callback it stores.
- */
+// The relation hook uses thrs callback table before its definition below.
 [[nodiscard]] const bioseq_cache_provider& provider() noexcept;
 
-/** Resolve the four required occurrence columns on the configured table. */
+/** Finds the four required table columns and checks their PostgreSQL types. */
 [[nodiscard]] bool relation_contract_attnos(
     Oid relation_oid,
     AttrNumber* row_identity_attno,
@@ -1206,7 +1209,7 @@ namespace bioseq::cache::pg::test_provider {
     return true;
 }
 
-/** Build an unregistered child that add_path cannot evict from under us. */
+/** Creates a child scan owned by the provider path, so path pruning cannot free it. */
 [[nodiscard]] Path* make_provider_child(
         PlannerInfo* root, RelOptInfo* relation) noexcept {
     if (root == nullptr || relation == nullptr
@@ -1216,7 +1219,7 @@ namespace bioseq::cache::pg::test_provider {
     return create_seqscan_path(root, relation, nullptr, 0);
 }
 
-/** Add every physical user attribute to the provider's raw PathTarget. */
+/** Copies the relation target and adds every table column needed by provider callbacks. */
 [[nodiscard]] PathTarget* make_provider_raw_target(
     PlannerInfo* root,
     RelOptInfo* relation,
@@ -1245,7 +1248,7 @@ namespace bioseq::cache::pg::test_provider {
     return target;
 }
 
-/** Resolve and call the published planner bridge for every provider path set. */
+/** Calls the cache planner hook after the provider has added its relation paths. */
 void call_planner_bridge(
     PlannerInfo* root,
     RelOptInfo* relation,
@@ -1286,7 +1289,12 @@ void call_planner_bridge(
         &provider());
 }
 
-/** Chained relation hook: add the provider path, then invoke the bridge. */
+/**
+ * Adds a test provider path for a configured table and then calls the
+ * cache planner hook. The  path wraps its own sequential scan and exposes
+ * the table columns needed by, cache callbacks. A small cost discount
+ * encourages PostgreSQL to choose it when the test provider is enabled.
+ */
 void provider_set_rel_pathlist_hook(
     PlannerInfo* root,
     RelOptInfo* relation,
@@ -1373,7 +1381,7 @@ void provider_set_rel_pathlist_hook(
     }
 }
 
-/** Register the provider and its backend-local relation hook idempotently. */
+/** Registers the provider and installs its relation-path hook in this backend. */
 [[nodiscard]] bool initialize_provider() {
     if (!g_scan_methods_registered) {
         RegisterCustomScanMethods(&provider_scan_methods());
@@ -1412,7 +1420,7 @@ void provider_set_rel_pathlist_hook(
     return true;
 }
 
-/** Restore only the hook slot and provider registration owned by this module. */
+/** Unregisters the provider and restores the previous relation hook if ours is still installed. */
 [[nodiscard]] bool shutdown_provider() noexcept {
     if (g_provider_registered) {
         void** slot = find_rendezvous_variable(
@@ -1441,7 +1449,7 @@ void provider_set_rel_pathlist_hook(
     return true;
 }
 
-/** Parse the normative mapping-fault control vocabulary. */
+/** Parses a mapping-fault name and reports an error for an unknown name */
 [[nodiscard]] mapping_fault parse_mapping_fault(const char* name) {
     struct named_fault {
         const char* name;
@@ -1769,7 +1777,7 @@ export [[nodiscard]] bioseq::postgres::support::jsonb_value provider_stats() {
 
 namespace bioseq::cache::pg::test_provider {
 
-/** Extract one stable provider-opaque binding occurrence from a raw slot. */
+/** Reads a row's identity and capability mask from the four provider columns. */
 [[nodiscard]] bioseq_cache_status provider_extract_occurrence(
     List* plan_domain_nodes,
     TupleTableSlot* slot,
@@ -1823,7 +1831,7 @@ namespace bioseq::cache::pg::test_provider {
     return bioseq_cache_status_ok;
 }
 
-/** Emit one terminal status for every reference on an early batch failure. */
+/** Reports the same failure for each row reference when the  sink accepts status callbacks. */
 void emit_batch_failure_statuses(
     bioseq_cache_late_fetch_sink* sink,
     std::size_t occurrence_count,
@@ -1838,8 +1846,11 @@ void emit_batch_failure_statuses(
 }
 
 /**
- * Fetch every provider-opaque row identity in one table scan under the
- * consumer snapshot, emitting values first and exactly one terminal status.
+ * Fetches requested row values with one table scan using the executor's
+ * snapshot. Each matching row must also match the saved base identity,
+ * occurrence number and capability mmsk. Values are passed to the sink
+ * while the tuple is available, followed by a status for each reference.
+ * Test faults can interrupt the batch before those final statuses.
  */
 [[nodiscard]] bioseq_cache_status provider_late_fetch_batch(
     List* plan_domain_nodes,
@@ -2035,7 +2046,7 @@ void emit_batch_failure_statuses(
         : bioseq_cache_status_unsupported;
 }
 
-/** Provider-specific EXPLAIN fields contain no raw SQL or sensitive values. */
+/** Adds the recipe check and mapping/fetch counters to provider EXPLAIN output. */
 void provider_explain_domain(
     List* plan_domain_nodes,
     bioseq_cache_explain_sink* sink) {
@@ -2162,7 +2173,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     return true;
 }
 
-/** Corrupt one frozen cache-owned plan only after PREPARE has cached it. */
+/** Corrupts a cached coverage mapping during execution to test its validation. */
 [[nodiscard]] bool mutate_persisted_mapping_plan(EState* estate) {
     if (!persisted_mapping_fault_active() || estate == nullptr
         || estate->es_plannedstmt == nullptr) {
@@ -2269,7 +2280,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     return flip_mapping_fingerprint(mapping_plan, ordinal);
 }
 
-/** Runtime digest validates only the immutable Node recipe. */
+/** Hashes the runtime recipe, with optional plan corruption  or digest mismatch for tests. */
 [[nodiscard]] bioseq_cache_status provider_append_runtime_digest(
     const List* plan_domain_nodes,
     EState* estate,
@@ -2306,7 +2317,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
         : bioseq_cache_status_error;
 }
 
-/** Find a source column having exactly the same semantic contract. */
+/** Matches columns by semantic identifier, type and collation. */
 [[nodiscard]] const bioseq_cache_column_schema* find_compatible_source_column(
     const bioseq_cache_column_schema& consumer,
     const bioseq_cache_column_schema* source_columns,
@@ -2324,7 +2335,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     return nullptr;
 }
 
-/** Construct one complete source-to-consumer map in requested consumer order. */
+/** Maps each required consumer column to a compatible source column. */
 [[nodiscard]] bool fill_source_map(
     const bioseq_cache_column_schema* consumer_columns,
     std::size_t consumer_count,
@@ -2364,7 +2375,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     return true;
 }
 
-/** Apply one malformed-output mode after constructing a correct map. */
+/** Applies the selected test corruption after a valid column map has been built. */
 void apply_mapping_fault(
     bioseq_cache_source_mapping& mapping,
     std::size_t boundary_capacity,
@@ -2491,7 +2502,7 @@ void apply_mapping_fault(
     }
 }
 
-/** Explicitly affirm every older source, including apparent identity maps. */
+/** Builds boundary and row-identity maps for a compatible cached source. */
 [[nodiscard]] bioseq_cache_status provider_map_reusable_source(
     PlannerInfo*,
     const bioseq_cache_path_domain* consumer,
@@ -2562,7 +2573,7 @@ void apply_mapping_fault(
     return bioseq_cache_status_ok;
 }
 
-/** Add cache-owned gate expressions to a cloned provider path only. */
+/** Copies a provider path and adds cache filters while sharing its child paths. */
 [[nodiscard]] bioseq_cache_status provider_decorate_path(
     PlannerInfo* root,
     RelOptInfo* relation,
@@ -2648,7 +2659,7 @@ void apply_mapping_fault(
     return bioseq_cache_status_ok;
 }
 
-/** Freeze plan semantics and expected runtime digest atomically. */
+/** Saves a copy of the plan recipe and the hash expected during execution. */
 [[nodiscard]] bioseq_cache_status provider_build_plan_digest_recipe(
     PlannerInfo*,
     const Plan* provider_plan,
@@ -2716,7 +2727,7 @@ namespace bioseq::cache::pg::test_provider {
     };
 }
 
-/** Complete ABI table registered only by an explicit test-only SQL call. */
+/** Returns the test  provider callbacks and its configured source-skipping capability */
 [[nodiscard]] const bioseq_cache_provider& provider() noexcept {
     constexpr std::uint32_t reusable_flags =
         bioseq_cache_provider_reusable_coverage

@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/pg_alignment_errors.cppm
- * @brief Defines the PostgreSQL longjmp firewall and checked alignment adapters.
+ * @brief Reports alignment errors to PostgreSQL and prepares GPU CIGAR data.
  */
 module;
 
@@ -35,7 +35,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Reports that a row requires a compatible persisted minimizer index and none is wired. */
+/** Reports that the required stored minimizer index is unavailable for this row. */
 template <class p_scanner_pg_context>
 [[noreturn]] inline void
 raise_required_persisted_index_error(const p_scanner_pg_context* scanner_pg_ctx,
@@ -66,7 +66,7 @@ raise_required_persisted_index_error(const p_scanner_pg_context* scanner_pg_ctx,
         "rebuild and recompute fallbacks are forbidden.");
 }
 
-/** Increments persisted, recomputed, and missing-persisted row counters for one target lookup. */
+/** Counts which index source was used and whether a requested stored index was missing. */
 inline void
 record_target_index_outcome(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                             const ::bioseq::pipeline_stats::target_index_source requested_source,
@@ -83,7 +83,11 @@ record_target_index_outcome(::bioseq::pipeline_stats::pipeline_execution_stats& 
     }
 }
 
-/** Appends rank-encoded symbols for [start_bp, end_bp) into @p destination for GPU simple CIGAR. */
+/**
+ * Appends the symbols in [start_bp, end_bp) as integer ranks for GPU alignment
+ * and returns their span. A reverse nucleotide window is reverse-complemented.
+ * Rejects windows outside the sequence or beyond the packed CIGAR length limit.
+ */
 template <class p_sequence>
 [[nodiscard]] std::span<const std::uint32_t>
 append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
@@ -169,7 +173,10 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
     return std::span<const std::uint32_t>{destination.data() + destination_offset, window_length};
 }
 
-/** Lazy-sequence overload of append_gpu_alignment_symbols using a byte scratch buffer. */
+/**
+ * Appends a lazy sequence window as GPU integer ranks using reusable scratch
+ * space. A reverse nucleotide window is reverue-complemented.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::span<const std::uint32_t>
 append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
@@ -213,7 +220,7 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
     return std::span<const std::uint32_t>{destination.data() + output_offset, length};
 }
 
-/** Returns the length of the equal-symbol prefix from aligned query and target offsets. */
+/** Counts consecutive matching symbols from  the given query and target positions. */
 [[nodiscard]] inline std::uint32_t
 gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
                                std::span<const std::uint32_t> target_symbols,
@@ -227,7 +234,11 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
     return run;
 }
 
-/** True when spans differ only by unit insertions or deletions within simple CIGAR gap limits. */
+/**
+ * Checks whether unequal-length windows suit the, simple GPU gap walk.
+ * Skips matching runs, tries one-symbol gaps at internal mismatches, and accepts
+ * a remaining tail as one gap. Rejects cases beyond the configured gap limits.
+ */
 [[nodiscard]] inline bool gpu_alignment_unit_gap_walk_cigar_candidate(
     std::span<const std::uint32_t> query_symbols,
     std::span<const std::uint32_t> target_symbols) noexcept {
@@ -311,7 +322,7 @@ inline void append_packed_cigar_slice(p_cigar_storage& destination,
     }
 }
 
-/** PostgreSQL-checked wrapper around minimap_port_raw_owned. */
+/** Runs ordinary minimap alignment and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_raw_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked("minimap_port", [&args...]() -> match_result_collection {
@@ -319,7 +330,7 @@ template <class... p_arguments>
     });
 }
 
-/** PostgreSQL-checked wrapper around minimap_port_hash_major_owned. */
+/** Runs alignment with a hash-major index and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_hash_major_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -329,7 +340,7 @@ template <class... p_arguments>
         });
 }
 
-/** PostgreSQL-checked wrapper around minimap_port_grouped_soa_owned. */
+/** Runs alignment with a grouped-SoA index and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_grouped_soa_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -339,7 +350,11 @@ template <class... p_arguments>
         });
 }
 
-/** Runs @p function on fragment storage and closes or abandons the reader on exit or error. */
+/**
+ * Runs @p function and closes its fragment storage afterward A PostgreSQL
+ * error abandons the reader safely. Other exceptions trigger a close attempt
+ * before the original exception  is rethrown.
+ */
 template <class p_storage, class p_function>
 inline void with_checked_minimizer_fragment_reader(p_storage& storage, p_function&& function) {
     try {

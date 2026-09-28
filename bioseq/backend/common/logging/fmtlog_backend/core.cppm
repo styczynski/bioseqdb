@@ -45,7 +45,7 @@ module;
 #include <utility>
 #include <vector>
 
-// FMT LOGIC
+// fmt configuration and headers.
 #define FMT_MODULE
 
 #ifdef _MSVC_LANG
@@ -139,7 +139,7 @@ module;
 #include <windows.h>
 #endif
 
-// FMT LOGIC END
+// End of fmt headers.
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -151,8 +151,8 @@ module;
 #define FAST_THREAD_LOCAL __thread
 #endif
 
-// define FMTLOG_BLOCK=1 if log statment should be blocked when queue is full, instead of discarding
-// the msg
+// Set FMTLOG_BLOCK to 1 to wait for  queue space when a record fits.
+// Oversized records are dropped even in blocking mode.
 #ifndef FMTLOG_BLOCK
 #define FMTLOG_BLOCK 0
 #endif
@@ -164,7 +164,7 @@ module;
 
 export module bioseq.common.logging:fmtlog_backend_core;
 
-// fmt logic
+// Export the fmt API.
 
 #ifdef FMT_IMPORT_STD
 import std;
@@ -174,11 +174,8 @@ import std;
 #define FMT_BEGIN_EXPORT export {
 #define FMT_END_EXPORT }
 
-// If you define FMT_ATTACH_TO_GLOBAL_MODULE
-//  - all declarations are detached from module 'fmt'
-//  - the module behaves like a traditional static library, too
-//  - all library symbols are mangled traditionally
-//  - you can mix TUs with either importing or #including the {fmt} API
+// FMT_ATTACH_TO_GLOBAL_MODULE gives fmt declarations their usual linkage.
+// This lets imported fmt code link with translation units that include fmt headers.
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 extern "C++" {
 #endif
@@ -214,16 +211,16 @@ extern "C++" {
 }
 #endif
 
-// fmt logic end
+// End of fmt exports.
 
 /** @brief Internal helpers for decoding queue-stored format arguments. */
 namespace fmtlogdetail {
-/** @brief Detects pointer-like argument types that must be dereferenced after decode. */
+/** @brief Selects pointer arguments whose pointees are formatted after decoding. */
 template <typename Arg> struct UnrefPtr : std::false_type {
     using type = Arg;
 };
 
-/** @brief Raw @c char* arguments are stored by address and are not dereferenced. */
+/** @brief Formats char pointers as strings without dereferencing one character. */
 template <> struct UnrefPtr<char*> : std::false_type {
     using type = char*;
 };
@@ -251,57 +248,68 @@ template <typename Arg> struct UnrefPtr<Arg*> : std::true_type {
 }; // namespace fmtlogdetail
 
 /**
- * @brief Asynchronous fmt-based logger with per-thread SPSC queues.
+ * @brief Queues log arguments on each thread and formats them in one poller.
  *
- * @tparam __ Unused instance tag. The default tag selects the shared wrapper instance.
+ * Each thread produces records for its own queue. One consumer drains
+ * those queues, formats messages with fmt and writes the output.
+ *
+ * @tparam __ Instance tag. The logging wrapper uses the  defalt.
  */
 template <int __ = 0> class fmtlogT {
   public:
     /** @brief Severity filter for queued records and flush policy. */
     enum LogLevel : uint8_t { DBG = 0, INF, WRN, ERR, OFF };
 
-    // Preallocate thread queue for current thread
+
     /** @brief Allocates the calling thread's queue buffer before the first log call. */
     static void preallocate() noexcept;
 
-    // Set the file for logging
-    /** @brief Opens or truncates a log file on disk for the polling thread. */
+
+    /** @brief Opens a log file, appending by default or truncating when requested. */
     static void setLogFile(const char* filename, bool truncate = false);
 
-    // Set an existing FILE* for logging, if manageFp is false fmtlog will not buffer log internally
-    // and will not close the FILE*
-    /** @brief Routes output to an existing @c FILE*. Caller owns the handle when @p manageFp is false. */
+
+    /**
+     * @brief Writes logs to an existing FILE handle.
+     *
+     * With manageFp enabled, the logger buffers output and closes the handle.
+     * Otherwise each poll flushes output and the caller keeps ownership.
+     */
     static void setLogFile(FILE* fp, bool manageFp = false);
 
-    // Collect log msgs from all threads and write to log file
-    // If forceFlush = true, internal file buffer is flushed
-    // User need to call poll() repeatedly if startPollingThread is not used
-    /** @brief Drains thread queues and writes formatted records. @p forceFlush flushes the file buffer. */
+
+    /**
+     * @brief Drains thread queues and writes formatted records.
+     *
+     * Call repeatedly when no background polling thread is running. Set
+     * forceFlush to bypass the usual file-buffer flush delay.
+     */
     static void poll(bool forceFlush = false);
 
-    // Set flush delay in nanosecond
-    // If there's msg older than ns in the buffer, flush will be triggered
-    /** @brief Sets the maximum age in nanoseconds before a buffered record triggers flush. */
+
+    /** @brief Sets the delay before a later poll flushes buffered output, in nanoseconds. */
     static void setFlushDelay(int64_t ns) noexcept;
 
-    // If current msg has level >= flushLogLevel, flush will be triggered
+
     /** @brief Flushes when a record at or above @p flushLogLevel is written. */
     static void flushOn(LogLevel flushLogLevel) noexcept;
 
-    // If file buffer has more than specified bytes, flush will be triggered
-    /** @brief Flushes when the internal file buffer exceeds @p bytes. */
+
+    /** @brief Flushes when, the output buffer reaches at least bytes. */
     static void setFlushBufSize(uint32_t bytes) noexcept;
 
-    // callback signature user can register
-    // ns: nanosecond timestamp
-    // level: logLevel
-    // location: full file path with line num, e.g: /home/raomeng/fmtlog/fmtlog.h:45
-    // basePos: file base index in the location
-    // threadName: thread id or the name user set with setThreadName
-    // msg: full log msg with header
-    // bodyPos: log body index in the msg
-    // logFilePos: log file position of this msg
-    /** @brief User callback invoked for each formatted record at or above a minimum level. */
+
+    /**
+     * @brief Receives a formatted record whose severity passes the callback filter
+     * @param ns Timestamp in nanoseconds since  the epoch.
+     * @param level Record severity.
+     * @param location Source path and line, possibly truncated to 255 bytes.
+     * @param basePos Offset of the basename in location.
+     * @param threadName Thread label set by setThreadName, or its thread ID.
+     * @param msg Header and body, without the final newline.
+     * @param bodyPos Offset of the body in msg.
+     * @param logFilePos Record offset in a managed log file.
+     */
     typedef void (*LogCBFn)(int64_t ns,
                             LogLevel level,
                             fmt::string_view location,
@@ -311,7 +319,7 @@ template <int __ = 0> class fmtlogT {
                             size_t bodyPos,
                             size_t logFilePos);
 
-    // Set a callback function for all log msgs with a mininum log level
+
     /** @brief Registers @p cb for records at or above @p minCBLogLevel. */
     static void setLogCB(LogCBFn cb, LogLevel minCBLogLevel) noexcept;
 
@@ -320,37 +328,39 @@ template <int __ = 0> class fmtlogT {
     /** @brief Registers the queue-full callback and opaque @p userData passed to it. */
     static void setLogQFullCB(LogQFullCBFn cb, void* userData) noexcept;
 
-    // Close the log file and subsequent msgs will not be written into the file,
-    // but callback function can still be used
+
     /** @brief Closes the log file. Callbacks still receive subsequent records. */
     static void closeLogFile() noexcept;
 
-    // Set log header pattern with fmt named arguments
+
     /** @brief Sets the fmt pattern for the line header written before each body. */
     static void setHeaderPattern(const char* pattern);
 
-    // Set a name for current thread, it'll be shown in {t} part in header pattern
-    /** @brief Sets the display name for the calling thread in the header pattern. */
+
+    /** @brief Sets the calling thread's label for the {t} header field. */
     static void setThreadName(const char* name) noexcept;
 
-    // Set current log level, lower level log msgs will be discarded
+
     /** @brief Sets the minimum level accepted by @ref checkLogLevel. */
     static inline void setLogLevel(LogLevel logLevel) noexcept;
 
-    // Get current log level
+
     /** @brief Returns the active minimum log level. */
     static inline LogLevel getLogLevel() noexcept;
 
-    // return true if passed log level is not lower than current log level
-    /** @brief Returns whether @p logLevel passes the current level filter. */
+
+    /** @brief Checks the level filter, or returns true if FMTLOG_NO_CHECK_LEVEL is set. */
     static inline bool checkLogLevel(LogLevel logLevel) noexcept;
 
-    // Run a polling thread in the background with a polling interval in ns
-    // Note that user must not call poll() himself when the thread is running
-    /** @brief Starts a background thread that calls @ref poll at @p pollInterval nanoseconds. */
+
+    /**
+     * @brief Starts a thread that polls at the requested nanosecond interval.
+     *
+     * Do not call poll() concurrently while this thread is running.
+     */
     static void startPollingThread(int64_t pollInterval = 1000000000) noexcept;
 
-    // Stop the polling thread
+
     /** @brief Stops the background polling thread started by @ref startPollingThread. */
     static void stopPollingThread() noexcept;
 
@@ -367,7 +377,7 @@ template <int __ = 0> class fmtlogT {
 
             /** @brief Total byte length of the slot including this header. */
             uint32_t size;
-            /** @brief Registered format-string id for deferred formatting on the consumer side. */
+            /** @brief Log-site ID, or severity for a one-shot preformatted message. */
             uint32_t logId;
         };
         /** @brief Number of header blocks in the ring, derived from @c FMTLOG_QUEUE_SIZE. */
@@ -387,10 +397,9 @@ template <int __ = 0> class fmtlogT {
         /** @brief Reserves a queue slot for @p size payload bytes. Returns null when full or oversize. */
         MsgHeader* allocMsg(uint32_t size) noexcept;
 
-        /** @brief Low-level slot reservation used by @ref allocMsg after size checks. */
+        /** @brief Reserves sace for a record without publishing it to the  consumer. */
         MsgHeader* alloc(uint32_t size) {
-            // Check before adding the record header so hostile/truncated sizes can
-            // never wrap the block calculation into an undersized reservation.
+            // Check the payload limit before adding the header to avoid overflow.
             if (size > MAX_PAYLOAD_SIZE)
                 return nullptr;
             size += sizeof(MsgHeader);
@@ -453,22 +462,22 @@ template <int __ = 0> class fmtlogT {
     struct ThreadBuffer {
         /** @brief Variable-size queue owned by this thread. */
         SPSCVarQueueOPT varq;
-        /** @brief Whether @ref preallocate should free this buffer on thread exit. */
+        /** @brief Set at thread exit so the poller can delete the drained buffer. */
         bool shouldDeallocate = false;
-        /** @brief NUL-terminated thread label for the log header. */
+        /** @brief Fixed-size thread label storage, read using nameSize. */
         char name[32];
         /** @brief Byte length of the active prefix of @c name. */
         size_t nameSize;
     };
 
     // https://github.com/MengRao/tscns
-    /** @brief Calibrated time-stamp counter to nanosecond conversion. */
+    /** @brief Converts processor clock ticks to calibrated nanosecond timestamps. */
     class TSCNS {
       public:
         /** @brief Nanoseconds per second, used for calibration intervals. */
         static const int64_t NsPerSec = 1000000000;
 
-        /** @brief Establishes TSC baseline and initial nanoseconds-per-TSC ratio. */
+        /** @brief Samples both clocks to estimate nanoseconds per processor tick. */
         void init(int64_t init_calibrate_ns = 20000000,
                   int64_t calibrate_interval_ns = 3 * NsPerSec) {
             calibate_interval_ns_ = calibrate_interval_ns;
@@ -539,10 +548,9 @@ template <int __ = 0> class fmtlogT {
             return 1.0 / ns_per_tsc_;
         }
 
-        // Linux kernel sync time by finding the first trial with tsc diff < 50000
-        // We try several times and return the one with the mininum tsc diff.
-        // Note that MSVC has a 100ns resolution clock, so we need to combine those ns with the same
-        // value, and drop the first and the last value as they may not scan a full 100ns range
+        // Choose the system-clock sample bracketed by the closest processor ticks.
+        // On MSVC, merge equal timestamps and skip incomplete edge intervals
+        // because the system clock has coarser resolution.
         /** @brief Pairs a TSC sample with a system-clock nanosecond sample for calibration. */
         static void syncTime(int64_t& tsc_out, int64_t& ns_out) {
 #ifdef _MSC_VER
@@ -581,7 +589,7 @@ template <int __ = 0> class fmtlogT {
             ns_out = ns[best];
         }
 
-        /** @brief Publishes a new TSC baseline and nanoseconds-per-TSC under the seqlock protocol. */
+        /** @brief Updates calibration while marking concurrent reads for  retry. */
         void
         saveParam(int64_t base_tsc, int64_t sys_ns, int64_t base_ns_err, double new_ns_per_tsc) {
             base_ns_err_ = base_ns_err;
@@ -597,7 +605,7 @@ template <int __ = 0> class fmtlogT {
             param_seq_.store(++seq, std::memory_order_release);
         }
 
-        /** @brief Seqlock generation counter for readers of calibration parameters. */
+        /** @brief Version counter used to detect calibration changes during a read */
         alignas(64) std::atomic<uint32_t> param_seq_ = 0;
         /** @brief Current nanoseconds elapsed per TSC tick. */
         double ns_per_tsc_;
@@ -621,7 +629,7 @@ template <int __ = 0> class fmtlogT {
 
     /** @brief fmt format context type used when decoding queued arguments. */
     using Context = fmt::format_context;
-    /** @brief Stack-backed buffer for synchronous formatting and header assembly. */
+    /** @brief Formatting buffer with 10,000 inline bytes and heap growth when needed. */
     using MemoryBuffer = fmt::basic_memory_buffer<char, 10000>;
     /** @brief Deferred formatter that decodes queue bytes and appends one record to @p out. */
     typedef const char* (*FormatToFn)(fmt::string_view format,
@@ -680,13 +688,13 @@ template <int __ = 0> class fmtlogT {
     };
 #endif
 
-    /** @brief Detects C-string mapped format argument types. */
+    /** @brief Checks whether fmt treats an argument as a C string. */
     template <typename Arg> static inline constexpr bool isCstring() {
         return fmt::detail::mapped_type_constant<Arg, char>::value ==
                fmt::detail::type::cstring_type;
     }
 
-    /** @brief Detects string_view mapped format argument types. */
+    /** @brief Checks whether fmt treats an argument as, a string view. */
     template <typename Arg> static inline constexpr bool isString() {
         return fmt::detail::mapped_type_constant<Arg, char>::value ==
                fmt::detail::type::string_type;
@@ -713,11 +721,11 @@ template <int __ = 0> class fmtlogT {
     }
 
     /*
-     * The queue deliberately packs strings and builtin scalar arguments without
-     * padding. Builtins can therefore begin at any byte after a string and must
-     * be decoded with memcpy.  Objects whose address is retained by fmt (custom
-     * formatters), and objects that have a non-trivial lifetime, instead need a
-     * real, aligned object in the queue until formatTo() has finished with it.
+     * Strings and builtin scalar arguments are packed without padding. A scalar
+     * can start at any byte after a string, so decode it with memcpy. Custom
+     * formatters may eep an object's address until formatTo() finishes. These
+     * objects, and objects that need a destructor, require aligned storage and
+     * must stay alive in  the queue until then.
      */
     /** @brief Detects argument types that require aligned object storage in the queue. */
     template <typename Arg> static inline constexpr bool needAlignedArgStorage() {
@@ -749,13 +757,13 @@ template <int __ = 0> class fmtlogT {
         return true;
     }
 
-    /** @brief Terminal overload that finishes compile-time argument size accounting. */
+    /** @brief Ends argument-size checking when no arguments remain. */
     template <size_t CstringIdx>
     static inline constexpr bool getArgSizes(size_t* cstringSize, size_t& remaining) {
         return true;
     }
 
-    /** @brief Accumulates encoded byte sizes for each log argument into @p remaining. */
+    /** @brief Checks argument storage against remaining space and records C-string sizes. */
     template <size_t CstringIdx, typename Arg, typename... Args>
     static inline constexpr bool
     getArgSizes(size_t* cstringSize, size_t& remaining, const Arg& arg, const Args&... args) {
@@ -790,7 +798,7 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Terminal overload that finishes queue argument encoding. */
+    /** @brief Returns the end of the encoded arguments. */
     template <size_t CstringIdx>
     static inline constexpr char* encodeArgs(size_t* cstringSize, char* out) {
         return out;
@@ -817,20 +825,17 @@ template <int __ = 0> class fmtlogT {
                 out = alignArgStorage<ArgType>(out);
             }
 
-            // Packed builtin scalars are only serialized bytes. No ArgType object is
-            // addressed in the queue.  Custom and non-scalar values are real,
-            // aligned objects because fmt may retain their address until the
-            // asynchronous formatting pass completes.
+            // Packed builtin scalars are copied as bytes and decoded with memcpy.
+            // Custom and non-scalar arguments need aligned object storage because fmt
+            // may keep their address until the asynchronous formatting pass finishes.
             if constexpr (!needAlignedArgStorage<ArgType>()) {
                 static_assert(std::is_scalar_v<ArgType> && std::is_trivially_copyable_v<ArgType>);
                 memcpy(out, &arg, sizeof(ArgType));
             } else if constexpr (std::is_constructible_v<ArgType, Arg&&>) {
                 std::construct_at(reinterpret_cast<ArgType*>(out), std::forward<Arg>(arg));
             } else {
-                // Raw arrays are the relevant non-constructible case.  memcpy starts
-                // their lifetime only when the standard classifies the type as
-                // implicit-lifetime. Reject any exotic type for which that guarantee
-                // does not hold rather than reintroducing typed access to raw bytes.
+                // Raw arrays reach this branch. Copying bytes starts their lifetime only
+                // for implicit-lifetime types, which the assertions require.
                 static_assert(std::is_trivially_copyable_v<ArgType>);
                 static_assert(std::is_implicit_lifetime_v<ArgType>);
                 memcpy(out, &arg, sizeof(ArgType));
@@ -840,7 +845,7 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Terminal overload for collecting named-argument index metadata. */
+    /** @brief Ends named-argument collection when  no arguments remain. */
     template <size_t Idx, size_t NamedIdx>
     static inline constexpr void
     storeNamedArgs(fmt::detail::named_arg_info<char>* named_args_store) {}
@@ -858,7 +863,7 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Writes one decoded value into the fmt argument array, optionally value-only. */
+    /** @brief Stores a decoded argument, optionally keeping its cached fmt type. */
     template <bool ValueOnly, size_t Idx, typename Decoded>
     static inline void storeDecodedArg(fmt::basic_format_arg<Context>* args, Decoded& decoded) {
         if constexpr (ValueOnly) {
@@ -874,14 +879,14 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Terminal overload that finishes queue argument decoding. */
+    /** @brief Returns the end of the decoded arguments. */
     template <bool ValueOnly, size_t Idx, size_t DestructIdx>
     static inline const char*
     decodeArgs(const char* in, fmt::basic_format_arg<Context>* args, const char** destruct_args) {
         return in;
     }
 
-    /** @brief Rebuilds fmt arguments from a queue payload and records destruct targets. */
+    /** @brief Rebuilds fmt arguments and remembers objects to destroy after formatting. */
     template <bool ValueOnly, size_t Idx, size_t DestructIdx, typename Arg, typename... Args>
     static inline const char*
     decodeArgs(const char* in, fmt::basic_format_arg<Context>* args, const char** destruct_args) {
@@ -936,7 +941,7 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Terminal overload for destroying decoded non-trivial queue arguments. */
+    /** @brief Ends cleanup when no stored objects remain. */
     template <size_t DestructIdx> static inline void destructArgs(const char** destruct_args) {}
 
     /** @brief Runs destructors for queue-stored arguments that required explicit cleanup. */
@@ -1041,7 +1046,13 @@ template <int __ = 0> class fmtlogT {
     }
 
   public:
-    /** @brief Enqueues a deferred format record with encoded arguments for the polling thread. */
+    /**
+     * @brief Queues arguments for the polling thread to format later.
+     *
+     * Registers the log site on first use String contents are copied into
+     * the queue, and other arguments are copied or moved as their types allow.
+     * Records too large for the queue are dropped after the queue-full callback.
+     */
     template <typename... Args>
     inline void log(uint32_t& logId,
                     int64_t tsc,
@@ -1057,8 +1068,8 @@ template <int __ = 0> class fmtlogT {
         size_t cstringSizes[std::max(num_cstring, (size_t)1)];
         size_t remaining = MAX_ARGUMENT_STORAGE_SIZE;
         if (!getArgSizes<0>(cstringSizes, remaining, args...)) {
-            // Preserve the queue-full callback contract while failing permanently
-            // oversized records once, even when FMTLOG_BLOCK is enabled.
+            // Report an oversized record once. Waiting for  queue space cannot
+            // make it fit, even when FMTLOG_BLOCK is enabled.
             (void)allocMsg(SPSCVarQueueOPT::FIRST_UNSUPPORTED_PAYLOAD_SIZE, true);
             return;
         }
@@ -1138,7 +1149,7 @@ template <int _> inline typename fmtlogT<_>::LogLevel fmtlogT<_>::getLogLevel() 
     return fmtlog_wrapper<>::instance.currentLogLevel;
 }
 
-/** @brief Compares @p logLevel against the shared wrapper instance filter. */
+/** @brief Applies the shared level filter unless FMTLOG_NO_CHECK_LEVEL disables it. */
 template <int _> inline bool fmtlogT<_>::checkLogLevel(LogLevel logLevel) noexcept {
 #ifdef FMTLOG_NO_CHECK_LEVEL
     return true;

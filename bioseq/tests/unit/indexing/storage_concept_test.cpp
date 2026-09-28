@@ -1,6 +1,6 @@
 /**
  * @file storage_concept_test.cpp
- * @brief Tests chunked-storage concepts and compile-time index registration.
+ * @brief Checks test storage interfaces, index registration, and default policies.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -33,8 +33,7 @@ using bioseq::indexing::test::fake_fragment_storage;
 using bioseq::indexing::test::fake_sequence_storage;
 using bioseq::indexing::test::fake_table_storage;
 
-// Re-assert the  conformance here so the test file itself documents the
-// requirement (they also fire when the support module is imported).
+// Check that each test,  storage supports its required index layout.
 static_assert(bioseq::indexing::is_index_chunked_storage_for<
                   fake_fragment_storage<>, sequence_index_layout::fragment_chunks>);
 static_assert(bioseq::indexing::is_external_sort_spill_storage<fake_fragment_storage<>>);
@@ -48,9 +47,8 @@ static_assert(bioseq::indexing::index_read_requirement_ordinal_valid(2));
 static_assert(!bioseq::indexing::index_read_requirement_ordinal_valid(-1));
 static_assert(!bioseq::indexing::index_read_requirement_ordinal_valid(3));
 
-// The  registry over the fake storages, instantiated with the three shipped
-// index templates (the  static_asserts inside supported_indexes additionally
-// check name, type, and policy invariants at this instantiation site).
+// Register the three index types with test storage. Instantiation also
+// checks their names, layouts, and update policies at compile time.
 using reg = bioseq::indexing::supported_indexes<
     fake_fragment_storage<>, fake_sequence_storage, fake_table_storage,
     bioseq::indexing::minimizers_per_fragment_index,
@@ -61,8 +59,7 @@ using reg = bioseq::indexing::supported_indexes<
 
 TEST_CASE("fake storages model their chunked-storage concepts",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // The static_asserts above are the actual checks; this case just makes the
-    // requirement visible to the test runner.
+    // Report the compile-time checks above in the test runner.
     SUCCEED("concept conformance holds at compile time");
 }
 
@@ -91,7 +88,7 @@ TEST_CASE("supported_indexes registry lists all three indexes with the right lay
     REQUIRE(by_name.at(bioseq::indexing::k_minimizers_per_sequence_index_name) == sequence_index_layout::fragment_chunks);
     REQUIRE(by_name.at(bioseq::indexing::k_symbol_counts_index_name)           == sequence_index_layout::sequence_inline);
 
-    // layout_of resolves the same way the SQL surface routes by name.
+    // Resolve index layouts by the names used in SQL.
     REQUIRE(reg::layout_of(bioseq::indexing::k_symbol_counts_index_name) == sequence_index_layout::sequence_inline);
     REQUIRE(reg::layout_of(bioseq::indexing::k_minimizers_per_fragment_index_name) == sequence_index_layout::fragment_chunks);
 }
@@ -104,7 +101,7 @@ TEST_CASE("fresh-table defaults set the cheap on-insert indexes",
     constexpr auto allows = reg::allows_on_insert_flags();
 
     for (std::size_t i = 0; i < types.size(); ++i) {
-        REQUIRE(r.enabled[i]);   // every index enabled on a fresh table
+        REQUIRE(r.enabled[i]);   // All index types are enabled by default
         const bool is_default_on_insert =
             (types[i].first == bioseq::indexing::k_minimizers_per_fragment_index_name
              || types[i].first == bioseq::indexing::k_symbol_counts_index_name);
@@ -116,22 +113,20 @@ TEST_CASE("fresh-table defaults set the cheap on-insert indexes",
         }
     }
 
-    // The whole-sequence external-sort index is eligible but remains opt-in.
+    // Updating the sequence index on insert must be enabled explicitly.
     REQUIRE(r.set_policy(bioseq::indexing::k_minimizers_per_sequence_index_name,
                          bioseq::indexing::index_update_policy::update_on_insert)
             == reg::set_policy_status::applied);
-    // An unknown name is reported as such.
+
     REQUIRE(r.set_policy("does_not_exist", bioseq::indexing::index_update_policy::manual)
             == reg::set_policy_status::unknown_index);
 }
 
 TEST_CASE("fake_sequence_storage INLINE resize round-trips a valid plan",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // NOTE: resize(k_max_index_chunk_size_bytes + 1) is an index_error => abort()
-    // (death/abort test, not wired here). We instead exercise the positive path:
-    // a sub-MAX resize must plan exactly one chunk and round-trip its bytes.
+    // A valid inline allocation should use one chunk and preserve its bytes.
     fake_sequence_storage storage;
-    REQUIRE(storage.number_of_chunks() == 0u);          // absent before any write
+    REQUIRE(storage.number_of_chunks() == 0u);          // No chunk exists before the first allocation.
     REQUIRE(storage.chunk_byte_size() == 0u);
 
     constexpr std::size_t k_storage_bytes = 4 * sizeof(std::int64_t);
@@ -142,7 +137,7 @@ TEST_CASE("fake_sequence_storage INLINE resize round-trips a valid plan",
         for (std::size_t i = 0; i < cap; ++i) {
             buf[i] = static_cast<std::int64_t>(100u + i);
         }
-        return c;   // exactly one inline chunk
+        return c;
     });
 
     REQUIRE(storage.number_of_chunks() == 1u);

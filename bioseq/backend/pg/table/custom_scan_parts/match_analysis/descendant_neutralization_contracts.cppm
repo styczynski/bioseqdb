@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares descendant helper ownership checks without importing their implementation.
+ * @brief Declares checks for the scans that supply dummy helper results.
  */
 module;
 struct Plan;
@@ -11,7 +11,7 @@ export module bioseq.postgres.table:custom_scan_match_analysis_descendant_neutra
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
-/** @brief Capture the first executable-helper ownership failure in a plan audit. */
+/** @brief Records the first helper-ownership failure fosnd while checking a plan. */
 export struct batch_join_plan_helper_audit_first_failure {
     const char* reason = "none";
     const char* store = "none";
@@ -27,7 +27,7 @@ export struct batch_join_plan_helper_audit_first_failure {
     bool recorded = false;
 };
 
-/** @brief Check that every helper in a dummy target list has one finalized owner. */
+/** @brief Checks that every dummy helper column has exactly one source for its match result. */
 export [[nodiscard]] bool dummy_targetlist_has_only_unique_finalized_owner_helpers(
     Plan* plan,
     const bioseq_stub_oids& oids,

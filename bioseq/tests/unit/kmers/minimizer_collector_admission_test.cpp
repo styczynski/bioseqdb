@@ -1,6 +1,6 @@
 /**
  * @file minimizer_collector_admission_test.cpp
- * @brief Memory-admission checks for minimizer collector growth.
+ * @brief Check  record-type validation and memory limits when minimizer collectors grow.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,7 +18,7 @@ using bioseq::minimizers::minimizer_physical_batch_view;
 using bioseq::minimizers::minimizer_physical_layout_selection;
 using bioseq::minimizers::minimizer_representation;
 
-/** Deliberately satisfies every former structural check without being a record. */
+/** Match a minimizer record's layout without being a registered record type. */
 struct same_layout_minimizer_impostor {
     using layout_type = minimap_sketch_data::layout_type;
     minimap_sketch_data::storage_type value_ = 0u;
@@ -64,7 +64,7 @@ template <class p_record>
 
 TEST_CASE("physical batch type authentication follows every generated record coordinate",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    // Baseline records.
+    // Record types included in every generated profile.
     STATIC_REQUIRE(generated_minimizer_physical_record<
                    minimizer_representation<15u, 15u>>);
     STATIC_REQUIRE(generated_minimizer_physical_record<
@@ -94,8 +94,8 @@ TEST_CASE("physical batch type authentication follows every generated record coo
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<
                    minimizer_representation<63u, 20u>>());
 
-    // Extended records are accepted exactly when the selected generated profile
-    // carries them.
+    // These extra record types are accepted only when the generated profile
+    // includes them.
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<
                    minimizer_representation<7u, 7u>>());
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<

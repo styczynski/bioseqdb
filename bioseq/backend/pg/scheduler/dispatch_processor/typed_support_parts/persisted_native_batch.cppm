@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/persisted_native_batch.cppm
- * @brief Owns retained native persisted-index query-batch execution.
+ * @brief Aligns several queries against one stored target index on CPU workers.
  */
 module;
 
@@ -46,10 +46,10 @@ import bioseq.parallelism.pipeline_ops;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Executes the authenticated retained native query batch when its complete
- * preflight succeeds, finalizes deferred compact-direct validation, and runs
- * the compile-time generic-row continuation only when the native batch did
- * not produce the complete result.
+ * Checks that the queries and stored index belong to the same prepared target,
+ * then runs eligible queries in parallel over a shared target copy. Finishes
+ * any deferred query-set, validation before use. If the batch cannot take this
+ * path, calls generic_rows after completing the pending validation.
  */
 template <class p_sequence,
           class p_pool,
@@ -272,11 +272,9 @@ void process_persisted_native_batch(
                                 : nullptr;
                         const auto fragment_lookup_route =
                             native_group->persisted_fragment_lookup_route;
-                        // Compact-direct preparation is itself the exact memory
-                        // authority. Attempt the complete canonical batch once,
-                        // without a duplicate occurrence-estimation pass. A typed
-                        // preparation-time admission failure may retry from wave 0
-                        // at the configured worker bound below.
+                        // Try all queries together for compact hash lookup. Preparing their
+                        // anchors reserves the required memory. If that reservation fails
+                        // before any query runs, retry once with at most one query per  worker.
                         const std::size_t worker_bounded_fragment_wave_size = std::max(
                             std::size_t{1u},
                             std::min(batch_size,
@@ -312,8 +310,8 @@ void process_persisted_native_batch(
                              worker_bounded_fragment_wave_size,
                              fragment_wave_size]() -> match_result_collection {
                                 /**
-                                 * Runs minimap hash-major alignment for one batch row into
-                                 * native_collections at the given row index.
+                                 * Aligns this qhery against the shared hash-major index and saves
+                                 * its matches in the corresponding batch slot.
                                  */
                                 const auto align_hash_major_query =
                                     [&native_collections,
@@ -345,8 +343,8 @@ void process_persisted_native_batch(
                                             bioseq::indexing::gpu_index_cache_identity{});
                                     };
                                 /**
-                                 * Runs minimap fragment-query alignment for one batch row using
-                                 * the prepared fragment anchor handle.
+                                 * Aligns this query using its prepared fragment anchors and saves
+                                 * its matches in the corresponding batch slot
                                  */
                                 const auto align_fragment_query =
                                     [&native_collections,
@@ -412,10 +410,8 @@ void process_persisted_native_batch(
                                         std::to_string(
                                             static_cast<unsigned>(scratch_result.error())));
                                 }
-                                // Reuse one admitted scratch owner across the
-                                // serial waves. Each prepared batch owns its
-                                // final anchors independently and is destroyed
-                                // after its synchronous query wave completes.
+                                // Reuse the scratch allocation across query waves. Each wave owns its
+                                // final anchors until all of its query workers finish.
                                 auto query_wave_scratch = std::move(*scratch_result);
 
                                 const std::uint64_t descriptor_bytes =
@@ -475,10 +471,9 @@ void process_persisted_native_batch(
                                     fragment_wave_size == batch_size &&
                                     worker_bounded_fragment_wave_size < batch_size;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-                                // This pending edge belongs to this callback's admitted scratch
-                                // owner, not to the statement tracker. Concurrent target jobs may
-                                // therefore retry independently while the tracker records only
-                                // exact-owner checkpoints under its mutex.
+                                // Keep retry state with this callback so target jobs can retry
+                                // independently. The shared tracker checks that each retry uses
+                                // the same statement  plan.
                                 auto* const benchmark_e2e_statement_plan_tracker =
                                     execution_plan->frozen_parameters.downstream_active_wall;
                                 bool benchmark_e2e_retry_reentry_pending = false;

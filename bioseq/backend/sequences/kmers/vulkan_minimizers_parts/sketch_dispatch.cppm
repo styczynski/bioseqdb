@@ -1,6 +1,6 @@
 /**
  * @file sketch_dispatch.cppm
- * @brief Single-window Vulkan sketch dispatch and materialization.
+ * @brief Sketches one Vulkan input window and downloads its minimizers.
  */
 module;
 
@@ -48,21 +48,24 @@ import :memory;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Dispatches one prepared upload window and materializes its result.
- * @tparam p_minimizer_type Packed minimizer record.
- * @param upload Packed bytes and shader geometry.
- * @param rank_lut Alphabet rank mapping.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param capacity_bound Optional fixed output capacity.
- * @param capacity_overflowed Receives runtime capacity overflow when present.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional pre-dispatch rejection record.
- * @param borrowed_dispatch_permit Optional caller-owned dispatch permit.
- * @param borrowed_dispatch_budget Bytes available through the borrowed permit.
- * @param host_ownership_route Host allocation ownership contract.
- * @return Sketch result, or no value when dispatch is declined.
- * @throws vulkan_runtime_error If runtime execution or materialization fails.
+ * @brief Sketches one input window and returns host and device minimizer buffers.
+ *
+ * Checks or reserves dispatch,  memory first. Allocates the host result after
+ * temporary upload storage is released. The call is synchronous.
+ * @param upload Packed input kept alive through the call.
+ * @param rank_lut Alphabet decoding table.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param capacity_bound Output capacity, or zero to estimate it.
+ * @param capacity_overflowed Optional output-capacity failure flag.
+ * @param query_gate Optional bitmap filtering target hashes.
+ * @param decline_out Optional rejection details, including failures after dispatch.
+ * @param borrowed_dispatch_permit Optional caller reservation kept alive with the returned buffers.
+ * @param borrowed_dispatch_budget Bytes available  from that reservation.
+ * @param host_ownership_route How the caller will keep the host buffer alive.
+ * @return Buffers and completion details, or no value when the request is rejected.
+ * @throws vulkan_runtime_error On execution failure, invalid result storage, or
+ * overflow of an explicie capacity when capacity_overflowed was not supplied.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::optional<vulkan_sketch_result<p_minimizer_type>>
@@ -96,9 +99,9 @@ sketch_uploaded_window_result(
         };
     }
     /**
-     * @brief Writes one rejection reason and optional capacity into decline_out.
-     * @param reason Decline identity.
-     * @param max_minimizers Planned minimizer capacity when relevant.
+     * @brief Records a rejection when decline_out was supplied.
+     * @param reason Failure reason.
+     * @param max_minimizers Planned output capacity, if relevant.
      */
     const auto decline = [decline_out](
             vulkan_sketch_decline_reason reason,
@@ -286,11 +289,9 @@ sketch_uploaded_window_result(
 
         runtime_sketch_result raw;
         {
-            // The packed host copy is intentionally scoped around the Vulkan
-            // dispatch.  The runtime also destroys its host tile vector and
-            // rewinds the arena mark before returning.  Exact host result
-            // admission therefore happens only after every dispatch transient
-            // has gone away.
+            // Free the temporary packed input before reserving the host result
+            // The runtime also releases its tile list and trims the GPU arena  before
+            // returning from the dispatch.
             const auto padded_sequence_size =
                 static_cast<std::size_t>(upload.padded_byte_size);
             auto padded_sequence_owner =
@@ -435,16 +436,16 @@ sketch_uploaded_window_result(
                 "materialization permit"};
         }
 
-        // Reserve once and download once. p_permit_type declaration precedes
-        // vector declaration so reverse
-        // destruction always frees vector capacity before returning admission.
+        // The host reservation is declared before this vector so destruction frees
+        // the buffer before returning its reserved bytes.
         std::vector<p_minimizer_type> host_minimizers;
         std::uint64_t exact_host_capacity_bytes = 0u;
         bool host_permit_released_to_process_footprint = false;
         std::uint64_t host_footprint_reflected_delta_bytes = 0u;
         /**
-         * @brief Sizes the host minimizer vector and downloads one device slice.
-         * @throws vulkan_runtime_error If fixed-route capacity exceeds admitted headroom.
+         * @brief Allocates the host result and downloads the device records into it.
+         * @throws vulkan_runtime_error If capacity exceeds the reserved bytes, or the
+         * fixed-adoption buffer has spare capacity.
          */
         const auto allocate_and_download = [
                 &host_minimizers,
@@ -504,14 +505,10 @@ sketch_uploaded_window_result(
             host_footprint_reflected_delta_bytes =
                 materialization.reflected_delta_bytes;
             if (!materialization.is_permit_released) {
-                // A large target does not imply a large emitted vector.  An
-                // ambiguity-heavy dna5 target can produce a small non-empty
-                // allocation whose allocator pages were already resident, so
-                // the serialized RSS probe may correctly decline to release
-                // the reservation.  Keep the exact, already-shrunk permit as
-                // the alternative ownership authority.  The pipeline moves it
-                // with the vector and releases it only after index construction
-                // has consumed the vector and proved capacity()==0.
+                // A short result can reuse pages that were already resident, even for a
+                // large input with many ambiguous bases. Keep its memory reservation  when
+                // the, process-memory measurement cannot account for the new buffer. The
+                // caller must keep that reservation until the buffer is freed.
                 bioseq_log<logging_level::debug>(
                     "[vulkan sketch] fixed host footprint reconciliation "
                     "retained exact permit: actual={} touched={} before={} "
@@ -530,7 +527,7 @@ sketch_uploaded_window_result(
             if (host_ownership_route
                     == vulkan_sketch_host_ownership_route::
                         fixed_zero_copy_adoption) {
-                // Empty vectors own no capacity and need no footprint delta.
+                // An empty vector needs no reserved buffer bytes or measured memory iacrease.
                 if (owned_host_permit) {
                     owned_host_permit->shrink_to(0u);
                 }

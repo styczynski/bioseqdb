@@ -1,6 +1,6 @@
 /**
  * @file formats_test.cpp
- * @brief Verifies header format definitions and name normalization.
+ * @brief Checks sequence header formats and accepted field names.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -25,7 +25,7 @@ TEST_CASE("identifier_formats: SQL names parse case/separator-insensitively",
 
 namespace {
 
-/// Resolve a field by canonical name, token, or normalised alias.
+/// Find a field by its name, header token, or alias after normalization.
 [[nodiscard]] const header_field_definition* find_field(const header_format_definition& def,
                                                         std::string_view name) {
     std::array<char, 64> scratch{};
@@ -68,7 +68,7 @@ TEST_CASE("identifier_formats: IMGT positional field table is complete",
     REQUIRE(def.fields.size() == 15);
     REQUIRE(def.primary_delimiter == '|');
     REQUIRE(def.metadata == metadata_style::none);
-    // `positions` is index 5 — the field the int4range column rewrites.
+    // The positions field is the sixth field, at index 5.
     const header_field_definition* positions = find_field(def, "positions");
     REQUIRE(positions != nullptr);
     REQUIRE(positions->position == 5);

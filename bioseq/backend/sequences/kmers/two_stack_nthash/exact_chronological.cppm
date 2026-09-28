@@ -1,6 +1,6 @@
 /**
  * @file exact_chronological.cppm
- * @brief Generic exact chronological SIMD minimizer recurrence.
+ * @brief Builds minimizer candidates and emits them in sequence order.
  */
 module;
 
@@ -26,14 +26,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace two_stack_internal {
 
-/** Per-lane forward and reverse rolling k-mer code vectors. */
+/** Forward and reverse-complement k-mer codes for each SIMD lane. */
 template<class p_simd_tag>
 struct canonical_kmer_vectors {
     hn::Vec<p_simd_tag> forward;
     hn::Vec<p_simd_tag> reverse;
 };
 
-/** Shift one nt4 code into per-lane forward and reverse rolling k-mer vectors. */
+/** Adds the next base to each forward and reverse-complement  k-mer code. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE canonical_kmer_vectors<p_simd_tag> incorporate_kmer_codes(
     p_simd_tag d,
@@ -50,7 +50,7 @@ template<class p_simd_tag>
     return current;
 }
 
-/** Per-lane minimizer candidate hash, packed raw storage, and ordinal. */
+/** Hash, encoded output, and sequence-order index for each candidate lane. */
 template<class p_simd_tag>
 struct minimizer_candidate_vectors {
     hn::Vec<p_simd_tag> hash;
@@ -58,7 +58,7 @@ struct minimizer_candidate_vectors {
     hn::Vec<p_simd_tag> ordinal;
 };
 
-/** Compare one combined-window slot against the running per-lane minimum. */
+/** Updates each window minimum, choosing the later candidate on equal hashes. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE minimizer_candidate_vectors<p_simd_tag> reduce_window_slot(
     p_simd_tag d,
@@ -78,7 +78,11 @@ template<class p_simd_tag>
     return minimum;
 }
 
-/** Construct and append only the split records retained by SIMD compression. */
+/**
+ * Builds wide minimizer records from the selected hash and position streams.
+ * Each record receives its position, strand, and runtime k-mer length.
+ * Returns the collector status when the collector provides one.
+ */
 template<class p_minimizer_type, class p_collector_type>
 requires wide_simd_minimizer_representation<p_minimizer_type>
 [[nodiscard]] inline bool append_wide_minimizer_records(
@@ -109,7 +113,15 @@ requires wide_simd_minimizer_representation<p_minimizer_type>
     return true;
 }
 
-/** Run one SIMD batch through rolling k-mers, window reduction, tie handling, and emission. */
+/**
+ * Processes consecutlve candidates in SIMD lanes and emits selected minimizers
+ * in sequence order. Each lane finds its window minimum, with later equal
+ * hashes taking  precedence. Separate tie events preserve the minimap2 output
+ * order when a window first fills or its current minimum expires.
+ *
+ * The invalid-only mode advances the window with sentinel candidates.
+ * Successful processing saves the tails needed by the next batch
+ */
 template<
     bool p_invalid_only,
     std::size_t p_window_size,
@@ -336,9 +348,8 @@ process_chronological_candidate_block(
             live_non_palindrome, candidate_raw, hn::Set(d, max_raw));
     }
 
-    // Every element subsequently read is covered by the tail copies or the
-    // full-width vector stores.  p_value_type-initializing these arrays generated
-    // three hot-loop bzero calls (3 * 2056 bytes on the runtime p_window_size=256 route).
+    // Tail copies and vector stores initialize every element read below, so
+    // these scratch arrays need no separate zero-fill.
     HWY_ALIGN std::array<std::uint64_t, combined_capacity> combined_hash;
     HWY_ALIGN std::array<std::uint64_t, combined_capacity> combined_raw;
     HWY_ALIGN std::array<std::uint64_t, combined_capacity> combined_ordinal;
@@ -373,8 +384,8 @@ process_chronological_candidate_block(
     }
     add_stats_counter(state.stats.scalar_orchestration_steps, w);
 
-    // Store/offset-load is a width-independent whole-vector carry. Unlike
-    // CombineShiftRightLanes it crosses AVX2/AVX-512 128-bit block boundaries.
+    // Storing and reloading one lane earlier carries the previous minimum
+    // across the whole, vector, including AVX2 and AVX-512 128-bit block boundaries.
     HWY_ALIGN std::array<std::uint64_t, max_lanes + 1>
         previous_hash_storage{};
     HWY_ALIGN std::array<std::uint64_t, max_lanes + 1>
@@ -442,8 +453,7 @@ process_chronological_candidate_block(
     const std::size_t event_stride = w + 1;
     const std::size_t row_stride =
         ((event_stride + lanes - 1) / lanes) * lanes;
-    // The slow tie path overwrites every row/column slot it reads.  Avoid a
-    // fourth per-block zero-fill of the maximum-capacity matrix.
+    // Tie processing fills every matrix  slot it reads, so zero-fill is unnecessary.
     HWY_ALIGN std::array<std::uint64_t, event_capacity> event_raw;
     HWY_ALIGN std::array<vector_type, max_lanes> event_columns{};
     std::uint64_t first_window_tie_events = 0;
@@ -452,11 +462,8 @@ process_chronological_candidate_block(
 
     std::size_t compressed_count = 0;
 
-    // Equal packed minimizer hashes are rare (the XXL production layout has a
-    // 30-bit hash field), so prove their absence before constructing the
-    // padded row-major tie-event matrix.  The
-    // direct CompressStore is already in chronological lane order and emits
-    // exactly the event-0 records the general path would retain.
+    // Check for tied records before building the event matrix. With no ties,
+    // compress the previous minima directly in sequence order.
     const mask_type possible_tie_lanes = hn::Or(special_ties, expiry_ties);
     mask_type actual_tie_lanes = hn::MaskFalse(d);
     if (hn::CountTrue(d, possible_tie_lanes) != 0) [[unlikely]] {
@@ -502,8 +509,8 @@ process_chronological_candidate_block(
             add_stats_counter(state.stats.scalar_orchestration_steps, 1);
         } else {
             add_stats_counter(state.stats.tie_matrix_event_batches, 1);
-            // Build B columns, transpose the BxB tile in registers, then
-            // vector-store each row chunk. This is the rare exact-tie route.
+            // Transpose tiles of tie events so output is ordered by candidate first,
+            // then by event within that candidate.
             for (std::size_t column_block = 0;
                  column_block < row_stride;
                  column_block += lanes) {
@@ -580,9 +587,8 @@ process_chronological_candidate_block(
                 state, two_stack_continuation_status::collector_overflow);
         }
     } else {
-        // Split records retain hash validity separately from position/strand.
-        // Both streams use the same mask and only compressed lanes become
-        // concrete record objects in the typed sink.
+        // Wide records keep hash and position/strand in separae vectors. Compress
+        // both with the same mask, then construct records from the selected lanes.
         HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
             compressed_hash;
         HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
@@ -767,7 +773,7 @@ process_chronological_candidate_block(
     return two_stack_continuation_status::ok;
 }
 
-/** Advance one or more max/invalid entries through the SIMD minimizer ring. */
+/** Advances the minimizer window with invalid candidates and their valid-run lengths. */
 template<
     std::size_t p_window_size,
     std::size_t p_kmer_size,
@@ -792,7 +798,11 @@ template<
         state, collector, valid_run_lengths.size());
 }
 
-/** Append one ambiguity-free nt4 run to the persistent SIMD k-mer stream. */
+/**
+ * Adds an  ambiguity-free run to the saved k-mer tail and pending SIMD batch.
+ * Tracks original input positions and the length of the valid run so windows
+ * after an ambiguous base follow the same emission rules as minimap2.
+ */
 template<
     std::size_t p_window_size,
     std::size_t p_kmer_size,
@@ -879,7 +889,10 @@ template<
     return two_stack_continuation_status::ok;
 }
 
-/** Emit the final live window minimum without finalizing the continuation. */
+/**
+ * Emits the current minimum if it is valid, keeping the continuation open.
+ * Updates output counters and reports collector failure
+ */
 template<class p_minimizer_type, class p_continuation_state, class p_collector_type>
 [[nodiscard]] inline two_stack_continuation_status flush_current_minimum(
     p_continuation_state& state,
@@ -953,8 +966,9 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
 }
 
 /**
- * Apply minimap2's ambiguous-base transition: l/rolling-kmer reset, one max
- * ring entry, but no window flush, ring clear, ordinal reset, or emit.
+ * Finishes pending candidates before an ambiguous base, then resets the
+ * valid run and k-mer tail. One invalid candidate advances the window while
+ * its history  and sequence-order count carry on.
  */
 template<
     std::size_t p_window_size,

@@ -1,6 +1,6 @@
 /**
  * @file table_storage_iteration.cppm
- * @brief Table-layout sequence traversal under PostgreSQL snapshot ownership.
+ * @brief Export the sequence and taele index storage adapters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -61,24 +61,24 @@ import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // Relation opening and primary-key lookup.
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
+import bioseq.postgres.storage.manager; // Sequence storage and locator helpers.
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.type; // Index layouts, chunk sizes and reserved keys.
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket checks.
+import bioseq.indexing.minimizer_fragment_image; // On-disk format  for minimizer fragment indexes.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.table.io; // Column table readers.
+import bioseq.postgres.storage.scanner;        // Read sequence fragments on demand from PostgreSQL.
 import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
+import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and type dispatch.
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode packed sequence fragments.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;

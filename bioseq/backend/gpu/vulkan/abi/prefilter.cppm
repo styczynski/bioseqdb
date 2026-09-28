@@ -1,6 +1,6 @@
 /**
  * @file vulkan/abi/prefilter.cppm
- * @brief Defines Vulkan rank-prefilter limits and reflected push constants.
+ * @brief GPU prefilter limits and parameters shared with, the shaders.
  */
 module;
 
@@ -13,27 +13,27 @@ import bioseq.prefilter.types;
 
 export namespace bioseq::gpu::vulkan {
 
-/** @brief Maximum rank-symbol span processed by one SneakySnake submaze. */
+/** @brief Maximum symbols in one SneakySnake submaze. */
 inline constexpr std::uint32_t k_gpu_sneaky_snake_submaze_length = 512u;
-/** @brief Highest inclusive edit threshold represented by SneakySnake masks. */
+/** @brief Largest supported SneakySnake edit threshold. */
 inline constexpr std::uint32_t k_gpu_sneaky_snake_max_edits = 31u;
-/** @brief Maximum rank-symbol length accepted by the generic GateKeeper kernel. */
+/** @brief Longest sequence accepted by the generic GateKeeper kernel. */
 inline constexpr std::uint32_t k_gpu_gatekeeper_max_length = 128u;
 /** @brief Highest inclusive edit threshold handled by GateKeeper. */
 inline constexpr std::uint32_t k_gpu_gatekeeper_max_edits = 8u;
 /**
- * @brief Mirrors the 16-byte GLSL push-constant block for a rank-prefilter dispatch.
+ * @brief Parameters sent to a GPU prefilter dispatch.
  *
- * Counts describe logical rank elements rather than padded buffer bytes.
- * Field order and widths are part of the shader ABI.
+ * Counts measure sequence symbols, excluding buffer padding. The 16-byte
+ * layout and field order must match the GLSL push-constant block.
  */
 struct gpu_prefilter_push {
-    std::uint32_t job_count = 0; ///< Number of job and result records addressable by the dispatch.
+    std::uint32_t job_count = 0; ///< Number of jobs and matching result slots.
     std::uint32_t mode = 0;      ///< SneakySnake lanes per job (1 or 8). GateKeeper uses 0.
-    std::uint32_t query_rank_count = 0;  ///< Logical query bound used to validate every job slice.
-    std::uint32_t target_rank_count = 0; ///< Logical target bound used to validate every job slice.
+    std::uint32_t query_rank_count = 0;  ///< Query symbol count  used to check job ranges.
+    std::uint32_t target_rank_count = 0; ///< Target symbol count used to check job ranges.
 };
-// Locks host prefilter_job layout against the shader job record ABI.
+// Keep the C++ job layout equal to the shader job layout.
 static_assert(std::is_standard_layout_v<bioseq::prefilter::prefilter_job>);
 static_assert(sizeof(bioseq::prefilter::prefilter_job) == 20);
 static_assert(offsetof(bioseq::prefilter::prefilter_job, query_offset) == 0);
@@ -41,14 +41,14 @@ static_assert(offsetof(bioseq::prefilter::prefilter_job, target_offset) == 4);
 static_assert(offsetof(bioseq::prefilter::prefilter_job, query_length) == 8);
 static_assert(offsetof(bioseq::prefilter::prefilter_job, target_length) == 12);
 static_assert(offsetof(bioseq::prefilter::prefilter_job, max_edits) == 16);
-// Locks host prefilter_result layout against the shader result record ABI.
+// Keep the C++ result layout equal to the shader result layout.
 static_assert(std::is_standard_layout_v<bioseq::prefilter::prefilter_result>);
 static_assert(sizeof(bioseq::prefilter::prefilter_result) == 16);
 static_assert(offsetof(bioseq::prefilter::prefilter_result, lower_bound) == 0);
 static_assert(offsetof(bioseq::prefilter::prefilter_result, status) == 4);
 static_assert(offsetof(bioseq::prefilter::prefilter_result, is_accepted) == 8);
 static_assert(offsetof(bioseq::prefilter::prefilter_result, diagnostics) == 12);
-// Locks push-constant size and field offsets against the GLSL block.
+// Keep the push-constant layout equal to the GLSL block.
 static_assert(std::is_standard_layout_v<gpu_prefilter_push>);
 static_assert(sizeof(gpu_prefilter_push) == 16);
 static_assert(offsetof(gpu_prefilter_push, job_count) == 0);

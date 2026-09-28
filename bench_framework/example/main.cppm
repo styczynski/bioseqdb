@@ -1,4 +1,4 @@
-/** @file bench_framework/example/main.cppm @brief Thin framework example launcher. */
+/** @file bench_framework/example/main.cppm @brief Run the benchmark examples. */
 
 import bioseq.bench.framework.example;
 

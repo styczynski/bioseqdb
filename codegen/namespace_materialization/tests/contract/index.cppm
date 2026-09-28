@@ -1608,7 +1608,7 @@ inline void verify_production_declaration_heads_and_probes(
         std::pair{
             std::string_view{"process_sequences"},
             std::string_view{
-                // The public root retains the immutable statement plan by value.
+                // The public root takes an owner of the immutable statement plan by value.
                 "2b8488a4dfa3ef6a978bff59121302342476f9d765d3a4ca65cf666442a7c071"}},
     };
     require(
@@ -1881,8 +1881,7 @@ inline void verify_production_declaration_heads_and_probes(
         }
         require(implementation.content.contains("#include <new>\n") &&
                     occurrences(implementation.content, "typed_support_detail::root_std::") ==
-                        // match_result_map removes four qualifiers; the plan-owner
-                        // guard adds one logic_error qualifier.
+                        // Expected root_std references after rewriting the selected root  body.
                         (root_shape ? 62U : 0U) &&
                     (!root_shape || occurrences(implementation.content, "std::") == 62U),
                 "scheduler root must retain the allocator anchor and bind exactly "

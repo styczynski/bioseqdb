@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_batch_test.cpp
- * @brief Vulkan minimizer batch materialization tests.
+ * @brief Check GPU-only  batch results, host copies, and batches with no minimizers.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -109,8 +109,8 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     REQUIRE(result.has_value());
     REQUIRE_FALSE(vk::is_runtime_metal_archive_configuration_installed());
     REQUIRE(result->query_authority.does_cover_device_output());
-    // Structural coverage cannot mint the causal immutable-pipeline stats
-    // required by the persisted grouped-SoA consumer.
+    // Persisted index search also needs a valid record of the GPU pipelines used.
+    // This test runs without the required Metal archive.
     REQUIRE_FALSE(result->query_authority.is_valid());
     REQUIRE(result->dispatch_stats.is_internally_consistent());
     REQUIRE(result->dispatch_stats.materialization() ==
@@ -148,8 +148,8 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
         result->device->words, 0u, std::span<std::byte>{downloaded.data(), downloaded.size()});
     REQUIRE(downloaded.empty());
 
-    // A malformed post-submit authority record must fail closed without
-    // leaving the shared arena cursor live for the next independent request.
+    // Reject invalid query metadata after submission and release the arena so
+    // the next request can use it.
     std::vector<std::byte> packed_sequence(
         static_cast<std::size_t>(all_n_uploads[0].padded_byte_size));
     std::memcpy(packed_sequence.data(),

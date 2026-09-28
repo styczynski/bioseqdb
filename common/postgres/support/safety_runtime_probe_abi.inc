@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/safety_runtime_probe_abi.inc
- * @brief Shared fixed-layout ABI for PostgreSQL ERROR-safety instrumentation.
+ * @brief Shared callback layout for PostgreSQL error-safety tests.
  */
 #pragma once
 
@@ -10,7 +10,7 @@
 
 namespace bioseq::postgres::support::safety_runtime_probe_abi {
 
-/** Current independently compiled probe ABI revision. */
+/** Version of the callback layout shared by separately compiled modules. */
 inline constexpr std::uint32_t k_abi_revision = 2;
 
 /** PostgreSQL rendezvous variable shared with the runtime safety harness. */
@@ -28,7 +28,7 @@ using record_event_function = void (*)(std::uint32_t kind,
                                        const char* name,
                                        std::size_t name_size) noexcept;
 
-/** Records arrival at one generated runtime-safety site. */
+/** Record that execution reached a generated safety-chck site. */
 using record_site_visit_function = void (*)(const char* site_reference,
                                             std::size_t site_reference_size) noexcept;
 
@@ -36,7 +36,7 @@ using record_site_visit_function = void (*)(const char* site_reference,
 using consume_fault_function = std::uint32_t (*)(const char* fault_key,
                                                  std::size_t fault_key_size) noexcept;
 
-/** Fixed-layout callback table published through PostgreSQL rendezvous. */
+/** Callback table shared through a PostgreSQL rendezvous variable. */
 struct probe_api final {
     /** ABI revision expected by both publisher and consumer. */
     std::uint32_t abi_revision;
@@ -44,13 +44,13 @@ struct probe_api final {
     /** Complete byte size of this callback table. */
     std::uint32_t struct_size;
 
-    /** Event recorder supplied by the instrumentation harness. */
+    /** Test callback for named cleanup events. */
     record_event_function record_event;
 
-    /** Generated-site recorder supplied by the instrumentation harness. */
+    /** Test callback for visits to generated safety-check sites. */
     record_site_visit_function record_site_visit;
 
-    /** Fault-consumption callback supplied by the instrumentation harness. */
+    /** Test callback that consumes an  armed fault. */
     consume_fault_function consume_fault;
 };
 

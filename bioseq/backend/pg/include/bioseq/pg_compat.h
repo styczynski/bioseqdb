@@ -1,6 +1,6 @@
 /**
  * @file pg_compat.h
- * @brief Provides the C++ include and function boundary for PostgreSQL headers.
+ * @brief Make PostgreSQL headers and SQL function declarations usable from C++.
  */
 #pragma once
 
@@ -399,10 +399,8 @@ extern "C" {
 #include "nodes/supportnodes.h"
 
 /*
- * In PG18, ExplainProperty{Text,Integer,UInteger,Float,Bool,List,...} were
- * moved out of commands/explain.h into a dedicated commands/explain_format.h
- * header. Pull it in unconditionally on PG18 so call sites compile without
- * needing to add the new include locally.
+ * PostgreSQL 18 declares ExplainProperty functions in explain_format.h.
+ * Include it here so EXPLAIN code can use the  same headers on each version.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18
 #include "commands/explain_format.h"
@@ -453,16 +451,11 @@ extern "C" {
 #include "catalog/pg_type.h"
 #include "catalog/pg_user_mapping.h"
 
-/*
- * PostgreSQL 17/18 boundary adapters.
- *
- * Each name states the Bioseq behavior selected at the boundary. These are
- * not aliases for superseded PostgreSQL spellings.
- */
+/* Adapt Bioseq calls to the PostgreSQL version being compiled. */
 
 /*
- * PG18 renamed BuildTupleHashTableExt and added the input slot operations.
- * Bioseq aggregate hashing feeds MinimalTuple-shaped slots.
+ * Build an aggregate hash table for MinimalTuple input slots. PostgreSQL 18
+ * takes the slot operations explicitly and names this BuildTupleHashTable.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18
 #define bioseq_build_tuple_hash_table(parent, input_desc, column_count, \
@@ -493,8 +486,8 @@ extern "C" {
 #endif
 
 /*
- * PG18 added runtime-pruning state to ExecInitRangeTable. Bioseq metadata
- * writes have no pruning information.
+ * Initialize the range table for metadata writes. PostgreSQL 18 also takes
+ * runtime-pruning state, which these writes do not need.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18
 #define bioseq_exec_init_range_table_without_pruning(estate, range_table, \
@@ -507,9 +500,9 @@ extern "C" {
 #endif
 
 /*
- * PG18 added optional index-scan instrumentation; PG19 added scan flags.
- * PG20 also requires the index-only mode. These custom scans fetch table
- * tuples and request neither instrumentation nor optional scan flags.
+ * Start a parallel index scan that fetches table tuples. Pass the defaults
+ * for instrumentation, scan flags, and index-only mode on PostgreSQL versions
+ * that require these arguments.
  */
 #if PG_VERSION_NUM >= 200000
 #define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
@@ -538,8 +531,8 @@ extern "C" {
 #endif
 
 /*
- * PG18 expanded parallel-scan initialization with instrumentation and worker
- * bookkeeping; PG19 moved it out again. Bioseq requests neither facility.
+ * Initialize a parallel index scan. PostgreSQL 18 alone takes the  extra
+ * instrumentation and worker arguments supplied by this adapter.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18 && PG_VERSION_NUM < 190000
 #define bioseq_initialize_uninstrumented_parallel_index_scan(heap_relation, \
@@ -554,8 +547,8 @@ extern "C" {
 #endif
 
 /*
- * PG18 stores TupleHashEntry additional data inline and exposes it through a
- * table-aware accessor. PG17 stores a separately allocated pointer.
+ * Access the aggregate state attached to a tuple hash entry. PostgreSQL 18
+ * stores it inside the entry. PostgreSQL 17 needs a separate allocation.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18
 #define bioseq_tuple_hash_entry_additional(hash_table, entry) \
@@ -571,9 +564,7 @@ extern "C" {
 #pragma GCC diagnostic pop
 }
 
-// These Min/Max macros from Postgres pollute global namespace and collide
-// with std::min / std::max; undef them so modern C++ code can use the
-// standard algorithms without qualification.
+// Remove PostgreSQL Min/Max macros before including C++ headers.
 #undef Min
 #undef Max
 

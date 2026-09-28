@@ -1,6 +1,6 @@
 /**
  * @file external/transport/locator.cppm
- * @brief Remote-locator parsing and outbound request policy enforcement.
+ * @brief Check download URLs and resolve addresses for the transfer
  */
 module;
 
@@ -19,23 +19,23 @@ module;
 
 export module bioseq.external.transport.locator;
 
-import bioseq.external.provider.base;     // provider_id, external_error key types
+import bioseq.external.provider.base;     // provider_id
 import bioseq.external.provider.errors;   // external_error, make_external_error
 import bioseq.external.provider.messages; // candidate_transfer_request_view, locator_scheme
 import bioseq.external.provider.locator;  // locator_policy_profile_view, scopes
 
-/// Validates transfer locators and pins approved numeric peers.
+/// Check download destinations and save resolved addresses for libcurl.
 export namespace bioseq::external::transport {
 
 namespace prov = bioseq::external::provider;
 
-/// Numeric peer approved for CURLOPT_RESOLVE pinning.
+/// Resolved address saved for CURLOPT_RESOLVE.
 struct resolved_address {
     int family{};
     std::string numeric;
 };
 
-/// Owning validated request with normalized locator and pinned peers.
+/// Download URL and resolved addresses returned by validation.
 class validated_transfer_request {
   public:
     /// Constructs an empty request with no approved destination.
@@ -46,27 +46,27 @@ class validated_transfer_request {
     validated_transfer_request& operator=(validated_transfer_request&&) noexcept = default;
     ~validated_transfer_request() = default;
 
-    /// Returns the validated transfer method.
+    /// Return the requested transfer method.
     [[nodiscard]] prov::transfer_method method() const noexcept {
         return method_;
     }
-    /// Returns the validated URL.
+    /// Return  the URL supplied to validation.
     [[nodiscard]] std::string_view url() const noexcept {
         return url_;
     }
-    /// Returns the normalized host.
+    /// Return the host as written in the URL.
     [[nodiscard]] std::string_view host() const noexcept {
         return host_;
     }
-    /// Returns the validated destination port.
+    /// Return the parsed port or the scheme's default port.
     [[nodiscard]] std::uint16_t port() const noexcept {
         return port_;
     }
-    /// Returns the validated locator scheme.
+    /// Return the URL scheme, accepted by the policy.
     [[nodiscard]] prov::locator_scheme scheme() const noexcept {
         return scheme_;
     }
-    /// Returns every approved numeric peer.
+    /// Return the addresses accepted by the address filter.
     [[nodiscard]] const std::vector<resolved_address>& pinned_addresses() const noexcept {
         return pinned_addresses_;
     }
@@ -104,9 +104,7 @@ class validated_transfer_request {
     std::vector<resolved_address> pinned_addresses_;
 };
 
-// ---------------------------------------------------------------------------
-// URL parsing (scheme://host[:port]/path) — no user-info accepted.
-// ---------------------------------------------------------------------------
+// Parse scheme://host[:port]/path and reject embedded user information.
 /// Parsed transfer URL fields used during validation.
 struct parsed_url {
     prov::locator_scheme scheme{};
@@ -159,7 +157,7 @@ parse_url(std::string_view url, prov::provider_id provider) {
                                       "locator",
                                       "transfer URL must not contain user-info"));
     }
-    // IPv6 literals are rejected because providers use DNS names.
+    // Read an optional port from a hostname authority.
     std::uint16_t port = default_port;
     std::string_view host = authority;
     const std::size_t colon = authority.rfind(':');
@@ -197,10 +195,8 @@ parse_url(std::string_view url, prov::provider_id provider) {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Host-allowlist matching against the policy's exact hosts and suffixes.
-// ---------------------------------------------------------------------------
-/// Returns whether a host satisfies an exact or suffix allowlist entry.
+// Match the host against exact names and allowed DNS suffixes.
+/// Check an exact host or DNS suffix match, preserving letter case.
 [[nodiscard]] inline bool is_host_allowed(std::string_view host,
                                           const prov::locator_policy_profile_view& policy) {
     for (const std::string_view exact : policy.exact_hosts) {
@@ -231,16 +227,13 @@ parse_url(std::string_view url, prov::provider_id provider) {
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Address-scope classification. A public address is anything that is not
-// loopback, private, link-local, multicast, unspecified, or otherwise reserved.
-// ---------------------------------------------------------------------------
-/// Returns whether an IPv4 address lies outside reserved private ranges.
+// Address filters used for download destinations.
+/// Check an IPv4 addres against the  blocked ranges below.
 [[nodiscard]] inline bool is_public_ipv4(std::uint32_t host_order) noexcept {
     const std::uint8_t a = static_cast<std::uint8_t>(host_order >> 24);
     const std::uint8_t b = static_cast<std::uint8_t>(host_order >> 16);
     if (a == 0)
-        return false; // 0.0.0.0/8 unspecified
+        return false; // 0.0.0.0/8
     if (a == 10)
         return false; // 10.0.0.0/8 private
     if (a == 127)
@@ -252,13 +245,13 @@ parse_url(std::string_view url, prov::provider_id provider) {
     if (a == 192 && b == 168)
         return false; // 192.168.0.0/16 private
     if (a == 100 && (b >= 64 && b <= 127))
-        return false; // 100.64.0.0/10 CGNAT
+        return false; // 100.64.0.0/10 shared address space
     if (a >= 224)
-        return false; // 224.0.0.0/4 multicast +
+        return false; // Multicast and higher reserved ranges, 224.0.0.0/3.
     return true;
 }
 
-/// Returns whether an IPv6 address lies outside reserved private ranges.
+/// Check an IPv6 address against the blocked ranges below.
 [[nodiscard]] inline bool is_public_ipv6(const std::uint8_t bytes[16]) noexcept {
     // Unspecified ::.
     bool all_zero = true;
@@ -279,19 +272,18 @@ parse_url(std::string_view url, prov::provider_id provider) {
     if (loopback)
         return false;
     if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80)
-        return false; // fe80::/10
+        return false; // fe80::/10 link-local
     if ((bytes[0] & 0xFE) == 0xFC)
-        return false; // fc00::/7 ULA
+        return false; // fc00::/7 unique local addresses
     if (bytes[0] == 0xFF)
-        return false; // ff00::/8 mcast
+        return false; // ff00::/8 multicast
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Full candidate validation. Resolves the host and requires every returned
-// address to satisfy the policy address scope and pins them for connect.
-// ---------------------------------------------------------------------------
-/// Validates a candidate and resolves every permitted numeric peer.
+// Resolve the host once and save the accepted addresses for connection.
+// Reject the request if any resolved address fails the selected filter.
+/// Check URL length, scheme, and host, then resolve and filter addresses.
+/// The test_loopback policy skips address  filtering.
 [[nodiscard]] inline std::expected<validated_transfer_request, prov::external_error>
 validate_candidate(const prov::candidate_transfer_request_view& candidate,
                    const prov::locator_policy_profile_view& policy,

@@ -1,13 +1,12 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file bioseq_caching/pg/storage.cppm
+ * @brief Stores cached column blocks in shared memory or  private files.
  *
- * Generic PostgreSQL storage for cache column-store blocks.
- *
- * This module owns no planner or provider policy.  It supplies a bounded
- * postmaster-lifetime DSA hot tier, a private file overflow tier, an ABA-safe
- * block ledger, generation manifests, reader pins, and deterministic
- * reclamation primitives for the PostgreSQL adapter.
- *
- *-------------------------------------------------------------------------
+ * A manifest groups the blocks of one cached result. Readers pin the
+ * manifest while using it, and the janitor frees retired results after
+ * readers and waiters release them. Slot sequence numbers let the code
+ * reject old handles after a slot is reused. The cache registries decide
+ * when results expire or should be evicted.
  */
 module;
 
@@ -86,7 +85,7 @@ inline constexpr std::uint64_t k_default_maximum_block_bytes = 64ULL << 20;
 inline constexpr std::uint32_t k_default_sweep_interval_ms = 1000;
 inline constexpr std::uint32_t k_default_reclaim_batch = 64;
 
-/** Fixed postmaster configuration; no additional production GUC is needed. */
+/** Storage limits and cleanup settings selected during PostgreSQL startup. */
 struct storage_config {
     std::uint64_t dsa_initial_bytes = k_default_dsa_initial_bytes;
     std::uint64_t hot_ceiling_bytes = k_default_hot_ceiling_bytes;
@@ -139,7 +138,7 @@ enum class storage_read_purpose : std::uint8_t {
     replay,
 };
 
-/** Explicit reservation token; callers own release through PG cleanup paths. */
+/** Tracks reserved shared-memory space. Callers must release it in PostgreSQL cleanup paths. */
 struct shared_dsa_reservation {
     std::uint32_t slot = (std::numeric_limits<std::uint32_t>::max)();
     std::uint32_t reserved = 0;
@@ -176,7 +175,7 @@ enum class manifest_state : std::uint32_t {
     retiring,
 };
 
-/** Full backend identity used for every storage-owned reference. */
+/** Identifies a backend by its process slot, PID and  start time. */
 struct storage_backend_identity {
     std::uint32_t proc_number = (std::numeric_limits<std::uint32_t>::max)();
     std::int32_t pid = 0;
@@ -194,7 +193,7 @@ struct storage_backend_identity {
 static_assert(std::is_standard_layout_v<storage_backend_identity>);
 static_assert(std::is_trivially_copyable_v<storage_backend_identity>);
 
-/** An ABA-safe capability for one stored but not necessarily published block. */
+/** Identifies a stored block and its rwner, with a sequence number to reject reused slots. */
 struct stored_block_token {
     std::uint32_t ledger_slot = (std::numeric_limits<std::uint32_t>::max)();
     std::uint32_t reserved = 0;
@@ -217,7 +216,7 @@ struct store_block_result {
     }
 };
 
-/** Immutable generation information published with its block manifest. */
+/** Describes a cached result when its block manifest is published. */
 struct manifest_descriptor {
     cache_entry_id id{};
     cache_entry_kind kind = cache_entry_kind::exact_final_result;
@@ -252,7 +251,7 @@ struct publish_manifest_result {
     }
 };
 
-/** One ABA-safe, owner-bound entitlement to consume a manifest once. */
+/** Lets the named backend turn one registered waiter into a reader pin. */
 struct manifest_waiter_token {
     manifest_handle handle{};
     std::uint32_t waiter_slot = (std::numeric_limits<std::uint32_t>::max)();
@@ -274,7 +273,7 @@ struct register_manifest_waiter_result {
     }
 };
 
-/** A reader-owned snapshot.  The shared generation remains pinned until release. */
+/** Copies a manifest for one reader and keeps its blocks alive until the pin is released. */
 struct manifest_pin {
     manifest_handle handle{};
     cache_entry_kind kind = cache_entry_kind::exact_final_result;
@@ -366,7 +365,7 @@ struct storage_runtime_snapshot {
 };
 
 #if defined(BIOSEQ_CACHE_TESTING)
-/** Test-only shared override and live ledger evidence for tier assertions. */
+/** Reports memory/file block counts and accounting checks for storage tests. */
 struct storage_tier_test_snapshot {
     bool force_file_tier = false;
     bool coherent = false;
@@ -389,7 +388,7 @@ struct storage_tier_test_snapshot {
     std::uint64_t reserved_file_bytes = 0;
 };
 
-/** Pinned-root ownership evidence used by bootstrap/TAP tests. */
+/** Reports shared-area initialization and attachment state for storage tests. */
 struct storage_bootstrap_test_snapshot {
     bootstrap_state state = bootstrap_state::uninitialized;
     shared_registry::shared_registry_error failure = shared_registry::shared_registry_error::none;
@@ -420,7 +419,7 @@ struct storage_bootstrap_test_snapshot {
     bool main_shmem_storage_region_requested = false;
 };
 
-/** One-backend evidence that repeated attachment initializes only once. */
+/** Records whether two attachments reused the same shared area and root */
 struct storage_bootstrap_attach_twice_snapshot {
     bool first_attached = false;
     bool second_attached = false;
@@ -434,15 +433,13 @@ struct storage_bootstrap_attach_twice_snapshot {
 };
 
 /**
- * Force later block reservations onto the file tier in testing builds only.
- *
- * The override retains actual-space and configured/capacity ceiling checks,
- * but waives the production free-space floor so file-tier tests do not depend
- * on unrelated host disk occupancy.
+ * Forces later test blocks into files. The test,  override skips the
+ * production free-space reserve, while still checking available disk
+ * space and the configured file-size limits.
  */
 [[nodiscard]] bool set_test_force_file_tier(bool enabled) noexcept;
 
-/** Snapshot backing tiers without exposing paths or mutable ledger records. */
+/** Copies block counts and accounting checks from the storage ledgers for tests. */
 [[nodiscard]] storage_tier_test_snapshot test_storage_tier_snapshot() noexcept;
 
 [[nodiscard]] storage_bootstrap_test_snapshot test_storage_bootstrap_snapshot() noexcept;
@@ -457,42 +454,46 @@ void test_release_storage_bootstrap_pause() noexcept;
 [[nodiscard]] bool test_detach_storage_mapping() noexcept;
 #endif
 
-/** Return the fixed storage-metadata bytes allocated inside the pinned DSA. */
+/** Returns the storage metadata size, or zero for invalid configuration. */
 [[nodiscard]] std::size_t storage_shared_memory_size(const storage_config& config = {}) noexcept;
 
-/** Request the bounded registry bootstrap/ledgers and named lock tranches. */
+/** Reserves startup registry memory and requests the storage lock. */
 void request_storage_resources(const storage_config& config = {});
 
-/** Initialize only the bounded bootstrap; dynamic DSA creation remains lazy. */
+/** Initializes the startup registry header. Shared block storage is created on first use. */
 [[nodiscard]] bool startup_storage(std::uint64_t boot_nonce, const storage_config& config = {});
 
-/** Attach this backend/worker to the postmaster-lifetime storage state. */
+/** Attaches this process to shared storage, initializing it on first use. */
 [[nodiscard]] bool attach_storage();
 
-/** Return true only when shared bootstrap and this process's DSA attach succeeded. */
+/** Checks that this process is attacqed to  a ready shared storage area. */
 [[nodiscard]] bool storage_ready() noexcept;
 
-/** Store a checksummed block, preferring DSA and falling back to a private file. */
+/** Stores a block with a checksum, trying shared memory before private files. */
 [[nodiscard]] store_block_result store_block(std::span<const std::byte> bytes);
 
-/** Reserve one later caller-owned DSA allocation against the shared ceiling. */
+/** Reserves space in the shared memory budget before a caller allocates from DSA. */
 [[nodiscard]] shared_dsa_reserve_result
 reserve_shared_dsa_allocation(std::uint64_t payload_bytes) noexcept;
 
-/** Release one explicit reservation exactly once. */
+/** Releases this backend's accounting reservation and clears the token on completion. */
 [[nodiscard]] bool release_shared_dsa_allocation(shared_dsa_reservation* reservation) noexcept;
 
-/** Transfer a pending reservation to live accounting exactly once. */
+/** Counts this backend's pending reservation as live memory. */
 [[nodiscard]] bool publish_shared_dsa_allocation(shared_dsa_reservation* reservation) noexcept;
 
-/** Discard a stored block that was not transferred into a manifest. */
+/** Releases a stored block that this backend has not published in a manifest. */
 [[nodiscard]] storage_error discard_unpublished_block(const stored_block_token& token);
 
-/** Atomically publish a generation and transfer all tokens into its manifest. */
+/**
+ * Publishes a manifest after all its blocks are ready. A successful
+ * publication transfers block ownership to the manifest. On failure,
+ * the caller remains responsible  for discarding unpublished blocks.
+ */
 [[nodiscard]] publish_manifest_result publish_manifest(const manifest_descriptor& descriptor,
                                                        std::span<const stored_block_token> blocks);
 
-/** Adapt one physical coalescer flush to the generic storage block ledger. */
+/** Writes combined column blocks through PostgreSQL storage and remembers storage errors. */
 class storage_column_store_physical_sink {
   public:
     using token_type = stored_block_token;
@@ -524,8 +525,9 @@ class storage_column_store_physical_sink {
 };
 
 /**
- * PostgreSQL-backed logical sink.  It retains one bounded physical buffer and
- * returns small logical handles while DSA/file capabilities stay internal.
+ * Combines logical column blocks into larger storage blocks using one
+ * bounded buffer Callers use logical handles while this sink tracks the
+ * shared-memory or file blocks that will form the manifest.
  */
 class storage_column_store_block_sink {
   public:
@@ -578,8 +580,9 @@ class storage_column_store_block_sink {
 };
 
 /**
- * Publish coalesced blocks atomically, or synchronously release every
- * unpublished physical capability on any validation/storage failure.
+ * Publishes the combined column blocks and transfers their cleanup to
+ * the manifest. If validation or publication returns an error, it asks
+ * the sink to discard the unpublished blocks.
  */
 [[nodiscard]] inline publish_manifest_result publish_streamed_column_store(
     manifest_descriptor descriptor,
@@ -614,74 +617,67 @@ class storage_column_store_block_sink {
     return published;
 }
 
-/** Pin one non-expired complete manifest for a reader. */
+/** Pins an unexpired manifest, for this backend, including one already  marked for retirement. */
 [[nodiscard]] pin_manifest_result pin_manifest(const cache_entry_id& id, std::int64_t now_us = 0);
 
 /**
- * Register a pre-expiry waiter whose entitlement can survive TTL expiry.
- *
- * Terminal publishers may name another live backend while holding the
- * registry's terminal-publication ordering.  The returned capability is
- * still bound to that backend and to this exact manifest ABA generation.
+ * Registers a waiter that started while a complete manifest was valid.
+ * The named backend can convert this token to a reader pin ater expiry.
+ * A publisher may register on another backend's behalf while coordinating
+ * publication through the cache registry.
  */
 [[nodiscard]] register_manifest_waiter_result
 register_manifest_waiter(const manifest_handle& handle,
                          const storage_backend_identity& owner,
                          std::int64_t registered_at_us = 0);
 
-/**
- * Recover this backend's unique published entitlement by generation id.
- * Retiring manifests remain discoverable so cancellation can release a token
- * after registry publication is rolled back; conversion still requires
- * Complete and therefore fails closed for that state.
- */
+/** Finds this backend's sole waiter for a complete manifest, rejecting missing or duplicate waiters. */
 [[nodiscard]] register_manifest_waiter_result current_manifest_waiter(const cache_entry_id& id);
 
-/** Convert one registered waiter to a reader pin even after expiry. */
+/** Converts this backend's waiter on a complete manifest into a reader pin, even after expiry. */
 [[nodiscard]] pin_manifest_result convert_waiter_to_pin(const manifest_waiter_token& token);
 
-/** Release one reader pin exactly once. */
+/** Releases this backend's reader pin, rejecting stale or already released pins. */
 [[nodiscard]] storage_error unpin_manifest(const manifest_pin& pin) noexcept;
 
 /**
- * Release one waiter reference without pinning.
- *
- * The caller may be the terminal publisher rolling back an explicit-owner
- * registration, so possession of the ABA capability is the authority.
+ * Releases a  registered waiter without creating a reader pin. A
+ * publisher can use the token to undo a registration made on another
+ * backend's behalf.
  */
 [[nodiscard]] storage_error unregister_manifest_waiter(const manifest_waiter_token& token) noexcept;
 
-/** Copy and checksum-verify one block from a pinned generation. */
+/** Copies one pinned block into an exactly sized buffer and checks its checksum. */
 [[nodiscard]] storage_error
 read_pinned_block(const manifest_pin& pin,
                   std::size_t block_index,
                   std::span<std::byte> destination,
                   storage_read_purpose purpose = storage_read_purpose::prevalidation);
 
-/** Reset/query process-local read telemetry at a query boundary. */
+/** Clears the process-local read counters at a query boundary */
 void reset_query_io_metrics() noexcept;
 [[nodiscard]] storage_query_io_snapshot query_io_metrics() noexcept;
 
-/** Mark a generation for reclamation. Existing pins drain before physical free. */
+/** Marks a manifest for cleanup after its readers and waiters release it. */
 [[nodiscard]] storage_error retire_manifest(const manifest_handle& handle) noexcept;
 
-/** Run one bounded TTL/LRU/abandoned-producer reclamation pass. */
+/** Runs a limited cleanup pass over retired manifests, unfinished publications and blocks left by dead producers. */
 [[nodiscard]] janitor_sweep_result janitor_sweep(std::int64_t now_us = 0, bool aggressive = false);
 
-/** Ask the static janitor for a normal or aggressive sweep. */
+/** Records a cleanup request for the janitor's next wakeup. */
 void request_janitor_sweep(bool aggressive = false) noexcept;
 
-/** Publish the highest correctness level actually proven by the adapter. */
+/** Records the adapter's current  cache-correctness level. */
 [[nodiscard]] bool publish_correctness_readiness(cache_correctness_readiness readiness) noexcept;
 
-/** Record worker lifecycle/heartbeat without exposing the shared header. */
+/** Records the janitor's lifecycle state, owner and heartbeat. */
 void publish_worker_lifecycle(worker_lifecycle lifecycle, int worker_pid = 0) noexcept;
 void publish_worker_heartbeat(std::int64_t now_us = 0) noexcept;
 
-/** Snapshot bounded counters and lifecycle diagnostics. */
+/** Copies storage counters, worker btate and this process's read statistics. */
 [[nodiscard]] storage_runtime_snapshot runtime_snapshot() noexcept;
 
-/** Authoritative interval copied into shared state at startup. */
+/** Returns the configured cleanup interval, using startup settings before attachment. */
 [[nodiscard]] std::uint32_t janitor_interval_ms() noexcept;
 
 } // namespace bioseq::cache::pg::storage
@@ -751,7 +747,7 @@ struct shared_manifest_reader {
     std::uint64_t owner_sequence;
 };
 
-/** ABA-safe exclusive ownership of one janitor sweep. */
+/** Identifies the backend running a cleanup pass and that pass's sequence number. */
 struct sweep_owner_token {
     storage_backend_identity owner{};
     std::uint64_t sequence = 0;
@@ -1273,7 +1269,7 @@ void digest_hex(const cache_digest_256& digest, char* output) noexcept {
     return storage_error::none;
 }
 
-/** Derive the cache nonce carried alongside the independently checked fields. */
+/** Combines backend identity fields into a nonzero cache nonce. */
 [[nodiscard]] constexpr std::uint64_t
 storage_backend_nonce(std::uint32_t proc_number, int pid, std::int64_t started_at_us) noexcept {
     const std::uint64_t nonce = static_cast<std::uint64_t>(started_at_us) ^
@@ -1282,7 +1278,7 @@ storage_backend_nonce(std::uint32_t proc_number, int pid, std::int64_t started_a
     return nonce == 0 ? 1 : nonce;
 }
 
-/** Capture this process without consulting PostgreSQL's backend arrays. */
+/** Reads this backend's identity from PostgreSQL process-local state. */
 [[nodiscard]] storage_backend_identity current_backend_identity() noexcept {
     const std::uint32_t proc_number = static_cast<std::uint32_t>(MyProcNumber);
     const std::int64_t started_at = static_cast<std::int64_t>(MyStartTimestamp);
@@ -1299,9 +1295,9 @@ storage_backend_nonce(std::uint32_t proc_number, int pid, std::int64_t started_a
 }
 
 /**
- * Probe one copied owner token.  Every caller invokes this after releasing
- * storage/cache locks and later rechecks the complete observation before any
- * mutation.
+ * Checks whether the backend in a copied owner record is alive. Callers
+ * probe outside storage locks, then check that  the shared record still
+ * matches before changing it.
  */
 [[nodiscard]] bool backend_identity_alive(const storage_backend_identity& owner) noexcept {
     if (ProcGlobal == nullptr || !owner.valid() ||
@@ -1329,7 +1325,7 @@ storage_backend_nonce(std::uint32_t proc_number, int pid, std::int64_t started_a
         }
     }
     if (!status_stable) {
-        /* A racing status writer does not establish owner death. */
+        /* Treat an owner as alive when its status keeps changing during the read. */
         return true;
     }
     PGPROC* process = ProcNumberGetProc(static_cast<ProcNumber>(owner.proc_number));
@@ -1412,7 +1408,7 @@ reap_backend_references(const storage_backend_identity& owner) noexcept {
     return sequence == 0 ? 1 : sequence;
 }
 
-/** Claim an unowned/dead sweep token through copy, probe, exact recheck. */
+/** Claims the cleanup pass when it has no owner or its unchanged, owner record belongs to a dead backend. */
 [[nodiscard]] bool acquire_sweep_ownership(sweep_owner_token& acquired) noexcept {
     const storage_backend_identity current = current_backend_identity();
     if (!current.valid()) {
@@ -1456,7 +1452,7 @@ reap_backend_references(const storage_backend_identity& owner) noexcept {
     return false;
 }
 
-/** Release only the exact sweep generation this backend acquired. */
+/** Releases cleanup ownership only if the owner and pass sequence still match. */
 void release_sweep_ownership(const sweep_owner_token& acquired) noexcept {
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     if (acquired.valid() && g_shared->sweep_owner == acquired) {
@@ -2045,11 +2041,9 @@ read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destinati
         LWLockRelease(g_storage_lock);
         return storage_error::invalid_state;
     }
-    /*
-     * Commit the one-way release before touching the physical tier.  If this
-     * process exits inside dsa_free()/unlink(), a later janitor leaves the
-     * tombstone fail-closed instead of risking a second DSA free.
-     */
+    /* Mark the release before freeing memory or deleting files. If the
+     * process dies during the release, later cleanup leaves this record
+     * alone to avoid  freeing the same allocation tkice */
     entry.state = block_ledger_state::release_committed;
     reference = entry.reference;
     reserved_bytes = entry.reserved_bytes;
@@ -2063,7 +2057,7 @@ read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destinati
     const bool live_accounted = entry.live_accounted;
     LWLockRelease(g_storage_lock);
 
-    /* ReleaseCommitted prevents a second janitor while physical I/O runs. */
+    /* Other cleanup passes skip this block while its release is in progress. */
     if (reference.tier == block_backing_tier::dsa &&
         DsaPointerIsValid(static_cast<dsa_pointer>(reference.handle_or_file_id))) {
         dsa_free(g_dsa, static_cast<dsa_pointer>(reference.handle_or_file_id));
@@ -2142,16 +2136,11 @@ struct manifest_file_finalization {
 };
 
 /**
- * Publish one already-fsynced manifest file through source-neutral primitives.
- *
- * This helper contains every nontrivial C++ filesystem/descriptor owner and
- * invokes no PostgreSQL function, so callers regain a destructor-free state
- * before any PG cleanup or lock operation can longjmp.
- *
- * The cache lifecycle satisfies durable_file_io's serialized-writer
- * precondition: staging names contain the backend identity, generation names
- * are created only through no-replace publication, and janitor removal is
- * admitted only after the corresponding ledger state becomes visible.
+ * Publishes an already-synced file without replacing an existing result.
+ * C++ filesystem objects stay inside this helper, which makes no
+ * PostgreSQL calls. They are destroyed before the caller resumes work
+ * that could raise a PostgreSQL error. Staging files belong to one
+ * backend, and ledger state controls when the janitor may remove them.
  */
 [[nodiscard]] inline storage_error publish_manifest_file_no_replace(
     std::string_view directory,
@@ -2230,9 +2219,8 @@ struct manifest_file_finalization {
             {},
             bioseq::common::durable_file_io::publication_state::visible_not_durable);
         if (!synced.has_value()) {
-            // A surfaced non-EINTR writeback error is final for this publish.
-            // A later fsync may return success merely because the kernel has
-            // already reported the error; it cannot erase the first failure.
+            // Keep the first writeback failure. A  later successful fsync cannot
+            // establish that the failed publication was durable.
             const auto removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
                 directory_descriptor.get(),
                 final_name,
@@ -2308,7 +2296,7 @@ struct manifest_file_finalization {
     }
 }
 
-/** Reject every forged/stale/duplicate capability before filesystem access. */
+/** Checks block ownership, slot sequences and duplicates before opening manifest files. */
 [[nodiscard]] storage_error
 validate_manifest_tokens_before_io(const manifest_descriptor& descriptor,
                                    std::span<const stored_block_token> blocks,
@@ -2361,7 +2349,7 @@ validate_manifest_tokens_before_io(const manifest_descriptor& descriptor,
     return storage_error::none;
 }
 
-/** Consolidate staged file blocks in manifest order before final publication. */
+/** Combines staged file blocks in manifest order, checks their checksums and publishes the result file. */
 [[nodiscard]] manifest_file_finalization
 finalize_manifest_file(const manifest_descriptor& descriptor,
                        std::span<const stored_block_token> blocks,
@@ -2737,7 +2725,7 @@ enum class manifest_reference_kind : std::uint8_t {
     waiter = 2,
 };
 
-/** Exact immutable observation copied before a backend-status probe. */
+/** Saves a reader or waiter record for a liveness check outside the storage lock. */
 struct manifest_reference_observation {
     manifest_handle handle{};
     manifest_reference_kind kind = manifest_reference_kind::reader;
@@ -2747,7 +2735,7 @@ struct manifest_reference_observation {
     bool requires_liveness = true;
 };
 
-/** Exact block-ledger observation copied before a backend-status probe. */
+/** Saves a block record for a liveness check outside the storage lock. */
 struct block_owner_observation {
     std::uint32_t ledger_slot = k_invalid_slot;
     block_ledger_entry entry{};
@@ -2785,7 +2773,7 @@ void probe_observation_owners(std::span<const p_observation_type> observations,
     }
 }
 
-/** Copy a rotating bounded slice of reader/waiter ABA tokens under lock. */
+/** Copies a limited set of reader and waiter records, resuming after the previous scan. */
 [[nodiscard]] std::size_t collect_manifest_reference_observations(
     std::span<manifest_reference_observation> observations) noexcept {
     if (observations.empty()) {
@@ -2843,7 +2831,7 @@ void probe_observation_owners(std::span<const p_observation_type> observations,
     return count;
 }
 
-/** Reap dead references only when their complete observation is unchanged. */
+/** Removes dead backends' references after checking that  their saved records still, match. */
 void reap_dead_manifest_references(janitor_sweep_result& result) noexcept {
     std::array<manifest_reference_observation, k_owner_liveness_scan_budget> observations{};
     const std::size_t count = collect_manifest_reference_observations(
@@ -2886,7 +2874,7 @@ void reap_dead_manifest_references(janitor_sweep_result& result) noexcept {
     LWLockRelease(g_storage_lock);
 }
 
-/** Compare all block fields that may change while its owner is active. */
+/** Checks that a block's state, owner and storage details have not changed since it was fopied. */
 [[nodiscard]] bool block_observation_matches(const block_ledger_entry& current,
                                              const block_ledger_entry& observed) noexcept {
     return current.state == observed.state &&
@@ -2904,7 +2892,7 @@ void reap_dead_manifest_references(janitor_sweep_result& result) noexcept {
            std::memcmp(&current.reference, &observed.reference, sizeof(block_reference)) == 0;
 }
 
-/** Copy a rotating bounded slice of unowned block states under lock. */
+/** Copies a limited set of producer-owned or retiring blocks for cleanup checks. */
 [[nodiscard]] std::size_t
 collect_block_owner_observations(std::span<block_owner_observation> observations) noexcept {
     if (observations.empty()) {
@@ -2941,9 +2929,11 @@ collect_block_owner_observations(std::span<block_owner_observation> observations
 }
 
 /**
- * Reclaim abandoned producer blocks through copy/probe/recheck.  The unknown
- * DSA-allocation window deliberately retains its reservation counter exactly
- * as before; ReleaseCommitted remains the one-way physical-free tombstone.
+ * Reclaims blocks left by dead producers and blocks marked for retirement
+ * The owner is checked outside the lock, then the saved block record is
+ * compared again before cleanup. For reservations with no recorded block,
+ * it clears the record and returns reserved bytes to the storage budget
+ * when possible.
  */
 void reclaim_abandoned_blocks(janitor_sweep_result& result) noexcept {
     std::array<block_owner_observation, k_owner_liveness_scan_budget> observations{};
@@ -3309,12 +3299,9 @@ store_block_result store_block(std::span<const std::byte> bytes) {
                                       ? g_shared->file_ceiling_bytes
                                       : policy_ceiling;
     const std::uint64_t observed = pg_atomic_read_u64(&file_reserved_bytes());
-    /*
-     * The explicit test-only override must exercise the file path even when
-     * unrelated host occupancy has already crossed the production reserve
-     * floor.  A zero floor still leaves the actual available bytes, configured
-     * file ceiling, and ten-percent filesystem-capacity ceiling below intact.
-     */
+    /* File-tier tests skip  the production free-space reserve so unrelated
+     * disk use does not prevent the test. Available-space and file-size
+     * limits still apply. */
     const std::uint64_t free_floor =
         force_file_tier ? 0 : file_admission_policy::free_floor_bytes(filesystem_bytes);
     const std::uint64_t free_headroom =
@@ -3531,7 +3518,8 @@ publish_manifest_result publish_manifest(const manifest_descriptor& descriptor,
         manifest.ledger_slots[index] = token.ledger_slot;
         manifest.blocks[index] = finalized.references[index];
     }
-    /* Complete is published last; janitor repairs a crashed Publishing slot. */
+    /* Publish Complete after assigning all blocks. The janitor can clean
+     * a Publishing record left by an interrupted publication. */
     manifest.state = manifest_state::publishing;
     pg_write_barrier();
     for (std::size_t index = 0; index < blocks.size(); ++index) {
@@ -3871,12 +3859,12 @@ janitor_sweep_result janitor_sweep(std::int64_t now_us, bool aggressive) {
     const std::uint32_t requested = pg_atomic_exchange_u32(&g_shared->sweep_requested, 0);
     aggressive = aggressive || requested > 1;
 
-    /* Every backend-status lookup is outside the storage lock. */
+    /* Check backend liveness outside the storage lock. */
     reap_dead_manifest_references(result);
     reclaim_abandoned_blocks(result);
 
-    /* Publishing repair and explicit registry retirement are the only
-     * manifest-level reclamation inputs owned by storage. */
+    /* Storage cleans unfinished publications and manifests retired by
+     * the cache registries. */
     for (std::uint32_t index = 0;
          index < k_manifest_capacity && result.expired_manifests < g_shared->reclaim_batch;
          ++index) {
@@ -3895,11 +3883,10 @@ janitor_sweep_result janitor_sweep(std::int64_t now_us, bool aggressive) {
         }
     }
 
-    /* The exact/reusable registries own TTL and LRU decisions.  Storage may
-     * reclaim COMPLETE only after the owning registry calls retire_manifest;
-     * otherwise a registry-visible handle could become stale between lookup
-     * and its provisional manifest pin.  Pressure therefore denies new
-     * admission until a registry-first eviction marks a manifest Retiring. */
+    /* The cache registries decide expiry and eviction. They must retire a
+     * manifest before storage frees it, so  a lookup cannot lose its blocks
+     * before acquiring a reader pin. Memory pressure alone does not let
+     * this pass evict a complete manifest. */
     static_cast<void>(aggressive);
     if (g_dsa != nullptr && result.reclaimed_hot_bytes != 0) {
         dsa_trim(g_dsa);
@@ -3919,9 +3906,9 @@ void request_janitor_sweep(bool aggressive) noexcept {
     while (observed < desired &&
            !pg_atomic_compare_exchange_u32(&g_shared->sweep_requested, &observed, desired)) {
     }
-    /* The worker's one-second timed latch wake is the notification bound.
-     * Avoid a PostgreSQL liveness lookup here because callers may still own
-     * an exact/reusable registry lock when they queue physical retirement. */
+    /* The jantor sees this request on its next timed wakeup. Avoid a
+     * backend-status lookup here because the caller may hold a cache
+     * registry lock. */
 }
 
 bool publish_correctness_readiness(cache_correctness_readiness readiness) noexcept {
@@ -4056,7 +4043,7 @@ std::uint32_t janitor_interval_ms() noexcept {
 #if defined(BIOSEQ_CACHE_TESTING)
 namespace bioseq::cache::pg::storage {
 
-/** Add a test-ledger byte count without allowing diagnostic wraparound. */
+/** Adds a test byte count, returning false and leaving the total unchanged on overflow */
 [[nodiscard]] bool add_test_reserved_bytes(std::uint64_t& total, std::uint64_t bytes) noexcept {
     if (total > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
         return false;
@@ -4272,7 +4259,7 @@ storage_tier_test_snapshot test_storage_tier_snapshot() noexcept {
 
 export namespace bioseq::cache::pg::storage::bootstrap_test_api {
 
-/** Test controls are private-cluster superuser operations only. */
+/** Requires superuser access to the bootstrap test controls. */
 inline void require_superuser() {
     if (!superuser()) {
         bioseq::postgres::support::raise_sql_error(
@@ -4304,7 +4291,7 @@ inline void append_json_boolean(std::string& json, std::string_view key, bool va
     append_json_member(json, key, value ? "true" : "false");
 }
 
-/** Return one owning snapshot of shared bootstrap state. */
+/** Returns bootstrap counters and attachment state as a JSON value. */
 [[nodiscard]] inline bioseq::postgres::support::jsonb_value bootstrap_status() {
     require_superuser();
     const storage_bootstrap_test_snapshot snapshot = test_storage_bootstrap_snapshot();
@@ -4357,7 +4344,7 @@ inline void append_json_boolean(std::string& json, std::string_view key, bool va
     return bioseq::postgres::support::jsonb_value{std::move(json)};
 }
 
-/** Prove that repeated attachment selects one shared area and root. */
+/** Attaches twice  and returns the area/root comparisons and initialization counters. */
 [[nodiscard]] inline bioseq::postgres::support::jsonb_value bootstrap_attach_twice() {
     require_superuser();
     const storage_bootstrap_attach_twice_snapshot snapshot = test_attach_storage_twice();
@@ -4376,7 +4363,7 @@ inline void append_json_boolean(std::string& json, std::string_view key, bool va
     return bioseq::postgres::support::jsonb_value{std::move(json)};
 }
 
-/** Corrupt one named bootstrap-manifest field for recovery testing. */
+/** Corrupts a named bootstrap, field and checks that reattachment rejects it. */
 [[nodiscard]] inline bool corrupt_bootstrap_manifest(const std::string& name) {
     require_superuser();
     shared_registry::shared_registry_test_manifest_corruption corruption{};

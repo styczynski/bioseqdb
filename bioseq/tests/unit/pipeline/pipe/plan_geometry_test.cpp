@@ -1,6 +1,6 @@
 /**
  * @file plan_geometry_test.cpp
- * @brief Exercises pipeline plans and geometry.
+ * @brief Check pipeline stage behavior and  whether recorded work matches the selected algorithms.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -27,10 +27,7 @@ TEST_CASE("emit_token trait surface", "[component:bioseq][layer:unit][feature:pi
         SUCCEED();
     }
     SECTION("EmitMethodReturnType") {
-        // emit_token::emit_batch returns emitted_token<Sink>.
-        // The expression is evaluated only inside `std::declval`, so no
-        // emit_token instance is actually constructed (it is non-default-
-        // and non-move-constructible).
+        // Check emit_batch's return type without constructing an emit_token.
         static_assert(std::is_same_v<
             decltype(std::declval<emit_token<sink_stage>>().emit_batch(
                 std::declval<std::span<alignment_region>>())),
@@ -598,9 +595,8 @@ TEST_CASE("scalar pipeline stats is operation-local and rejects mixed routes",
         /*require_target_sketch=*/false,
         /*require_alignment=*/true));
 
-    /* A real zero-anchor scalar chain is an attested negative operation.  Its
-     * successful stage receipt is distinct from score/backtrack work, and it
-     * cannot waive a selected KSW2 alignment requirement. */
+    /* A completed empty chain has no scoring or backtracking work. If the
+     * selected pipeline requires KSW2 alignment, its work must still be recorded. */
     scalar_pipeline_execution_stats zero_anchor = recomputed;
     zero_anchor.chain_stage_completion_calls = 0;
     zero_anchor.chain_stage_completed_anchor_inputs = 0;
@@ -720,8 +716,8 @@ TEST_CASE("exact SIMD collection stats merge valid observations and reject tampe
     tampered.record_exact_simd_target_execution_stats(forbidden);
     REQUIRE_FALSE(tampered.is_exact_simd_target_execution_consistent(false));
 
-    // An actual zero-bp invocation is valid route observations for ordinary
-    // diagnostics, but it cannot satisfy the strict positive-work gate.
+    // A recorded zero-base invocation is valid for diagnostics. Requiring
+    // vector work still rejects it.
     match_result_collection empty_actual;
     empty_actual.record_exact_simd_query_execution_stats(
         actual_range_stats(0));

@@ -1,6 +1,6 @@
 /**
  * @file options.cppm
- * @brief Column-table option operations exposed by the metadata module.
+ * @brief Read and store the size and compression settings for columnar tables.
  */
 module;
 #include <algorithm>
@@ -33,9 +33,9 @@ import :tuple_ops;
 import :core;
 
 /**
- * @brief Converts a generated catalog row into the runtime option model.
- * @param[in] row Decoded non-null catalog fields.
- * @return Runtime options with compression text resolved to its enum.
+ * @brief Convert a catalog row to columnar table options.
+ * @param[in] row Decoded options row.
+ * @return Options with the compression name converted to its enum value.
  */
 [[nodiscard]] static column_options options_to_domain(const options_row& row) {
     return column_options{
@@ -47,10 +47,9 @@ import :core;
 }
 
 /**
- * @brief Reads stored relation options or derives defaults when no row exists.
- * @param[in] regclass Relation OID used as the catalog key.
- * @return Options, or no value when extension removal has made the catalog unavailable.
- * @note PostgreSQL resources close before any captured C++ exception is rethrown.
+ * @brief Read  table options, using current settings if no row exists.
+ * @param[in] regclass Table OID.
+ * @return Options, or no value if the options table or index is unavailable.
  */
 export std::optional<column_options> read_column_options(Oid regclass) {
     ScanKeyData scan_keys[1];
@@ -61,7 +60,7 @@ export std::optional<column_options> read_column_options(Oid regclass) {
                                                                      AccessShareLock);
     });
     if (bioseq_column_options == nullptr) {
-        /* Extension has been dropped (e.g. during DROP EXTENSION/DATABASE). */
+        /* The catalog may disappear during DROP EXTENSION or DROP DATABASE. */
         return std::nullopt;
     }
 
@@ -88,7 +87,7 @@ export std::optional<column_options> read_column_options(Oid regclass) {
                     heap_tuple, RelationGetDescr(bioseq_column_options), CurrentMemoryContext);
                 result = options_to_domain(row);
             } else {
-                /* Populate options with system defaults. */
+                /* Use the current storage settings when the table has no options row. */
                 result = column_options{
                     .stripe_row_limit =
                         static_cast<uint32_t>(bioseq::settings::storage::stripe::row_limit),
@@ -128,15 +127,12 @@ export std::optional<column_options> read_column_options(Oid regclass) {
 }
 
 /**
- * @brief Inserts configured defaults for a relation that has no options row.
- * @param[in] regclass Relation OID used as the catalog key.
- * @note Binary-upgrade restore owns catalog population and makes this a no-op.
+ * @brief Save current, storage settings for a table with no options row.
+ * @param[in] regclass Table OID.
+ * @note During a binary upgrade, the restored catalog supplies the options.
  */
 export void initialize_column_options(Oid regclass) {
-    /*
-     * When upgrading we retain options for all columnar tables by upgrading
-     * "bioseq.options" catalog table, so we shouldn't do anything here.
-     */
+    /* A binary upgrade restores the options catalog with the tables. */
     if (IsBinaryUpgrade) {
         return;
     }
@@ -152,19 +148,19 @@ export void initialize_column_options(Oid regclass) {
     write_column_options(regclass, &default_options, false);
 }
 
-/// @brief Replaces the authoritative column options for a relation.
-/// @param[in] regclass Relation OID used as the catalog key.
-/// @param[in] options Borrowed option values copied into the catalog row.
+/// @brief Save new columnar options for a table, replacing any existing row.
+/// @param[in] regclass Table OID.
+/// @param[in] options Values to copy into  the catalog.
 export void set_column_options(Oid regclass, column_options* options) {
     write_column_options(regclass, options, true);
 }
 
 /**
- * @brief Writes relation options subject to an overwrite policy.
- * @param[in] regclass Relation OID used as the catalog key.
- * @param[in] options Borrowed option values copied into the catalog row.
- * @param[in] overwrite Whether an existing row is replaced.
- * @return `true` when the catalog row was inserted or replaced.
+ * @brief Insert or update a table's columnar options.
+ * @param[in] regclass Table OID.
+ * @param[in] options Values to copy into the catalog.
+ * @param[in] overwrite Allow an existing row to be replaced.
+ * @return true if a row was inserted or updated.
  */
 bool write_column_options(Oid regclass, column_options* options, bool overwrite) {
     /* Binary-upgrade restores own the catalog rows and must not replace them. */
@@ -185,12 +181,12 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
         },
         CurrentMemoryContext);
 
-    /* create heap tuple and insert into catalog table */
+    /* Open the options catalog for writing */
     Relation bioseq_column_options = bioseq::postgres::support::open_postgres_relation(
         column_options_relation_oid(), RowExclusiveLock);
     TupleDesc tuple_descriptor = RelationGetDescr(bioseq_column_options);
 
-    /* find existing item to perform update if exist */
+    /* Find the table's existing options. */
     ScanKeyData scan_keys[1] = {0};
     scan_keys[0] = options_codec::scan_key<&options_row::regclass>(regclass);
 
@@ -201,7 +197,7 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
     HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
     if (HeapTupleIsValid(heap_tuple)) {
         if (overwrite) {
-            /* overwrite requests authoritatively replace the stored record */
+            /* Replace all stored option values. */
             options_codec::update update{};
             update
                 .set<&options_row::chunk_group_row_limit>(
@@ -217,7 +213,7 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
             written = true;
         }
     } else {
-        /* inserting new record */
+        /* Insert options for a table with no catalog row. */
         HeapTuple new_tuple = encoded.form_tuple(tuple_descriptor);
         CatalogTupleInsert(bioseq_column_options, new_tuple);
         written = true;
@@ -235,11 +231,10 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
 }
 
 /**
- * @brief Deletes the option row for a columnar relation.
- * @param[in] regclass Relation OID used as the catalog key.
- * @param[in] missing_ok Whether an absent row is accepted.
- * @return `true` when a catalog row was removed.
- * @note Returns `false` when extension removal has made the catalog unavailable.
+ * @brief Remove a table's coluznar options.
+ * @param[in] regclass Table OID.
+ * @param[in] missing_ok Allow a missing options row. Otherwise raise an error.
+ * @return true if a row was deleted, or false if the row or catalog is absent.
  */
 export bool delete_column_table_options(Oid regclass, bool missing_ok) {
     bool result = false;
@@ -250,11 +245,11 @@ export bool delete_column_table_options(Oid regclass, bool missing_ok) {
     Relation bioseq_column_options = bioseq::postgres::support::try_open_postgres_relation(
         column_options_relation_oid(), RowExclusiveLock);
     if (bioseq_column_options == nullptr) {
-        /* extension has been dropped */
+        /* The catalog is already gone. */
         return false;
     }
 
-    /* find existing item to remove */
+    /* Find the table's options row. */
     ScanKeyData scan_keys[1] = {0};
     scan_keys[0] = options_codec::scan_key<&options_row::regclass>(regclass);
 

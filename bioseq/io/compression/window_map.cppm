@@ -1,6 +1,6 @@
 /**
  * @file window_map.cppm
- * @brief Trailing decompression window metadata.
+ * @brief Stores the trailing bytes needed by the next decompression chunk.
  */
 module;
 
@@ -15,10 +15,9 @@ export namespace bioseq::io::compression {
 
 inline constexpr std::size_t window_size_bytes = 32 * 1024;
 
-/// One reusable window entry. `bytes` holds the trailing 32 KiB of
-/// the chunk's decoded output. `size` is below 32 KiB only at end-of-stream.
-/// `encoded_end_bit_offset` is the bit-offset just past the chunk's
-/// last DEFLATE block. `generation` distinguishes reused entries.
+/// Saved trailing bytes from  a decoded chunk, with their valid length.
+/// `encoded_end_bit_offset` locates the end of its compressed blocks.
+/// `generation` distinguishes successive uses of the same entry.
 struct decompression_window {
     std::array<std::uint8_t, window_size_bytes> bytes{};
     std::size_t size = 0;

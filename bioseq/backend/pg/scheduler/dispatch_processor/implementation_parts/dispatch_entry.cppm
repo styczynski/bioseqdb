@@ -1,6 +1,6 @@
 /**
  * @file implementation_parts/dispatch_entry.cppm
- * @brief Owns batch dispatch entry, prepared-group lookup, and pair parameter scaling.
+ * @brief Run alignment batches with  the statement's selected CPU kernels.
  */
 module;
 
@@ -25,24 +25,14 @@ import bioseq.pipeline.pipe;
 namespace bioseq::simd {
 
 /**
- * @brief Selects one Highway target and executes a typed alignment batch.
+ * @brief Run a btch using the statement's selected Highway kernels.
  *
- * Only the first `batch_size` target and identifier slots participate. Observer state is
- * restored on both success and failure, while processing errors propagate to the caller.
+ * Only the first batch_size array entries participate. Use query_hdr for a
+ * shared query, or per_row_query_hdrs for separate queries. The scanner context
+ * supplies deferred sequences and preparation callbacks. Add execution counters
+ * to stats and restore the caller's job observer on success or failure
  *
- * @param[in] batch_size Number of live rows in the fixed-capacity arrays.
- * @param[in] alphabet_code Shared alphabet code for every participating sequence.
- * @param[in] storage_unit_byte_width Shared packed storage width in bytes.
- * @param[in] query_hdr Broadcast query, or `nullptr` in per-row query mode.
- * @param[in] per_row_query_hdrs Optional fixed-capacity array of per-row queries.
- * @param[in] target_hdrs Fixed-capacity target array with a live prefix of `batch_size`.
- * @param[in] query_ids Stable row identifiers parallel to `target_hdrs`.
- * @param[in] base_params Caller-selected minimap2 parameters.
- * @param[in] invocation_role Broadcast or per-row scheduling role.
- * @param[in] broadcast_query_ordinal Stable ordinal for broadcast-query accounting.
- * @param[in,out] stats Batch and pipeline counters accumulated by the typed route.
- * @param[in,out] scanner_pg_ctx Optional scan-owned preparation and observer context.
- * @return Matches grouped by the corresponding query identifier.
+ * @return Matches keyed by query_ids.
  */
 [[nodiscard]] match_result_map batch_processor::process_sequences(
     const size_t batch_size,
@@ -158,12 +148,8 @@ namespace bioseq::simd {
 }
 
 /**
- * @brief Finds a prepared CPU index group matching one minimizer configuration.
- * @param[in] kmer_size Minimizer k-mer length in bases.
- * @param[in] window_size Minimizer window length in bases.
- * @param[in] max_occ Maximum retained minimizer occurrence count.
- * @param[in] sketch_backend Sketch implementation used to build the group.
- * @return Borrowed group pointer, or `nullptr` when no prepared group matches.
+ * @brief Find a prepared index with the same minimizer settings and sketch implementation.
+ * @return A borrowed group, or nullptr when none matches.
  */
 batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target::find_group(
     const std::int32_t kmer_size,
@@ -180,10 +166,10 @@ batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target:
 }
 
 /**
- * @brief Scales untouched minimizer defaults for short query-target pairs.
- * @param[in] base Requested parameters, preserved when any tuned field is nondefault.
- * @param[in] min_bp Shorter operand length in base pairs.
- * @return Effective parameters for the pair.
+ * @brief Adjust default minimizer and chaining settings for the shorter sequence.
+ * @param[in] base Requested parameters. User changes to  the adjusted fields are preserved.
+ * @param[in] min_bp Length of the shorter sequence in bases.
+ * @return The parameters to use for this pair.
  */
 minimap2_parameters batch_processor::effective_params_for_pair(const minimap2_parameters& base,
                                                                const std::size_t min_bp) noexcept {

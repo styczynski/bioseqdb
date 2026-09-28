@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Defines stable field counts and version tags for custom-scan plan payloads.
+ * @brief Defines the tags, versions, and field counts of saved custom-scan records.
  */
 export module bioseq.postgres.table:custom_scan_plan_abi_constants;
 
-/** @brief Version of the two-child batched-join planner payload. */
+/** @brief Format version shared by two-child batch-join paths and plans. */
 export inline constexpr int k_bioseq_batch_join_plan_version = 3;
 /** @brief Magic tag for locator passthrough metadata. */
 export inline constexpr int k_bioseq_locator_passthrough_magic = 0x424c5031;
@@ -26,7 +26,7 @@ export inline constexpr int k_bioseq_base_match_owner_plan_fields = 7;
 export inline constexpr int k_bioseq_batch_join_path_private_fields = 13;
 /** @brief Number of private fields in a batched-join plan. */
 export inline constexpr int k_bioseq_batch_join_private_fields = 18;
-/** @brief Version of the one-child per-row join planner payload. */
+/** @brief Format version shared by one-child  per-row join paths and plans. */
 export inline constexpr int k_bioseq_per_row_join_plan_version = 5;
 /** @brief Number of private fields in a per-row join path. */
 export inline constexpr int k_bioseq_per_row_join_path_private_fields = 13;

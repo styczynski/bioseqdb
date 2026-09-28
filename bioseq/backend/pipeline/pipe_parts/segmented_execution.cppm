@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/segmented_execution.cppm
- * @brief Executes admitted segments and returns merged pipeline results.
+ * @brief Index overlapping target segments and merge their alignment results.
  */
 module;
 
@@ -66,15 +66,16 @@ export {
     namespace bioseq::simd {
 
     /**
-     * Execute target indexing and alignment in admission-bounded overlapping
-     * segments while retaining global biological coordinates and result order.
+     * Index overlapping target segments and merge results in segment order.
+     * Keep global coordinates, accepting each result in the core containing its
+     * target start. Parallel calls reserve  memory for a group of segments.
      *
-     * `max_occ` filtering remains segment-local, so exact genome-wide filtering
-     * for highly repetitive targets requires a global occurrence pre-count.
+     * max_occ applies within each segment. Genome-wide repeat filtering needs
+     * a separate count across the full target.
      *
-     * @tparam p_index_dispatch Transient or generated fragment-index route.
-     * @tparam p_alphabet Logical alphabet shared by query and target.
-     * @tparam p_fragment_index_storage Optional persistent fragment sink.
+     * @tparam p_index_dispatch Transient or generated fragmenq-index route.
+     * @tparam p_alphabet Alphabet shared by query and target.
+     * @tparam p_fragment_index_storage Optional persistent fragment storage.
      */
     template <class p_index_dispatch,
               sequence_alphabet p_alphabet,
@@ -104,8 +105,7 @@ export {
             return match_result_collection{};
         }
 
-        // Resolve the target-index sketch backend once so every segment preserves
-        // the selected route without an implicit scalar fallback.
+        // Choose the target sketch algorithm once and use it for every segment.
         const minimizer_sketch_backend target_sketch_backend =
             pipe::target_index_sketch_backend_from_params(params);
 
@@ -123,7 +123,7 @@ export {
         }
         bioseq::indexing::gpu_minimizer_index_cache* segmented_gpu_index_cache_ptr =
             segmented_gpu_index_cache ? &*segmented_gpu_index_cache : nullptr;
-        /// Derive a stable cache identity for one target segment.
+        /// Give each segment a distinct identity within this call's GPU cache.
         auto segment_gpu_identity = [](std::size_t segment_index) noexcept {
             return bioseq::indexing::gpu_index_cache_identity{
                 .assembly_identity =
@@ -131,11 +131,9 @@ export {
             };
         };
 
-        // (1) Sketch the query ONCE as minimap_sketch_data (query <= 2^28 bp; its
-        //     positions fit the 28-bit field). Same kmer hashing as the target, so
-        //     `collect_seed_hits` matches identically. The helper sketches on the GPU
-        //     when vulkan_minimap_integer is selected (byte-identical
-        //     minimizers) and otherwise uses the scalar CPU sketch.
+        // Sketch the query once with the selected  algorithm and reuse it for all
+        // segments. Keep its host minimizers and any Vulkan device span, alive
+        // until the final segment finishes.
         using query_sketch_type = decltype(
             sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k));
         const auto query_owner = std::make_shared<query_sketch_type>(
@@ -193,7 +191,7 @@ export {
                     std::abort();
                 }
             };
-        /// Attach the once-per-query sketch stats to the merged segment result.
+        /// Check sketch statistics against the selected backend and add the query counts once
         auto finalize_segmented_stats = [&query_sketch,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                          execution_plan,
@@ -280,7 +278,7 @@ export {
             std::uint64_t mask = 0u;
             bool exact = false;
 
-            /// Build a conservative fixed-width membership gate for query k-mers.
+            /// Build a bit filter for query hashes. Collisions can admit extra hashes.
             void build(const boost::unordered_flat_set<std::uint64_t>& filter,
                        std::size_t /*kmer_size*/) {
                 const unsigned gate_bits = 26u;
@@ -299,7 +297,7 @@ export {
                 }
             }
 
-            /// Test the conservative bit gate before exact host lookup.
+            /// Reject hashes whose bit is clear, leaving possible matches for exact lookup.
             [[nodiscard, gnu::always_inline]] bool
             maybe_contains(std::uint64_t kmer) const noexcept {
                 if (words.empty())
@@ -309,13 +307,13 @@ export {
                         (std::uint32_t{1} << (bit & 31u))) != 0u;
             }
 
-            /// Report that this approximate gate never proves exact membership.
+            /// Require exact lookup for every hash that passes this bit filter.
             [[nodiscard, gnu::always_inline]] bool
             accepts_exactly(std::uint64_t /*kmer*/) const noexcept {
                 return false;
             }
 
-            /// Borrow the gate words through the Vulkan sketch ABI.
+            /// Borrow the  bit filter for a Vulkan sketch call.
             [[nodiscard]] bioseq::gpu::vulkan::vulkan_sketch_query_gate
             vulkan_gate() const noexcept {
                 return bioseq::gpu::vulkan::vulkan_sketch_query_gate{
@@ -328,7 +326,7 @@ export {
             query_gate.build(query_kmer_filter, k);
         }
         using filtered_minimizer_pair = std::pair<std::uint64_t, std::uint64_t>;
-        /// Build a segment index containing only query-relevant minimizers.
+        /// Build a segment index from target hashes present in the query sketch.
         auto build_query_filtered_segment_index =
             [&query_kmer_filter, &query_gate, target_len](
                 std::span<const p_minimizer> minimizers,
@@ -366,22 +364,22 @@ export {
             std::uint64_t position_offset = 0u;
             std::vector<filtered_minimizer_pair> pairs;
 
-            /// Reserve a conservative filtered-pair capacity.
+            /// Reserve an inioial capacity based on the expected sketch and query hash count.
             void reserve(std::size_t expected_count) {
                 const std::size_t filtered_hint =
                     filter == nullptr ? expected_count
                                       : std::min<std::size_t>(expected_count, filter->size() + 64u);
                 pairs.reserve(filtered_hint);
             }
-            /// Reuse retained capacity for the next segment.
+            /// Clear the segment's pairs while keeping capacity for reuse.
             void clear() {
                 pairs.clear();
             }
-            /// Forward a movable minimizer to the borrowed-record overload.
+            /// Read a temporary minimizer through the same collector path.
             [[gnu::always_inline]] void collect(p_minimizer&& sketch) {
                 collect(static_cast<const p_minimizer&>(sketch));
             }
-            /// Append one query-relevant minimizer with its global position.
+            /// Keep matching query hashes and convert their target positions to global coordinates.
             [[gnu::always_inline]] void collect(const p_minimizer& sketch) {
                 const std::uint64_t kmer = sketch.kmer();
                 if (filter == nullptr || ((gate == nullptr || gate->maybe_contains(kmer)) &&
@@ -391,7 +389,7 @@ export {
                     pairs.emplace_back(kmer, encoded);
                 }
             }
-            /// Decode and append an exact raw-storage minimizer batch.
+            /// Decode raw minimizers and  apply the same query filter and position offset.
             [[nodiscard]] bool append_raw_storage(const typename p_minimizer::storage_type* raw,
                                                   std::size_t count) {
                 if (count > pairs.max_size() - pairs.size()) {
@@ -404,12 +402,12 @@ export {
             }
         };
 
-        // (2) Segment the target. Overlap >= longest target match span so a match
-        //     starting in a segment core is fully indexed within that segment.
+        // Add overlap around each segment core so boundary matches can find
+        // nearby seeds. The query length sets the overlap, subject to its cap.
         constexpr std::size_t lpu = 1u;
         const sequence_size_t overlap_bp = pipe::segment_overlap_bp(query_len);
 
-        /// Execute the established serial segmented route and merge in order.
+        /// Process target segments serially and keep results whose start belongs to each core.
         auto run_serial_segmented = [target_len,
                                      query_len,
                                      lpu,
@@ -546,8 +544,8 @@ export {
                         w,
                         k,
                         query_gate.vulkan_gate());
-                    // Safe with the approximate device gate because the collector
-                    // still exact-confirms each emitted kmer against query_kmer_filter.
+                    // The GPU bit filter may pass hash collisions. The collector checks
+                    // every returned hash against the exact query set
                     seg_index.build_from_pairs(
                         std::span<filtered_minimizer_pair>{filtered_pair_collector.pairs.data(),
                                                            filtered_pair_collector.pairs.size()},
@@ -639,7 +637,7 @@ export {
             return finalize_segmented_stats(std::move(merged_collection));
         };
 
-        /// Execute the all-Vulkan segment-coordinate batch when strictly selected.
+        /// Build resident GPU indexes for the segments and collect coordinate-only results.
         auto run_vulkan_segment_coordinate_batch = [target_len,
                                                     query_len,
                                                     lpu,
@@ -824,7 +822,7 @@ export {
         };
 
         constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
-        /// Bound collected biological symbols for one segment core.
+        /// Bound the collected length by the  core, both overlaps and the target length.
         auto collected_bp_upper_bound = [target_len,
                                          overlap_bp](sequence_size_t core_bp) -> std::uint64_t {
             const std::uint64_t core = static_cast<std::uint64_t>(core_bp);
@@ -837,7 +835,7 @@ export {
             return std::min<std::uint64_t>(collected, static_cast<std::uint64_t>(target_len));
         };
 
-        /// Bound the nested packed-range owner required by bounded ntHash.
+        /// Estimate the packed copy needed by bounded ntHash for a segment and its overap.
         auto packed_range_peak_for_segment_core_bp =
             [bounded_nthash_segmented_route,
              &collected_bp_upper_bound](sequence_size_t core_bp) -> std::uint64_t {
@@ -848,7 +846,7 @@ export {
                 collected_bp_upper_bound(core_bp), sizeof(std::uint32_t));
         };
 
-        /// Estimate the full peak for one segment, including the nested packed range.
+        /// Estimate index and context memory, plus the, bounded ntHash packed copy.
         auto peak_for_segment_core_bp = [&collected_bp_upper_bound,
                                          &packed_range_peak_for_segment_core_bp](
                                             sequence_size_t core_bp) {
@@ -872,7 +870,8 @@ export {
             std::uint64_t estimated_work_bp = 0;
         };
 
-        /// Choose the first geometry whose full worker wave is memory-admitted.
+        /// Compare segment sizes and worker counts, then reserve the first affordable
+        /// wave in estimated-work order. Return an empty plan if none fits.
         auto try_admit_segment_geometry = [&pool,
                                            target_len,
                                            &collected_bp_upper_bound,
@@ -996,7 +995,7 @@ export {
             return run_serial_segmented();
         }
 
-        /// Transfer exact nested packed-range admission out of a full wave permit.
+        /// Split each bounded ntHash packed-copy reservation from the wave's permit.
         auto split_packed_range_permits = [&ranges,
                                            target_len,
                                            lpu,
@@ -1032,7 +1031,7 @@ export {
                 match_result_collection merged_collection;
                 auto& merged = merged_collection.results;
 
-                /// Materialize and persist one fragment-producing segment serially.
+                /// Sketch and align one segment serially, saving its index fragments in  order.
                 auto process_segment_serial = [&ranges,
                                                &target_seq,
                                                &query_seq,
@@ -1255,7 +1254,7 @@ export {
         std::vector<std::size_t> segment_minimizer_counts(ranges.size());
         std::vector<std::size_t> segment_filtered_counts(ranges.size());
 
-        /// Execute one non-persisting segment for serial fallback waves.
+        /// Run one segment serially when its worker wave cannot reserve enough memory.
         auto process_segment_serial = [&ranges,
                                        &seg_out,
                                        &target_seq,

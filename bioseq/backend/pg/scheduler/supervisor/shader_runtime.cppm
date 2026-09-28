@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/shader_runtime.cppm
- * @brief PostgreSQL Vulkan shader-cache and runtime supervision implementation.
+ * @brief Prepare PostgreSQL shader caches and coordinate background compilation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -58,11 +58,7 @@ namespace bioseq::postgres::scheduler {
 static_assert(k_shader_cache_ok_wire_value ==
               static_cast<std::uint32_t>(bioseq::gpu::vulkan::shader_cache_error::ok));
 
-/**
- * @brief Maps a shader-cache diagnostic to its shared wire error.
- * @param[in] error Current cache or compiler diagnostic.
- * @return Stable shader-cache error category.
- */
+/** Classify a compiler or cache error message  for reporting through shared memory. */
 [[nodiscard]] bioseq::gpu::vulkan::shader_cache_error
 classify_shader_cache_error(std::string_view error) noexcept {
     using bioseq::gpu::vulkan::shader_cache_error;
@@ -92,33 +88,25 @@ classify_shader_cache_error(std::string_view error) noexcept {
     return shader_cache_error::metadata_io;
 }
 
-/**
- * @brief Returns the PostgreSQL-owned runtime cache root.
- * @return A path below `DataDir`, or the process directory when it is unavailable.
- */
+/** Return bioseq_runtime_cache below DataDir, or below the current directory if unet. */
 [[nodiscard]] std::filesystem::path runtime_cache_root() {
     const char* data_dir = DataDir != nullptr ? DataDir : ".";
     return std::filesystem::path(data_dir) / "bioseq_runtime_cache";
 }
 
-/**
- * @brief Resolves the cache directory for one shader-input digest.
- * @param[in] digest Canonical shader-cache identity.
- * @return Digest-specific cache directory.
- */
+/** Return the cache directory for the given shader-input digest. */
 [[nodiscard]] std::filesystem::path runtime_cache_dir_from_digest(std::string_view digest) {
     return runtime_cache_root() / std::string(digest);
 }
 
 /**
- * @brief Publishes validated cache paths before Vulkan runtime construction.
- * @param[in] cache_dir Directory containing the sealed shader cache.
- * @return Success or the first environment update diagnostic.
+ * Set the cache paths that MoltenVK and the shader loader read during startup.
+ * Return the first environment-update error.
  */
 [[nodiscard]] std::expected<void, std::string>
 publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
-    // Exact command bytes are carried only by the admitted sealed seed/configuration.
-    // A pathname environment override is never authority in immutable mode.
+    // Load the command library from the checked cache image. Clear the
+    // environment override so it cannot select a different library by pathname.
     if (::unsetenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB") != 0) {
         const int saved_errno = errno;
         return std::unexpected(
@@ -145,25 +133,19 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
     return {};
 }
 
-/**
- * @brief Copies the published cache digest from scheduler shared memory.
- * @return The current digest, or an empty string when it is unavailable.
- */
+/** Copy the shared shader-cache digest, or  return an empty string without shared state. */
 [[nodiscard]] std::string current_runtime_cache_digest() {
     if (g_shared == nullptr) {
         return {};
     }
-    // Mirror the shared C buffer so readers never observe a partially terminated string.
+    // Terminate the local copy before constructing a string from shared bytes.
     char local[sizeof(g_shared->cache_digest_hex)]{};
     std::memcpy(local, g_shared->cache_digest_hex, sizeof(local));
     local[sizeof(local) - 1] = '\0';
     return std::string(local);
 }
 
-/**
- * @brief Builds the device-independent shader inputs used before runtime probing.
- * @return Conservative limits and stable toolchain identity.
- */
+/** Choose shader build settings without probing a GPU device. */
 [[nodiscard]] bioseq::gpu::vulkan::shader_cache_build_inputs conservative_shader_inputs() {
     bioseq::gpu::vulkan::shader_cache_build_inputs inputs{};
     inputs.variants.max_workgroup_invocations = 256u;
@@ -175,17 +157,17 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
 }
 
 /**
- * @brief Computes the platform cache digest before selecting a sealed-cache directory.
- * @param[in] inputs Stable shader-cache build inputs.
- * @return Base digest off Apple, or the digest bound to the once-qualified helper on Apple.
+ * Compute the shader-cache digest used to choose its directory.
+ * On Apple, include the checked archive-helper identity so cached shaders
+ * match the helper that will load them.
  */
 [[nodiscard]] std::expected<std::string, std::string> runtime_shader_cache_digest(
     const bioseq::gpu::vulkan::shader_cache_build_inputs& inputs) {
 #if !defined(__APPLE__)
     return bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
 #else
-    // Sealing and receipt validation call load_once() again, but the process store
-    // returns this retained image without another qualification or filesystem hash.
+    // Later cache checks reuse this process-owned helper image, avoiding
+    // another fil read and hash
     auto helper = bioseq::gpu::vulkan::qualified_metal_archive_helper_process_store_instance()
                       .load_once();
     if (!helper) {
@@ -196,11 +178,7 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
 #endif
 }
 
-/**
- * @brief Enumerates and canonicalizes every static shader variant.
- * @param[in] inputs Limits and toolchain identity defining the variant set.
- * @return Canonical variant keys, or a validation diagnostic.
- */
+/** List the  static shader variants, sort their keys, and reject invalid or duplicate keys. */
 [[nodiscard]] std::expected<std::vector<bioseq::gpu::vulkan::shader_variant_key>, std::string>
 exact_aot_shader_keys(const bioseq::gpu::vulkan::shader_cache_build_inputs& inputs) {
     std::vector<bioseq::gpu::vulkan::shader_variant_key> keys;
@@ -210,10 +188,7 @@ exact_aot_shader_keys(const bioseq::gpu::vulkan::shader_cache_build_inputs& inpu
     return bioseq::gpu::vulkan::canonical_sealed_shader_cache_keys(keys);
 }
 
-/**
- * @brief Returns the process-lifetime sealed shader seed store.
- * @return Process-local store owning the accepted seed image.
- */
+/** Return the process-owned store for the checked shader cache image. */
 [[nodiscard]] bioseq::gpu::vulkan::sealed_shader_cache_process_store&
 process_shader_seed_store() noexcept {
     static bioseq::gpu::vulkan::sealed_shader_cache_process_store store;
@@ -221,11 +196,8 @@ process_shader_seed_store() noexcept {
 }
 
 /**
- * @brief Loads one validated seed identity into the process store.
- * @param[in] cache_dir Directory containing the sealed artifacts.
- * @param[in] digest Expected cache digest.
- * @param[in] keys Expected canonical variant order.
- * @return The accepted process seed, or a validation diagnostic.
+ * Load and check the shader cache once for this process. Later calls reuse
+ * the image and must match its directory, digest, and shader keys.
  */
 [[nodiscard]] std::expected<
     std::shared_ptr<const bioseq::gpu::vulkan::sealed_shader_cache_seed_image>,
@@ -236,20 +208,13 @@ load_process_shader_seed_once(const std::filesystem::path& cache_dir,
     return process_shader_seed_store().load_once(cache_dir, digest, keys);
 }
 
-/**
- * @brief Samples the accepted process shader seed.
- * @return Shared ownership of the current seed, or null before preparation.
- */
+/** Share, ownership of the loaded shader cache image, or return null before loading. */
 [[nodiscard]] std::shared_ptr<const bioseq::gpu::vulkan::sealed_shader_cache_seed_image>
 process_shader_seed_snapshot() {
     return process_shader_seed_store().snapshot();
 }
 
-/**
- * @brief Installs archive configuration derived from one accepted seed.
- * @param[in] seed Accepted sealed shader seed.
- * @return Success or an archive configuration diagnostic.
- */
+/** Configure Metal archive loading from an accepted shader cache  image. */
 [[nodiscard]] std::expected<void, std::string> install_verified_runtime_archive_configuration(
     std::shared_ptr<const bioseq::gpu::vulkan::sealed_shader_cache_seed_image> seed) {
     if (!seed || !seed->is_accepted()) {
@@ -271,8 +236,10 @@ process_shader_seed_snapshot() {
 }
 
 /**
- * @brief Creates or validates the supervisor-owned exact shader seed.
- * @return Success, or the first cache, compiler, or sealing diagnostic.
+ * Prepare the supervisor's Apple shader cache before serving requests.
+ * Validate an existing manifest, or compile and seal the required variants
+ * when none exists. Reject an invalid existing cache. Other platforms return
+ * success without this preparation.
  */
 [[nodiscard]] std::expected<void, std::string> run_shader_cache_aot_phase() {
 #if !defined(__APPLE__)
@@ -385,18 +352,12 @@ process_shader_seed_snapshot() {
 #endif
 }
 
-/**
- * @brief Initializes runtime assets owned by the scheduler supervisor.
- * @return Success or a diagnostic safe for shared publication.
- */
+/** Prepare shader assets during supervisor startup and return any error. */
 [[nodiscard]] std::expected<void, std::string> load_bioseq_runtime() {
     return run_shader_cache_aot_phase();
 }
 
-/**
- * @brief Publishes terminal runtime initialization state and wakes every waiter.
- * @param[in] initialization_result Runtime initialization outcome.
- */
+/** Publish sdader initialization success or failure and wake all waiting backends. */
 void publish_runtime_init_result(std::expected<void, std::string> initialization_result) noexcept {
     if (g_shared == nullptr) {
         return;
@@ -421,24 +382,17 @@ void publish_runtime_init_result(std::expected<void, std::string> initialization
     ConditionVariableBroadcast(&g_shared->runtime_init_cv);
 }
 
-/**
- * @brief Checks whether a PostgreSQL process number addresses a live slot.
- * @param[in] procno Shared process number.
- * @return True when `ProcGlobal` contains the slot.
- */
+/** Check whether a process number is a valid index into PostgreSQL's process array. */
 [[nodiscard]] bool procno_in_range(std::uint32_t procno) noexcept {
     return procno != static_cast<std::uint32_t>(INVALID_PROC_NUMBER) && ProcGlobal != nullptr &&
            procno < static_cast<std::uint32_t>(ProcGlobal->allProcCount);
 }
 
-/**
- * @brief Creates or validates the backend-local sealed shader cache.
- * @return The prepared cache directory, or a diagnostic.
- */
+/** Build or validate  this backend's shader cache and configure its use at runtime. */
 [[nodiscard]] std::expected<std::filesystem::path, std::string>
 prepare_backend_local_shader_cache_env();
 
-/** @brief Wakes the currently published supervisor process when it is reachable. */
+/** Set the supervisor's latch when its published process slot is in range. */
 void wake_supervisor_if_known() {
     if (g_shared == nullptr) {
         return;
@@ -450,29 +404,25 @@ void wake_supervisor_if_known() {
     }
 }
 
-/** @brief Runs PostgreSQL interrupt processing inside an error bridge. */
+/** Check PostgreSQL interrupts through the C++ error bridge */
 inline void pg_check_for_interrupts_as_cpp() {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CHECK_FOR_INTERRUPTS(); });
 }
 
-/**
- * @brief Prepares one PostgreSQL condition variable for bridged sleep.
- * @param[in,out] condition Shared condition variable used by the waiter.
- */
+/** Register this process as a condition-variable waiter through the C++ error bridge. */
 inline void pg_condition_variable_prepare_to_sleep_as_cpp(ConditionVariable* condition) {
     bioseq::postgres::support::invoke_pg_as_cpp(
         [condition] { ConditionVariablePrepareToSleep(condition); });
 }
 
-/** @brief Cancels the current process condition-variable sleep preparation. */
+/** Remove this process from its prepared condition-variable wait. */
 inline void pg_condition_variable_cancel_sleep_as_cpp() {
     bioseq::postgres::support::invoke_pg_as_cpp([] { ConditionVariableCancelSleep(); });
 }
 
 /**
- * @brief Sleeps on a PostgreSQL condition variable inside an error bridge.
- * @param[in,out] condition Shared condition variable used by the waiter.
- * @param[in] timeout_ms Maximum sleep duration in milliseconds.
+ * Wait on a PostgreSQL condition variable through the C++ error bridge.
+ * @param timeout_ms Maximum wait in milliseconds.
  */
 inline void pg_condition_variable_timed_sleep_as_cpp(ConditionVariable* condition,
                                                      const long timeout_ms) {
@@ -481,13 +431,10 @@ inline void pg_condition_variable_timed_sleep_as_cpp(ConditionVariable* conditio
     });
 }
 
-/**
- * @brief Raises the terminal PostgreSQL error for unavailable GPU runtime state.
- * @param[in] detail Stable diagnostic copied before entering the PostgreSQL leaf.
- */
+/** Report why Vulkan preparation failed through  the PostgreSQL error bridge. */
 [[noreturn]] void report_runtime_init_unavailable(std::string_view detail) {
-    // Own the rendered detail in the ordinary C++ frame.  The PG leaf captures
-    // only stable pointers and therefore cannot longjmp across this string.
+    // Keep the string owner outside the PostgreSQL callback so an ERROR
+    // reaches the bridge before C++ destroys the string.
     const std::string diagnostic{detail};
     const char* diagnostic_cstr = diagnostic.c_str();
     bioseq::postgres::support::invoke_pg_as_cpp([diagnostic_cstr] {
@@ -504,20 +451,17 @@ inline void pg_condition_variable_timed_sleep_as_cpp(ConditionVariable* conditio
 }
 
 /**
- * @brief Waits for shared initialization or prepares a backend-local runtime cache.
- *
- * A successful return fixes the process cache identity before Vulkan singleton access.
+ * Prepare shader state before the first Vulkan access in tlis backend.
+ * Wait for the shared supervisor when attached, otherwise prepare a local
+ * cache. Report initialization failures or a timeout as PostgreSQL errors.
  */
 void wait_for_runtime_ready() {
     static bool backend_runtime_ready = false;
     if (backend_runtime_ready) {
         return;
     }
-    // PostgreSQL single-user mode has no postmaster child and launches no
-    // registered background workers.  Waiting on preload-owned shared state
-    // would therefore time out forever.  The process is not forked, so the
-    // normal in-process Vulkan/compiler path is safe and needs no supervisor
-    // archive handoff.
+    // Single-user PostgreSQL has no supervisor, worker. Let Vulkan initialize
+    // in this process instead of waiting for a worker that cannot start.
     if (is_standalone_backend_process()) {
         backend_runtime_ready = true;
         return;
@@ -611,25 +555,21 @@ void wait_for_runtime_ready() {
             try {
                 cancel_sleep();
             } catch (...) {
-                // Preserve the initiating PostgreSQL/C++ error.  A valid prepared
-                // condition-variable cancellation is not expected to fail.
+                // Keep the  original error if cancelling the wait also fails.
             }
         }
         throw;
     }
 }
 
-/** @brief Captures one claimed shader slot generation and immutable variant key. */
+/** Shader variant and queue generation claimed by the supervisor. */
 struct compile_claim {
     std::size_t slot_index = 0;
     std::uint32_t generation = 0;
     bioseq::gpu::vulkan::shader_variant_key key{};
 };
 
-/**
- * @brief Claims the first requested shader slot for supervisor compilation.
- * @return A claim snapshot, or absence when no request is ready.
- */
+/** Claim the first pending shader request, or return no claim when the queue is empty. */
 [[nodiscard]] std::optional<compile_claim> try_claim_shader_compile_slot() noexcept {
     if (g_shared == nullptr) {
         return std::nullopt;
@@ -654,10 +594,7 @@ struct compile_claim {
     return std::nullopt;
 }
 
-/**
- * @brief Clears one owned shader slot and publishes it as free.
- * @param[in] slot_index Shared compile-queue index.
- */
+/** Clear an owned shader slot and make it available for a new request. */
 void release_shader_compile_slot(std::size_t slot_index) noexcept {
     if (g_shared == nullptr || slot_index >= scheduler_shared_state::k_compile_queue_size) {
         return;
@@ -671,12 +608,7 @@ void release_shader_compile_slot(std::size_t slot_index) noexcept {
     pg_atomic_write_u32(&slot.state, static_cast<std::uint32_t>(compile_slot_state::free));
 }
 
-/**
- * @brief Claims terminal slot ownership before returning it to the queue.
- * @param[in] slot_index Shared compile-queue index.
- * @param[in] completed_state Expected terminal publication state.
- * @return True when this caller released the matching terminal slot.
- */
+/** Claim a completed slot for cleanup, then make it reusable. */
 [[nodiscard]] bool
 try_release_completed_shader_compile_slot(const std::size_t slot_index,
                                           const compile_slot_state completed_state) noexcept {
@@ -696,10 +628,8 @@ try_release_completed_shader_compile_slot(const std::size_t slot_index,
 }
 
 /**
- * @brief Publishes one shader compilation result and wakes slot ownership cleanup.
- * @param[in] claim Claimed slot generation and variant key.
- * @param[in] errc Stable shader-cache result code.
- * @param[in] compile_succeeded Whether compilation completed successfully.
+ * Publish the shader compilation result If its waiter has cancelled,
+ * release the completed slot so another request can use it.
  */
 void finish_shader_compile_slot(const compile_claim& claim,
                                 bioseq::gpu::vulkan::shader_cache_error errc,
@@ -716,9 +646,8 @@ void finish_shader_compile_slot(const compile_claim& claim,
                                                        ? compile_slot_state::done_ok
                                                        : compile_slot_state::done_error));
     pg_read_barrier();
-    // A cancelled waiter marks its request orphaned.  Whichever side observes
-    // the cancellation after the Done publication owns returning the slot to the
-    // queue; this prevents cancellation from permanently exhausting the queue.
+    // A cancelled waiter clears its PID. The waiter or compiler  then claims
+    // the completed slot for cleanup so cancelled work cannot fill the queue.
     if (slot.requester_pid == 0) {
         (void)try_release_completed_shader_compile_slot(
             claim.slot_index,
@@ -727,9 +656,8 @@ void finish_shader_compile_slot(const compile_claim& claim,
 }
 
 /**
- * @brief Cancels an unclaimed request or marks an active request as orphaned.
- * @param[in] slot_index Shared compile-queue index.
- * @param[in] generation Request generation observed by the waiter.
+ * Cancel a pending shader request or mark a running request as bandoned.
+ * A running compiler keeps its slot until it publishes the result.
  */
 void abandon_shader_compile_request(const std::size_t slot_index,
                                     const std::uint32_t generation) noexcept {
@@ -765,9 +693,9 @@ void abandon_shader_compile_request(const std::size_t slot_index,
 }
 
 /**
- * @brief Publishes one exact shader variant into the shared compile queue.
- * @param[in] key Canonical shader variant identity.
- * @return Slot and generation identity, or a queue diagnostic.
+ * Queue a shader variant for the supervisor and wake its latch.
+ * Return the slot and generation, or an error when the queue is unavailable
+ * or full. A wakeup failure cancels the  request before propagating.
  */
 [[nodiscard]] std::expected<std::pair<std::size_t, std::uint32_t>, std::string>
 publish_shader_compile_request(const bioseq::gpu::vulkan::shader_variant_key& key) {
@@ -799,12 +727,12 @@ publish_shader_compile_request(const bioseq::gpu::vulkan::shader_variant_key& ke
     return std::unexpected("shader compile queue full");
 }
 
-/** @brief Submits shader variants to the shared supervisor and waits for completion. */
+/** Request shader compilation from the supervisor and wait for its result. */
 struct pg_supervisor_compile_service {
     /**
-     * @brief Compiles one canonical variant through the shared queue.
-     * @param[in] key Canonical shader variant identity.
-     * @return Success or a queue, compiler, cancellation, or timeout diagnostic.
+     * Queue one shader variant and wait up to two minutes for completion.
+     * Return compilation and timeout diagnostics. PostgreSQL cancellation
+     * raises through the C++ error bridge after the request is abandoned.
      */
     [[nodiscard]] std::expected<void, std::string>
     ensure_variant_compiled(bioseq::gpu::vulkan::shader_variant_key key) {
@@ -942,16 +870,12 @@ prepare_backend_local_shader_cache_env() {
     return cache_dir;
 }
 
-/** @brief Compiles shader variants directly into one backend-local cache. */
+/** Compile, shader variants into this backend's selected cache directory. */
 struct pg_backend_compile_service {
     std::filesystem::path cache_dir;
     bioseq::gpu::vulkan::msl_version msl;
 
-    /**
-     * @brief Compiles one canonical variant into this service cache.
-     * @param[in] key Canonical shader variant identity.
-     * @return Success or the compiler diagnostic.
-     */
+    /** Compile this shader variant and return  any compiler error. */
     [[nodiscard]] std::expected<void, std::string>
     ensure_variant_compiled(bioseq::gpu::vulkan::shader_variant_key key) {
         return bioseq::gpu::vulkan::ensure_compiled(cache_dir, key, msl);
@@ -959,8 +883,8 @@ struct pg_backend_compile_service {
 };
 
 /**
- * @brief Warms and validates every backend-local shader-cache variant.
- * @return Stable multiline status including variant and artifact identities.
+ * Prepare the Apple shader cache and report its checked variants and artifact
+ * sizes On other platforms, report buccess with zero variants.
  */
 [[nodiscard]] std::string warmup_backend_local_shader_cache_report() {
     std::ostringstream report;
@@ -1061,10 +985,7 @@ struct pg_backend_compile_service {
 #endif
 }
 
-/**
- * @brief Prepares the shader provider before runtime pipeline creation.
- * @return Success or the shared or backend-local preparation diagnostic.
- */
+/** Prepare shared or local shader cache state before creating runtime pipelines. */
 [[nodiscard]] std::expected<void, std::string> pg_shader_provider_prepare_runtime() {
     if (g_shared != nullptr) {
         wait_for_runtime_ready();
@@ -1078,11 +999,12 @@ struct pg_backend_compile_service {
 }
 
 /**
- * @brief Loads one exact shader module from the accepted process seed.
- * @param[in] device Vulkan device receiving the module.
- * @param[in] key Canonical shader variant identity.
- * @param[in] create_shader_module Vulkan creation callback for the active loader.
- * @return Loaded module ownership, or an identity or Vulkan diagnostic.
+ * Create a Vulkan shader module from the checked process cache image.
+ * Prepare the cache if needed and require its shader keys to match the current
+ * build settings. Return the module or a cache or Vulkan error.
+ * @param device Vulkan device receiving the module.
+ * @param key Requested shader variant.
+ * @param create_shader_module Creation callback supplied by  the active Vulkan loader.
  */
 [[nodiscard]] std::expected<bioseq::gpu::vulkan::shader_module_load, std::string>
 pg_shader_provider_load_module(VkDevice device,
@@ -1107,7 +1029,7 @@ pg_shader_provider_load_module(VkDevice device,
     return bioseq::gpu::vulkan::load_sealed_cached_module(device, *seed, key, create_shader_module);
 }
 
-/** @brief Installs the PostgreSQL shader provider before first runtime access. */
+/** Install the Apple shader provider after preload, except in single-user mode. */
 void install_pg_shader_provider_if_available() noexcept {
 #if defined(__APPLE__)
     if (process_shared_preload_libraries_in_progress || is_standalone_backend_process()) {
@@ -1120,20 +1042,16 @@ void install_pg_shader_provider_if_available() noexcept {
 }
 
 /**
- * @brief Prepares PostgreSQL shader state before accessing the Vulkan singleton.
- *
- * MoltenVK consumes cache configuration while creating device and pipeline state. Every
- * PostgreSQL operation completes inside an error bridge before control returns here.
+ * Install the PostgreSQL shader provider and finish cache preparation before
+ * creating Vulkan device or pipeline state. MoltenVK reads this configuration
+ * during initialization.
  */
 void prepare_pg_vulkan_runtime_ready() {
     install_pg_shader_provider_if_available();
     wait_for_runtime_ready();
 }
 
-/**
- * @brief Samples the process-local Vulkan runtime after PostgreSQL preparation.
- * @return Device availability, limits, and initialization diagnostic.
- */
+/** Prepare the runtime, then report device availability, limits, and initialization errors. */
 vulkan_runtime_status_snapshot snapshot_vulkan_runtime_status() {
     prepare_pg_vulkan_runtime_ready();
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();

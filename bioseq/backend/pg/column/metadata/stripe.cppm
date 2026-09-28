@@ -1,6 +1,6 @@
 /**
  * @file stripe.cppm
- * @brief Storage-id, stripe, chunk-group, and skip-list metadata operations.
+ * @brief Store chunk statistics and look up columnar stripes by row or stripe id
  */
 module;
 #include <algorithm>
@@ -32,11 +32,11 @@ import :types;
 import :tuple_ops;
 import :core;
 
-/// @brief Writes chunk skip-list rows to bioseq.column_chunk for one stripe.
-/// @param relfilelocator Resolves storage_id for the encoded catalog rows.
-/// @param stripe Stripe number stored on each inserted chunk row.
-/// @param chunk_list Per-column chunk skip nodes and column or chunk counts.
-/// @param tuple_descriptor Column types used to encode optional min and max bytea values.
+/// @brief Save a stripe's chunk locations and statistics in bioseq_internal.chunk.
+/// @param relfilelocator Physical relation used to find the storage id.
+/// @param stripe Stripe number for the new catalog rows.
+/// @param chunk_list Chunk metadata for each column  and chunk group.
+/// @param tuple_descriptor Column types used to encode optional min/max values.
 export void save_stripe_skip_list(RelFileLocator relfilelocator,
                                   uint64_t stripe,
                                   stripe_skip_list* chunk_list,
@@ -96,9 +96,7 @@ export void save_stripe_skip_list(RelFileLocator relfilelocator,
     table_close(bioseq_column_chunk, RowExclusiveLock);
 }
 
-/*
- * save_chunk_groups saves the metadata for given chunk groups in bioseq.chunk_group.
- */
+/** @brief Save chunk-group row counts with initial deleted-row counts of zero. */
 export void
 save_chunk_groups(RelFileLocator relfilelocator, uint64_t stripe, List* chunk_group_row_counts) {
     uint64_t storage_id = lookup_storage_id(relfilelocator);
@@ -130,25 +128,20 @@ save_chunk_groups(RelFileLocator relfilelocator, uint64_t stripe, List* chunk_gr
     table_close(bioseq_column_chunk_group, RowExclusiveLock);
 }
 
-/*
- * save_empty_row_mask saves the metadata for inserted rows in bioseq.mask_row
- */
+// Stripe lookups by logical row number.
 
-/// @brief Returns stripe metadata for the stripe whose first_row_number exceeds row_number.
-/// @param relation Column table whose stripe catalog rows are scanned.
-/// @param row_number Row number used as an exclusive lower bound on first_row_number.
-/// @param snapshot Visibility snapshot for the ordered index scan.
-/// @return Next stripe metadata, or nullptr when no later stripe exists.
+/// @brief Find the first stripe that starts after a logical row number.
+/// @param relation Columnar table to search.
+/// @param row_number Exclusive lower bound on the stripe's first row.
+/// @param snapshot Snapshot used to read metadata.
+/// @return Stripe metadata, or nullptr if no later stripe exists.
 export stripe_metadata*
 find_next_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot) {
     return find_stripe_metadata_by_row_number(
         relation, row_number, snapshot, row_number_lookup_mode::greater);
 }
 
-/*
- * find_stripe_by_row_number returns stripe_metadata for the stripe that contains
- * the row with row_number. If no such stripe exists, then returns null.
- */
+/** @brief Find the stripe containing a logical row number, or return nullptr. */
 export stripe_metadata*
 find_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot) {
     stripe_metadata* stripe = find_stripe_by_first_row_number(relation, row_number, snapshot);
@@ -163,19 +156,12 @@ find_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snaps
     return stripe;
 }
 
-/*
- * find_stripe_by_first_row_number returns a stripe_metadata object for
- * the stripe that has the greatest first_row_number among the stripes whose
- * first_row_number is smaller than or equal to given row_number. If no such
- * stripe exists, then returns null.
+/**
+ * @brief Find the stripe with the latest start  at or before a row number.
  *
- * Note that this doesn't mean that found stripe certainly contains the tuple
- * with given row_number. This is because, it also needs to be verified if
- * highest row number that found stripe contains is greater than or equal to
- * given row_number. For this reason, unless that additional check is done,
- * this function is mostly useful for checking against "possible" constraint
- * violations due to concurrent writes that are not flushed by other backends
- * yet.
+ * Check stripe_highest_row_number() separately to confirm that the row is
+ * inside the stripe. Looking up the start alone also finds unflushed
+ * reservations when checking for conflicts with concurrent writers.
  */
 stripe_metadata*
 find_stripe_by_first_row_number(Relation relation, uint64_t row_number, Snapshot snapshot) {
@@ -183,9 +169,9 @@ find_stripe_by_first_row_number(Relation relation, uint64_t row_number, Snapshot
         relation, row_number, snapshot, row_number_lookup_mode::less_or_equal);
 }
 
-/* find_next_stripe_for_parallel_worker returns next stripe that should be assigned
- * for worker. Approach here is to calculate module of stripe id with total number
- * of workers that are running for execution.
+/** @brief Find the firsc visible stripe at or after next_stripe_id.
+ * Return its id through next_higher_stripe_id so the caller can atomically
+ * claim it. Missing ids left by aborted writes are skipped.
  */
 
 export stripe_metadata* find_next_stripe_for_parallel_worker(Relation relation,
@@ -224,9 +210,7 @@ export stripe_metadata* find_next_stripe_for_parallel_worker(Relation relation,
     return found_stripe_metadata;
 }
 
-/*
- * stripe_write_state_for returns write state of given stripe.
- */
+/** @brief Classify a stripe as aborted, flushed or still being written */
 export stripe_write_state stripe_write_state_for(stripe_metadata* stripe) {
     if (stripe->aborted) {
         return stripe_write_state::aborted;
@@ -237,20 +221,14 @@ export stripe_write_state stripe_write_state_for(stripe_metadata* stripe) {
     }
 }
 
-/*
- * stripe_highest_row_number returns row_number of the row with highest
- * row_number in given stripe.
- */
+/** @brief Return the  inclusive last logical row number of a nonempty stripe. */
 uint64_t stripe_highest_row_number(stripe_metadata* stripe) {
     return stripe->first_row_number + stripe->row_count - 1;
 }
 
-/*
- * find_stripe_metadata_by_row_number returns stripe_metadata for the stripe whose
- * first_row_number is less than or equal to (row_number_lookup_mode::less_or_equal), or is
- * greater than (row_number_lookup_mode::greater) given row_number by doing backward index
- * scan on stripe_first_row_number_idx.
- * If no such stripe exists, then returns null.
+/** @brief Find the nearest stripe start on the requested side of a row number.
+ * Search backward for less_or_equal and forward for greater. Return nullptr
+ * when the snapshot contains no matching stripe.
  */
 stripe_metadata* find_stripe_metadata_by_row_number(Relation relation,
                                                     uint64_t row_number,
@@ -306,11 +284,8 @@ void validate_stripe_metadata(stripe_metadata* stripe) {
                                     stripe->file_offset == invalid_logical_offset &&
                                     stripe->data_length == 0;
 
-    /*
-     * Even if stripe is flushed, file_offset and data_length might be equal
-     * to 0 for zero column tables, but those two should still be consistent
-     * with respect to each other.
-     */
+    /* A table with no columns can have rows without data bytes.
+     * In that case, both the offset and length use, their empty values. */
     bool stripe_looks_flushed =
         stripe->row_count > 0 && stripe->chunk_count > 0 &&
         ((stripe->file_offset != invalid_logical_offset && stripe->data_length > 0) ||
@@ -318,25 +293,14 @@ void validate_stripe_metadata(stripe_metadata* stripe) {
 
     const stripe_write_state write_state = stripe_write_state_for(stripe);
     if (write_state == stripe_write_state::flushed && stripe_looks_flushed) {
-        /*
-         * If stripe was flushed to disk, then we expect stripe to store
-         * at least one tuple.
-         */
+        /* A flushed stripe contains at least one row and chunk group. */
         return;
     } else if (write_state == stripe_write_state::in_progress && stripe_looks_in_progress) {
-        /*
-         * If stripe was not flushed to disk, then values of given four
-         * fields should match the columns inserted by
-         * insert_empty_stripe_metadata_row.
-         */
+        /* Pending stripes must  match the initial reservation fields. */
         return;
     } else if (write_state == stripe_write_state::aborted &&
                (stripe_looks_in_progress || stripe_looks_flushed)) {
-        /*
-         * Stripe metadata entry for an aborted write can be complete or
-         * incomplete. We might have aborted the transaction before or after
-         * inserting into stripe metadata.
-         */
+        /* A transaction can abort before or after its stripe is flushed. */
         return;
     }
 
@@ -345,10 +309,8 @@ void validate_stripe_metadata(stripe_metadata* stripe) {
         stripe->id);
 }
 
-/*
- * find_highest_row_number_stripe returns stripe_metadata for the stripe that
- * has the row with highest row_number by doing backward index scan on
- * stripe_first_row_number_idx. If given relation is empty, then returns null.
+/** @brief Find the stripe with the highest starting row number.
+ * Return nullptr when no stripe is visible in the supplied snapshot.
  */
 export stripe_metadata* find_highest_row_number_stripe(Relation relation, Snapshot snapshot) {
     stripe_metadata* stripe_with_highest_row_number = nullptr;
@@ -375,10 +337,9 @@ export stripe_metadata* find_highest_row_number_stripe(Relation relation, Snapsh
     return stripe_with_highest_row_number;
 }
 
-/*
- * read_chunk_group_row_counts returns an array of row counts of chunk groups and
- * deleted rows count for each chunk group for given stripe.
- * Arrays that are updated will be allocated in this function.
+/** @brief Read row and deletion counts for every chunk group in a strpe.
+ * Allocate both result arrays in the current memory context. Entries with
+ * no visible catalog row remain zero.
  */
 void read_chunk_group_row_counts(uint64_t storage_id,
                                  uint64_t stripe,
@@ -386,9 +347,8 @@ void read_chunk_group_row_counts(uint64_t storage_id,
                                  uint32_t** chunk_group_row_counts,
                                  uint32_t** chunk_group_deleted_rows,
                                  Snapshot snapshot) {
-    // VACUUM/statistics callers may supply GetTransactionSnapshot() without
-    // owning that exact snapshot. ResourceOwner releases this pin on ERROR;
-    // the normal path releases it immediately after ending the ordered scan.
+    // Register an unowned MVCC snapshot  for this scan. Release it on completion.
+    // PostgreSQL's ResourceOwner handles release if an error interrupts the scan.
     const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
                                  snapshot->regd_count == 0 && snapshot->active_count == 0;
     if (retain_snapshot) {
@@ -418,12 +378,9 @@ void read_chunk_group_row_counts(uint64_t storage_id,
     *chunk_group_deleted_rows =
         bioseq::postgres::support::allocate_zeroed_array<uint32_t>(chunk_group_count);
 
-    /*
-     * The caller's snapshot selects the one visible version of each chunk-group
-     * row.  A tuple that is HOT-updated can still be exactly the version visible
-     * to an older REPEATABLE READ snapshot; filtering it by the physical
-     * HEAP_HOT_UPDATED flag would incorrectly hide pre-update source rows.
-     */
+    /* Use the row version selected by the caller's snapshot An older
+     * REPEATABLE READ transaction can still see a version marked
+     * HEAP_HOT_UPDATED after another transaction updates the row. */
     while (HeapTupleIsValid(heap_tuple =
                                 systable_getnext_ordered(scan_descriptor, ForwardScanDirection))) {
         const chunk_group_row row = chunk_group_codec::deform(
@@ -455,9 +412,7 @@ void read_chunk_group_row_counts(uint64_t storage_id,
     table_close(bioseq_column_chunk_group, AccessShareLock);
 }
 
-/*
- * update_chunk_group_deleted_rows updates `deleted_rows` column for each chunk group.
- */
+/** @brief Replace the deleted-row count for one chunk group. */
 export void update_chunk_group_deleted_rows(uint64_t storage_id,
                                             uint64_t stripe,
                                             uint32_t chunk_group_id,
@@ -506,10 +461,7 @@ export void update_chunk_group_deleted_rows(uint64_t storage_id,
     CommandCounterIncrement();
 }
 
-/*
- * insert_empty_stripe_metadata_row adds a row to bioseq.stripe for the empty
- * stripe reservation made for stripe_id.
- */
+/** @brief Record an empty stripe reservation in bioseq_internal.stripe. */
 void insert_empty_stripe_metadata_row(uint64_t storage_id,
                                       uint64_t stripe_id,
                                       uint32_t column_count,

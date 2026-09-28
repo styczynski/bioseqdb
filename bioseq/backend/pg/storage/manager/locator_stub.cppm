@@ -1,6 +1,6 @@
 /**
  * @file locator_stub.cppm
- * @brief Narrow canonical locator-stub allocation and encoding contract.
+ * @brief Store a sequence locator in the small value kept in the user table.
  */
 module;
 
@@ -23,20 +23,20 @@ import bioseq.storage.size;
 
 export namespace bioseq::storage {
 
-/// Physical size in bytes of the canonical locator-stub varlena.
+/// Size of the sequence header and locator payload stored in the user table.
 constexpr std::size_t k_locator_stub_varlena_bytes =
     bioseq::pg_types::seq::header_bytes() + sizeof(sequence_locator);
 static_assert(k_locator_stub_varlena_bytes == 56,
               "sequence locator stub must be exactly 56 bytes");
 
-/// Encode one canonical locator stub without changing its wire geometry.
-/// @param dst Writable storage for exactly `k_locator_stub_varlena_bytes` bytes.
-/// @param logical_alphabet_code Sequence alphabet stored in the varlena header.
+/// Write a sequence header and locator into an existing 56-byte buffer.
+/// @param dst Writable storage of `k_locator_stub_varlena_bytes` bytes.
+/// @param logical_alphabet_code Sequence alphabet stored in the header
 /// @param logical_byte_width Packed storage-unit width in bytes.
 /// @param padding_letters Unused letters in the final packed unit.
-/// @param total_bp_size Logical sequence length in letters.
-/// @param loc Canonical locator encoded into the payload.
-/// @throws PostgreSQL ERROR when an input is outside the locator wire domain.
+/// @param total_bp_size Sequence length in letters.
+/// @param loc Locator with a valid  version, source epoch and reserved fields.
+/// @throws PostgreSQL ERROR if the locator or storage width is invalid.
 [[gnu::always_inline]]
 inline void encode_locator_into_stub(
     bioseq::pg_types::seq* dst,
@@ -71,10 +71,10 @@ inline void encode_locator_into_stub(
     }
 }
 
-/// Allocate and encode one canonical locator stub in a memory context.
-/// @param mctx Memory context that owns the returned varlena.
-/// @return Encoded locator stub owned by `mctx`.
-/// @throws PostgreSQL ERROR when allocation or encoding fails.
+/// Allocate and encode a sequence locator in the supplied memory context.
+/// @param mctx Memory context that owns the returned value.
+/// @return A sequence header followed by the encoded locator.
+/// @throws PostgreSQL ERROR if allocation or encoding fails.
 [[nodiscard]] [[gnu::always_inline]]
 inline bioseq::pg_types::seq* alloc_locator_stub_in(
     MemoryContext mctx,
@@ -93,12 +93,10 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
 }
 
 /**
- * Allocate one canonical locator stub through an out-of-line PostgreSQL
- * exception boundary.
- *
- * This keeps the canonical always-inlined encoder available to storage
- * callers while giving cross-module coordinators a narrow ABI boundary that
- * does not instantiate PostgreSQL/C++ bridge templates in their module unit.
+ * Allocate a sequence locator and return it as a PostgreSQL Datum.
+ * PostgreSQL allocation or encoding errors become C++ exceptions herm, so
+ * callers in other modules can use this function, without building the  error
+ * conversion code themselves.
  */
 [[nodiscard]] [[gnu::noinline]] Datum
 alloc_locator_stub_datum_in(MemoryContext mctx,

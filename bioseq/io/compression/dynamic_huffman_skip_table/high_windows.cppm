@@ -1,6 +1,6 @@
 /**
  * @file high_windows.cppm
- * @brief Skip distances for 15-bit windows with bit 14 set.
+ * @brief Search hints for 15-bit windows with bit 14 set.
  */
 module;
 

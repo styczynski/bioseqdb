@@ -1,8 +1,6 @@
 /**
  * @file admin/index.cppm
- * @brief Stable facade for PostgreSQL indexing administration partitions.
- *
- * Re-exports policy, publisher, rebuild and integration support contracts.
+ * @brief Exports the PostgreSQL index administration and test interfaces.
  */
 export module bioseq.postgres.storage.indexing.admin;
 

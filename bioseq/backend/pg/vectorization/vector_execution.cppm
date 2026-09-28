@@ -1,24 +1,11 @@
 /**
  * @file
- * Rewrites, compiles, and evaluates PostgreSQL vector predicates.
+ * Evaluate supported SQL filters over  a batch of rows. Comparisons use one
+ * column and one constant, with vector routines found in generated registries.
+ * AND and OR combine the results into a mask of rows that pass.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/vector_execution.cppm
- *
- * Walks query expression trees to build vectorised-friendly variants:
- *   - is_pg_const_var_binary_args gates OpExprs to
- *     the (one Const + one Var) shape the vectorised evaluator supports.
- *   - lookup_vectorized_routine_oid looks up the "v"-prefixed vectorised
- *     implementation of a scalar procedure.
- *   - rewrite_vectorized_expression_list / compile_vector_qualifier_list convert
- *     qual/expr trees into vector_qualifier_node tree structures for the executor.
- *   - evaluate_vectorized_qualifiers runs the compiled vector_qualifier_node tree over a
- *     vector_tuple_table_slot_storage and returns the surviving-rows mask.
- *
- *-------------------------------------------------------------------------
- */
+
 module;
 
 #include <bioseq/pg_compat.h>
@@ -60,7 +47,7 @@ using bioseq::postgres::support::pg_node_view;
 using bioseq::postgres::support::postgres_list;
 using bioseq::postgres::support::try_cast_pg_operator_expression;
 
-/** Captures the catalog identity needed to validate a vector routine owner. */
+/** Catalog name, schema and types used to find a matching vector routine */
 struct routine_signature final {
     std::array<char, NAMEDATALEN> name{};
     Oid namespace_oid = InvalidOid;
@@ -70,13 +57,16 @@ struct routine_signature final {
     char procedure_kind = PROKIND_FUNCTION;
 };
 
-/** Distinguishes routine calls from Boolean composition nodes. */
+/** Select a vector funstion call or an AND/OR group of child filters. */
 enum class vector_qualifier_node_kind : int {
     boolean_expression,
     expression,
 };
 
-/** Stores one compiled vector predicate node in PostgreSQL memory. */
+/**
+ * A compiled filter with reusable function-call arguments, or a Boolean group
+ * of child filters. PostgreSQL memory contexts own the allocated records.
+ */
 struct vector_qualifier_node final {
     vector_qualifier_node_kind kind;
     union payload_type {
@@ -92,7 +82,7 @@ struct vector_qualifier_node final {
     } payload;
 };
 
-/** Reads a bounded routine signature from PostgreSQL's procedure cache. */
+/** Read a routine's catalog signature. Return no match for over two arguments. */
 [[nodiscard]] std::optional<routine_signature> read_routine_signature(Oid procedure_oid) {
     HeapTuple procedure_tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(procedure_oid));
     if (!HeapTupleIsValid(procedure_tuple))
@@ -119,7 +109,7 @@ struct vector_qualifier_node final {
     return signature;
 }
 
-/** Returns the schema that owns the installed Bioseq extension. */
+/** Find the schema of the installed bioseq extension, if present. */
 [[nodiscard]] std::optional<Oid> find_extension_namespace_oid() {
     const Oid extension_oid = get_extension_oid("bioseq", true);
     if (!OidIsValid(extension_oid))
@@ -131,7 +121,7 @@ struct vector_qualifier_node final {
     return namespace_oid;
 }
 
-/** Resolves an exact installed routine without implicit argument coercion. */
+/** Find a function by schema, name and exact  argument types. */
 [[nodiscard]] std::optional<Oid> lookup_installed_routine(Oid namespace_oid,
                                                           std::string_view routine_name,
                                                           std::span<const Oid> argument_types) {
@@ -156,7 +146,7 @@ struct vector_qualifier_node final {
     return OidIsValid(routine_oid) ? std::optional<Oid>{routine_oid} : std::nullopt;
 }
 
-/** Validates the installed owner of a generated vector comparison entry. */
+/** Find the registered vector comparison and check its return type. */
 [[nodiscard]] std::optional<Oid>
 lookup_vector_comparison_owner(Oid namespace_oid,
                                std::string_view vector_name,
@@ -169,7 +159,10 @@ lookup_vector_comparison_owner(Oid namespace_oid,
     return vector_oid;
 }
 
-/** Tests whether a procedure has the required schema and catalog name. */
+/**
+ * Check a routine's schema and name. An empty expected name matches an absent
+ * routine, as needed for aggregates without, a final function.
+ */
 [[nodiscard]] bool
 routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_name) {
     if (!OidIsValid(procedure_oid))
@@ -187,7 +180,11 @@ routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_
     return matches;
 }
 
-/** Validates the installed owner of a generated vector aggregate entry. */
+/**
+ * Find a vector aggregate whose input, result and state types match the registry.
+ * Also check its transition and final functions, so an unrelated installed
+ * aggregate cannot be selected just because it has the expected name.
+ */
 [[nodiscard]] std::optional<Oid> lookup_vector_aggregate_owner(
     Oid namespace_oid,
     const bioseq::sql::generated::vector_aggregate_registry::association& association) {
@@ -222,7 +219,7 @@ routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_
     return vector_oid;
 }
 
-/** Detects null constants that must retain scalar PostgreSQL evaluation. */
+/** Find NULL constants, which  this rewriter leaves for scalar evaluation. */
 [[nodiscard]] bool contains_null_constant(List* arguments) noexcept {
     for (Expr* argument : postgres_list<Expr>{arguments}) {
         if (Const* constant = pg_node_view{reinterpret_cast<Node*>(argument)}.try_cast<Const>();
@@ -234,7 +231,12 @@ routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_
 
 } // namespace
 
-/** Resolve a scalar routine through the generated vector-owner registries. */
+/**
+ * Find the installed vector version of a scalar comparison or agmregate.
+ * Match the scalar signature against the generated registry, then validate
+ * the vector routine in the bioseq extension's schema. Return no match when
+ * either side is missing or has a different signature
+ */
 export [[nodiscard]] std::optional<Oid> lookup_vectorized_routine_oid(Oid procedure_oid) {
     const std::optional<routine_signature> signature = read_routine_signature(procedure_oid);
     if (!signature)
@@ -281,8 +283,10 @@ export [[nodiscard]] std::optional<Oid> lookup_vectorized_routine_oid(Oid proced
 }
 
 /**
- * Copy vectorizable operator expressions and bind them to vector routines.
- * Unsupported nodes retain their original PostgreSQL-owned pointer.
+ * Copy supported comparisons and point them at their vector functions.
+ * A comparison needs one column and one  non-NULL constant. Rebuild an AND/OR
+ * group only when every child can be rewritten. Keep the original pointers
+ * for other expressions so the planner can leave them in scalar evaluation.
  */
 export List* rewrite_vectorized_expression_list(List* expression_list) {
     if (expression_list == nullptr)
@@ -297,8 +301,8 @@ export List* rewrite_vectorized_expression_list(List* expression_list) {
             return nullptr;
 
         /*
-         * OpExpr / DistinctExpr / NullIfExpr share OpExpr storage but carry
-         * distinct tags; try_cast_pg_operator_expression groups all three.
+         * OpExpr, DistinctExpr and NullIfExpr share these fields. The helper
+         * accepts their different PostgreSQL node tags.
          */
         if (OpExpr* op_expr_node = try_cast_pg_operator_expression(expression_node)) {
             if (list_length(op_expr_node->args) != 2) {
@@ -372,8 +376,9 @@ export List* rewrite_vectorized_expression_list(List* expression_list) {
 }
 
 /**
- * Compile vector expressions against one batch slot.
- * Function-call records are initialized once and reused for every batch.
+ * Prepare vector filter calls for this batch slot. Build function-call records
+ * once and keep references to the slot's column storage for later batches.
+ * The input list must contain the supported expressions selected  by rewriting.
  */
 export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorized_qual) {
     vector_tuple_table_slot_storage* vector_slot =
@@ -461,7 +466,7 @@ export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorize
     return compiled_qualifiers;
 }
 
-/** Invoke one compiled vector expression in the per-tuple memory context. */
+/** Run one filter and return its row mask from the per-tuple memory context. */
 static bool* evaluate_vectorized_expression(vector_qualifier_node* compiled_qualifier,
                                             ExprContext* expression_context) {
     vector_column_storage* evaluation_result;
@@ -475,7 +480,11 @@ static bool* evaluate_vectorized_expression(vector_qualifier_node* compiled_qual
     return reinterpret_cast<bool*>(evaluation_result->data);
 }
 
-/** Combine compiled vector predicate masks with the requested Boolean kind. */
+/**
+ * Evaluate a filter list and combine its row masks with AND or OR.
+ * Reuse, the first result mask for the combined result, and eturn nullptr
+ * for an empty list. The mask has one entry for each populated batch row.
+ */
 export bool* evaluate_vectorized_qualifiers(TupleTableSlot* slot,
                                             List* vectorized_qual_list,
                                             BoolExprType bool_type,

@@ -1,6 +1,6 @@
 /**
  * @file index_parts/join_execution.cppm
- * @brief Defines join-wave execution, normalization, cleanup, and rescan recovery.
+ * @brief Align query batches against a shared target and release completed join state.
  */
 module;
 
@@ -25,14 +25,8 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// Reuse the prepared target across query batches and keep each batch
+// alive until its output has been read.
 module bioseq.postgres.scheduler.dispatch_buffer:join_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -42,7 +36,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
+import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipeline in a separate module.
 import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
 import bioseq.pipeline.pipe;
@@ -52,8 +46,11 @@ import bioseq.postgres.scheduler.supervisor;
 
 namespace bioseq::scheduler {
 
-/** @brief Implements the run join query batch and build cursors contract declared by the stable
- * buffer facade. */
+/**
+ * @brief Align the current query batch and prepare its output cursors.
+ * Reuse the saved target and count its preparation  once across batches.
+ * @return True when a nonempty query batch ran, even if it found no matches.
+ */
 [[nodiscard]] bool tuple_dispatch_buffer::run_join_query_batch_and_build_cursors() {
     if (!join_mode || !join_target_prepared || !join_target_active) {
         ereport(ERROR,
@@ -90,8 +87,7 @@ namespace bioseq::scheduler {
     auto& scanner_pg_ctx = *join_scanner_pg_ctx;
     const auto ticket =
         bioseq::postgres::scheduler::begin_batch(static_cast<std::int64_t>(batch_size));
-    /** @brief Sums prepared-target build, reuse, duplicate, and persisted-reader counters across
-     * all CPU preparation groups. */
+    /** @brief Total the CPU preparation counters so this batch can report their change. */
     auto prepared_counter_totals = [this] {
         std::array<std::uint64_t, 5> totals{};
         for (const auto& group : join_cpu_prepared_target->groups) {
@@ -249,11 +245,9 @@ namespace bioseq::scheduler {
                 static_cast<std::int16_t>(join_target_storage_seq_attno));
             const bool record_physical_target = !join_target_outcomes_recorded;
             scanner_pg_ctx.explicit_query_ordinals = true;
-            /* Ask the generic processor for its native raw stats on every
-             * wave. CPU and GPU both report one target/source observation per
-             * completed pair, including when GPU execution shares the target.
-             * The batch join owner validates the exact raw shape and alone
-             * decides whether this wave publishes the physical target. */
+            /* Request one target outcome per query from the processor Validate
+             * those counts after execution, then count the shared physical
+             * target only if an earlier batch has not already reported it. */
             scanner_pg_ctx.shared_target_batch = false;
             scanner_pg_ctx.record_target_operational_outcomes = true;
             if (join_cpu_preparation_pending) {
@@ -413,7 +407,7 @@ namespace bioseq::scheduler {
                     read_delta.persisted_source_fragment_rows_read = read.source_fragment_rows_read;
                     read_delta.persisted_source_decoded_bp = read.source_decoded_bp;
                     map_hash_major_index_reader_stats(read_delta, read);
-                    /** @brief Records grouped-SoA reader capacity and layout checks into @p read_delta. */
+                    /** @brief Record reader memory use and check its storage layout against admitted bytes. */
                     const auto record_grouped_soa_reader_memory_stats = [&read_delta](
                                                                             const auto& reader) {
                         const auto memory_stats = reader.memory_stats();
@@ -641,7 +635,10 @@ namespace bioseq::scheduler {
     return true;
 }
 
-/** @brief Implements the finish join target contract declared by the stable buffer facade. */
+/**
+ * @brief Check target preparution counters and release the  current join target.
+ * Partial execution is allowed, for example when the parent stops early.
+ */
 void tuple_dispatch_buffer::finish_join_target() {
     if (!join_mode) {
         return;
@@ -764,8 +761,11 @@ void tuple_dispatch_buffer::finish_join_target() {
     clear_slots();
 }
 
-/** @brief Implements the abandon join runtime after pg error noexcept contract declared by the
- * stable buffer facade. */
+/**
+ * @brief Discard join state after an error, and abort any active sequence reads.
+ * Leave tuple and cache handles for PostgreSQL error cleanup while releasing
+ * C++ storage and memory permits.
+ */
 void tuple_dispatch_buffer::abandon_join_runtime_after_pg_error_noexcept() noexcept {
     if (join_scanner_pg_cache != nullptr) {
         auto* abandoned = std::exchange(join_scanner_pg_cache, nullptr);
@@ -831,8 +831,7 @@ void tuple_dispatch_buffer::abandon_join_runtime_after_pg_error_noexcept() noexc
     batch_payload_ctx = nullptr;
 }
 
-/** @brief Implements the reset join runtime for rescan contract declared by the stable buffer
- * facade. */
+/** @brief Release the current join batch and preparation so a rescan can start. */
 void tuple_dispatch_buffer::reset_join_runtime_for_rescan() {
     join_queries.clear();
     join_match_map.clear();

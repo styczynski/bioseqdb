@@ -1,6 +1,6 @@
 /**
  * @file external/https.cppm
- * @brief Bounded synchronous HTTPS transport with verified TLS.
+ * @brief Synchronous HTTPS requests with certificate checks and a response-body  limit.
  */
 module;
 
@@ -51,7 +51,7 @@ namespace http_validation = bioseq::common::http::validation;
 
 namespace bioseq::external::detail {
 
-/** Returns the latest OpenSSL error prefixed with operation context. */
+/** Removes one OpenSSL error from its queue and adds the operation description. */
 [[nodiscard]] inline std::string make_openssl_error_message(std::string_view prefix) {
     const unsigned long code = ERR_get_error();
     if (code == 0) {
@@ -65,14 +65,12 @@ namespace bioseq::external::detail {
     return message;
 }
 
-/** Collects a decoded response body while enforcing the caller's byte budget.
- */
+/** Collects response-body chunks up to the caller's byte limit. */
 class bounded_body_writer final : public oatpp::data::stream::WriteCallback {
   public:
     explicit bounded_body_writer(std::size_t maximum_bytes) : maximum_bytes_(maximum_bytes) {}
 
-    /** Appends one decoded chunk or aborts before the configured limit is
-     * exceeded. */
+    /** Appends a chunk, throwing length_error before it would exceed the byte limit. */
     oatpp::v_io_size write(const void* data, ::v_buff_size count, oatpp::async::Action&) override {
         if (count <= 0)
             return count;
@@ -84,8 +82,7 @@ class bounded_body_writer final : public oatpp::data::stream::WriteCallback {
         return count;
     }
 
-    /** Transfers the bounded body into the transport response without another
-     * copy. */
+    /** Moves out the collected response body. */
     [[nodiscard]] std::string take() && noexcept {
         return std::move(body_);
     }
@@ -95,10 +92,10 @@ class bounded_body_writer final : public oatpp::data::stream::WriteCallback {
     std::string body_;
 };
 
-/** Blocking OpenSSL stream layered over one pooled TCP stream. */
+/** Blocking TLS stream that keeps its underlying TCP connection alive. */
 class tls_stream final : public oatpp::base::Countable, public oatpp::data::stream::IOStream {
   public:
-    /** Owns an established TLS session layered over one pooled TCP stream. */
+    /** Takes ownership of an established TLS session and its TCP connection. */
     tls_stream(oatpp::provider::ResourceHandle<oatpp::data::stream::IOStream> tcp, SSL* ssl)
         : tcp_(std::move(tcp)), ssl_(ssl, &SSL_free),
           context_(oatpp::data::stream::StreamType::STREAM_INFINITE) {}
@@ -106,12 +103,12 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
     tls_stream(const tls_stream&) = delete;
     tls_stream& operator=(const tls_stream&) = delete;
 
-    /** Shuts down TLS before releasing the underlying pooled stream. */
+    /** Attempts TLS shutdown  before releasing the session and TCP connection. */
     ~tls_stream() override {
         close();
     }
 
-    /** Reads decrypted bytes, retrying only signal interruptions. */
+    /** Reads decrypted bytes. Reports signal interruptions to Oat++ as retryable reads. */
     oatpp::v_io_size read(void* buffer, ::v_buff_size count, oatpp::async::Action&) override {
         if (!ssl_ || count <= 0) {
             return oatpp::IOError::BROKEN_PIPE;
@@ -134,7 +131,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         return oatpp::IOError::BROKEN_PIPE;
     }
 
-    /** Writes encrypted bytes, retrying only signal interruptions. */
+    /** Encrypts and writes bytes. Reports signal interruptions to Oat++ as retryable writes. */
     oatpp::v_io_size write(const void* data, ::v_buff_size count, oatpp::async::Action&) override {
         if (!ssl_ || count <= 0) {
             return oatpp::IOError::BROKEN_PIPE;
@@ -162,7 +159,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         require_blocking(mode);
     }
 
-    /** Reports the blocking input mode required by OpenSSL socket I/O. */
+    /** Reports blocking input mode. */
     [[nodiscard]] oatpp::data::stream::IOMode getInputStreamIOMode() override {
         return oatpp::data::stream::IOMode::BLOCKING;
     }
@@ -177,7 +174,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         require_blocking(mode);
     }
 
-    /** Reports the blocking output mode required by OpenSSL socket I/O. */
+    /** Reports blocking output mode. */
     [[nodiscard]] oatpp::data::stream::IOMode getOutputStreamIOMode() override {
         return oatpp::data::stream::IOMode::BLOCKING;
     }
@@ -187,7 +184,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         return context_;
     }
 
-    /** Invalidates both TLS and TCP ownership after a failed exchange. */
+    /** Closes TLS, invalidates the TCP connection, and clears its handle. */
     void invalidate() noexcept {
         close();
         if (tcp_) {
@@ -197,8 +194,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
     }
 
   private:
-    /** Rejects async modes because the adapter implements blocking OpenSSL I/O.
-     */
+    /** Rejects asynchronous mode because this, adapter uses blocking socket I/O. */
     static void require_blocking(oatpp::data::stream::IOMode mode) {
         if (mode != oatpp::data::stream::IOMode::BLOCKING) {
             throw std::runtime_error("Bioseq TLS transport supports blocking Oat++ I/O only");
@@ -218,11 +214,10 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
     oatpp::data::stream::DefaultInitializedContext context_;
 };
 
-/** Invalidates pooled streams through their TLS owner. */
+/** Closes pooled TLS streams and invalidates their TCP connections. */
 class tls_invalidator final : public oatpp::provider::Invalidator<oatpp::data::stream::IOStream> {
   public:
-    /** Invalidates a pooled stream when it is one of this transport's TLS
-     * streams. */
+    /** Invalidates the connectiot if it belongs to this TLS adapter. */
     void invalidate(const std::shared_ptr<oatpp::data::stream::IOStream>& connection) override {
         const auto stream = std::dynamic_pointer_cast<tls_stream>(connection);
         if (stream) {
@@ -231,10 +226,10 @@ class tls_invalidator final : public oatpp::provider::Invalidator<oatpp::data::s
     }
 };
 
-/** Creates verified TLS streams for one HTTPS origin. */
+/** Creates TLS connections with certificate and hostname checks for one host and port */
 class tls_connection_provider final : public oatpp::network::ClientConnectionProvider {
   public:
-    /** Creates a verified TLS provider for the specified HTTPS endpoint. */
+    /** Configures the TCP provider and TLS trust settings for one HTTPS endpoint. */
     tls_connection_provider(std::string host, std::uint16_t port)
         : host_(std::move(host)), port_(port),
           tcp_(oatpp::network::tcp::client::ConnectionProvider::createShared(
@@ -249,7 +244,13 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
     tls_connection_provider(const tls_connection_provider&) = delete;
     tls_connection_provider& operator=(const tls_connection_provider&) = delete;
 
-    /** Acquires TCP, applies deadlines, verifies TLS, and returns the stream. */
+    /**
+     * Opens TCP, completes the TLS handshake, and checks the server certificate.
+     *
+     * On non-Windows systems, sets 30-second  socket send and receive timeouts after
+     * TCP acquisition. These are socket-operation limits, not an overall request
+     * deadline. Connection and verification failures throw.
+     */
     [[nodiscard]] oatpp::provider::ResourceHandle<oatpp::data::stream::IOStream> get() override {
         if (stopped_.load(std::memory_order_acquire)) {
             throw std::runtime_error("Bioseq TLS connection provider is stopped");
@@ -295,17 +296,17 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
         return {std::move(stream), invalidator_};
     }
 
-    /** Adapts synchronous acquisition to Oat++'s coroutine result interface. */
+    /** Wraps blocking connection acquisition in Oat++'s coroutine interface. */
     [[nodiscard]] oatpp::async::CoroutineStarterForResult<
         const oatpp::provider::ResourceHandle<oatpp::data::stream::IOStream>&>
     getAsync() override {
-        /** Completes an asynchronous request with one synchronously acquired connection. */
+        /** Coroutine that completes after a blocking call to the provider. */
         class ready_connection final
             : public oatpp::async::CoroutineWithResult<
                   ready_connection,
                   const oatpp::provider::ResourceHandle<oatpp::data::stream::IOStream>&> {
           public:
-            /** Stores the provider used when the one-shot coroutine executes. */
+            /** Borrows the provider until this coroutine finishes. */
             explicit ready_connection(tls_connection_provider* provider) : provider_(provider) {}
 
             /** Acquires one stream and completes the coroutine with that handle. */
@@ -354,20 +355,20 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
     std::atomic<bool> stopped_{false};
 };
 
-/** Executes raw bounded HTTP exchanges without DTO mapping. */
+/** Executes GET requests and leaves response-body handling to its caller. */
 class raw_api_client final : public oatpp::web::client::ApiClient {
   public:
-    /** Response and connection handle retained for explicit invalidation. */
+    /** Response and connection handle kept so a failed exchange can invalidate  the connection. */
     struct exchange {
         std::shared_ptr<Response> response;
         std::shared_ptr<oatpp::web::client::RequestExecutor::ConnectionHandle> connection;
     };
 
-    /** Binds Oat++'s low-level request executor without a DTO mapper. */
+    /** Uses the request executor without mapping response bodies to C++ data objects. */
     explicit raw_api_client(const std::shared_ptr<oatpp::web::client::RequestExecutor>& executor)
         : oatpp::web::client::ApiClient(executor, nullptr) {}
 
-    /** Executes one GET and retains its handle for explicit invalidation. */
+    /** Executes a GET and returns its connection handle. Invalidates the connection on an exception. */
     [[nodiscard]] exchange get(const std::string& path, const Headers& headers) {
         const auto path_template = parsePathTemplate("bioseq-generated-get", path.c_str());
         auto connection = getConnection();
@@ -385,9 +386,9 @@ class raw_api_client final : public oatpp::web::client::ApiClient {
     }
 };
 
-/** Shared transport objects retained by one public HTTPS client. */
+/** Connection provider, pool, and request objects shared by HTTPS client copies. */
 struct https_state {
-    /** Shares the provider, connection pool, executor, and raw client. */
+    /** Creates the connection pool and the client that uses it. */
     explicit https_state(const std::string& host, std::uint16_t port)
         : provider(std::make_shared<tls_connection_provider>(host, port)),
           connection_pool(oatpp::network::ClientConnectionPool::createShared(
@@ -405,19 +406,19 @@ struct https_state {
 
 export namespace bioseq::external {
 
-/** @brief HTTP header name and value preserved from a transport exchange. */
+/** HTTP eader name and value. */
 struct http_header {
     std::string name;
     std::string value;
 };
 
-/** @brief Transport diagnostic with the originating library error code. */
+/** Transport failure message and library error code, or zero when no code is, available. */
 struct transport_error {
     std::string message;
     long transport_code{};
 };
 
-/** @brief Complete bounded HTTP response returned by the synchronous client. */
+/** HTTP status, response body, and headers returned after the body-size check. */
 struct transport_response {
     long status_code{};
     std::string body;
@@ -437,10 +438,10 @@ inline constexpr std::size_t k_default_maximum_response_body_bytes = 64U * 1024U
     return encoded ? std::string(encoded->data(), encoded->size()) : std::string{};
 }
 
-/** @brief Reusable synchronous HTTPS client bound to one verified origin. */
+/** Reusable synchronous HTTPS client  with a connection pool for one host and port. */
 class https_client {
   public:
-    /** Creates a reusable verified HTTPS transport for one host and port. */
+    /** Validates the DNS host and port, then creates the shared HTTPS transport */
     explicit https_client(std::string host, std::uint16_t port = 443) : host_(std::move(host)) {
         if (!http_validation::is_valid_dns_host(host_) || port == 0) {
             throw std::invalid_argument("HTTPS host or port is invalid");
@@ -451,7 +452,14 @@ class https_client {
         state_ = std::make_shared<detail::https_state>(host_, port);
     }
 
-    /** Executes a synchronous GET through Oat++ with verified OpenSSL TLS. */
+    /**
+     * Sends a GET and collects its response body up to the supplied byte limit.
+     *
+     * Validates the request target and headers before sending. TLS checks the
+     * server certificate and hostname. Transport and body-read failures return
+     * transport_error. HTTP error statuses remain ordinary responses for callers
+     * to interpret.
+     */
     [[nodiscard]] std::expected<transport_response, transport_error>
     get(std::string path,
         const std::vector<http_header>& request_headers = {},

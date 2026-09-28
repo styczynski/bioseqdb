@@ -1,6 +1,6 @@
 /**
  * @file generation_session_checksum_rewrite.cppm
- * @brief Owns integration-only generation checksum rewriting.
+ * @brief Change stored source checksums for integration tests.
  */
 module;
 
@@ -46,10 +46,9 @@ import :generation_session_completion;
 
 export namespace bioseq::storage::indexing {
 
-/// Integration-only self-consistent metadata corruption. Both manifest and
-/// head source-content fields, the head's manifest checksum, and both physical
-/// row CRCs are rewritten together. Only an independent source-row decode can
-/// detect the corruption.
+/// Give the stored head and manifest the same incorrect source checksum.
+/// Recompute their row CRCs and the head's manifest checksum so those checks
+/// still pass. Tests can then check whether source validation catches the change.
 inline void
 rewrite_source_checksum_pg(Oid table_oid, std::uint64_t query_key, std::uint64_t xor_mask) {
     if (!bioseq::postgres::support::invoke_pg_as_cpp([] { return superuser(); }) || xor_mask == 0 ||

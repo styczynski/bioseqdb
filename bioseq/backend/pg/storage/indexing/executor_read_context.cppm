@@ -1,6 +1,6 @@
 /**
  * @file executor_read_context.cppm
- * @brief Declares the non-owning PostgreSQL executor read capability.
+ * @brief Borrow, an executor relation and snapshot for index reads.
  */
 module;
 
@@ -28,11 +28,11 @@ export namespace bioseq::storage::indexing {
 struct borrowed_executor_read_context_access;
 
 /**
- * @brief Borrows one locked relation and registered MVCC snapshot.
+ * @brief Borrow a locked relation and a registered MVCC snapshot.
  *
- * The CustomScan owns both PostgreSQL resources. Moving this capability
- * transfers only the right to borrow them. Destruction performs no PostgreSQL
- * work.
+ * The  caller must keep both resources alive while this context is used. Moving
+ * the context transfers its references. Destruction leaves PostgreSQL resources
+ * with their owner.
  */
 class borrowed_executor_read_context {
   private:
@@ -66,8 +66,8 @@ class borrowed_executor_read_context {
     borrowed_executor_read_context() = delete;
 
     /**
-     * @brief Binds a valid relation and registered MVCC snapshot.
-     * @return A borrowing capability, or no value when the pair is invalid.
+     * @brief Bind a relation to its registered MVCC snapshot.
+     * @return A context if the snapshot and relation idntity are valid, otherwise no value.
      */
     [[nodiscard]] static std::optional<borrowed_executor_read_context>
     bind_checked(Relation relation, Snapshot registered_snapshot) noexcept {
@@ -100,7 +100,7 @@ class borrowed_executor_read_context {
     }
     ~borrowed_executor_read_context() = default;
 
-    /// @return True when the borrowed relation and snapshot still match.
+    /// @return True if the snapshot is registered and the relation identity still matches.
     [[nodiscard]] bool valid() const noexcept {
         return relation_ != nullptr && snapshot_ != nullptr && IsMVCCSnapshot(snapshot_) &&
                snapshot_->regd_count > 0 && OidIsValid(relation_oid_) &&
@@ -111,7 +111,7 @@ class borrowed_executor_read_context {
                static_cast<Oid>(relation_->rd_locator.relNumber) == relfilenode_;
     }
 
-    /// @return True when the capability belongs to the supplied relation identity.
+    /// @return True if this valid context refers to the supplied relation identity.
     [[nodiscard]] bool matches(Oid database_oid,
                                Oid tablespace_oid,
                                Oid relfilenode,
@@ -140,21 +140,20 @@ class borrowed_executor_read_context {
     [[nodiscard]] Oid tablespace_oid() const noexcept {
         return tablespace_oid_;
     }
-    /// @return Relfilenode captured at binding.
+    /// @return Relation file  number captured at binding.
     [[nodiscard]] Oid relfilenode() const noexcept {
         return relfilenode_;
     }
 };
 
 /**
- * @brief Constructs the administrative adapter used before shared validation.
+ * @brief Let administrative reads use the same source checks as executor reads.
  *
- * Callers must immediately pass the result to the catalog authorization path,
- * which performs the same identity and snapshot validation as executor-owned
- * contexts.
+ * This helper creates an unchecked context. Pass it directly to catalog source
+ * authorization, which checks the relation identity and registered snapshot.
  */
 struct borrowed_executor_read_context_access {
-    /// @return A borrowing capability whose validation remains with authorization.
+    /// @return An unchecked context for catalog source authorization to validate.
     [[nodiscard]] static borrowed_executor_read_context
     bind_for_catalog_authorization(Relation relation, Snapshot registered_snapshot) noexcept {
         return borrowed_executor_read_context{relation, registered_snapshot};

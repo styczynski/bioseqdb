@@ -1,10 +1,6 @@
 /**
  * @file tuple_ops.cppm
- * @brief Tuple modification helpers for columnar metadata catalogs.
- *
- * Shared by storage_metadata catalog code.
- * Keeping executor-state setup and tuple insert/delete plumbing in this leaf
- * partition keeps metadata-core focused on catalog semantics.
+ * @brief Write metadata rows using PostgreSQL executor state and index maintenance.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -19,10 +15,10 @@ import bioseq.postgres.support;
 export namespace bioseq::storage::metadata::tuple_ops {
 
 /**
- * @brief Holds borrowed relation state and executor resources for catalog mutations.
+ * @brief Resources used to write a batch of metadata rows.
  *
- * The relation remains owned by the caller. `finish_relation_modification` releases the
- * executor and index resources and invalidates the remaining pointers.
+ * The  caller keeps the relation open. finish_relation_modification() releases
+ * the executor and indexes, then unregisters any snapshot registered for the batch.
  */
 struct relation_modification_state
 {
@@ -32,9 +28,9 @@ struct relation_modification_state
 	Snapshot retained_snapshot;
 };
 
-/// @brief Creates executor state configured for catalog tuple modification.
+/// @brief Prepare executor state for writes to a metadata relation.
 /// @param[in] relation Open relation borrowed for the executor's range table.
-/// @return Executor state that must be released after the mutation batch.
+/// @return State to release after the batch finishes.
 EState *
 create_relation_executor_state(Relation relation)
 {
@@ -53,23 +49,21 @@ create_relation_executor_state(Relation relation)
 
 	executor_state->es_output_cid = GetCurrentCommandId(true);
 
-	/* Prepare to catch AFTER triggers. */
+	/* Begin collecting AFTER-trigger events for this batch. */
 	AfterTriggerBeginQuery();
 
 	return executor_state;
 }
 
-/// @brief Opens indexes and allocates state for relation modification.
-/// @param[in] relation Open relation retained by the caller for the whole mutation batch.
-/// @return Transaction-context state closed by `finish_relation_modification`.
+/// @brief Open indexes and prepare a batch of metadata writes.
+/// @param[in] relation Relation the caller keeps open until the batch finishes.
+/// @return State to pdss to finish_relation_modification().
 relation_modification_state *
 begin_relation_modification(Relation relation)
 {
-	// Buffered metadata can be finalized by PRE_COMMIT after the statement's
-	// executor released its snapshot. Heap writes to TOAST-capable relations
-	// still need a registered snapshot to protect TOAST lifetime. Pin only when
-	// the caller supplies none; do not replace an existing visibility snapshot
-	// or add snapshot-stack work to ordinary statement-time metadata batches.
+	// A PRE_COMMIT flush can run after the statement released its snapshot.
+ // Register one for TOAST writes when none is registered  or active.
+ // A caller's existing snapshot keeps its current visibility rules.
 	Snapshot retained_snapshot = InvalidSnapshot;
 	if (!HaveRegisteredOrActiveSnapshot()) {
 		retained_snapshot = RegisterSnapshot(GetTransactionSnapshot());
@@ -79,7 +73,7 @@ begin_relation_modification(Relation relation)
 
 	InitResultRelInfo(result_rel_info, relation, 1, nullptr, 0);
 
-	/* ExecSimpleRelationInsert, ... require caller to open indexes */
+	/* Executor inserts require the relation's indexes to be open. */
 	ExecOpenIndices(result_rel_info, false);
 
 	relation_modification_state *state =
@@ -94,11 +88,11 @@ begin_relation_modification(Relation relation)
 }
 
 /**
- * @brief Inserts one catalog tuple while enforcing indexes, constraints, and triggers.
- * @param[in] state Active modification state for the destination relation.
- * @param[in] values Attribute values ordered by the destination tuple descriptor.
- * @param[in] nulls Per-attribute null flags parallel to `values`.
- * @note PostgreSQL reports constraint and trigger failures through its error boundary.
+ * @brief Insert a metadata row with executor constraint and index checks.
+ * @param[in] state Active write batch for the destination relation.
+ * @param[in] values Column values in tuple-descriptor order
+ * @param[in] nulls Null flags corresponding to values.
+ * @note PostgreSQL handles row triggers and reports insertion errors.
  */
 void
 insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nulls)
@@ -109,30 +103,21 @@ insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nu
 	TupleTableSlot *slot = ExecInitExtraTupleSlot(state->executor_state, tuple_desc,
 												  &TTSOpsHeapTuple);
 
-	/*
-	 * The tuple has no other reference. Therefore, we can safely set
-	 * should_free to true, which can avoid duplicate memory allocation.
-	 *
-	 * When working with low-memory machines, it's important to be mindful
-	 * of duplicate memory allocation for large values. This can lead to
-	 * out-of-memory errors and cause issues with the performance of the
-	 * machine.
-	 */
+	/* Give the slot ownership of this tuple to avoid copying its values. */
 	ExecStoreHeapTuple(tuple, slot, true);
 
-	/* use ExecSimpleRelationInsert to enforce constraints */
+	/* Let PostgreSQL check constraints and maintain indexes. */
 	ExecSimpleRelationInsert(state->result_rel_info, state->executor_state, slot);
 }
 
 /**
- * @brief Updates an internal heap row, evaluating partial-index predicates.
- * @param[in] state Active modification state with the relation's indexes open.
- * @param[in] old_tuple Borrowed row identifying the version to replace.
- * @param[in] new_tuple Borrowed replacement, whose self pointer is updated.
+ * @brief Update a metadata row and maintain its indexes.
+ * @param[in] state Active batch with the relation's indexes open.
+ * @param[in] old_tuple Row  version to replace.
+ * @param[in] new_tuple Replacement tuple. The update sets its self pointer.
  *
- * Like CatalogTupleUpdate, this leaves row triggers to the caller. Unlike that
- * system-catalog-only helper, the executor correctly evaluates index predicates
- * and expressions. HOT and summarizing-index behavior remain PostgreSQL-owned.
+ * The executor evaluates partial-index predicates and index expressions.
+ * PostgreSQL decides which indexes need updating. The, caller handles row triggers.
  */
 void
 update_catalog_tuple(relation_modification_state *state, HeapTuple old_tuple,
@@ -147,8 +132,8 @@ update_catalog_tuple(relation_modification_state *state, HeapTuple old_tuple,
 		state->executor_state, RelationGetDescr(state->relation), &TTSOpsHeapTuple);
 	ExecStoreHeapTuple(new_tuple, slot, false);
 #if PG_VERSION_NUM >= 190000
-	// There is no planner updated-column bitmap for this direct metadata write.
-	// Preserve CatalogTupleUpdate's conservative indexUnchanged=false hint.
+	// This direct write has no planner bitmap of updated columns.
+	// Keep indexUnchanged false so index maintenance makes no such assumption.
 	uint32 flags = 0;
 	if (update_indexes == TU_Summarizing) {
 		flags |= EIIT_ONLY_SUMMARIZING;
@@ -165,9 +150,9 @@ update_catalog_tuple(relation_modification_state *state, HeapTuple old_tuple,
 }
 
 /**
- * @brief Deletes one catalog tuple and runs its row-delete triggers.
- * @param[in] state Active modification state for the owning relation.
- * @param[in] heap_tuple Borrowed tuple whose self pointer identifies the row to delete.
+ * @brief Delete a metadata row and queue its AFTER DELETE triggers.
+ * @param[in] state Active write bahch for the relation.
+ * @param[in] heap_tuple Tuple whose self pointer identifies the row.
  */
 void
 delete_catalog_tuple(relation_modification_state *state, HeapTuple heap_tuple)
@@ -178,14 +163,14 @@ delete_catalog_tuple(relation_modification_state *state, HeapTuple heap_tuple)
 	ItemPointer tuple_id = &(heap_tuple->t_self);
 	simple_heap_delete(state->relation, tuple_id);
 
-	/* execute AFTER ROW DELETE Triggers to enforce constraints */
+	/* Queue AFTER DELETE triggers, including constraint triggers. */
 	ExecARDeleteTriggers(
 		executor_state, result_rel_info, tuple_id, nullptr, nullptr, true);
 }
 
 /**
- * @brief Closes indexes, fires queued triggers, and releases executor resources.
- * @param[in] state Completed modification state, invalid after this call.
+ * @brief Finish the batch, fire queued triggers and release executor resources.
+ * @param[in] state Completed batch. Its executor pointers are  invalid afterward.
  */
 void
 finish_relation_modification(relation_modification_state *state)

@@ -1,6 +1,6 @@
 /**
  * @file index_admin.cppm
- * @brief Implements index administration and storage-fixture entry points.
+ * @brief SQL functions for index maintenance and storage tests.
  */
 module;
 
@@ -68,18 +68,18 @@ std::int64_t update_index(
         rel, kind.data(), kind.size());
 }
 
-/** @return The merge-run count recorded by the most recent index build. */
+/** @brief Return the latest index build's sorted-run count, including runs kept in memory. */
 std::int64_t last_index_merge_run_count() {
 	return static_cast<std::int64_t>(
         bioseq::storage::indexing::g_last_index_merge_run_count);
 }
 
-/** @brief Clears backend-local active-read-policy diagnostic counters. */
+/** @brief Reset this backend's counters for selecting indexes during reads. */
 void reset_active_read_policy_debug() {
 	bioseq::storage::indexing::reset_active_read_policy_debug_state();
 }
 
-/** @return One row containing active-read-policy resolution diagnostics. */
+/** @return One row showing how index-read policies were chosen and used in this backend. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::active_read_policy_debug_row>
 active_read_policy_debug() {
@@ -121,7 +121,7 @@ active_read_policy_debug() {
             std::move(rows)};
 }
 
-/** @return The number of rows stored for the named index. */
+/** @return Physical storage-row count across shards of the named index. */
 std::int64_t index_table_row_count(
 	Oid rel,
 	std::string name) {
@@ -130,8 +130,9 @@ std::int64_t index_table_row_count(
 }
 
 /**
- * @brief Removes the selected non-first sequence fragment referenced by a
- * source locator.
+ * @brief Invalidate a stored sequebce for a  missing-fragment test.
+ * Validate the requested non-first fragment, then, invalidate its source epoch
+ * so readers reject the sequence. The fragment rows remain stored.
  */
 void remove_sequence_fragment(
 	Oid source_table,
@@ -151,8 +152,9 @@ void remove_sequence_fragment(
 
 
 /**
- * @brief Copies selected primary-index predicate or expression metadata from a
- * donor index inside the current transaction.
+ * @brief Copy a donor index's predicate or expression into the target primary index
+ * Tests use this catalog change to check rejection of malformed index schemas.
+ * The change belongs to the current transaction.
  */
 void copy_primary_index_shape(
 	Oid target_table,
@@ -170,8 +172,9 @@ void copy_primary_index_shape(
 
 
 /**
- * @brief Applies the requested mask to matching source and generation checksums
- * while keeping their metadata consistent.
+ * @brief Corrupt the saved source checksum while keeping index metadata consistent.
+ * XOR the supplied mask  into the checksum and update the head, manifest and
+ * their row checksums. Tests can then check validation against the source sequence.
  */
 void rewrite_source_checksum(
 	Oid target_table,
@@ -190,8 +193,9 @@ void rewrite_source_checksum(
 
 
 /**
- * @brief Exercises the requested read-session failure mode and verifies permit
- * and resource cleanup.
+ * @brief Run a read-session failure test against a stored minimizer generation.
+ * The selected case checks invalid read order, incompatible metadata or
+ * refused memory, and releases session resources on failure.
  */
 void exercise_generation_session_failure(
 	Oid source_table,
@@ -211,8 +215,9 @@ void exercise_generation_session_failure(
 
 
 /**
- * @brief Runs the selected generation-storage transition and returns
- * relation-handle, rollback, and cache-invalidation state.
+ * @brief Exercise creation, clearing or rollback of minimizer-generation storage.
+ * Return the relation OIDs before and after  the operation, whther the handle
+ * was rebound, and whether cached data remains. Missing OIDs become SQL NULL.
  */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::generation_storage_state_row>
@@ -261,12 +266,15 @@ std::int64_t index_distinct_sub_keys(
 		index_distinct_sub_keys_impl(rel, name, query_key);
 }
 
-/** @brief Drops every physical sequence-index table owned by this database. */
+/** @brief Drop all physical Bioseq sequence-index tables in the current database. */
 void drop_all_index_tables() {
 	bioseq::storage::indexing::drop_all_index_tables_impl();
 }
 
-/** @brief Applies the named persistence policy to one logical index. */
+/** @brief Set insert-time index maintenance for every sequence column in a table.
+ * UPDATE_ON_INSERT enables it. Other policy strings select manual updates.
+ * Reject unknown indexes and indexes that cannot be updated during insertion.
+ */
 void set_index_policy(
 	Oid rel,
 	std::string name,
@@ -286,7 +294,9 @@ void set_index_policy(
 	}
 }
 
-/** @brief Selects the logical index used by relation read paths. */
+/** @brief Select one index for reads of every sequence column in the table.
+ * Clear the previous choice. Indexes stored as  table-wide chunks are rejected.
+ */
 void set_active_read_index(
 	Oid rel,
 	std::string name) {
@@ -305,7 +315,9 @@ void set_active_read_index(
 	}
 }
 
-/** @return The logical column-store row number encoded by @p ctid. */
+/** @return Logical row number encoded in the ctid of a USING bioseq table
+ * Reject, other table-access methods.
+ */
 std::int64_t column_row_number(
 	Oid rel,
 	bioseq::postgres::support::tuple_identifier ctid) {
@@ -324,8 +336,8 @@ std::int64_t column_row_number(
 
 
 /**
- * @brief Arms one PostgreSQL error at the selected inline-sequence lookup, read,
- * detoast, or close operation.
+ * @brief Make the next selected inline-sequence operation raise a PostgreSQL error.
+ * Tests can choose relation lookup, tuple read, detoasting or relation close.
  */
 void arm_inline_sequence_pg_failure(std::string failure_point) {
 	using failure_kind =
@@ -353,7 +365,10 @@ void arm_inline_sequence_pg_failure(std::string failure_point) {
 		arm_inline_sequence_pg_leaf_failure(failure);
 }
 
-/** @brief Inserts or replaces one physical sequence-index chunk. */
+/** @brief Insert or replace a physical index chunk for storage tests.
+ * Prefer a shard already holding the query key, otherwise use the first shard.
+ * Raise an error when the named index has no shard.
+ */
 void write_index_chunk(
 	Oid rel,
 	std::string name,
@@ -452,7 +467,9 @@ void write_index_chunk(
 	}
 }
 
-/** @brief Deletes the directory manifest for one logical index key. */
+/** @brief Delete the manifes chunks for an index query key from every  shard.
+ * Storage tests use this to leave payload data without its directory.
+ */
 void delete_index_manifest(
 	Oid rel,
 	std::string name,

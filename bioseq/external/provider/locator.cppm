@@ -1,6 +1,6 @@
 /**
  * @file external/provider/locator.cppm
- * @brief Provider locator-policy interface and validated remote locators.
+ * @brief Rules for allowed download URLs and policy lookup callbacks.
  */
 module;
 
@@ -16,14 +16,12 @@ import bioseq.external.provider.base;     // provider_id, locator_policy_id
 import bioseq.external.provider.errors;   // external_error
 import bioseq.external.provider.messages; // locator_scheme
 
-/// @brief Defines locator security-policy profiles.
-// Provider core emits candidate
-// transfer requests plus a static locator_policy_id. The configured pack builds
-// one immutable registry. The concrete transfer service resolves profiles
-// through the registry and contains no provider/hostname switch.
+/// Rules for, the hosts, addresses, and protocols a provider may contact.
+// Providers attach a policy ID to each download plan The transfer code
+// can use this registry interface to look up that provider's URL rules.
 export namespace bioseq::external::provider {
 
-/// Allowed DNS suffix and whether its apex is included.
+/// Allowed DNS suffix and whether the suffix itself is also allowed.
 struct locator_host_suffix_view {
     std::string_view suffix;
     bool include_apex;
@@ -41,7 +39,7 @@ enum class locator_address_scope : std::uint8_t { public_only, test_loopback };
 /// Whether proxy routing is forbidden or explicitly pinned.
 enum class locator_proxy_policy : std::uint8_t { disabled, explicit_pinned_connect };
 
-/// Borrowed immutable outbound locator-policy profile.
+/// Download URL rules with borrowed host and protocol lists.
 struct locator_policy_profile_view {
     locator_policy_id id;
     std::span<const locator_scheme> schemes;
@@ -56,14 +54,14 @@ struct locator_policy_profile_view {
     locator_proxy_policy proxy;
 };
 
-/// Type-erased resolver for configured locator policies.
+/// Callback for looking  up configured URL rules.
 struct locator_policy_registry_ref {
     void* object{};
     std::expected<locator_policy_profile_view, external_error> (*resolve_fn)(void*,
                                                                              provider_id,
                                                                              locator_policy_id){};
 
-    /// Resolve a policy only for its owning provider.
+    /// Look up a policy for the given provider.
     [[nodiscard]] std::expected<locator_policy_profile_view, external_error>
     resolve(provider_id provider, locator_policy_id policy) const {
         return resolve_fn(object, provider, policy);

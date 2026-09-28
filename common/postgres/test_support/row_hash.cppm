@@ -40,12 +40,15 @@ struct sha256_digest {
     friend bool operator==(const sha256_digest&, const sha256_digest&) = default;
 };
 
-/// @brief Incremental, allocation-free SHA-256 implementation for test artifacts.
+/// Incremental SHA-256 using fixed-size buffers for test files and row data.
 class sha256_hasher {
 public:
     sha256_hasher() = default;
 
-    /// @brief Appends arbitrary bytes to the digest stream.
+    /**
+     * Add bytes to the hash.
+     * Calling update after finalize throws a logic_error.
+     */
     void update(std::span<const std::byte> bytes) {
         if (finalized_) {
             throw std::logic_error("cannot update a finalized SHA-256 stream");
@@ -84,7 +87,7 @@ public:
         update(std::as_bytes(std::span(bytes.data(), bytes.size())));
     }
 
-    /// @brief Finalizes the stream and returns its digest; repeat calls are stable.
+    /// Finish the hash and return its digest. Later calls return the same digest.
     [[nodiscard]] sha256_digest finalize() {
         if (!finalized_) {
             const std::uint64_t bit_count = total_bytes_ * 8U;
@@ -222,7 +225,7 @@ private:
     return hasher.finalize();
 }
 
-/// @brief Hashes a regular file without loading it wholly into memory.
+/// Hash a file in chunks without loading the whole file into memory
 [[nodiscard]] inline sha256_digest hash_sha256_file(
     const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
@@ -253,7 +256,11 @@ struct result_text_cell {
     std::string_view bytes;
 };
 
-/// @brief Implements the normative BIOSEQ_CACHE_ROWS_V1 nullable-row stream.
+/**
+ * Hash ordered query results using the BIOSEQ_CACHE_ROWS_V1 byte format.
+ * Include row positions, column counts and cell lengths so boundaries remain
+ * unambiguous. Separate NULL from empty text with a marker  for each cell.
+ */
 class ordered_result_hasher {
 public:
     ordered_result_hasher() {
@@ -263,7 +270,7 @@ public:
         hasher_.update(std::string_view(k_header.data(), k_header.size()));
     }
 
-    /// @brief Appends a zero-based row ordinal and its text-format columns.
+    /// Hash the next row, preserving its position, NULL flags and cell boundaries.
     void append_row(std::span<const result_text_cell> columns) {
         if (finalized_) {
             throw std::logic_error("cannot append to a finalized row hash");
@@ -285,7 +292,7 @@ public:
         ++row_count_;
     }
 
-    /// @brief Appends one row directly from the shared libpq result owner.
+    /// Read and hash one row from an owned libpq result.
     void append_result_row(
         const bioseq::libpq::command_result& result,
         std::size_t row) {
@@ -304,7 +311,7 @@ public:
         append_row(columns);
     }
 
-    /// @brief Finalizes with the 0xff marker and exact row count.
+    /// Finish the row stream with its end marker and row count, then return, the digest.
     [[nodiscard]] sha256_digest finalize() {
         if (!finalized_) {
             append_byte(0xffU);
@@ -315,7 +322,7 @@ public:
         return digest_;
     }
 
-    /// @brief Returns the number of rows appended before finalization.
+    /// Return how many rows have been added.
     [[nodiscard]] std::uint64_t row_count() const noexcept { return row_count_; }
 
 private:
@@ -351,7 +358,7 @@ private:
     bool finalized_{};
 };
 
-/// @brief Hashes every ordered row of a libpq result with the canonical format.
+/// Hash all rows of a libpq result in their current order using BIOSEQ_CACHE_ROWS_V1.
 [[nodiscard]] inline sha256_digest hash_ordered_result_rows(
     const bioseq::libpq::command_result& result) {
     ordered_result_hasher hasher;

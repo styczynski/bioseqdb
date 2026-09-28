@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_summary_paths.cppm
- * @brief NCBI gene summary and link endpoint fragments.
+ * @brief NCBI requests for gene counts, related genes, and download summaries.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_summary_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene download-summary, count, ortholog, link, and chromosome paths. */
+/** @brief Gene package previews, counts per taxon or chromosome, ortholog reports, and links. */
 inline constexpr std::string_view gene_summary_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/download_summary:
     get:

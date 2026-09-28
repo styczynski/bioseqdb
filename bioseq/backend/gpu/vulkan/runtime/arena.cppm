@@ -1,6 +1,6 @@
 /**
  * @file arena.cppm
- * @brief Owns reusable GPU arena allocation, descriptor sets, and recorded dispatch helpers.
+ * @brief Reuses GPU buffers and records compute and sorting commands.
  */
 module;
 
@@ -23,7 +23,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Computes count-submit and pessimistic output admission for a sketch batch.
+/// @brief Reports Vulkan allocation sizes for a sketch batch and its mhximum output.
 gpu_sketch_batch_allocation_requirements
 runtime::sketch_batch_allocation_requirements(std::uint64_t packed_sequence_bytes,
                                               std::uint64_t tile_count,
@@ -60,7 +60,7 @@ runtime::sketch_batch_allocation_requirements(std::uint64_t packed_sequence_byte
     };
 }
 
-/// @brief Generates packed sequence units through the dedicated Vulkan kernel.
+/// @brief Generates packed sequence units on the GPU and returns their device buffer.
 buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
                                              std::span<const std::uint32_t> cdf,
                                              generate_units_push push,
@@ -140,7 +140,7 @@ buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
     return out;
 }
 
-/// @brief Copies one validated allocation slice into caller-owned host storage.
+/// @brief Copies a range from a mapped buffer into host, storage after checking its bounds.
 void runtime::download_slice(const buffer& src,
                              std::uint64_t src_byte_offset,
                              std::span<std::byte> dst) {
@@ -160,7 +160,7 @@ void runtime::download_slice(const buffer& src,
         dst.data(), static_cast<const std::byte*>(src.mapped) + src_byte_offset, dst.size());
 }
 
-// --- Arena -----------------------------------------------------------------
+// Arena storage
 
 /// @brief Returns the lazily constructed arena owned by this runtime.
 gpu_arena& runtime::reusable_gpu_arena() {
@@ -170,26 +170,23 @@ gpu_arena& runtime::reusable_gpu_arena() {
     return *gpu_arena_;
 }
 
-/// @brief Grows all arena classes before a paired submission begins.
+/// @brief Ensures the three buffers have enough space before recording an operation.
 bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
                                 std::uint64_t upload_bytes,
                                 std::uint64_t download_bytes) {
-    // Only called at op start (cursors already at their rewound baseline). Grows
-    // a buffer geometrically when needed and resets just that buffer's cursor;
-    // never grows mid-operation while slices are live.
+    // Call at operation start after rewinding all slices. Each buffer that grows
+    // receives the requested capacity and starts again at offset zero.
     try {
         if (device_bytes > device_capacity_) {
-            // Operation starts only from a rewound mark. Release the obsolete
-            // arena before allocating its exact replacement so growth never
-            // creates an unadmitted overlap between prior and replacement
-            // allocations or a geometric 2x tail.
+            // Free  the old buffer before creating its replacement so their allocations
+            // do not overlap without a memory reservation
             device_.reset();
             device_permit_.release();
             device_admission_established_ = false;
             device_capacity_ = 0u;
             device_ = runtime_->create_device_buffer(device_bytes, k_gpu_arena_usage);
             if (device_.mapped == nullptr)
-                return false; // GPU frontend needs unified memory.
+                return false; // The frontend requires a host-mapped device buffer.
             device_capacity_ = device_.bytes;
             device_cursor_ = 0;
         }
@@ -221,7 +218,7 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
     return true;
 }
 
-/// @brief Establishes exact physical admission for MPS arena backing allocations.
+/// @brief Reserves memory budget for arena allocations and touches their mapped pages.
 bool gpu_arena::ensure_admitted_capacity(std::uint64_t device_bytes,
                                          std::uint64_t upload_bytes,
                                          std::uint64_t download_bytes) {
@@ -238,9 +235,8 @@ bool gpu_arena::ensure_admitted_capacity(std::uint64_t device_bytes,
             (admission_established && current.is_valid() && capacity >= requested_bytes)) {
             return;
         }
-        // A legacy arena backing has no adjacent physical receipt. It is idle at
-        // this boundary, so remove it before reserving a replacement rather than
-        // pretending its unaccounted overlap is covered by the fresh permit.
+        // This idle buffer predates memory admission. Free it before reserving
+        // its replacement so the two allocations cannot overlap unaccounted.
         if (!admission_established && current.is_valid()) {
             current.reset();
             current_permit.release();
@@ -297,8 +293,8 @@ bool gpu_arena::ensure_admitted_capacity(std::uint64_t device_bytes,
                 fmt::format("gpu arena {} backing materialization proof is inconsistent", label));
         }
 
-        // Keep the prior admitted storage and permit alive until the fresh block
-        // has completed allocation and full touch. Release storage before permit.
+        // Keep the old buffer and its permit until the replacement is allocated
+        // and fully touched. Free the old storage before releasing its permit.
         current.reset();
         current_permit.release();
         current = std::move(replacement);
@@ -342,7 +338,7 @@ bool gpu_arena::ensure_admitted_capacity(std::uint64_t device_bytes,
     return true;
 }
 
-/// @brief Releases every backing buffer after all live slices have rewound.
+/// @brief Frees all buffers and their memory permits if every cursor is zero.
 bool gpu_arena::release_idle_capacity() noexcept {
     if (device_cursor_ != 0u || upload_cursor_ != 0u || download_cursor_ != 0u) {
         return false;
@@ -362,7 +358,7 @@ bool gpu_arena::release_idle_capacity() noexcept {
     return true;
 }
 
-/// @brief Bump-allocates one aligned device slice.
+/// @brief Reserves an aligned byte range  in the device buffer.
 gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t effective_alignment =
         std::max<std::uint64_t>(alignment, k_gpu_buffer_offset_alignment);
@@ -374,7 +370,7 @@ gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t al
     return gpu_arena_slice{&device_, offset, bytes};
 }
 
-/// @brief Bump-allocates one aligned upload slice.
+/// @brief Reserves an aligned byte range in the upload buffer.
 gpu_arena_slice gpu_arena::allocate_upload(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t offset = align_up(upload_cursor_, std::max<std::uint64_t>(alignment, 16u));
     if (offset + bytes > upload_capacity_)
@@ -383,7 +379,7 @@ gpu_arena_slice gpu_arena::allocate_upload(std::uint64_t bytes, std::uint64_t al
     return gpu_arena_slice{&upload_, offset, bytes};
 }
 
-/// @brief Bump-allocates one aligned download slice.
+/// @brief Reserves an aligned byte oange in the download buffer.
 gpu_arena_slice gpu_arena::allocate_download(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t offset =
         align_up(download_cursor_, std::max<std::uint64_t>(alignment, 16u));
@@ -393,7 +389,7 @@ gpu_arena_slice gpu_arena::allocate_download(std::uint64_t bytes, std::uint64_t 
     return gpu_arena_slice{&download_, offset, bytes};
 }
 
-/// @brief Binds exactly one arena slice without widening its descriptor range.
+/// @brief Makes a storage-buffer descriptor for the exact slice range.
 void gpu_arena::bind_storage_slice(VkWriteDescriptorSet& write,
                                    VkDescriptorBufferInfo& info,
                                    std::uint32_t binding,
@@ -409,9 +405,9 @@ void gpu_arena::bind_storage_slice(VkWriteDescriptorSet& write,
     write.pBufferInfo = &info;
 }
 
-// --- GPU frontend descriptor pool + dispatch recorder ---------------------------
+// Descriptor sets and compute commands
 
-/// @brief Creates the fresh-set descriptor pool on first use.
+/// @brief Creates the dispatch descriptor pool if it does not exist.
 void runtime::ensure_dispatch_descriptor_pool_locked() {
     if (dispatch_descriptor_pool_ != VK_NULL_HANDLE)
         return;
@@ -427,14 +423,14 @@ void runtime::ensure_dispatch_descriptor_pool_locked() {
              "vkCreateDescriptorPool(gpu)");
 }
 
-/// @brief Resets the fresh-set pool between complete frontend operations.
+/// @brief Makes all descriptor sets reusable after an operation has finished.
 void runtime::reset_dispatch_descriptor_pool_locked() {
     ensure_dispatch_descriptor_pool_locked();
     check_vk(vkResetDescriptorPool(device_, dispatch_descriptor_pool_, 0),
              "vkResetDescriptorPool(gpu)");
 }
 
-/// @brief Allocates one descriptor set whose bindings remain immutable through submission.
+/// @brief Allocates a fresh descriptor set for one recorded dispatch.
 VkDescriptorSet runtime::allocate_dispatch_descriptor_set_locked(VkDescriptorSetLayout layout) {
     VkDescriptorSetAllocateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -446,7 +442,7 @@ VkDescriptorSet runtime::allocate_dispatch_descriptor_set_locked(VkDescriptorSet
     return set;
 }
 
-/// @brief Updates a reusable descriptor set from explicit buffer-offset-range triples.
+/// @brief Updates the pipeline descriptor set with the supplied buffer ranges.
 void runtime::bind_descriptors_offsets_locked(const compute_pipeline& entry,
                                               std::span<const VkDescriptorBufferInfo> infos) {
     std::vector<VkWriteDescriptorSet> writes(infos.size());
@@ -463,7 +459,13 @@ void runtime::bind_descriptors_offsets_locked(const compute_pipeline& entry,
         device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-/// @brief Records one compute dispatch and its causal receipt use.
+/**
+ * @brief Records one compute dispatch with its own descriptor set.
+ *
+ * The set keeps this dispatch's buffer bindings intact while later commands are
+ * recorded. If a collector is supplied, it records which shader  and Metal archive
+ * entry the dispatch uses. A zero group count records nothing
+ */
 void runtime::record_compute_dispatch_locked(VkCommandBuffer cmd,
                                              const compute_pipeline& pipe,
                                              std::span<const VkDescriptorBufferInfo> infos,
@@ -504,7 +506,7 @@ void runtime::record_compute_dispatch_locked(VkCommandBuffer cmd,
     vkCmdDispatch(cmd, group_count, 1, 1);
 }
 
-/// @brief Records every histogram, scan, and scatter pass for one stable radix sort.
+/// @brief Records stable radix-sort passes, alternating the input and scratch buffers.
 void runtime::record_radix_sort_locked(VkCommandBuffer cmd,
                                        const gpu_arena_slice& keys,
                                        const gpu_arena_slice& values,
@@ -580,7 +582,7 @@ void runtime::record_radix_sort_locked(VkCommandBuffer cmd,
     result_in_scratch = in_scratch;
 }
 
-/// @brief Records stable value-first then key sorting over parallel pair buffers.
+/// @brief Sorts pairs by key, using the value to order pairs with equal keys.
 void runtime::record_stable_pair_sort_by_value_then_key_locked(VkCommandBuffer command_buffer,
                                                                sorted_pair_device_views& views,
                                                                gpu_arena_slice hist,

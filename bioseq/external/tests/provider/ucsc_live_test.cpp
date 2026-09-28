@@ -1,6 +1,6 @@
 /**
  * @file external/tests/provider/ucsc_live_test.cpp
- * @brief Live UCSC provider query and sequence-delivery tests.
+ * @brief Check a live UCSC jenome catalog response.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -28,7 +28,7 @@ using bioseq::external::providers::ucsc_provider;
 
 namespace {
 
-// A caller-thread collector satisfying the owning-message push protocol.
+// Keep catalog rows and diagnostics received from the session.
 struct catalog_collector {
     std::vector<owning_catalog_row> catalogs;
     std::vector<owning_provider_diagnostic> diagnostics;
@@ -80,9 +80,7 @@ TEST_CASE(
     REQUIRE(stats->is_complete);
     REQUIRE(stats->wire_bytes > 0);
 
-    // Live UCSC lists hundreds of assemblies. The normalized catalog must be
-    // non-empty and contain the human hg38 assembly with its provider database
-    // key set (proving the common model preserved the UCSC-specific field).
+    // Check that  the catalog includes hg38 and preserves its UCSC database name.
     REQUIRE_FALSE(collector.catalogs.empty());
     REQUIRE(stats->rows == collector.catalogs.size());
 

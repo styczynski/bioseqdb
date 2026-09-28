@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/result_schemas.cppm
- * @brief EBI Search result schema fragments.
+ * @brief OpenAPI schemas for EBI Search results and their fields.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:result_schemas;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Components prefix and search result schemas. */
+/** Opens components.schemas and defines search results, entries, and suppoting result types. */
 inline constexpr std::string_view result_schemas = R"bioseq_openapi(components:
   schemas:
     WSSuggestion:

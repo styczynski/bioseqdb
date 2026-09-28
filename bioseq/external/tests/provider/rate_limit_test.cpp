@@ -1,10 +1,9 @@
 /**
  * @file external/tests/provider/rate_limit_test.cpp
- * @brief Deterministic request-pacing and cancellation tests.
+ * @brief Check request spacing, concurrency limits, and slot release.
  */
 
-// A controllable clock makes the process-local GCRA request-policy checks
-// deterministic without network access.
+// A controllable clock tests request timing without waiting or using the network.
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -40,7 +39,7 @@ struct fake_clock {
     }
 };
 
-// One-tier policy request (spacing, burst, max_in_flight).
+// Request fixture with one rate tier and a configurable active-request cap.
 struct policy_fixture {
     std::array<prov::request_rate_tier_view, 1> tiers{};
     prov::policy_request_view request{};
@@ -86,7 +85,7 @@ TEST_CASE("gcra allows an initial burst then throttles",
     policy_fixture fx(/*spacing=*/1000, /*burst=*/3, /*max_in_flight=*/0);
 
     int proceeded = 0;
-    for (int i = 0; i < 4; ++i) { // burst=3 → 1 + 3 immediate at t=0
+    for (int i = 0; i < 4; ++i) { // One scheduled request  plus three burst requests can start immediately.
         auto r = policy.acquire(fx.request, {});
         if (r->action == prov::request_policy_action::proceed)
             ++proceeded;
@@ -109,9 +108,9 @@ TEST_CASE("gcra caps concurrent in-flight requests",
     REQUIRE(b->action == prov::request_policy_action::proceed);
     REQUIRE(policy.in_flight_for_tests(fx.request) == 2);
 
-    auto c = policy.acquire(fx.request, {}); // cap full → refused before reserving
+    auto c = policy.acquire(fx.request, {}); // Both active slots are already occupied.
     REQUIRE(c->action == prov::request_policy_action::retry_at);
-    REQUIRE(policy.in_flight_for_tests(fx.request) == 2); // c leaked nothing
+    REQUIRE(policy.in_flight_for_tests(fx.request) == 2); // Rejection leaves the active count unchanged.
 
     prov::policy_response_view resp{};
     resp.outcome = prov::policy_attempt_outcome::response;
@@ -129,19 +128,18 @@ TEST_CASE("gcra rolls back the in-flight slot when it throttles",
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/0, /*max_in_flight=*/2);
 
-    auto a = policy.acquire(fx.request, {}); // proceed → tat=1000, in_flight=1
+    auto a = policy.acquire(fx.request, {}); // First request starts and advances the schedule.
     REQUIRE(a->action == prov::request_policy_action::proceed);
     REQUIRE(policy.in_flight_for_tests(fx.request) == 1);
 
-    // b reserves a slot because the cap has room, but GCRA rejects at now=0
-    // with tat=1000. The
-    // reserved slot MUST be rolled back, not left held.
+    // The second request can reserve a slot but is too early to start.
+    // Rejecting it must return that slot.
     auto b = policy.acquire(fx.request, {});
     REQUIRE(b->action == prov::request_policy_action::retry_at);
     REQUIRE(b->retry_at.count() == 1000);
-    REQUIRE(policy.in_flight_for_tests(fx.request) == 1); // rolled back, not leaked
+    REQUIRE(policy.in_flight_for_tests(fx.request) == 1); // The rejected request rlturned its slot.
 
-    clock.now = 1000; // a later request still proceeds → cap not wedged by a leak
+    clock.now = 1000; // Advance to the next allowed request time.
     auto c = policy.acquire(fx.request, {});
     REQUIRE(c->action == prov::request_policy_action::proceed);
 }
@@ -161,7 +159,7 @@ TEST_CASE("gcra applies a Retry-After penalty floor",
     resp.rate.retry_at = ns{50000};
     (void)policy.observe(*a->attempt, fx.request, resp);
 
-    auto b = policy.acquire(fx.request, {}); // blocked by penalty despite burst
+    auto b = policy.acquire(fx.request, {}); // Server retry time overrides the burst allowance.
     REQUIRE(b->action == prov::request_policy_action::retry_at);
     REQUIRE(b->retry_at.count() == 50000);
 
@@ -195,12 +193,12 @@ TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
                     if (r.has_value() && r->action == prov::request_policy_action::proceed) {
                         (void)policy.observe(*r->attempt, fx.request, prov::policy_response_view{});
                     }
-                    // A throttled request reserves no net slot — nothing to release.
+                    // A delayed request has already  returned any reserved slot.
                 }
             });
         }
     } // jthreads join on scope exit
-    // Every proceed was balanced by an observe and every reject rolled back, so
-    // concurrent CAS on the shared bucket leaves the in-flight count at 0.
+    // All started requests were observed and all delayed requests returned
+    // their slots. No active requests should remain after the threads join
     REQUIRE(policy.in_flight_for_tests(fx.request) == 0);
 }

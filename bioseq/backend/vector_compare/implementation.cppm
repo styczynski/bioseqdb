@@ -1,6 +1,6 @@
 /**
  * @file implementation.cppm
- * @brief Highway implementation of Boolean column-mask composition.
+ * @brief Combines column Boolean masks using Highway SIMD.
  */
 module;
 
@@ -15,20 +15,15 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::column::vec::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** Boolean operation applied lane-wise to two mask byte vectors. */
+/** Operation used to combine two mask vectors. */
 enum class mask_composition_operation : std::uint8_t {
     intersection,  ///< Applies a lane-wise Boolean AND.
     union_,        ///< Applies a lane-wise Boolean OR.
 };
 
 /**
- * @brief Applies one Boolean mask operation without a runtime operation branch.
- *
- * @tparam p_operation Boolean operation selected at compile time.
- * @tparam p_vector_type Highway byte-vector type.
- * @param[in] left Left mask bytes.
- * @param[in] right Right mask bytes.
- * @return Composed mask bytes.
+ * Combines mask bytes with the AND or OR selected at compile time
+ * @return A vector containing the result for each byte.
  */
 template <mask_composition_operation p_operation, class p_vector_type>
 [[nodiscard]] HWY_INLINE p_vector_type compose_mask_vectors(
@@ -42,12 +37,12 @@ template <mask_composition_operation p_operation, class p_vector_type>
 }
 
 /**
- * @brief Composes two byte-addressable Boolean masks for the active target.
+ * Combines Boolean masks in place using the selected Highway target.
  *
- * @tparam p_operation Boolean operation selected at compile time.
- * @param[in,out] left Left mask and destination.
- * @param[in] right Right mask.
- * @param[in] element_count Number of mask elements.
+ * Processes full vectors, then loads and stores only the remaining bytes.
+ * @param left Destination and left input mask.
+ * @param right Right input mask.
+ * @param element_count Number of elements in each mask.
  */
 template <mask_composition_operation p_operation>
 HWY_INLINE void compose_mask_impl(

@@ -1,6 +1,6 @@
 /**
  * @file sneaky_snake.cppm
- * @brief Defines the SneakySnake rank-prefilter GLSL body.
+ * @brief GPU SneakySnake filter for estimating a lower bound on  sequence edit distance.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_sneaky_snake;
 
@@ -8,12 +8,14 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Rank-buffer sneaky_snake_buffer lower-bound filter. A uniform push-constant mode
-/// keeps low-edit batches on independent scalar invocations and assigns high-
-/// edit batches to fixed eight-lane logical teams. Equal-length inputs use
-/// bounded compile_time_maximum_span-symbol submazes. Unequal and unsupported shapes remain
-/// conservative. Team-mode barriers are uniform and the implementation has no
-/// subgroup-size assumption or atomics.
+/// @brief Filter sequence pairs with SneakySnake's edit-distance lower bound.
+/// For equal lengths, follow the longest shifted match within each bounded
+/// piece, then count an edit to pass the mismatch. Reject when the total
+/// exceeds the edit limit.
+///
+/// Dispatch assigns one thread or an eight-thread team to each job. Unequal
+/// lengths use their length difference as the bound. Unsupported inputs remain
+/// candidates.
 inline constexpr std::string_view k_sneaky_snake_rank_batch_body = R"GLSL(
 const uint k_maximum_supported_edits = 31u;
 const uint k_team_size = 8u;

@@ -1,6 +1,6 @@
 /**
  * @file sql_entities.cppm
- * @brief SQL sequence entities used by columnar metadata catalogs.
+ * @brief Declare SQL sequences that allocate columnar metadata ids.
  */
 module;
 
@@ -18,7 +18,7 @@ export namespace bioseq::storage::metadata::sql_entities {
 })]]
 inline constexpr std::int64_t row_mask_seq = 1;
 
-/// @brief Allocates storage identifiers above the reserved metadata range.
+/// @brief Allocate storage ids starting at 10,000,000,000.
 [[bioseq_sql::sequence({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::if_not_exists,

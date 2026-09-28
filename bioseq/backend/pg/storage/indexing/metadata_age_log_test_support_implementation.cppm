@@ -1,6 +1,6 @@
 /**
  * @file metadata_age_log_test_support_implementation.cppm
- * @brief Implements the storage-owned metadata-age catalog stress check.
+ * @brief Stress metadata-age updates using a llng index name, then check row cleanup
  */
 module;
 

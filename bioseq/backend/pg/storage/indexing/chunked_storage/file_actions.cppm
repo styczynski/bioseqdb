@@ -1,12 +1,9 @@
 /**
  * @file file_actions.cppm
- * @brief Transaction-safe file publication and cleanup actions for persisted
- *        minimizer generations.
+ * @brief Publish minimizer files and remove them when a transaction commits or aborts.
  *
- * Index chunks are raw BYTEA tuples in heap relations (heap_form_tuple /
- * CatalogTupleInsert + systable_beginscan), bypassing columnarisation
- * (Invariant C). The per-sequence layouts co-locate with the sequence's
- * `(bucket, shard)`. The table layout shards via `index_table_shard`.
+ * A backend keeps pending file actions until its transaction ends. Each action
+ * saves the path and inode so cleanup can check that it still names the same file.
  */
 module;
 
@@ -42,40 +39,36 @@ export module bioseq.postgres.storage.indexing.chunked_storage:file_actions;
 
 import std;
 import bioseq.common.logging;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // bioseq::postgres::support::invoke_pg_as_cpp
 import :catalog;
 export namespace bioseq::storage::indexing {
 
-// -------------------------------------------------------------------------
-// Bounded transaction-owned generation file actions.
-//
-// The file-action queue is separate from publication so transaction callbacks
-// never inherit writer object lifetime.
-// -------------------------------------------------------------------------
+// Keep file cleanup in the transaction queue so it can outlive the writer.
 
-/// Maximum transaction-owned actions retained by one backend process.
+/// Maximum pending file actions in one backend.
 inline constexpr std::size_t k_pending_file_action_capacity = 4096u;
-/// Number of callback diagnostics retained in the fixed ring.
+/// Number of callback diagnostics  kept in the fixed ring.
 inline constexpr std::size_t k_file_action_diagnostic_capacity = 256u;
-/// Maximum files one reaper operation may reserve atomically.
+/// Maximum files reserved together for one cleanup batch.
 inline constexpr std::size_t k_maximum_reaper_file_actions = 64u;
 /// Sentinel used when an action has no paired queue slot.
 inline constexpr std::uint16_t k_no_paired_file_action =
     static_cast<int>(std::numeric_limits<std::uint16_t>::max());
-/// Stable identity tag for mapped minimizer-fragment files.
+/// File type tag for mapped minimizer-fragment indexes.
 inline constexpr std::uint8_t k_mapped_minimizer_fragment_index_identity = 1u;
-/// Database-local directory containing persisted fragment images.
+/// Directory for, minimizer files inside a PostgreSQL database directory.
 inline constexpr std::string_view k_minimizer_generation_file_directory_name =
     "bioseq_minimizer_fragment_images";
 
-/// Selects the transaction outcome that removes an identity-bound file.
+/// Choose whether commit or rollback removes the file.
 enum class file_action : std::uint8_t {
     unlink_on_abort,
     unlink_on_commit,
 };
 
-/// Callback-safe file authority.  The queue stores no owning C++ object and
-/// no pointer into a PostgreSQL memory context.
+/// File deletion scheduled for a transaction callback.
+/// Store the path and inode directly so cleanup can run after PostgreSQL
+/// memory contexts and writer objects have been released.
 struct pending_file_action {
     file_action action{};
     SubTransactionId owner_subxid{};
@@ -90,7 +83,7 @@ struct pending_file_action {
 static_assert(std::is_trivially_copyable_v<pending_file_action>);
 static_assert(std::is_standard_layout_v<pending_file_action>);
 
-/// Callback-safe outcome recorded for one attempted file action.
+/// Result or failure recorded by a file cleanup callback.
 enum class file_action_diagnostic_code : std::uint8_t {
     none,
     already_missing,
@@ -106,7 +99,7 @@ enum class file_action_diagnostic_code : std::uint8_t {
     prepare_rejected,
 };
 
-/// One fixed-size diagnostic emitted without allocation from a callback.
+/// Callback diagnostic stored without allocating memory.
 struct file_action_diagnostic {
     std::uint64_t sequence = 0u;
     std::uint16_t slot = k_no_paired_file_action;
@@ -114,21 +107,21 @@ struct file_action_diagnostic {
     int saved_errno = 0;
 };
 
-/// Stable copy of the diagnostic ring and its monotonic entry count.
+/// Copy of the rcent diagnostics and the total number recorded.
 struct file_action_diagnostics_snapshot {
     std::array<file_action_diagnostic, k_file_action_diagnostic_capacity> entries{};
     std::uint64_t total = 0u;
 };
 
-/// Opaque all-or-nothing reservation.  Slots are found by reservation id
-/// rather than assumed contiguous because savepoint completion can leave
-/// holes in the fixed queue.
+/// Slots reserved together  for pending file actions.
+/// Find slots by reservation ID because rolling back a savepoint can leave
+/// gaps in the queue
 struct file_action_reservation {
     std::uint32_t id = 0u;
     std::uint16_t count = 0u;
 };
 
-/// Catalog-derived identity that binds a file path to one generation.
+/// Database, relation and generation identifiers used to form a file path.
 struct minimizer_generation_file_identity {
     Oid database_oid = InvalidOid;
     Oid tablespace_oid = InvalidOid;
@@ -140,8 +133,7 @@ struct minimizer_generation_file_identity {
     std::uint64_t generation_id = 0u;
 };
 
-/// Fixed owned buffers let callbacks consume the exact backend-resolved path
-/// without catalog access, formatting, allocation or a memory-context pointer.
+/// Database directory and generation file paths stored in fixed buffers.
 struct resolved_minimizer_generation_file_path {
     std::array<char, MAXPGPATH> database_directory{};
     std::array<char, MAXPGPATH> bioseq_directory{};
@@ -149,7 +141,8 @@ struct resolved_minimizer_generation_file_path {
     std::array<char, MAXPGPATH> final_path{};
 };
 
-/// Move-only authority for a reserved temporary and final publication path.
+/// Own an unfinished publication and cancel it on destruction.
+/// After publication succeeds, the transaction queue owns rollback cleanup.
 struct pending_minimizer_generation_file_publication {
     file_action_reservation reservation{};
     std::uint16_t temporary_slot = k_no_paired_file_action;
@@ -186,14 +179,14 @@ struct pending_minimizer_generation_file_publication {
 
 namespace generation_file_action_detail {
 
-/// Lifecycle state of one fixed action-queue slot.
+/// Whether a queue slot is free, reserved or ready to execute.
 enum class slot_state : std::uint8_t {
     free,
     reserved,
     armed,
 };
 
-/// Backend-local action queue consumed by transaction callbacks.
+/// Pending  file actions and callback diagnostics for one backend.
 struct queue_state {
     std::array<pending_file_action, k_pending_file_action_capacity> actions{};
     std::array<slot_state, k_pending_file_action_capacity> slot_states{};
@@ -205,7 +198,7 @@ struct queue_state {
     bool subxact_callback_installed = false;
 };
 
-// The extension image is private to one PostgreSQL backend process.
+// Each PostgreSQL backend has its own queue.
 inline queue_state g_queue_state{};
 
 static_assert(std::tuple_size_v<decltype(queue_state::actions)> == k_pending_file_action_capacity);
@@ -239,7 +232,7 @@ inline void release_slot(const std::size_t slot) noexcept {
     g_queue_state.reservation_ids[slot] = 0u;
 }
 
-/// Report whether any occupied slot retains a reservation identifier.
+/// Check whether a reservation ID is still in use.
 [[nodiscard]] inline bool reservation_id_is_live(const std::uint32_t reservation_id) noexcept {
     for (std::size_t slot = 0u; slot < k_pending_file_action_capacity; ++slot) {
         if (slot_is_occupied(slot) && g_queue_state.reservation_ids[slot] == reservation_id) {
@@ -249,7 +242,7 @@ inline void release_slot(const std::size_t slot) noexcept {
     return false;
 }
 
-/// Allocate a nonzero reservation identifier absent from the live queue.
+/// Choose a nonzero reservation ID that the queue is not using.
 [[nodiscard]] inline std::uint32_t next_unused_reservation_id() {
     for (std::uint64_t attempts = 0u;
          attempts < static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
@@ -266,7 +259,7 @@ inline void release_slot(const std::size_t slot) noexcept {
         "generation file-action reservation id space is exhausted");
 }
 
-/// Resolve a reservation ordinal to its noncontiguous queue slot.
+/// Find a reserved slot by its position within the reservation.
 [[nodiscard]] inline std::optional<std::uint16_t>
 reservation_slot(const file_action_reservation reservation, const std::size_t ordinal) noexcept {
     if (reservation.id == 0u || ordinal >= reservation.count) {
@@ -284,7 +277,7 @@ reservation_slot(const file_action_reservation reservation, const std::size_t or
     return std::nullopt;
 }
 
-/// Compare an observed inode with the authority captured for an action.
+/// Check that a file has the saved device and inode numbers.
 [[nodiscard]] inline bool same_inode(const struct stat& observed,
                                      const pending_file_action& action) noexcept {
     return action.inode_valid && observed.st_dev == action.expected_device &&
@@ -301,8 +294,10 @@ enum class callback_failure_injection : std::uint8_t {
 inline callback_failure_injection g_callback_failure_injection = callback_failure_injection::none;
 #endif
 
-/// The sole callback filesystem mutation. It cannot allocate, log or raise.
-/// failures enter the fixed ring for later backend-thread reporting.
+/// Remove a file only, if it still matches the saved inode and allowed links.
+/// A temporary and final name may share the inode during publication. Cleanup
+/// checks ihat pair before unlinking. Failures go into the  diagnostic ring
+/// without allocating memory or raising an error from the callback.
 inline void unlink_identity_bound_noexcept(const std::uint16_t slot) noexcept {
     pending_file_action& action = g_queue_state.actions[slot];
     if (!action.armed || !action.inode_valid || action.path[0] == '\0') {
@@ -395,7 +390,7 @@ inline void finish_top_transaction(const bool committed) noexcept {
     }
 }
 
-/// Reparent committed actions or discard aborted subtransaction actions.
+/// Move committed savepoint actions to the parent, or run rollback cleanup.
 inline void finish_subtransaction(const SubTransactionId subxid,
                                   const bool committed,
                                   const SubTransactionId parent_subxid) noexcept {
@@ -416,7 +411,7 @@ inline void finish_subtransaction(const SubTransactionId subxid,
     }
 }
 
-/// Report whether PREPARE must be rejected for pending file work.
+/// Check whether pending file work prevents PREPARE TRANSACTION.
 [[nodiscard]] inline bool has_occupied_slot() noexcept {
     for (std::size_t slot = 0u; slot < k_pending_file_action_capacity; ++slot) {
         if (slot_is_occupied(slot))
@@ -425,7 +420,8 @@ inline void finish_subtransaction(const SubTransactionId subxid,
     return false;
 }
 
-/// Apply top-level transaction events without owning C++ state.
+/// Run file cleanup at transaction end and reject prepared transactions
+/// while file actions remain pending
 inline void xact_callback(const XactEvent event, void*) {
     switch (event) {
     case XACT_EVENT_COMMIT:
@@ -453,7 +449,7 @@ inline void xact_callback(const XactEvent event, void*) {
     }
 }
 
-/// Apply savepoint completion to actions owned by that subtransaction.
+/// Finish the file actions owned by a committed or aborted savepoint.
 inline void subxact_callback(const SubXactEvent event,
                              const SubTransactionId subxid,
                              const SubTransactionId parent_subxid,
@@ -471,7 +467,7 @@ inline void subxact_callback(const SubXactEvent event,
     }
 }
 
-/// Install each backend-local callback at most once.
+/// Register transaction and savepoint callbacks once per backend.
 inline void install_callbacks() {
     if (!g_queue_state.xact_callback_installed) {
         bioseq::postgres::support::invoke_pg_as_cpp(
@@ -485,7 +481,7 @@ inline void install_callbacks() {
     }
 }
 
-/// Format into a fixed buffer and reject truncation.
+/// Format a null-terminated string, returning false if it would be truncated.
 template <std::size_t p_buffer_bytes, typename... p_argument_types>
 [[nodiscard]] inline bool format_fixed(std::array<char, p_buffer_bytes>& destination,
                                        fmt::format_string<p_argument_types...> format,
@@ -502,7 +498,7 @@ template <std::size_t p_buffer_bytes, typename... p_argument_types>
     return true;
 }
 
-/// Validate an absolute path without empty, dot, or parent components.
+/// Reject empty path components, '.' and '..', and a trailing slash.
 [[nodiscard]] inline bool path_has_only_canonical_components(const std::string_view path) noexcept {
     if (path.empty() || path.back() == '/')
         return false;
@@ -564,7 +560,7 @@ template <std::size_t p_buffer_bytes, typename... p_argument_types>
     return created;
 }
 
-/// Bind one reserved slot to an inode-checked transaction action.
+/// Schedule a reserved  slot to remove a path with the given inode.
 inline void arm_reserved_slot(const file_action_reservation reservation,
                               const std::size_t ordinal,
                               const file_action action,
@@ -601,7 +597,7 @@ inline void arm_reserved_slot(const file_action_reservation reservation,
     g_queue_state.slot_states[slot] = slot_state::armed;
 }
 
-/// Durably flush a trusted directory after publication changes.
+/// Flush directory changes to disk after creating or publishing files.
 inline void fsync_directory(const char* path) {
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
     if (fd < 0) {
@@ -620,7 +616,8 @@ inline void fsync_directory(const char* path) {
 
 } // namespace generation_file_action_detail
 
-/// Reserve the complete requested action set before any filesystem mutation.
+/// Reserve all cleanup slots before changing the filesystem.
+/// Fail without reserving any slots if the queue has too little room.
 [[nodiscard]] inline file_action_reservation
 reserve_file_actions(const std::size_t requested_count) {
     using namespace generation_file_action_detail;
@@ -638,8 +635,7 @@ reserve_file_actions(const std::size_t requested_count) {
             "generation file-action queue capacity exhausted before mutation");
     }
 
-    // After the complete preflight this pass cannot fail: it marks exactly
-    // the requested number without allocation or partial-return behavior.
+    // The capacity check guarantees enough slots for the whole reservation.
     const std::uint32_t reservation_id = next_unused_reservation_id();
     std::size_t reserved = 0u;
     for (std::size_t slot = 0u; slot < k_pending_file_action_capacity && reserved < requested_count;
@@ -659,7 +655,7 @@ reserve_file_actions(const std::size_t requested_count) {
     };
 }
 
-/// Reserve one bounded reaper batch under its smaller hard limit.
+/// Reserve cleanup slots for at most 64 files.
 [[nodiscard]] inline file_action_reservation
 reserve_reaper_file_actions(const std::size_t requested_count) {
     if (requested_count == 0u || requested_count > k_maximum_reaper_file_actions) {
@@ -681,7 +677,7 @@ release_unarmed_file_action_reservation(const file_action_reservation reservatio
     }
 }
 
-/// Close and remove unpublished temporary state without raising.
+/// Close an unfinished publication and remove its files without raising.
 inline void cancel_generation_file_publication_noexcept(
     pending_minimizer_generation_file_publication& publication) noexcept {
     using namespace generation_file_action_detail;
@@ -712,10 +708,9 @@ inline void cancel_generation_file_publication_noexcept(
         (void)CloseTransientFile(publication.fd);
         publication.fd = -1;
     }
-    // Before fstat supplies inode authority the O_EXCL name is still owned by
-    // this backend inside its private 0700 shard.  Remove that exact temp
-    // directly; after arming, the queue's inode-bound path is the sole
-    // deletion authority.
+    // Before the inode is recorded, remove the temporary name created with
+    // O_EXCL in our private directory. Once  an actipn is armed, use its
+    // inode checks for cleanup.
     if (!has_armed_action && publication.temporary_path[0] != '\0') {
         (void)unlink(publication.temporary_path.data());
     }
@@ -743,7 +738,8 @@ inline pending_minimizer_generation_file_publication::
     cancel_generation_file_publication_noexcept(*this);
 }
 
-/// Resolve and validate canonical database-local paths for a generation.
+/// Build generation file paths from database and relation identifiers.
+/// Check that each path stays directly inside its expected directory.
 [[nodiscard]] inline resolved_minimizer_generation_file_path
 resolve_generation_file_path(const minimizer_generation_file_identity& identity) {
     using namespace generation_file_action_detail;
@@ -817,8 +813,9 @@ resolve_generation_file_path(const minimizer_generation_file_identity& identity)
     return resolved;
 }
 
-/// Reserve temp/final before the first filesystem mutation and then create a
-/// cryptographically unique strict mode-0600 O_EXCL temp.
+/// Create a private temporary file after reserving both cleanup slots.
+/// Use a random, name and exclusive creation to avoid replacing an existing file.
+/// Record its inode so rollback can safely remove it.
 [[nodiscard]] inline pending_minimizer_generation_file_publication
 begin_generation_file_publication(const minimizer_generation_file_identity& identity) {
     using namespace generation_file_action_detail;
@@ -906,9 +903,9 @@ begin_generation_file_publication(const minimizer_generation_file_identity& iden
     return publication;
 }
 
-/// Freeze, link without replacement, validate and directory-fsync a completed
-/// header-last image.  The caller finishes payload/header writes and image
-/// validation before entering this function.
+/// Make a completed generation file read-only and  publish its final name
+/// The caller must finish and validate the image first. This function syncs
+/// the file and directory, then leaves rollback cleanup in the transaction queue.
 inline void publish_generation_file(pending_minimizer_generation_file_publication& publication) {
     using namespace generation_file_action_detail;
     if (publication.fd < 0 || publication.temporary_slot == k_no_paired_file_action ||
@@ -939,14 +936,13 @@ inline void publish_generation_file(pending_minimizer_generation_file_publicatio
                AT_FDCWD,
                publication.final_path.data(),
                0) != 0) {
-        // EEXIST is intentionally not special: no existing final is ever
-        // overwritten, renamed aside or pre-unlinked.
+        // An existing final name makes publication fail.
         minimizer_generation_storage_error_as_cpp(fmt::format(
             "generation immutable final link failed without replacement: errno={}", errno));
     }
     if (unlink(publication.temporary_path.data()) != 0) {
-        // Both abort actions stay armed and paired.  Callback cleanup accepts
-        // precisely this two-link window and refuses every unrelated link.
+        // Keep both rollback actions armed so cleanup can check and remove
+        // the two names that now refer to this inode.
         minimizer_generation_storage_error_as_cpp(
             fmt::format("generation strict temp unlink failed: errno={}", errno));
     }
@@ -971,22 +967,21 @@ inline void publish_generation_file(pending_minimizer_generation_file_publicatio
     }
     publication.fd = -1;
     publication.temporary_path.fill('\0');
-    // The final abort action remains transaction-owned until commit/abort;
-    // the C++ publication guard must no longer cancel it on ordinary scope
-    // exit after the durable no-replace publication succeeds.
+    // Leave final-file cleanup to the transaction callback. The publication
+    // object can now go out  of scope without deleting the file.
     publication.published = true;
 }
 
-/// Bind one pre-reserved commit action to an existing exact final inode.  A
-/// reaper first reserves its whole <=64-file batch, then calls this only after
-/// its descriptor/head horizon checks and before descriptor deletion.
+/// Schedule an existing generation file for deletion on commit.
+/// The caller must reserve the ceanup batch and check that the generation
+/// can be removed before deleting its catalog descriptor. Save the current
+/// inode so the callback can detect a replaced file.
 inline void
 arm_generation_file_unlink_on_commit(const file_action_reservation reservation,
                                      const std::size_t ordinal,
                                      const minimizer_generation_file_identity& identity) {
     using namespace generation_file_action_detail;
-    // Never accept caller-assembled path authority.  Recompute the canonical
-    // database/shard/final path from the persisted physical identity.
+    // Derive the path from the generation identifiers.
     const resolved_minimizer_generation_file_path resolved = resolve_generation_file_path(identity);
     if (!path_has_only_canonical_components(resolved.final_path.data()) ||
         !exact_child_path(resolved.database_directory.data(), resolved.bioseq_directory.data()) ||
@@ -1010,7 +1005,7 @@ arm_generation_file_unlink_on_commit(const file_action_reservation reservation,
                       k_no_paired_file_action);
 }
 
-/// Copy callback diagnostics for backend-thread inspection.
+/// Copy recent cleanup diagnostics for inspection by the backend.
 [[nodiscard]] inline file_action_diagnostics_snapshot
 generation_file_action_diagnostics() noexcept {
     return file_action_diagnostics_snapshot{
@@ -1020,7 +1015,7 @@ generation_file_action_diagnostics() noexcept {
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// Test-only counts for each externally observable queue state.
+/// Counts of reserved slots and pending rollback or commit actions for tests.
 struct file_action_queue_test_snapshot {
     std::size_t reserved = 0u;
     std::size_t armed_abort = 0u;
@@ -1046,13 +1041,13 @@ generation_file_action_queue_test_snapshot() noexcept {
     return snapshot;
 }
 
-/// Arm one test-only callback failure for the next matching operation.
+/// Inject one failure into the  next matching file cleanup step.
 inline void arm_generation_file_callback_failure(
     const generation_file_action_detail::callback_failure_injection injection) noexcept {
     generation_file_action_detail::g_callback_failure_injection = injection;
 }
 
-/// Reset test-visible queue state while retaining callback registration.
+/// Reset test-visible queue state while keeping callback registration.
 inline void reset_generation_file_action_queue_for_test() noexcept {
     using namespace generation_file_action_detail;
     const bool xact_callback_installed = g_queue_state.xact_callback_installed;

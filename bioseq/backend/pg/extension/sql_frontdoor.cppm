@@ -1,7 +1,9 @@
 /**
  * @file sql_frontdoor.cppm
- * @brief Implements SQL rendezvous, projection, runtime-status,
- * symbol-count, and planner-support routines.
+ * @brief SQL search markers, alignment-result helpers and planner support
+ *
+ * Bioseq custom scans replace search and result calls during planning.
+ * This file also handles direct symbol counts and GPU status queries.
  */
 module;
 
@@ -93,7 +95,9 @@ template <class p_result>
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Requests similarity search with default aligner options.
+ * @brief Mark a similarity search for the planner, using default options.
+ * A Bioseq custom scan must execute the search. Calling tis function as
+ * an  ordinary Boolean predicate raises an error.
  * @ingroup bioseq_sql_public_api
  */
 bool mmsearch(
@@ -105,7 +109,9 @@ bool mmsearch(
 }
 
 /**
- * @brief Similarity-search predicate with explicit per-call aligner options.
+ * @brief Mark a similarity search with per-call aligner options.
+ * Return SQL NULL for a null target or query. Otherwise require the planner
+ * to replace this call with a Bioseq custom scan.
  * @ingroup bioseq_sql_public_api
  */
 std::optional<bool> mmsearch(
@@ -138,7 +144,8 @@ std::int64_t query_len(
 }
 
 /**
- * @brief Start offset of the current mmsearch alignment on the query sequence.
+ * @brief Query start offset supplied by the owning mmsearch scan.
+ * Return -1 if the planner leaves this placeholder as a direct call.
  * @ingroup bioseq_sql_public_api
  */
 std::int64_t query_start(
@@ -148,7 +155,8 @@ std::int64_t query_start(
 }
 
 /**
- * @brief End offset of the current mmsearch alignment on the query sequence.
+ * @brief Query end offset supplied by the owning mmsearch scan.
+ * Return -1 if this placeholder  is called directly.
  * @ingroup bioseq_sql_public_api
  */
 std::int64_t query_end(
@@ -164,7 +172,8 @@ std::int64_t target_len(
 }
 
 /**
- * @brief Start offset of the current mmsearch alignment on the stored target sequence.
+ * @brief Target start offset supplied by the owning mmsearch scan.
+ * Return -1 if this placeholder is called directly.
  * @ingroup bioseq_sql_public_api
  */
 std::int64_t target_start(
@@ -174,7 +183,8 @@ std::int64_t target_start(
 }
 
 /**
- * @brief End offset of the current mmsearch alignment on the stored target sequence.
+ * @brief Target end offset supplied by the owning mmsearch scan.
+ * Return -1 if this placeholder is called directly.
  * @ingroup bioseq_sql_public_api
  */
 std::int64_t target_end(
@@ -265,7 +275,8 @@ float divergence(
 }
 
 /**
- * @brief CIGAR string describing the current mmsearch alignment.
+ * @brief CIGAR operations supplied by the owning mmsearch scan.
+ * A direct call returns !UNEXPECTED! to expose a missing planner rewrite.
  * @ingroup bioseq_sql_public_api
  */
 std::string cigar(
@@ -297,10 +308,11 @@ vulkan_runtime_status() {
 }
 
 /**
- * @brief Number of occurrences of a given symbol within a bioseq.seq value.
+ * @brief Count occurrences of one alphabet symbol in a sequence.
  *
- * Stored locator values are resolved by the Bioseq scan path, which can
- * access their owning relation and persisted symbol-count metadata.
+ * The symbol must be one byte and belong to the sequence alphabet This
+ * direct call handles in-memory values. Stored locators need  a Bioseq scan,
+ * which can read the sequence or use, its stored symbol-count index.
  *
  * @ingroup bioseq_sql_public_api
  */
@@ -383,7 +395,7 @@ std::int64_t symbol_count(
 
 namespace {
 
-/** Finds the first Var without rejecting other expression node kinds. */
+/** Store the frst column reference found while walking an expression. */
 struct first_var_finder final {
 	Var* found_var = nullptr;
 };
@@ -404,9 +416,9 @@ struct first_var_visitor final {
 };
 
 /**
- * Wraps a projection call in a PlaceHolderVar when joins or aggregates require
- * evaluation at its originating relation. Returns nullptr when no rewrite is
- * necessary or the expression contains no Var.
+ * Keep a projection beside its source relation when a query has joins or
+ * aggregates. Use the first column reference to build a PlaceHolderVar.
+ * Return nullptr if the request cannot be rewritten or has no column reference.
  */
 [[nodiscard]] Node* try_wrap_in_placeholder(
 		const SupportRequestSimplify* simplify_request)
@@ -455,7 +467,8 @@ struct first_var_visitor final {
 namespace bioseq::pg::sql_routines {
 
 /**
- * Assigns planner cost or projection placement for bioseq.symbol_count.
+ * Give direct symbol counting a high planner cost and keep its projection
+ * at the source relation in queries with joins or aggregates.
  */
 Datum bioseq_symbol_count_support(
         Datum request_datum) {
@@ -473,10 +486,8 @@ Datum bioseq_symbol_count_support(
 	}
 	if (SupportRequestSimplify* simplify_request =
 			try_cast_pg_node<SupportRequestSimplify>(request_node)) {
-		/*
-		 * Keep symbol_count at its originating relation when a join or
-		 * aggregate would otherwise duplicate evaluation of the projection.
-		 */
+		/* Evaluate symbol_count at  its source relation so joins or aggregates
+		 * do not duplicate the projection work. */
 		Node* const placeholder = try_wrap_in_placeholder(simplify_request);
 		if (placeholder != nullptr) {
 			return PointerGetDatum(placeholder);
@@ -486,7 +497,9 @@ Datum bioseq_symbol_count_support(
 }
 
 /**
- * Supplies the scalar mmsearch fallback cost to PostgreSQL's planner.
+ * Give an ordinary mmsearch call a high planner cost so PostgreSQL prefers
+ * a Bioseq custom scan that performs the search. Direct execution of the
+ * SQL marker raises an error.
  */
 Datum mmsearch_support(
         Datum request_datum) {
@@ -520,9 +533,9 @@ Datum mmsearch_support(
 }
 
 /**
- * Keeps alignment projections at their originating scan relation across
- * joins and aggregates. Returns NULL when PostgreSQL should retain the
- * original FuncExpr.
+ * Keep alignment-result projections at the scan that supplies their values
+ * when the query contains joins or aggregates. Return NULL if PostgreSQL
+ * should keep the original function expression.
  */
 Datum bioseq_placeholder_support(
         Datum request_datum) {

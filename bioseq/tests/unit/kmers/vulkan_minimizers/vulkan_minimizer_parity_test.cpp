@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_parity_test.cpp
- * @brief Vulkan minimizer scalar parity and decline tests.
+ * @brief Compare Vulkan and, scalar minimizers, and check reasons for rejected requests.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -89,7 +89,7 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
         k,
         w);
     const auto gpu = triples(gpu_values);
-    // No emitted minimizer's k-mer may span an N (decode the same range).
+    // Check that every emitted k-mer avoids N in the decoded input.
     const auto decoded = compact_sequence_range<seq_type>(dna5_with_n).to_string();
     std::vector<std::size_t> n_positions;
     for (std::size_t i = 0; i < decoded.size(); ++i)
@@ -169,10 +169,8 @@ TEST_CASE("vulkan minimizer: generic alphabet functional superset",
 
 TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
           "[component:bioseq][layer:unit][feature:seeding]") {
-    // The pre-dispatch guards (k > 32, k*step_bits > 64, w > 256) return
-    // std::nullopt so selected Vulkan callers can raise a hard decline before
-    // dispatch. k=40 trips the k>32
-    // guard for dna4 (step_bits=2).
+    // Unsupported k-mer and window sizes must return a reason before GPU work.
+    // This test  can run without a Vulkan device
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(dna4_fixture);
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(seq);

@@ -1,12 +1,13 @@
 /**
  * @file radix_sort.cppm
- * @brief In-place most-significant-byte radix sorting for unsigned keys.
+ * @brief Sorts unsigned keys in place, starting  with their hghest byte.
  *
- * The algorithm uses eight bits per pass and a 256-entry stack bucket table.
- * Each non-empty bucket is permuted in place by following its destination
- * cycle. Small ranges use insertion sort to avoid bucket-table overhead.
+ * Each pass groups values by one key byte, then sorts each group by the next
+ * byte. Moving values directly between their destination groups avoids an
+ * extra array. Small groups use insertion sort.
  *
- * Recursion consumes one key byte per level, bounding depth by the key width.
+ * The bucket table has 256 entries on the stack. Recursion stops after the
+ * lowest key byte.
  */
 module;
 
@@ -30,13 +31,8 @@ inline constexpr std::size_t radix_sort_bits_per_pass = 8;
 namespace bioseq::sorting::radix_sort_detail {
 
 /**
- * @brief Sort a small non-empty range by its extracted unsigned key.
- *
- * @tparam p_value_type Element type stored in the range.
- * @tparam p_key_function Callable returning an unsigned key for an element.
- * @param[in,out] begin First element in the range.
- * @param[in] end One past the final element in the range.
- * @param[in] key Key extractor invoked at each comparison site.
+ * @brief Sorts a small range by moving each value into its sorted, position.
+ * @param[in] key Returns an unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
  */
 template <typename p_value_type, typename p_key_function>
@@ -62,18 +58,15 @@ void insertion_sort(
 }
 
 /**
- * @brief Partition a range by one key byte and recursively sort each bucket.
- *
- * @tparam p_value_type Element type stored in the range.
- * @tparam p_key_function Callable returning an unsigned key for an element.
- * @param[in,out] begin First element in the range.
- * @param[in] end One past the final element in the range.
- * @param[in] bits_per_pass Number of key bits assigned to the bucket index.
- * @param[in] shift Least-significant bit of the current key digit.
- * @param[in] key Key extractor invoked at each radix-extraction site.
+ * @brief Groups values by the selected key bits, then sorts the lower bits.
+ * @param[in] bits_per_pass Number of key bits used for each bucket.
+ * @param[in] shift Lowest bit of the current group of key bits.
+ * @param[in] key Returns an  unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
- * @pre `bits_per_pass` is positive and no greater than
- * `radix_sort_bits_per_pass`.
+ * @pre `bits_per_pass` is positive and at most `radix_sort_bits_per_pass`.
+ *
+ * Bucket counts determine each destination range. Values are moved in cycles
+ * until each range contains its own bucket, then each range is sorted further.
  */
 template <typename p_value_type, typename p_key_function>
 void sort_suffix(
@@ -96,7 +89,7 @@ void sort_suffix(
     const key_type bucket_mask =
         static_cast<key_type>(bucket_count) - 1;
 
-    // Only the active bucket prefix is initialized and visited for this pass.
+    // This pass uses only the first `bucket_count` entries.
     std::array<bucket, std::size_t{1} << radix_sort_bits_per_pass> buckets;
     bucket* const buckets_begin = buckets.data();
     bucket* const buckets_end = buckets_begin + bucket_count;
@@ -184,17 +177,12 @@ void sort_suffix(
 export namespace bioseq::sorting {
 
 /**
- * @brief Sorts a half-open range in place by an unsigned extracted key.
+ * @brief Sorts `[begin, end)` in place by an unsigned key.
+ * @param[in] key Extracts the sorting key from an element.
+ * @pre The range is valid, mutable, and non-empty.
  *
- * Equal-key ordering is unspecified. The key function is invoked inline at
- * each comparison and radix extraction site.
- *
- * @tparam p_value_type Element type stored in the range.
- * @tparam p_key_function Callable returning an unsigned key for an element.
- * @param[in,out] begin First element in the range.
- * @param[in] end One past the final element in the range.
- * @param[in] key Key extractor invoked at each comparison and radix site.
- * @pre `[begin, end)` is a valid, non-empty mutable range.
+ * The order of equal keys is unspecified. Keys are read during sorting, so
+ * the extractor must return a consistent value for each element
  */
 template <typename p_value_type, typename p_key_function>
 void radix_sort(
@@ -221,16 +209,13 @@ void radix_sort(
 }
 
 /**
- * @brief Sorts a range whose more-significant key bytes are already partitioned.
- *
- * @tparam p_shift Least-significant bit of the next key byte to consume.
- * @tparam p_value_type Element type stored in the range.
- * @tparam p_key_function Callable returning an unsigned key for an element.
- * @param[in,out] begin First element in the range.
- * @param[in] end One past the final element in the range.
- * @param[in] key Key extractor invoked at each comparison and radix site.
+ * @brief Sorts a range starting at a selected key byte.
+ * @tparam p_shift Lowest bit of the next byte to sort. Must  be a valid byte bousdary.
+ * @param[in] key Extracts an unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
- * @pre Every key byte above `p_shift` is equal throughout the range.
+ * @pre All key bytes above the selected byte are equal throughout the range.
+ *
+ * Use this after higher key bytes have already placed the values in one bucket.
  */
 template <int p_shift, typename p_value_type, typename p_key_function>
 void radix_sort_from_shift(

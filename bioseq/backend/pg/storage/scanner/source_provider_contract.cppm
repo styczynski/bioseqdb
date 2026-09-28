@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_provider_contract.cppm
- * @brief Exact PostgreSQL source-provider ownership and layout contract.
+ * @brief Shared state that keeps PostgreSQL sequence readers alive.
  */
 module;
 
@@ -31,15 +31,15 @@ import bioseq.sequences.compact_sequence_typmod;
 
 export namespace bioseq::storage {
 
-/// Ownership boundary that permits reclaiming unused source domains.
+/// Events at which unused sequence read resources can be released.
 enum class pg_sequence_source_sweep_boundary : std::uint8_t {
     /// Base provider has ended.
     provider_end,
-    /// Upper executor owner released a route lease.
+    /// A parent plan node released its reference to the source registry.
     upper_lease_end,
-    /// Executor rescan may reuse an unchanged binding.
+    /// A rescan can reuse readers for the same stored data.
     rescan,
-    /// Standalone index owner has ended.
+    /// A standalone index operation has ended.
     standalone_end,
     /// Top-level transaction cleanup is running.
     transaction_end,
@@ -47,11 +47,11 @@ enum class pg_sequence_source_sweep_boundary : std::uint8_t {
     subtransaction_end,
 };
 
-/// Executor owner that created a source provider.
+/// Operation that owns a source provider.
 enum class pg_sequence_source_provider_kind : std::uint8_t {
-    /// Provider follows a table scan lifecycle.
+    /// Provider belongs to a table scan.
     scan,
-    /// Provider follows standalone index administration.
+    /// Provider belongs to an index administration operation
     standalone_index,
 };
 
@@ -60,63 +60,65 @@ struct pg_sequence_source_domain;
 }
 
 /**
- * Transaction-owned registry for one verified relation/storage/snapshot flow.
- * It contains no Relation pointer and is never shared through DSM.
+ * Track  sequence read resources for one table, storage version and snapshot.
+ * The registry stores table identifiers without holding a Relation pointer.
+ * It belongs to this backend and is never sent through parllel shared memory.
  */
 struct pg_sequence_source_registry {
     /// Backend thread on which every registry operation must run.
     pg_sequence_backend_thread_token backend_thread;
     /// User-visible parent relation OID.
     Oid user_relid = InvalidOid;
-    /// Database component of the parent physical identity.
+    /// Parent database OID.
     Oid database_oid = InvalidOid;
-    /// Tablespace component of the parent physical identity.
+    /// Parent tablespace OID.
     Oid tablespace_oid = InvalidOid;
-    /// File component of the parent physical identity.
+    /// Parent table, file number.
     Oid main_relfilenode = InvalidOid;
-    /// Storage-generation identity authenticated when the provider is created.
+    /// Storage ID read from the parent table when the provider opens.
     std::uint64_t main_storage_id = 0u;
-    /* Bioseq's metapage storage id is the immutable binding generation.  Keep
-     * the named copy in the registry key so a rel/attno pair can never reuse a
-     * domain after its physical binding has been replaced. */
+    /* Copy of the table's storage ID used to match read domains. A replaced
+     * table must get new readers even if its relation and column IDs match. */
     std::uint64_t binding_generation = 0u;
-    /// Borrowed registered MVCC snapshot governing source-catalog lookup.
+    /// Borrowed registered MVCC snapshot used to look up  source catalog rows.
     Snapshot authoritative_snapshot = nullptr;
     /// Subtransaction that created this registry.
     SubTransactionId creating_subid = InvalidSubTransactionId;
-    /// Backend-local generation authenticating leases.
+    /// Backend-local number used to reject stale registry references.
     std::uint64_t generation = 0u;
-    /// Registry-owned linked list of source domains.
+    /// Read domains owned by this registry.
     sequence_source_detail::pg_sequence_source_domain* domains = nullptr;
     /// Link in the backend-local registry list.
     pg_sequence_source_registry* next = nullptr;
-    /// Number of provider and upper-owner lease tokens.
+    /// Number of references held by the provider and parent plan nodes.
     std::uint32_t active_leases = 0u;
-    /// Whether authenticated leases may resolve new source lookups.
+    /// Whether valid registry references may open sequence readers.
     bool accepting_lookups = false;
-    /// Whether the base provider has released its token.
+    /// Whether the original provider has closed.
     bool provider_closed = false;
-    /// Sticky lease-accounting failure.
+    /// A reference-count error occurred. Further lookups are rejected.
     bool lease_fault = false;
-    /// Whether top-level transaction cleanup detached the registry.
+    /// Whether transaction cleanup detached this registry.
     bool xact_ended = false;
 };
 
-/** A checked upper/provider retain on a registry. */
+/** A counted reference that keeps a source registry alive. */
 struct pg_sequence_source_registry_lease {
-    /// Borrowed registry control while `owned` is true.
+    /// Referenced registry while `owned` is true.
     pg_sequence_source_registry* registry = nullptr;
     /// Generation that must match the current registry generation.
     std::uint64_t provider_generation = 0u;
-    /// Whether this object owns one active-lease count.
+    /// Whether this object accounts for one  active registry reference.
     bool owned = false;
 };
 
 namespace sequence_source_detail {
 
-/// Validate lease ownership, generation, lookup state and backend thread.
-/// @param lease Candidate provider or upper-owner lease.
-/// @return Whether this thread may use it for source lookup.
+/// Check that this reference still permits lookups on the current backend thread.
+/// Reject a missing reference, a stale generation or a registry with failed
+/// refevence accounting
+/// @param lease Reference to check.
+/// @return Whether the current backend thread may use it for source lookups.
 [[nodiscard]] inline bool registry_lease_is_live(
         const pg_sequence_source_registry_lease& lease) noexcept {
     return lease.owned && lease.registry != nullptr
@@ -128,41 +130,40 @@ namespace sequence_source_detail {
 
 } // namespace sequence_source_detail
 
-/** Provider control owned by a base scan or standalone index owner. */
+/** Source registry reference owned by a table scan or index operation. */
 struct pg_sequence_source_provider {
-    /// Provider-owned initial registry lease.
+    /// Initial registry reference held by this provider.
     pg_sequence_source_registry_lease lease{};
     /// Link in the backend-local provider list.
     pg_sequence_source_provider* next = nullptr;
-    /// Executor lifecycle that owns this provider.
+    /// Operation responsible  for closing this provider.
     pg_sequence_source_provider_kind kind =
         pg_sequence_source_provider_kind::scan;
     /// Whether provider operations may still use `lease`.
     bool open = false;
 };
 
-/** One source-provider route retained by an upper executor owner. */
+/** Reference through which a parent plan node can read a sequence source. */
 struct pg_sequence_source_route {
-    /// Parent relation axis of the route key.
+    /// Parent table OID used to find this route.
     Oid relation_oid = InvalidOid;
-    /// Independently retained registry lease.
+    /// Registry reference held by this route.
     pg_sequence_source_registry_lease lease{};
 };
 
 static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
 
-/** Query-lifetime routing for joins, appends and nested upper wrappers.
- *
- * A PostgreSQL self join has independent registries even when every binding
- * names the same physical relation. The provider generation is therefore the
- * route key. `relation_oid` supplies the physical-relation axis. Two routes stay inline
- * for the common binary-join case. Larger legal plans grow in the executor's
- * query MemoryContext, before any new lease is retained.
+/**
+ * Sequence sources held by joins, appends and other parent plan nodes.
+ * Self joins need separate sources even when both sides read the same table,
+ * so routes identify the, provider generation as well as the table OID.
+ * Two routes fit in the object. Additional routes use the query memory context.
+ * Grow that storage  before acquiring another registry reference.
  */
 struct pg_sequence_source_route_set {
-    /// Inline storage for the common one- or two-route plan.
+    /// Space for up to two routes ithout a separate allocation.
     std::array<pg_sequence_source_route, 2u> inline_routes{};
-    /// Memory-context-owned storage used after inline capacity is exceeded.
+    /// Additional route storage allocated in the query memory context.
     pg_sequence_source_route* dynamic_routes = nullptr;
     /// Number of entries available in `dynamic_routes`.
     std::size_t dynamic_capacity = 0u;
@@ -174,7 +175,7 @@ struct pg_sequence_source_route_set {
 
 namespace sequence_source_detail {
 
-/// Source-domain construction and cleanup state.
+/// Whether a read domain is being created, used or cleaned up.
 enum class domain_lifecycle : std::uint8_t {
     constructing,
     live,
@@ -184,7 +185,7 @@ enum class domain_lifecycle : std::uint8_t {
     released,
 };
 
-/// ResourceOwner release stages already completed for one domain.
+/// ResourceOwner cleanup stages recorded for a domain.
 enum class owner_release_stage_bits : std::uint8_t {
     none = 0u,
     before_locks = 1u,
@@ -192,52 +193,51 @@ enum class owner_release_stage_bits : std::uint8_t {
     after_locks = 4u,
 };
 
-/// Convert one release stage into its stored bit mask.
-/// @param stage ResourceOwner release stage.
-/// @return Underlying single-bit mask.
+/// @param stage ResourceOwner cleanup stage.
+/// @return Bit mask for the stage, or zero for `none`.
 [[nodiscard]] constexpr std::uint8_t stage_bit(
         owner_release_stage_bits stage) noexcept {
     return static_cast<std::uint8_t>(stage);
 }
 
-/// Transaction-owned source domain with a registered snapshot, read cache and
-/// staged ResourceOwner cleanup state.
+/// Shared read resources for one sequence column and packed type
+/// Keeps a snapshot registered and owns fragment readers until cleanup.
 struct pg_sequence_source_domain {
     /// Backend thread on which reads and cleanup must run.
     pg_sequence_backend_thread_token backend_thread;
-    /// Borrowed registry while the registry token is owned.
+    /// Registry that holds the initial reference  to this domain.
     pg_sequence_source_registry* registry = nullptr;
     /// Link in the owning registry's domain list.
     pg_sequence_source_domain* next = nullptr;
-    /// Transaction-child context owning scanners and read-cache allocation.
+    /// Context below TopTransactionContext for scanner and cache memory.
     MemoryContext payload_context = nullptr;
-    /// Transaction-child owner for snapshot, relation, and lock resources.
+    /// Child of the transaction ResourceOwner for snapshots, relations and locks.
     ResourceOwner resource_owner = nullptr;
     /// MVCC snapshot registered on `resource_owner`.
     Snapshot registered_snapshot = nullptr;
     /// Read-side fragment cache owned by `payload_context` and `resource_owner`.
     seq_caches* read_caches = nullptr;
-    /// One-based parent sequence attribute number.
+    /// One-based sequence column number in the parent table.
     AttrNumber column_attno = InvalidAttrNumber;
     /// Persisted alphabet and packed-unit width.
     compact_sequence_stdc_type_params stored_type{};
-    /// Physical storage generation authenticated by the registry.
+    /// Parent storage ID copied from the registry.
     std::uint64_t binding_generation = 0u;
     /// Subtransaction that created this domain.
     SubTransactionId creating_subid = InvalidSubTransactionId;
-    /// Backend-local identity generation.
+    /// Backend-local number distinguishing this domain from earlier allocations.
     std::uint64_t generation = 0u;
-    /// Registry token plus retained expanded-value and scanner references.
+    /// References held by the registry, expanded sequence values and scanners.
     std::uint32_t refcount = 0u;
-    /// Construction and cleanup lifecycle.
+    /// Current state of domain creation, use or cleanup.
     domain_lifecycle lifecycle = domain_lifecycle::constructing;
     /// ResourceOwner release phases already attempted.
     std::uint8_t released_owner_stages = 0u;
-    /// Whether the registry owns one reference count.
+    /// Whether the registry holds one reference to this domain.
     bool registry_token_owned = false;
-    /// Hint that only the registry token remains.
+    /// The registry may now hold the  only remaining refedence.
     bool reclaimable_hint = false;
-    /// Sticky reference-count failure that prevents further reads.
+    /// A reference-count error occurred. Further reads are rejected.
     bool refcount_fault = false;
 };
 

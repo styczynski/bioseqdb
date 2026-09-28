@@ -1,10 +1,10 @@
 /**
  * @file load_runtime.cppm
- * @brief Runs and cleans up the PostgreSQL load lifecycle in resource-safe order.
+ * @brief Set up sequence loading, finish writes and relese the  load resources.
  */
 module;
-// Highway and PostgreSQL declarations precede the module unit because this
-// owner imports Highway-bearing module graphs.
+// Include Highway and PostgreSQL headers before the named module declaration.
+// Imported sequence modules also depend on these declarations.
 #include <bioseq/pg_compat.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
@@ -30,7 +30,7 @@ extern "C" {
 #include "access/relation.h"     // index_open / index_close
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
-#include "catalog/namespace.h"   // (parity w/ sample_table_udf; relid arrives as regclass)
+#include "catalog/namespace.h"
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
@@ -42,16 +42,16 @@ extern "C" {
 #include "utils/lsyscache.h"     // getTypeInputInfo, get_typtype, getBaseType
 #include "utils/rel.h"           // RelationGetDescr
 #include "utils/resowner.h"      // CurrentResourceOwner, TopTransactionResourceOwner
-#include "utils/snapmgr.h" // PushActiveSnapshot/PopActiveSnapshot/GetTransactionSnapshot, ActiveSnapshotSet
+#include "utils/snapmgr.h" // Snapshot stack operations.
 #include "utils/typcache.h" // lookup_rowtype_tupdesc
 
 #include "fmgr.h"
 #include "rewrite/rewriteHandler.h" // build_column_default
 }
-// flush_relation_write_state declarations
+
 export module bioseq.postgres.storage.io:load_runtime;
 
-import bioseq.common.logging; // bioseq_log<logging_level::debug>(bioseq::settings::diagnostics::logging::enabled)
+import bioseq.common.logging; // Load diagnostics.
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
@@ -62,25 +62,22 @@ import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
 import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
 import bioseq.common.templating.value_sequence;
-import bioseq.sequences;                       // compact_sequence_stdc_type_params::decode,
-                                               //   dispatch_storage_unit_byte_width, traits
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, pgseq_supported_alphabets
-import bioseq.postgres.storage.manager; // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
-                                        //   read_max_sub_table_cap_bytes,
-//   k_sequence_fragment_storage_units, sequence_stream_writer,
-//   flush_seq_cache_write_states, sequence_locator
-import bioseq.postgres.table.io; // write_column_row, get_column_write_per_tuple_context
+import bioseq.sequences;                       // Sequence alphabets and packed storage types.
+
+import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and supported alphabets.
+import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
+
+
+import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
-import bioseq.io.reader;                       // stream_sequences_file, packed_sequence_chunk,
-                                               //   sample_sequence_headers
+import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
+
 import bioseq.io.identifier_parser.formats;
-import bioseq.io.identifier_parser; // resolve_identifier_mapping, parse_and_route_header
+import bioseq.io.identifier_parser; // Map input header fields to destination columns.
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
-// initialize_column_write_state +
-// pop_relation_column_write_state
-// (PostgreSQL support already imported above: bioseq::postgres::support::find_primary_key_oid)
+
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
@@ -90,18 +87,17 @@ import :stream_dispatch;
 import :load_catalog;
 
 /**
- * @brief Tears down optional executor state for a streamed load.
+ * @brief Finish triggers and release the load's executor state.
  * @param[in,out] ctx Load context whose executor pointers are cleared.
- * @param[in] stable_context Caller-owned context that survives executor deletion.
- * @throws PostgreSQL ERROR when executor or trigger teardown fails.
+ * @param[in] stable_context Context that  remains alive after executor cleanup.
+ * @throws PostgreSQL ERROR if trigger or executor cleanup fails.
  */
 void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
     if (ctx.estate == nullptr) {
         return;
     }
-    // FreeExecutorState destroys the estate's executor contexts.  The checked
-    // PostgreSQL boundary restores the context that was current on entry, so it
-    // must enter from a caller-owned context that survives the deletion.
+    // FreeExecutorState deletes the executor memory contexts. Switch to a context
+    // that survives it so invoke_pg_as_cpp can restore a valid current context.
     MemoryContextSwitchTo(stable_context);
     bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { AfterTriggerEndQuery(ctx.estate); });
     bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { ExecCloseResultRelations(ctx.estate); });
@@ -116,28 +112,27 @@ void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
 }
 
 /**
- * @brief Releases invocation-owned executor, slot, and parent-relation state.
+ * @brief Release the executor, tuple slot and parent table reference for a load
  *
- * The parent relation was opened under `RowExclusiveLock`, but this cleanup
- * closes it with `NoLock` so the transaction retains that lock until end.
+ * The transaction keeps the parent table's RowExclusiveLock until it ends.
+ * Finish the write states separately before calling this function on success.
  *
- * @param[in,out] ctx Load context to make inert.
- * @param[in] commit Whether the load completed successfully.
- * @param[in] stable_context Caller-owned context used during cleanup.
- * @throws PostgreSQL ERROR when executor, slot, or relation cleanup fails.
+ * @param[in,out] ctx Load resources to  release.
+ * @param[in] commit Unused completion flg.
+ * @param[in] stable_context Context used while releasing executor resources.
+ * @throws PostgreSQL ERROR if resource cleanup fails.
  */
 void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_context) {
     MemoryContextSwitchTo(stable_context);
-    // Release the per-load executor state before
-    // closing the parent relation. Idempotent (no-op if already torn down).
+    // Release the executor before closing the parent table. Repeated calls do nothing
+    // once the executor pointer has been cleared.
     teardown_load_executor(ctx, stable_context);
     if (ctx.slot != nullptr) {
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&ctx] { ExecDropSingleTupleTableSlot(ctx.slot); });
         ctx.slot = nullptr;
     }
-    // Write-state teardown is explicit in finish_load_write_states(). This
-    // cleanup owns only the slot and parent relation.
+    // finish_load_write_states() handles write-state cleanup separately.
     (void)commit;
     ctx.caches = nullptr;
     const ResourceOwner saved = CurrentResourceOwner;
@@ -153,20 +148,17 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
 }
 
 /**
- * @brief Owns the complete streamed-load lifecycle and converges cleanup.
- *
- * The parent table remains protected by `RowExclusiveLock` through the
- * transaction. Fragment writes are flushed before policy-driven index rebuilds,
- * and cleanup preserves the initiating exception if a secondary close fails.
- *
- * @param[in] relid Target table OID.
- * @param[in] path Input path borrowed for the duration of the call.
- * @param[in] kind Detected FASTA or FASTQ source kind.
- * @param[in] requested_fmt Header parser selected by the SQL caller.
- * @param[in] user_maps Parsed-column mappings borrowed for the load.
- * @return Number of complete records inserted.
- * @throws PostgreSQL ERROR when relation setup, parsing, persistence, index
- * maintenance, or cleanup fails.
+ * @brief Load sequence records and finish their writes.
+ * The target table keeps RowExclusiveLock until transaction end. Finish parent
+ * and, fragment writes before rebuilding indexes configured for update  on insert.
+ * Cleanup preserves the original failure.
+ * @param[in] relid Target OID.
+ * @param[in] path Borrowed input path.
+ * @param[in] kind Detected file kind.
+ * @param[in] requested_fmt Header parser.
+ * @param[in] user_maps Borrowed header-to-column mappings.
+ * @return Complete records inserted.
+ * @throws postgres_error If setup, parsing, writing, indexing or cleanup fails.
  */
 [[nodiscard]] std::int64_t run_load(Oid relid,
                                     const char* path,
@@ -180,10 +172,9 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
     std::exception_ptr failure;
 
     try {
-        // Open the parent under TopTransactionResourceOwner, then restore the
-        // caller's (executor/Portal) owner for the stream itself so the slot +
-        // tuple descriptors stay owned by the Portal. Fragment shards are
-        // similarly pinned by sequence_stream_writer.
+        // Keep the parent table reference with the transaction. Restore the caller
+        // resource owner before creating slots and tuple descriptors so those
+        // resources are released with the caller's executor.
         const ResourceOwner saved = CurrentResourceOwner;
         ctx.parent_rel = bioseq::postgres::support::invoke_pg_as_cpp([relid, saved] {
             CurrentResourceOwner = TopTransactionResourceOwner;

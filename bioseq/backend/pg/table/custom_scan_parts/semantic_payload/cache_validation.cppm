@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Validates and copies structural custom-scan cache payloads.
+ * @brief Checks custom-scan plan data and prepares it for cache comparison.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -45,7 +45,7 @@ export {
         return bioseq_column_scan_scan_methods();
     }
 
-    /** @brief Report whether a base scan contains a decodable semantic snapshot. */
+    /** @brief Checks that  a Bioseq base scan has readable saved execution settings. */
     bool bioseq_customscan_has_valid_semantic_payload(const CustomScan* scan) noexcept {
         if (scan == nullptr || scan->methods != bioseq_column_scan_scan_methods()) {
             return false;
@@ -54,7 +54,7 @@ export {
         return decode_bioseq_semantic_payload(scan->custom_private, &semantics);
     }
 
-    /** @brief Copy the cache-stable private payload for a valid base scan. */
+    /** @brief Copies base-scan private data for cache comparison and clears its temporary locator token. */
     List* bioseq_customscan_cache_private_payload(const CustomScan* scan) {
         if (!bioseq_customscan_has_valid_semantic_payload(scan)) {
             return NIL;
@@ -79,8 +79,8 @@ export {
             locator_tag = tag;
         }
         if (locator_tag != nullptr) {
-            /* This token pairs a locator child with its parent only inside one
-             * planned statement; the monotonic value is not result semantics. */
+            /* This token pairs the locator scan with its parent within one plan.
+             * Ignore its allocated number when comparing separately planned queries. */
             lfirst(list_nth_cell(locator_tag, 2)) = makeInteger(0);
         }
         return private_payload;
@@ -117,7 +117,7 @@ export {
         return true;
     }
 
-    /** @brief Validates the serialized match-owner descriptor at a private-data position. */
+    /** @brief Checks the, shape and saved owner ID of a serialized match descriptor. */
     [[nodiscard]] bool
     bioseq_batch_join_descriptor_is_structural(const CustomScan* scan,
                                                const int descriptor_index) noexcept {
@@ -157,7 +157,7 @@ export {
                    static_cast<Index>(intVal(list_nth(descriptor, k_match_owner_base_relid))));
     }
 
-    /** @brief Report whether a BatchJoin contains the complete serialized executor contract. */
+    /** @brief Checks that a BatchJoin plan has the structure supported by the cache provider. */
     bool bioseq_batch_join_customscan_has_valid_semantic_payload(const CustomScan* scan) noexcept {
         if (scan == nullptr || scan->methods != bioseq_batch_join_scan_methods() ||
             scan->scan.scanrelid != 0 || scan->scan.plan.plan_node_id < 0 ||
@@ -169,9 +169,8 @@ export {
             return false;
         }
         const int version = intVal(linitial(scan->custom_private));
-        /* V4 shares the PostgreSQL method table but has a different one-child
-         * executor ABI.  Exact source elision is deliberately V3-only until that
-         * ABI gets its own complete recipe contract. */
+        /* Per-row joins share this method table but use one child and a different
+         * private layout. The  cache provider currently accepts only two-child BatchJoin. */
         if (version != k_bioseq_batch_join_plan_version ||
             list_length(scan->custom_private) != k_bioseq_batch_join_private_fields ||
             list_length(scan->custom_plans) != 2 ||
@@ -229,15 +228,13 @@ export {
                IsA(incumbent_cost_floor, Const);
     }
 
-    /** @brief Copy result semantics while removing planner-only tokens and costs. */
+    /** @brief Copies result-related plan data while clearing temporar pairing tokens and planner costs. */
     List* bioseq_batch_join_cache_plan_payload(const CustomScan* scan) {
         if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
             return NIL;
         }
-        /* The token pairs one BatchJoin with its locator child only inside one
-         * planned statement.  It is deliberately monotonic and therefore cannot
-         * participate in a cross-planning cache identity.  Child plan semantics
-         * are covered independently by the exact-plan provider walk. */
+        /* Pairing tokens change between planning runs. Clear this token and
+         * let the cache provider compare each child plan separately. */
         auto* private_payload = static_cast<List*>(copyObject(scan->custom_private));
         lfirst(list_nth_cell(private_payload, k_batch_join_token)) = makeInteger(0);
         for (const int cost_index : {k_batch_join_honest_startup_cost,
@@ -253,7 +250,13 @@ export {
                           copyObject(scan->custom_scan_tlist));
     }
 
-    /** @brief Reconstruct the frozen execution parameters for a valid BatchJoin. */
+    /**
+     * @brief Builds the BatchJoin settings used in cache comparison.
+     *
+     * Starts with current session settings, applies the saved SQL options and enables
+     * result computations from finalized helper bindings. Returns NIL when the plan
+     * is unsupported, a binding is invalid or the index  policy differs from the plan
+     */
     List* bioseq_batch_join_cache_semantic_snapshot(const CustomScan* scan) {
         if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
             return NIL;
@@ -270,8 +273,8 @@ export {
             return NIL;
         }
 
-        /* Match BeginCustomScan exactly: expensive result columns are enabled by
-         * the finalized placeholder ABI, not by the post-setrefs target list. */
+        /* Use finalized helper bindings to enable CIGAR, edit distance,
+         * divergence and MAPQ, matching BeginCustomScan. */
         params.do_cigar = false;
         params.compute_divergence = false;
         params.compute_mapq = false;
@@ -330,13 +333,13 @@ export {
         });
     }
 
-    /** @brief Tracks whether an expression contains a Bioseq projection or mmsearch call. */
+    /** @brief Records whether a Bioseq match helper, mmsearch or symbol_count call was found. */
     struct projection_presence_probe {
         const bioseq_stub_oids* stub_oids;
         bool found;
     };
 
-    /** @brief Stops an expression walk after finding a scan-time Bioseq call. */
+    /** @brief Stops at the first Bioseq call that needs special scan handling. */
     struct projection_presence_visitor {
         /** @brief Examines one expression node for a projection, mmsearch, or symbol-count call. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
@@ -356,17 +359,12 @@ export {
         }
     };
 
-    /** @brief Report whether an expression depends on Bioseq scan-time projection state.
+    /**
+     * @brief Finds match helpers, mmsearch and symbol_count calls in an expression.
      *
-     * True if any node in the expression tree references a bioseq.<...>
-     * projection FuncExpr (cigar / score / target_*, or symbol_count) or
-     * an mmsearch FuncExpr. The vectorised aggregator rewrite path uses
-     * this to skip its rewrite when the agg input depends on any of
-     * these — the projection FuncExprs are scan-time-rewritten into
-     * placeholder Consts that the regular Postgres Aggregate node can
-     * evaluate, but the vectorised aggregator expects vector-typed
-     * scan output and crashes with a SIGSEGV when fed a regular slot
-     * carrying our placeholder Consts.
+     * The aggregate planner uses this check to keep inputs that need scalar scan
+     * results out of VectorAgg. That node expects vector slots, so feeding it a
+     * regular result slot would use the wrong memory  layout.
      */
     bool bioseq_expr_uses_bioseq_projection(Node* node) {
         if (node == nullptr) {

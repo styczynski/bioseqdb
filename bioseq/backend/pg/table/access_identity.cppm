@@ -1,6 +1,6 @@
 /**
  * @file access_identity.cppm
- * @brief Table-access identity checks independent of callback-table assembly.
+ * @brief Index  access methods supported by Bioseq tables.
  */
 module;
 
@@ -12,9 +12,9 @@ export module bioseq.postgres.table:access_identity;
 import bioseq.common.logging;
 
 /**
- * @brief Checks whether Bioseq tables support a named PostgreSQL index access method.
+ * @brief Check whether an index access method can be used on a Bioseq table.
  * @param index_access_method_name Null-terminated PostgreSQL access-method name.
- * @return True for the access methods supported by Bioseq column tables.
+ * @return True for btree, hash, gin, gist, spgist, or rum.
  */
 export [[nodiscard]] bool
 supports_index_access_method(const char* index_access_method_name) noexcept {

@@ -1,16 +1,11 @@
 /**
  * @file
- * Defines vector comparison SQL owners for character and integer types.
+ * Compare an integer or CHARACTER vector with a scalar, preserving NULL rows.
+ * Integer comparisons accept different integer widths. CHARACTER comparisons
+ * ignore trailing spaces and use the PostgreSQL collation.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/types/int.cppm
- *
- * Vector comparison owners for PostgreSQL character and integer types.
- *
- *-------------------------------------------------------------------------
- */
+
 module;
 
 #include <bioseq/pg_compat.h>
@@ -27,7 +22,7 @@ export namespace bioseq::vector::sql_routines {
 
 using bioseq::column::vec::comparison_operation;
 
-/** Compares CHARACTER vector operands for equality. */
+/** Compare CHARACTER values for  equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpchareq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -38,7 +33,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares CHARACTER vector operands for inequality. */
+/** Test whether CHARACTER values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpcharne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -49,7 +44,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares CHARACTER vector operands for greater-than ordering. */
+/** Test left > right for CHARACTER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpchargt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -60,7 +55,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares CHARACTER vector operands for less-than ordering. */
+/** Test left < right for CHARACTER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpcharlt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -71,7 +66,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares CHARACTER vector operands for less-than-or-equal ordering. */
+/** Test left <= right for CHARACTER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpcharle(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -82,7 +77,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares CHARACTER vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for CHARACTER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpcharge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -93,7 +88,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT vector operands for equality. */
+/** Compare SMALLINT values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -102,7 +97,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares SMALLINT vector operands for inequality. */
+/** Test whether SMALLINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -111,7 +106,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT vector operands for greater-than ordering. */
+/** Test left > right for SMALLINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -120,7 +115,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares SMALLINT vector operands for less-than ordering. */
+/** Test left < right for SMALLINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -129,7 +124,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares SMALLINT vector operands for less-than-or-equal ordering. */
+/** Test left <= right for SMALLINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -138,7 +133,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for SMALLINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint2ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -147,7 +142,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for equality. */
+/** Compare SMALLINT and INTEGER values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -156,7 +151,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for inequality. */
+/** Test whether SMALLINT and INTEGER values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -165,7 +160,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for greater-than ordering. */
+/** Test SMALLINT left > INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -174,7 +169,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for less-than ordering. */
+/** Test SMALLINT left < INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -183,7 +178,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for less-than-or-equal ordering. */
+/** Test SMALLINT left <= INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -192,7 +187,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and INTEGER vector operands for greater-than-or-equal ordering. */
+/** Test SMALLINT left >= INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint24ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -201,7 +196,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for equality. */
+/** Compare SMALLINT and BIGINT values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -210,7 +205,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for inequality. */
+/** Test wherher SMALLINT and BIGINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -219,7 +214,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for greater-than ordering. */
+/** Test SMALLINT left > BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -228,7 +223,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for less-than ordering. */
+/** Test SMALLINT left < BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -237,7 +232,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for less-than-or-equal ordering. */
+/** Test SMALLINT left <= BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -246,7 +241,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares SMALLINT and BIGINT vector operands for greater-than-or-equal ordering. */
+/** Test SMALLINT left >= BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -255,7 +250,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER vector operands for equality. */
+/** Compare INTEGER values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -264,7 +259,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares INTEGER vector operands for inequality. */
+/** Test whether INTEGER values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -273,7 +268,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER vector operands for greater-than ordering. */
+/** Test left > right for INTEGER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -282,7 +277,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares INTEGER vector operands for less-than ordering. */
+/** Test left < right for INTEGER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -291,7 +286,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares INTEGER vector operands for less-than-or-equal ordering. */
+/** Test left <= right for INTEGER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -300,7 +295,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for INTEGER values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint4ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -309,7 +304,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for equality. */
+/** Compare INTEGER and SMALLINT values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -318,7 +313,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for inequality. */
+/** Test whether INTEGER and SMALLINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -327,7 +322,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for greater-than ordering. */
+/** Test INTEGER left > SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -336,7 +331,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for less-than ordering. */
+/** Test INTEGER left < SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -345,7 +340,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for less-than-or-equal ordering. */
+/** Test INTEGER left <= SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -354,7 +349,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and SMALLINT vector operands for greater-than-or-equal ordering. */
+/** Test INTEGER left >= SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint42ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -363,7 +358,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for equality. */
+/** Compare INTEGER and BIGINT values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -372,7 +367,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for inequality. */
+/** Test whether INTEGER and BIGINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -381,7 +376,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for greater-than ordering. */
+/** Test INTEGER left > BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -390,7 +385,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for less-than ordering. */
+/** Test INTEGER left < BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -399,7 +394,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for less-than-or-equal ordering. */
+/** Test INTEGER left <= BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -408,7 +403,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares INTEGER and BIGINT vector operands for greater-than-or-equal ordering. */
+/** Test INTEGER left >= BIGINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint48ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::integer, std::int32_t> left,
@@ -417,7 +412,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT vector operands for equality. */
+/** Compare BIGINT values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -426,7 +421,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares BIGINT vector operands for inequality. */
+/** Test whether BIGINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -435,7 +430,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT vector operands for greater-than ordering. */
+/** Test left > right for BIGINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -444,7 +439,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares BIGINT vector operands for less-than ordering. */
+/** Test left < right for BIGINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -453,7 +448,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares BIGINT vector operands for less-than-or-equal ordering. */
+/** Test left <= right for BIGINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -462,7 +457,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for BIGINT values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint8ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -471,7 +466,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for equality. */
+/** Compare BIGINT and SMALLINT values for  equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -480,7 +475,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for inequality. */
+/** Test whether BIGINT and SMALLINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -489,7 +484,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for greater-than ordering. */
+/** Test BIGINT left > SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -498,7 +493,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for less-than ordering. */
+/** Test BIGINT left < SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -507,7 +502,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for less-than-or-equal ordering. */
+/** Test BIGINT left <= SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -516,7 +511,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and SMALLINT vector operands for greater-than-or-equal ordering. */
+/** Test BIGINT left >= SMALLINT right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -525,7 +520,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for equality. */
+/** Compare BIGINT and INTEGER values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -534,7 +529,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for inequality. */
+/** Test whether BIGINT and INTEGER values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -543,7 +538,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for greater-than ordering. */
+/** Test BIGINT left > INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -552,7 +547,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for less-than ordering. */
+/** Test BIGINT left < INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -561,7 +556,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for less-than-or-equal ordering. */
+/** Test BIGINT left <= INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,
@@ -570,7 +565,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares BIGINT and INTEGER vector operands for greater-than-or-equal ordering. */
+/** Test BIGINT left >= INTEGER right. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint84ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,

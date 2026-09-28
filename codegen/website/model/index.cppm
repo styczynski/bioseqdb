@@ -15,15 +15,15 @@ export module bioseq.codegen.website.model;
 
 import bioseq.codegen.support;
 
-// Source-neutral data model shared by every website stage. It never exposes
-// MD4C, Doxygen, pugixml, Clang, or libpq types; parsers project their inputs
-// onto these owned trees before any cross-stage artifact is written.
+// Data shared by website parsing, SQL execution, and rendering. These types
+// own their text and trees so later stages do not need the parser libraries
+// or live PostgreSQL connections that produced them.
 export namespace bioseq::codegen::website {
 
 using bioseq::codegen::diagnostic;
 using bioseq::codegen::source_span;
 
-/// @brief Closed set of semantic nodes accepted by the Markdown/Doxygen pipeline.
+/// @brief Content kinds used for Markdown and Doxygen documents.
 enum class content_node_kind : std::uint8_t {
     root, paragraph, text, heading, emphasis, strong_text, strikethrough,
     highlight,
@@ -32,7 +32,7 @@ enum class content_node_kind : std::uint8_t {
     footnote, line_break, code_annotation
 };
 
-/// @brief Source-neutral owned content tree shared by parsers and renderers.
+/// @brief A  document node that owns its text, attributes, and children.
 struct content_node {
     content_node_kind kind{};
     std::string text;
@@ -42,10 +42,10 @@ struct content_node {
     std::optional<source_span> source;
 };
 
-/// @brief Namespace in which an unresolved reference query must be resolved.
+/// @brief Selects C++, SQL, an exact entity ID, or a search across both languages.
 enum class entity_query_domain : std::uint8_t { any, cpp, sql, canonical_id };
 
-/// @brief Typed entity reference captured from tutorial prose before resolution.
+/// @brief An entity link from a tutorial before its target is found.
 struct unresolved_entity_query {
     entity_query_domain domain{};
     std::string spelling;
@@ -53,13 +53,13 @@ struct unresolved_entity_query {
     source_span source;
 };
 
-/// @brief Parsed release path component with numeric ordering components.
+/// @brief A release path label with numbers used to sort releases.
 struct release_identifier {
     std::string path_component;        // for example v0.1
-    std::vector<std::uint32_t> parts;  // numeric sort, never lexical sort
+    std::vector<std::uint32_t> parts;  // numeric components used for version ordering
 };
 
-/// @brief Validated tutorial front-matter projection.
+/// @brief Tutorial metadata read from its front matter.
 struct tutorial_metadata {
     std::string title;
     std::string slug;
@@ -71,10 +71,10 @@ struct tutorial_metadata {
     source_span source;
 };
 
-/// @brief Supported fenced-code language identities.
+/// @brief Languages recognized in fenced code blocks.
 enum class code_language : std::uint8_t { text, bash, sql, cpp, cmake, json, yaml };
 
-/// @brief Commentary range attached to a named code block.
+/// @brief An explanation attached to madching text in a named code block.
 struct code_annotation {
     std::string target_block_id;
     std::string title;
@@ -104,7 +104,7 @@ struct sql_example {
 struct tutorial {
     tutorial_metadata metadata;
     release_identifier version;
-    std::string source_path;  // repository-relative source path
+    std::string source_path;  // path relative to the content root
     std::vector<content_node> content;
     std::vector<sql_example> sql_examples;
     std::vector<code_annotation> annotations;
@@ -113,13 +113,13 @@ struct tutorial {
     std::optional<std::string> next_slug;
 };
 
-/// @brief One content input recorded in the deterministic site plan.
+/// @brief An input path and content hash recorded in the site  plan.
 struct source_input {
-    std::string path;          // repository-relative forward-slash path
-    std::string content_hash;  // SHA-256 content digest
+    std::string path;          // relative input path using forward slashes
+    std::string content_hash;  // input content hash
 };
 
-/// @brief Deterministic aggregate written by the `website plan` stage.
+/// @brief Parsed tutorials and build inputs saved by website plan.
 struct site_plan {
     std::string schema;
     std::uint32_t schema_revision{};
@@ -136,27 +136,27 @@ struct site_plan {
     std::string signature;
 };
 
-/// @brief Shape of one captured SQL execution result.
+/// @brief Whether a SQL result contains rows, command status, or an error.
 enum class result_shape : std::uint8_t { rows, command, error };
 /// @brief Execution stage associated with a captured SQL notice.
 enum class sql_execution_stage : std::uint8_t {
     session_setup, setup, visible, teardown, cleanup
 };
 
-/// @brief Column metadata projected from a tuple result.
+/// @brief A result column name and its PostgreSQL type.
 struct sql_column {
     std::string name;
     std::uint32_t type_oid{};
     std::string type_name;
 };
 
-/// @brief Nullable textual SQL cell independent of libpq storage.
+/// @brief A SQL cell with owned text and a separate NULL flag
 struct sql_cell {
     bool is_null{};
     std::string text;
 };
 
-/// @brief One normalized row, command, or error result.
+/// @brief Rows, command status, or an error captured from SQL execution.
 struct sql_result_set {
     result_shape shape{};
     std::vector<sql_column> columns;
@@ -169,7 +169,7 @@ struct sql_result_set {
     std::string hint;
 };
 
-/// @brief Notice captured during an identified execution stage.
+/// @brief A PostgreSQL notice and the execution stage that produced it.
 struct sql_notice {
     sql_execution_stage stage{};
     std::string severity;
@@ -184,30 +184,30 @@ struct sql_example_result {
     std::vector<sql_notice> notices;
 };
 
-/// @brief Wall-time statistics retained outside the published content model.
+/// @brief Elapsed execution time kept outside the published site data.
 struct sql_example_measurement {
     std::string example_id;
     std::chrono::milliseconds elapsed{};
 };
 
-/// @brief Language domain that owns a reference entity.
+/// @brief Whether an entity belongs to C++ or SQL.
 enum class entity_domain : std::uint8_t { cpp, sql };
-/// @brief Semantic kind used for routes, coverage, and search records.
+/// @brief Entity  kind used for page routes, coverage counts, and search.
 enum class entity_kind : std::uint8_t {
     namespace_, module, class_, struct_, union_, enum_, enum_value, concept_,
     type_alias, function, variable, sql_schema, sql_type, sql_function,
     overload_group
 };
 
-/// @brief One interface unit and its public/internal module import edges.
+/// @brief A module interface and the modules it imports.
 struct module_graph_unit {
     std::string source_path;
     std::string provided_module;
     std::vector<std::string> exported_imports;  // public re-export edges
-    std::vector<std::string> internal_imports;  // plain imports, never public
+    std::vector<std::string> internal_imports;  // imports without export
 };
 
-/// @brief PostgreSQL C entrypoint recovered from a structural source scan.
+/// @brief A PostgreSQL C entry point found by, scanning C++ declarations.
 struct pg_entrypoint_candidate {
     std::string symbol;
     std::string normalized_signature;
@@ -223,7 +223,7 @@ struct parameter_description {
     std::vector<content_node> description;
 };
 
-/// @brief Canonical C++ or SQL entity used by coverage, links, and rendering.
+/// @brief A C++ or SQL entity with its documentation and reference links.
 struct reference_entity {
     std::string canonical_id;
     entity_domain domain{};
@@ -239,20 +239,20 @@ struct reference_entity {
     std::optional<source_span> declaration;
     std::optional<std::string> implementation_entity_id;
     std::vector<std::string> overload_ids;
-    // Overload-group members as (identity signature, base-aware route); populated
-    // transiently at render time for the group page, never serialized.
+    // Overload signatures and URLs for the group page. Filled while rendering
+    // and omitted froc saved entity data.
     std::vector<std::pair<std::string, std::string>> overload_members;
-    // Container child index as (label, base-aware route): class/struct members and
-    // module/namespace children, populated transiently at render time.
+    // Child names and URLs for class, module, and namespace pages.
+    // Filled while rendering.
     std::vector<std::pair<std::string, std::string>> child_members;
-    // Resolved base-aware route of implementation_entity_id, for the "Implemented by"
-    // cross-link; populated transiently at render time.
+    // URL for the Implemented by link. Resolved from implementation_entity_id
+    // while rendering.
     std::string implemented_by_route;
     std::map<std::string, std::string, std::less<>> attributes;
-    std::string route_path;  // leading-slash, base-independent site route
+    std::string route_path;  // route of the reference page
 };
 
-/// @brief Allowlisted SQL catalog projection plus server provenance.
+/// @brief SQL catalog entities and the PostgreSQL and  extension versions.
 struct sql_catalog_snapshot {
     std::vector<reference_entity> entities;
     std::string server_version;
@@ -260,9 +260,9 @@ struct sql_catalog_snapshot {
     std::string staged_artifact_sha256;
 };
 
-// One executed landing-page runnable slot. `visible_sql` contains only the visible
-// section; hidden setup/teardown never enters this projection. `result` is
-// meaningful only when has_result is set and the visible statement returned rows.
+// A landing-page example with visible SQL and an optional table result.
+// Execution selects the last table result for the page. Read result only
+// when has_result is true. Setup and teardown SQL stay outside this view.
 struct landing_example_view {
     std::string slot;
     std::string visible_sql;
@@ -277,13 +277,10 @@ struct coverage_group_view {
     std::uint32_t documented_total{};
 };
 
-// The fully resolved, database-independent site model written by `website execute`
-// (schema bioseq.website.site_model, revision 1) and consumed by `website render`
-// without a cluster. It carries only normalized semantic projections: resolved
-// tutorial/landing trees, executed visible-result models, the entity graph with
-// base-independent routes, coverage, and server/extension provenance. It never
-// carries setup/teardown SQL, credentials, OIDs, timings, or machine paths, so the
-// same model can be rendered at two base paths without re-executing SQL.
+// Site data saved by website execute and read by website render It contains
+// resolved tutorial content and SQL results so pages can be rendered again
+// without running PostgreSQL. Execution clears hidden setup and teardown SQL
+// before saving. Rendering adds the deployment base path to  page routes.
 struct site_model {
     std::string schema;
     std::uint32_t schema_revision{};
@@ -296,25 +293,25 @@ struct site_model {
     std::string source_revision;
     std::vector<tutorial> tutorials;               // content stripped of hidden SQL
     std::vector<landing_example_view> landing_examples;
-    std::vector<reference_entity> cpp_entities;   // base-independent route_path
-    std::vector<reference_entity> sql_entities;   // allowlisted public SQL pages
+    std::vector<reference_entity> cpp_entities;   // routes resolved during rendering
+    std::vector<reference_entity> sql_entities;   // public SQL reference pages
     std::vector<reference_entity> omitted_sql_entities;  // inventory-only
     std::uint32_t coverage_public_total{};
     std::uint32_t coverage_documented_total{};
-    std::vector<std::string> coverage_missing;             // undocumented, non-fatal
-    std::vector<std::string> coverage_missing_parameters;  // undocumented parameters
-    std::vector<std::string> coverage_missing_returns;     // undocumented return values
+    std::vector<std::string> coverage_missing;             // optional entries missing a summary
+    std::vector<std::string> coverage_missing_parameters;  // entities missing parameter documentatio
+    std::vector<std::string> coverage_missing_returns;     // entities missing return documentation
     std::vector<std::string> coverage_fatal_missing;       // required/referenced, undocumented
     std::vector<coverage_group_view> coverage_groups;      // totals by module / SQL domain
     std::string postgres_server_version;
     std::string extension_version;
     std::string staged_extension_sha256;
     std::vector<source_input> inputs;   // path + content hash, for the site manifest
-    std::string plan_signature;       // semantic hash of the plan input
-    std::string cpp_signature;        // semantic hash of the C++ entity input
+    std::string plan_signature;       // hash identifying the plan input
+    std::string cpp_signature;        // hash identifying the C++ entity input
 };
 
-/// @brief Executor contract required by the site SQL orchestration layer.
+/// @brief Operations needed to read catalog data and execute SQL examples.
 template <typename p_executor>
 concept sql_example_executor =
     requires(p_executor& executor, sql_example const& example) {
@@ -324,7 +321,7 @@ concept sql_example_executor =
             -> std::same_as<std::expected<sql_example_result, diagnostic>>;
     };
 
-/// @brief Stable search-index projection for one entity or page.
+/// @brief Search fields for a documented entity or page.
 struct search_record {
     std::string canonical_id;
     std::string title;
@@ -336,8 +333,8 @@ struct search_record {
     std::vector<std::string> keywords;
 };
 
-// Site-wide fields bound into every rendered page's context. All
-// URLs are pre-resolved (base-path aware) so templates never build paths.
+// Site fields shared by page templates. Links within the site already
+// include the deployment base path so templates can insert them directly.
 struct site_view {
     std::string title;
     std::string base_path;

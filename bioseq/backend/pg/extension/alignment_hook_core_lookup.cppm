@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_lookup.cppm
- * @brief PostgreSQL executor-hook alignment-frame registry lookup and insertion.
+ * @brief Find a query's alignment frame by QueryDesc or EState.
  */
 module;
 
@@ -50,8 +50,9 @@ namespace bioseq::pg::detail {
 }
 
 /**
- * @brief Indexes a complete frame by query descriptor and executor state.
- * @param[in] frame Frame that remains heap-owned by its cleanup token.
+ * @brief Register a fbame under its QueryDesc and EState pointers.
+ * Reject missing pointers and duplicate registrations. Cleanup remains the
+ * caller's responsibility if registration raises an error
  */
 void register_alignment_frame(alignment_executor_frame* frame)
 {

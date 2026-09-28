@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares BatchJoin setrefs rewriting without importing its visitors.
+ * @brief Declares and checks the output bindings needed by PostgreSQL's setrefs pass.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -14,14 +14,14 @@ export import :custom_scan_join_plan_placeholder_contracts;
 
 using namespace bioseq::postgres::support;
 
-/** @brief Finds the last exact scan-target expression within a validated result range. */
+/** @brief Finds the last matching expression within the requested scan output columns. */
 export [[nodiscard]] TargetEntry* batch_join_find_exact_scan_entry(
     List* scan_tlist,
     const Node* expression,
     AttrNumber minimum_resno = 1,
     AttrNumber maximum_resno = MaxAttrNumber) noexcept;
 
-/** @brief Finds the unique semantically equal helper entry within a scan-target range. */
+/** @brief Finds a single mathing helper in  the requested output columns, allowing a PlaceHolderVar wrapper */
 export [[nodiscard]] TargetEntry* batch_join_find_unique_semantic_helper_entry(
     List* scan_tlist,
     Node* identity,
@@ -30,24 +30,21 @@ export [[nodiscard]] TargetEntry* batch_join_find_unique_semantic_helper_entry(
     AttrNumber maximum_resno,
     bool& ambiguous) noexcept;
 
-/** @brief Finds a scan-target Var with the same complete planner identity. */
+/** @brief Finds the same Var by relation, column, type, query level, and NULL-producing joins. */
 export [[nodiscard]] TargetEntry* batch_join_find_compatible_var_entry(
     List* scan_tlist,
     const Var* var) noexcept;
 
 /**
- * @brief Normalizes output expressions to identities present in the unfixed scan target.
+ * @brief Makes each output reference match an expression in the scan's output list.
  *
- * CustomScan setrefs resolves output Vars against the unfixed scan tlist.
- * Normalize harmless base-Var spelling deltas, but preserve the exact raw
- * helper/PHV identity in both lists.  Upper setrefs fixes a parent before it
- * recurses into this child, so hiding that identity here makes Sort/Result
- * fail to bind the whole helper expression.  PostgreSQL's normal CustomScan
- * setrefs pass then maps those identities to INDEX_VAR against
- * custom_scan_tlist before executor initialization.
+ * PostgreSQL fixes parent references before visiting this child. Keep whole
+ * helper and PlaceHolderVar expressions visible so a parent Sort or Result
+ * can find them. PostgreSQL's CustomScan setrefs pass will then replace them
+ * with INDEX_VAR references to custom_scan_tlist.
  */
 export struct batch_join_output_setrefs_rewrite_mutator {
-    /** @brief Rewrites one Var or helper identity to its supplied scan-target spelling. */
+    /** @brief Replaces a Var or, match helper with the matching scan output expression. */
     [[nodiscard]] pg_node_mutation
     operator()(pg_expression_mutation_cursor,
                pg_node_view node,
@@ -133,16 +130,14 @@ export struct batch_join_setrefs_coverage {
 };
 
 /**
- * @brief Validates output dependencies against PostgreSQL's setrefs lookup order.
+ * @brief Checks that PostgreSQL can find every output dependency  in the scan tuple.
  *
- * Mirror the relevant fix_upper_expr() lookup order before PostgreSQL's final
- * setrefs pass.  A CustomScan with scanrelid == 0 must make every output Var
- * discoverable in custom_scan_tlist; diagnosing that invariant here preserves
- * the exact offending varno/attno instead of reducing it to PostgreSQL's
- * generic "variable not found in subplan target list" error.
+ * For a CustomScan with scanrelid == 0, output Vars must occur in
+ * custom_scan_tlist. Follow the relevant setrefs lookup order here so a
+ * missing input can be reported with its relation and column numbers.
  */
 export struct batch_join_setrefs_coverage_visitor {
-    /** @brief Checks one Var, PHV, helper, or expression against the scan target list. */
+    /** @brief Checks one output node against the scan's columns and registered helper expressions. */
     [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                           pg_node_view node,
                                           batch_join_setrefs_coverage& coverage) const {
@@ -192,10 +187,10 @@ export struct batch_join_setrefs_coverage_visitor {
     }
 };
 
-/** @brief Raises a precise PostgreSQL error when an output dependency lacks scan coverage. */
+/** @brief Reports the missing input column or match helper when the output cannot bind to the scan tuple. */
 export void validate_batch_join_setrefs_coverage(List* output_tlist, List* scan_tlist);
 
-/** @brief Resolves the authoritative PHV id for a Plan-only helper carrier. */
+/** @brief Finds the PlaceHolderVar id to preserve for a helper arried as a hidden plan output. */
 export [[nodiscard]] bool batch_join_plan_only_helper_phid(
     List* authoritative_identities,
     Node* carrier_identity,

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns batched-join slot, context, admission, and error cleanup.
+ * @brief Release batch-join tuples, sequence readers, and reserved memory.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -35,18 +35,18 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Returns the C++ BatchJoin runtime stored behind a custom scan state. */
+    /** Return the  join runtime, or null when the node has none. */
     [[nodiscard]] batch_join_runtime* try_get_batch_join_runtime(CustomScanState* node) noexcept {
         auto* state = reinterpret_cast<batch_join_state*>(node);
         return state == nullptr ? nullptr : static_cast<batch_join_runtime*>(state->runtime);
     }
 
     /**
-     * @brief Clears parent-visible references before their retained recipe storage is released.
+     * @brief Clear output references before releasing borrowed sequence values.
      *
-     * Recipe-aware custom scans expose virtual rows which borrow retained EOH
-     * wrappers. Clear every parent-visible slot and expression-context pointer
-     * before the owning dispatch arena is reset.
+     * Virtual slots can point into saved expanded sequences. Clear the resut
+     * and scan slots, then reset expression references before the dispatch buffer
+     * frees that storage.
      */
     void clear_recipe_scan_parent_tuple_references(CustomScanState* node) {
         if (node == nullptr)
@@ -74,7 +74,7 @@ export {
         }
     }
 
-    /** @brief Clears parent-visible tuple references and forgets the active target slot. */
+    /** Clear output references and forget the current target slot. */
     void batch_join_clear_parent_tuple_references(CustomScanState* node,
                                                   batch_join_runtime& runtime) {
         clear_recipe_scan_parent_tuple_references(node);
@@ -82,8 +82,11 @@ export {
     }
 
     /**
-     * @brief Performs ordered BatchJoin cleanup while translating PostgreSQL errors to C++.
-     * @param delete_query_context Whether to delete rather than reset the query memory context.
+     * @brief Drain join work before releasing tuples, memory reservations, and children.
+     *
+     * Translate PostgreSQL errors into C++ exceptions during cleanup Repeated
+     * calls do nothing once cleanup is complete.
+     * @param delete_query_context Delete the query  context if true, otherwise reset it.
      */
     void batch_join_release_executor_resources_checked(CustomScanState* node,
                                                        batch_join_runtime& runtime,
@@ -130,7 +133,7 @@ export {
             });
             runtime.query_tuple_context = nullptr;
         }
-        /* Release admission only after the owning tuple context was reset/deleted. */
+        /* Keep the memory reservation until the tuple storage has been freed. */
         runtime.query_permits.clear();
         runtime.query_reserved_admission_bytes = 0;
         runtime.query_actual_materialized_bytes = 0;
@@ -151,7 +154,7 @@ export {
         runtime.cleanup_done = true;
     }
 
-    /** @brief Marks executor resources abandoned after PostgreSQL has already unwound them. */
+    /** Forget PostgreSQL resources after an error and release the remaining C++ state. */
     void batch_join_abandon_executor_resources_after_error(CustomScanState* node,
                                                            batch_join_runtime& runtime) noexcept {
         if (runtime.cleanup_done) {
@@ -199,8 +202,8 @@ export {
     }
 
     /**
-     * @brief Releases materialized query rows before resetting their owning memory context.
-     * @param drop_slots Whether live PostgreSQL slots must be explicitly dropped first.
+     * @brief Clear saved query rows and reset their memory context.
+     * @param drop_slots Explicitly drop live row slots before resetting the context.
      */
     void batch_join_clear_query_tuples(batch_join_runtime& runtime, const bool drop_slots) {
         if (drop_slots) {
@@ -220,8 +223,7 @@ export {
         if (runtime.query_tuple_context != nullptr) {
             MemoryContextReset(runtime.query_tuple_context);
         }
-        /* The permit covers allocations owned by query_tuple_context (plus the
-         * MinimalTuple slots above).  Release only after those owners are gone. */
+        /* Release the reservation after freeing tuple storage and its slots. */
         runtime.query_permits.clear();
         runtime.query_reserved_admission_bytes = 0;
         runtime.query_actual_materialized_bytes = 0;
@@ -229,14 +231,12 @@ export {
     }
 
     /**
-     * @brief Validates the physical slot returned by a BatchJoin child plan.
+     * @brief Check the layout and sequence  type of the slot returned by a child.
      *
-     * A child PlanState may legally return a pass-through scan/child slot rather
-     * than its ps_ResultTupleSlot.  Validate the slot that ExecProcNode actually
-     * returned before reading or copying it; the post-setrefs Plan targetlist is
-     * the planning ABI, while this is the independent executor ABI.
-     *
-     * @throws PostgreSQL ERROR when column counts or sequence and row-number types differ.
+     * ExecProcNode can return a scan slot or another child's slot, directly. Check
+     * that slot before reading it. Its layout, sequence alphabet, and optional
+     * bigint row number must match the saved plan.
+     * @throws PostgreSQL ERROR for a layout or type misnatch.
      */
     void batch_join_validate_returned_child_slot(TupleTableSlot* slot,
                                                  const int expected_columns,
@@ -289,11 +289,10 @@ export {
     }
 
     /**
-     * @brief Raises a materialization failure through the PostgreSQL-to-C++ bridge.
+     * @brief Raise a materialization error while allowing C++ cleanup to run.
      *
-     * Convert validation failures raised while automatic C++ row metadata is live
-     * into normal C++ unwinding. A raw PostgreSQL longjmp here would skip the two
-     * retained-attribute vector destructors.
+     * A direct PostgreSQL error would jump past local vector destructors. The
+     * translated exception releases those objects before returning to PostgreSQL.
      */
     [[noreturn]] void batch_join_raise_materialization_as_cpp(const int sqlstate,
                                                               const char* message,

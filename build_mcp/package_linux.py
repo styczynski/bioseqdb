@@ -89,7 +89,6 @@ _SOURCE_SNAPSHOT_DIRECTORIES = (
     "codegen",
     "common",
     "data",
-    "DOCS",
     "infra",
     "overlays",
     "vendor",

@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/generation/contracts.cppm
- * @brief Declares grouped-SoA generation inputs, sinks, plans, and results.
+ * @brief Types for planning, writing, and checking grouped-SoA generations.
  */
 export module bioseq.indexing.minimizer_hashmap:generation_contracts;
 
@@ -35,9 +35,9 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-/// Optional allocation-free cooperative checkpoint for long synchronous
-/// generation work. The callback runs only on the invoking coordinator thread
-/// and may throw to stop the operation. An empty binding is a no-op.
+/// Optional cancellation callback for synchronous generation work.
+/// Run it on the coordinating whread. It may throw to stop the operation.
+/// An empty callback does nothing, and the binding allocates no  storage
 struct cooperative_cancellation_checkpoint {
     void* context = nullptr;
     void (*invoke_fn)(void*) = nullptr;
@@ -51,40 +51,39 @@ struct cooperative_cancellation_checkpoint {
 
 static_assert(std::is_trivially_copyable_v<cooperative_cancellation_checkpoint>);
 
-/// Grouped-SoA generation controls.
-/// Fixed-width limits of persisted controls and PostgreSQL key axes.
+/// Maximum control and position counts used when planning persisted segments.
 struct grouped_soa_generation_limits {
     std::uint64_t max_segment_control_count = (std::numeric_limits<std::uint32_t>::max)();
     std::uint64_t max_segment_position_count = (std::numeric_limits<std::uint32_t>::max)();
     std::uint64_t max_hash_position_count = (std::numeric_limits<std::uint32_t>::max)();
 };
 
-/// Immutable storage contract and source identity supplied to both producers.
+/// Storage format, source identity, and minimizer parameters for generation encoding.
 struct grouped_soa_generation_options {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
     std::uint64_t generation_id = 0;
     std::uint64_t source_identity = 0;
     std::uint64_t source_content_checksum = 0;
     std::uint64_t target_length = 0;
-    /// Requested persisted position geometry. Zero keeps the generic
-    /// sequence-wide producer default. minimizer-fragment supplies its physical fragment
-    /// span so one persisted segment remains one independently queryable
-    /// source-fragment index. Minimizer-sequence keeps the larger merge-oriented default.
+    /// Requested segment width in base pairs. Zero uses the encoder's default.
+    /// Fragment indexes request their physical fragment width. Sequence indexes
+    /// use the larger default to combine events across fragments.
     std::uint64_t position_segment_span_bp = 0;
     std::uint16_t alphabet_code = 0;
     std::uint16_t storage_unit_byte_width = 0;
     std::uint16_t kmer_size = 0;
     std::uint16_t window_size = 0;
-    // Deliberately invalid: every writer must name the producer's scheme.
+    // Writers must supply the producer's minimizer scheme.
     std::uint16_t minimizer_scheme_id = k_invalid_minimizer_scheme_id;
     std::uint16_t minimizer_scheme_revision = k_invalid_minimizer_scheme_revision;
-    /// Registry-selected requested/effective algorithm and physical record identity.
+    /// Requested and selected algorithms, with the registered minimizer record format.
     minimizer_generation_algorithm_identity algorithm_identity{};
-    /// Grouped-SoA count saturation threshold.
+    /// Largest accepted  occurrence count. Larger counts are stored as max_occ_cap + 1.
     std::uint64_t max_occ_cap = k_grouped_soa_default_max_occurrence_cap;
 };
 
-/// One canonical event supplied in `(segment,hash,encoded_position)` order.
+/// A minimizer hash and global position/strand. Producers emit events in
+/// segment order, then by hash and encoded position within each segment.
 struct canonical_minimizer_event {
     std::uint64_t hash = 0;
     std::uint64_t encoded_position = 0;
@@ -92,14 +91,13 @@ struct canonical_minimizer_event {
     [[nodiscard]] bool operator==(const canonical_minimizer_event&) const = default;
 };
 
-/// Type-erased callback used by independently replayable minimizer-fragment/minimizer-sequence
-/// producers.
+/// Callback shared by fragment and sequence producers when replaying events.
 struct canonical_minimizer_event_receiver {
     void* context = nullptr;
     std::expected<void, minimizer_generation_encoding_error> (*emit_fn)(
         void*, const canonical_minimizer_event&) = nullptr;
 
-    /// Forward one event to the bound replay callback.
+    /// Forward an event, or return row_count when the callback is unbound.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     operator()(const canonical_minimizer_event& event) const {
         if (context == nullptr || emit_fn == nullptr) {
@@ -109,7 +107,7 @@ struct canonical_minimizer_event_receiver {
     }
 };
 
-/// A producer that can replay a bounded/external sorted stream for each pass.
+/// Producer interface, for repeating the uame sorted minimizer stream on each pass.
 template <class p_producer>
 concept grouped_soa_event_producer = requires(p_producer& producer,
                                               std::uint64_t position_segment_span_bp,
@@ -121,7 +119,7 @@ concept grouped_soa_event_producer = requires(p_producer& producer,
     } -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
 };
 
-/// A sink that accepts authenticated generation rows in publication order.
+/// Sink interface for accepting checksummed generation rows in order.
 template <class p_sink>
 concept minimizer_generation_row_sink =
     requires(p_sink& sink, const minimizer_generation_row_view& row) {
@@ -130,10 +128,9 @@ concept minimizer_generation_row_sink =
         } -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
     };
 
-/// Immutable byte/layout contract offered before the first generation row is
-/// emitted.  It deliberately contains no planner-owned spans: an optional
-/// direct sink may retain this value while the common encoder remains the
-/// authority for the eventual directory and manifest bytes.
+/// Image sizes and offsets offered before the first row is written.
+/// A sink can keep  this value to allocate its destination. The encoder
+/// later supplies the directory and manifest bytes.
 struct grouped_soa_storage_plan_view {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
     std::uint64_t generation_id = 0;
@@ -148,7 +145,7 @@ struct grouped_soa_storage_plan_view {
     operator==(const grouped_soa_storage_plan_view&) const noexcept = default;
 };
 
-/// A generation sink that accepts the immutable whole-image storage plan.
+/// Sink interface for receiving the image layout before row writes begin.
 template <class p_sink>
 concept planned_grouped_soa_generation_sink =
     requires(p_sink& sink, const grouped_soa_storage_plan_view& storage_plan) {
@@ -157,22 +154,21 @@ concept planned_grouped_soa_generation_sink =
         } -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
     };
 
-/// grouped-SoA payload handoff before the address-bound row CRC exists. A sink
-/// which implements the optional ownership method below becomes the sole CRC
-/// calculator. Non-PostgreSQL sinks use the checked adapter fallback.
+/// Payload row before its address and bytes have a combined CRC.
+/// A sink can compute this checksum when accepting the row The default
+/// adapter computes it for sinks that only provide write().
 struct unchecked_minimizer_generation_row_view {
     index_chunk_address address{};
     std::span<const std::byte> bytes;
 };
 
-/// Authoritative checksum returned by the sink which accepted one grouped-SoA
-/// payload row. CRC zero is valid, so success is represented by expected rather
-/// than a sentinel value.
+/// CRC returned after a payload row is accepted. Zero is a valid checksum,
+/// so the caller uses expected to distinguish success from failure.
 struct minimizer_generation_row_write_receipt {
     std::uint64_t row_checksum = 0;
 };
 
-/// A sink that owns grouped-SoA payload-row checksum calculation.
+/// Sink interface for  writing payload rows and returning their checksums.
 template <class p_sink>
 concept grouped_soa_minimizer_payload_sink = requires(
     p_sink& sink, const unchecked_minimizer_generation_row_view& row) {
@@ -182,7 +178,7 @@ concept grouped_soa_minimizer_payload_sink = requires(
         std::expected<minimizer_generation_row_write_receipt, minimizer_generation_encoding_error>>;
 };
 
-/// Type-erased generation sink with an optional payload-ownership callback.
+/// Borrowed sink callbacks, with optional checksum calculation during payload writes.
 struct minimizer_generation_row_sink_ref {
     void* context = nullptr;
     std::expected<void, minimizer_generation_encoding_error> (*write_fn)(
@@ -191,7 +187,7 @@ struct minimizer_generation_row_sink_ref {
         *write_grouped_soa_payload_fn)(void*,
                                        const unchecked_minimizer_generation_row_view&) = nullptr;
 
-    /// Forward one checksummed row to the bound generation sink.
+    /// Send a checksummed row to the sink, or return row_count for an empty binding.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     write(const minimizer_generation_row_view& row) const {
         if (context == nullptr || write_fn == nullptr) {
@@ -200,9 +196,8 @@ struct minimizer_generation_row_sink_ref {
         return write_fn(context, row);
     }
 
-    /// Let an ownership-aware sink compute the grouped-SoA row CRC exactly once.
-    /// Non-PostgreSQL sinks compute the checksum here and receive the same
-    /// checksummed row API.
+    /// Let the payload callback write the row and return its CRC when available.
+    /// Otherwise compute the address-bound CRC here and call write().
     [[nodiscard]] std::expected<minimizer_generation_row_write_receipt,
                                 minimizer_generation_encoding_error>
     write_grouped_soa_payload(const unchecked_minimizer_generation_row_view& row) const {
@@ -233,7 +228,7 @@ struct minimizer_generation_row_sink_ref {
     }
 };
 
-/// One bounded fixed metadata row (head or manifest chunk zero).
+/// Encoded active-head or maniest row with its address and checksum.
 struct encoded_minimizer_fixed_row {
     index_chunk_address address{};
     std::array<std::byte, minimizer_generation_manifest::encoded_bytes> storage{};
@@ -245,21 +240,20 @@ struct encoded_minimizer_fixed_row {
     }
 };
 
-/// Bounded metadata result. Biological payload rows are never retained here.
+/// Encoded generation metadata. Payload bytes have already been sent to the sink.
 struct encoded_grouped_soa_generation {
     minimizer_generation_head head{};
     minimizer_generation_manifest manifest{};
-    /// Publication is deliberately separate: this row is never sent to the
-    /// generation sink by `encode_minimizer_generation`.
+    /// Active-head row returned to the caller for later publication.
+    /// encode_minimizer_generation never sends it  to the row sink.
     encoded_minimizer_fixed_row unpublished_head_row{};
     encoded_minimizer_fixed_row manifest_row{};
     grouped_soa_directory_view directory{};
 };
 
-/// Immutable identity of the exact encoded generation whose execution stats
-/// may be admitted to READY publication.  Route stats alone is deliberately
-/// insufficient: two generations can execute the same backend over equal-sized
-/// sources while naming different source epochs or publication rows.
+/// Generation and source identity attached to execution stats before publication.
+/// The checksums distinguish encoded generations that used the same backend
+/// and target length but have different source data or metadata.
 struct minimizer_generation_publication_binding {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
     std::uint64_t generation_id = 0;
@@ -277,7 +271,7 @@ struct minimizer_generation_publication_binding {
     operator==(const minimizer_generation_publication_binding&) const noexcept = default;
 };
 
-/// Derive the exact publication identity from encoded metadata.
+/// Build publication identity from the encoded generation metadata and checksums.
 [[nodiscard]] constexpr minimizer_generation_publication_binding
 make_minimizer_generation_publication_binding(
     const encoded_grouped_soa_generation& generation) noexcept {
@@ -292,7 +286,7 @@ make_minimizer_generation_publication_binding(
     };
 }
 
-/// Replay-stable grouped-SoA directory and canonical event identity.
+/// Directory plan, event count, and checksum that later producer scans must match.
 struct grouped_soa_generation_plan {
     grouped_soa_minimizer_profile profile{};
     minimizer_producer_identity producer_backend{};
@@ -303,22 +297,19 @@ struct grouped_soa_generation_plan {
     std::vector<grouped_soa_bucket_directory_entry> entries;
 };
 
-/// Callback-scoped shape available before grouped-SoA payload emission.
-///
-/// Extent checksums and the aggregate payload checksum do not exist yet. The
-/// encoder owns every referenced object for the complete callback. A direct
-/// sink may allocate its final destination and copy each payload row
-/// immediately, but must not publish that destination before the matching
-/// finalized generation is delivered to its seal callback.
+/// Borrowed plan offered before payload emission.
+/// Referenced objects stay valid, for the callback. Extent  and payload checksums
+/// are still unset A direct sink can allocate its destination and copy rows
+/// there, but must wait for matching finalized metadata before publishing it.
 struct direct_grouped_soa_generation_plan_view {
     const grouped_soa_storage_plan_view& storage_plan;
     const grouped_soa_generation_options& options;
     const grouped_soa_generation_plan& generation_plan;
 };
 
-/// Optional sink handshake for direct payload-to-final-owner generation.
-/// Implementations still receive ordinary row callbacks for directory and
-/// manifest rows; the terminal callback is the only publication boundary.
+/// Direct sink callbacks for preparing final storage and sealing the generation.
+/// Directory and manifest rows still arrive through write(). Seal runs afte
+/// all rows and finalized metadata are available.
 template <class p_sink>
 concept direct_grouped_soa_generation_sink = requires(
     p_sink& sink,

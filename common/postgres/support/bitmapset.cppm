@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/bitmapset.cppm
- * @brief Pointer-sized range and mutation adapters for PostgreSQL Bitmapset.
+ * @brief C++ iteration and updates for PostgreSQL bitmap sets.
  */
 module;
 
@@ -65,10 +65,10 @@ class postgres_bitmapset_iterator final {
 };
 
 /**
- * Pointer-sized mutable view over a PostgreSQL Bitmapset.
- *
- * The view mirrors PostgreSQL's possibly-reallocating mutation operations
- * while retaining the returned pointer. It does not free automatically.
+ * Wrap a PostgreSQL Bitmapset for iteration and updates.
+ * Updates may reallocate the set, so the wrapper saves the pointer PostgreSQL
+ * returns. Destruction leaves the allocation, alone. Call clear to free  it, or
+ * release to hand its pointer to another owner.
  */
 class postgres_bitmapset final {
   public:
@@ -103,7 +103,7 @@ class postgres_bitmapset final {
         return bms_is_member(member_bit, set_);
     }
 
-    /** Adds @p member_bit and retains PostgreSQL's resulting set pointer. */
+    /** Adds @p member_bit and saves the resulting PostgreSQL set pointer. */
     postgres_bitmapset& add(int member_bit) {
         set_ = bms_add_member(set_, member_bit);
         return *this;
@@ -149,7 +149,7 @@ class postgres_bitmapset final {
         return postgres_bitmapset_iterator{set_};
     }
 
-    /** Returns the range sentinel iterator. */
+    /** Return the iterator used to mark the end of the set. */
     [[nodiscard]] postgres_bitmapset_iterator end() const noexcept {
         return {};
     }

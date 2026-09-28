@@ -1,6 +1,6 @@
 /**
  * @file reprepare_probe_implementation.cppm
- * @brief Connects the narrow reprepare probe API to the dispatch processor.
+ * @brief Calls the scheduler test that checks prepard-target cleanup and reuse.
  */
 module bioseq.postgres.scheduler.dispatch_processor.reprepare_probe;
 

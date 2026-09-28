@@ -1,6 +1,6 @@
 /**
  * @file external/providers/ebi.cppm
- * @brief EBI provider planning, retrieval, and record parsing.
+ * @brief Search EBI metadata and turn the response into provider rows.
  */
 module;
 
@@ -50,22 +50,22 @@ using prov::external_error_kind;
 using prov::make_external_error;
 using prov::provider_id;
 
-/// Returns the normalized EBI provider identity.
+/// Return the provider ID used for EBI rows and errors.
 inline prov::provider_id ebi_provider_id() noexcept {
     return {.value = "ebi"};
 }
 
-/// Copies an identifier into the provider-wide bounded representation.
+/// Copy an identifier, truncating it at the shared byte limit.
 inline prov::bounded_string<prov::maximum_identifier_bytes> ebi_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// Returns the bounded display name used in normalized rows.
+/// Return the bounded EBI name stored in result rows.
 inline prov::bounded_string<prov::maximum_provider_name_bytes> ebi_bounded_name() {
     return prov::bounded_string<prov::maximum_provider_name_bytes>::make_truncated("ebi");
 }
 
-/// Validated EBI request plan containing no credentials.
+/// EBI search operation, domain, and query text.
 struct ebi_plan {
     prov::query_target target{prov::query_target::catalog};
     std::string operation_id{"search"};
@@ -73,16 +73,17 @@ struct ebi_plan {
     std::string query_text;
     std::optional<std::uint64_t> limit;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the plan and its strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         return sizeof(ebi_plan) + operation_id.capacity() + domain.capacity() +
                query_text.capacity();
     }
 
-    /// Returns the deterministic execution identity for this plan.
+    /// Hash the operation, domain, and search text for plan identification.
+    /// The target and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        // Mix one plan component into the stable execution fingerprint.
+        // Add one text field to the plan hash.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -101,10 +102,10 @@ struct ebi_plan {
     }
 };
 
-/// Executes one validated EBI request plan.
+/// Fetch one EBI Search response  and send its rows to a consumer.
 class ebi_session {
   public:
-    /// Opens a session over borrowed runtime services and an owning plan.
+    /// Own the plan while borrowing the memory context and worker pool.
     ebi_session(const context::context& memory,
                 const bioseq::parallelism::global_pool& pool,
                 ebi_plan plan)
@@ -114,15 +115,14 @@ class ebi_session {
     ebi_session(ebi_session&&) noexcept = default;
     ebi_session& operator=(ebi_session&&) noexcept = default;
 
-    /// Runs the request and emits normalized provider messages.
+    /// Fetch one search page and emit taxonomy or catalog rows.
     std::expected<prov::provider_statistics, external_error>
     run(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
         api::bioseq_external_api_client client(*memory_, *pool_, std::nullopt);
 
-        // The generated "search" descriptor types `size` as a string, so it is
-        // serialized here rather than passed as an int64 (the client rejects a
-        // mismatched scalar kind). `size_text` outlives the get() call below.
+        // The generated search API expects size as text. Keep that text alive
+        // until get() has used the parameter view.
         std::string size_text;
         std::vector<api::parameter_value> params;
         params.push_back({.name = "domain",
@@ -166,7 +166,7 @@ class ebi_session {
         return stats;
     }
 
-    /// Requests cooperative session cancellation.
+    /// Ask the row-emission loop to stop.
     void request_stop() noexcept {
         if (stop_) {
             stop_->store(true);
@@ -174,7 +174,7 @@ class ebi_session {
     }
 
   private:
-    /// Normalizes an absence-tolerant EBI Search hit list into provider rows.
+    /// Read EBI entries, skipping missing IDs and leaving absent fields unset.
     std::expected<void, external_error> emit_rows(std::string_view body,
                                                   prov::provider_message_sink_ref sink,
                                                   prov::provider_statistics& stats,
@@ -196,7 +196,7 @@ class ebi_session {
 
         const bool taxonomy_domain = plan_.domain == "taxonomy";
 
-        // Parse provider taxonomy text for normalized row emission.
+        // Read the numeric TaxID prefix when the, field starts with a number.
         const auto parse_taxon = [](std::string_view text) -> std::optional<std::int64_t> {
             std::int64_t numeric_identifier = 0;
             const char* const first = text.data();
@@ -253,8 +253,7 @@ class ebi_session {
                 prov::owning_catalog_row row;
                 row.provider = ebi_provider_id();
                 row.provider_name = ebi_bounded_name();
-                // EBI Search has no `sequence` entity kind. Default the generic
-                // hit to `protein` (matches the default `uniprot` domain).
+                // Label catalog hits as proteins, matching the  default UniProt doman
                 row.kind = prov::entity_kind::protein;
                 row.is_retrievable = false;
 
@@ -262,9 +261,8 @@ class ebi_session {
                 row.key.provider_name = ebi_bounded_name();
                 row.key.domain = ebi_bounded_id(plan_.domain);
                 row.key.original_identifier = ebi_bounded_id(*id);
-                // EBI Search's top-level `acc` is the primary accession (e.g.
-                // "P04637"). `id` is the entry name (e.g. "P53_HUMAN"). Key on
-                // the accession so an accession= predicate matches the row.
+                // Use acc, such as P04637, as the accession. The id field can contain
+                // an entry name such as P53_HUMAN and is kept as the original identifier.
                 if (const auto acc = entry.read_string_member("acc");
                     acc.has_value() && !acc->empty()) {
                     row.key.accession = ebi_bounded_id(*acc);
@@ -313,7 +311,7 @@ class ebi_session {
 
 static_assert(prov::external_api_session_compatible<ebi_session>);
 
-/// EBI adapter implementing the external provider contract.
+/// Provider adapter for EBI Search metadata.
 struct ebi_provider {
     static constexpr auto id = bioseq::common::templating::compile_time_string("ebi");
     static constexpr auto name = bioseq::common::templating::compile_time_string("EBI");
@@ -324,7 +322,7 @@ struct ebi_provider {
     /// Session executing a prepared request plan.
     using session_type = ebi_session;
 
-    /// Returns statically available EBI capabilities.
+    /// Return the EBI features advertised by this adapter.
     static prov::provider_capabilities make_potential_capabilities() {
         prov::provider_capabilities caps;
         caps.flags.set(static_cast<std::size_t>(prov::provider_capability::catalog_search));
@@ -335,17 +333,17 @@ struct ebi_provider {
         return caps;
     }
 
-    /// Returns the request-policy profiles owned by this adapter.
+    /// Return an empty list of request-policy profiles.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
-    /// Returns the locator-policy profiles owned by this adapter.
+    /// Return an empty list of URL-policy profiles.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
-    /// Estimates the bounded resources required by one EBI plan.
+    /// Return fixed estimates for the plan and metadata buffers.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query&,
              const prov::provider_capability_snapshot&,
@@ -354,11 +352,12 @@ struct ebi_provider {
         estimate.plan_bytes = 4096;
         estimate.metadata_page_bytes = 2U * 1024U * 1024U;
         estimate.staging_message_bytes = 64U * 1024U;
-        estimate.transfer_count = 0U; // Discovery only and never retrieves.
+        estimate.transfer_count = 0U; // Metadata searches reserve no sequence transfers.
         return estimate;
     }
 
-    /// Lowers a normalized query into a validated EBI plan.
+    /// Choose an EBI search  domain and text from the query filters.
+    /// Sequence targets return unsupported_capability.
     static std::expected<ebi_plan, external_error>
     plan(const prov::normalized_external_query& query,
          const prov::provider_capability_snapshot&,
@@ -378,9 +377,8 @@ struct ebi_provider {
         const bool taxonomy_target = query.target == prov::query_target::taxonomy;
         plan.domain = taxonomy_target ? "taxonomy" : "uniprot";
 
-        // Lower the free-text predicate into the EBI query string, and let a
-        // catalog translator override the default domain via an equality
-        // predicate on `external_field::domain`.
+        // Use taxonomy for taxon rows and UniProt by default for catalog rows.
+        // A catalog domain filter can select a different EBI database.
         for (const prov::predicate_node& node : query.predicates) {
             if (const auto* text = std::get_if<prov::text_search_predicate>(&node.leaf)) {
                 plan.query_text = std::string(text->query.view());
@@ -402,8 +400,7 @@ struct ebi_provider {
                 case prov::external_field::accession:
                 case prov::external_field::scientific_name:
                 case prov::external_field::common_name:
-                    // Lower a keyed lookup into the EBI Search free-text
-                    // query. A text_search_predicate still wins when present.
+                    // Use a name or accession as search text when no text filter supplied it.
                     if (text_value != nullptr && plan.query_text.empty()) {
                         plan.query_text = std::string(text_value->view());
                     }
@@ -422,7 +419,7 @@ struct ebi_provider {
         return plan;
     }
 
-    /// Opens an execution session for a validated plan.
+    /// Open a session that owns a copy of the plan.
     static std::expected<ebi_session, external_error>
     open(context::context& worker_memory,
          const bioseq::parallelism::global_pool& pool,

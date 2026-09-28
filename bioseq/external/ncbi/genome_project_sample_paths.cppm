@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_project_sample_paths.cppm
- * @brief NCBI genome project and sample catalog endpoint fragments.
+ * @brief NCBI genome reports selected by BioProject or BioSample.
  */
 module;
 

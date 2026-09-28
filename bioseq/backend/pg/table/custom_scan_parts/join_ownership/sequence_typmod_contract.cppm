@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares descriptor-only sequence typmod compatibility predicates.
+ * @brief Checks sequence type descriptors against the compiled dispatch types.
  */
 export module bioseq.postgres.table:custom_scan_join_ownership_sequence_typmod_contract;
 
@@ -9,7 +9,7 @@ import bioseq.sequences.compact_sequence_typmod;
 import bioseq.postgres.types.compact_sequence.dispatch_profile_contract;
 
 export {
-    /** @brief Validates a canonical sequence typmod supported by runtime dispatch. */
+    /** @brief Checks that the typmod has a valid encoding and an alphabet and storage width this build supports. */
     [[nodiscard]] bool batch_join_typmod_is_supported(const std::int32_t typmod) noexcept {
         if (typmod < 0) {
             return false;

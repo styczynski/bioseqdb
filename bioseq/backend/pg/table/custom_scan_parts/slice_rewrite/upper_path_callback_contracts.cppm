@@ -1,13 +1,13 @@
 /**
  * @file
- * @brief Declares the SliceProject upper-path callback without importing its implementation.
+ * @brief Declares the planner callback that places SliceProject above scan and join paths.
  */
 module;
 #include <bioseq/pg_compat.h>
 
 export module bioseq.postgres.table:custom_scan_slice_rewrite_upper_path_callback_contracts;
 
-/** @brief Install SliceProject ownership at the relevant upper-planner stage. */
+/** @brief Add SliceProject paths when  this planner stage has supported sequence work. */
 export void bioseq_slice_project_create_upper_paths(
     PlannerInfo* root,
     UpperRelationKind stage,

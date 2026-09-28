@@ -1,6 +1,7 @@
 /**
  * @file runtime_diagnostics.cppm
- * @brief Provides profile-gated BPCHAR and vector ownership statistics.
+ * @brief Test counters for BPCHAR storage, views and vector cleanup.
+ * Production builds keep the same calls but do not collect statistics.
  */
 module;
 
@@ -10,7 +11,7 @@ export module bioseq.postgres.support.runtime_diagnostics;
 
 export namespace bioseq::postgres::support::runtime_diagnostics {
 
-/** @brief Counts observed PostgreSQL BPCHAR storage representations. */
+/** Counts BPCHAR values by PostgreSQL storage form. */
 struct bpchar_source_form_statistics final {
     std::uint64_t short_datums = 0;
     std::uint64_t four_byte_uncompressed_datums = 0;
@@ -19,7 +20,7 @@ struct bpchar_source_form_statistics final {
     std::uint64_t unknown_datums = 0;
 };
 
-/** @brief Captures BPCHAR view and vector-payload lifetime transitions. */
+/** Counts BPCHAR views, copied data and cleanup operations. */
 struct bpchar_lifetime_statistics final {
     std::uint64_t live_views = 0;
     std::uint64_t view_constructions = 0;
@@ -51,7 +52,7 @@ struct bpchar_lifetime_statistics final {
     bpchar_source_form_statistics view_decode_sources{};
 };
 
-/** @brief Classifies the source representation of one BPCHAR datum. */
+/** Storage form of a PostgreSQL BPCHAR value */
 enum class bpchar_source_form : std::uint8_t {
     short_header,
     four_byte_uncompressed,
@@ -60,7 +61,7 @@ enum class bpchar_source_form : std::uint8_t {
     unknown,
 };
 
-/** @brief Identifies the consumer that inspected a BPCHAR source datum. */
+/** Place where a BPCHAR value was inspected. */
 enum class bpchar_source_site : std::uint8_t {
     vector_copy,
     view_decode,
@@ -82,13 +83,13 @@ inline void reset_bpchar_lifetime_statistics() noexcept {
     bpchar_lifetime_statistics_state = {};
 }
 
-/** @brief Starts one source-form observation session. */
+/** Start recording the storage forms seen by BPCHAR readers. */
 inline void begin_bpchar_source_observation_session() noexcept {
     bpchar_lifetime_statistics_state.source_observation_active = true;
     ++bpchar_lifetime_statistics_state.source_observation_sessions;
 }
 
-/** @brief Completes the active source-form observation session. */
+/** Stop recording BPCHAR storage forms and count the completed session. */
 inline void end_bpchar_source_observation_session() noexcept {
     if (bpchar_lifetime_statistics_state.source_observation_active) {
         bpchar_lifetime_statistics_state.source_observation_active = false;
@@ -96,7 +97,7 @@ inline void end_bpchar_source_observation_session() noexcept {
     }
 }
 
-/** @return True when source-form observations are currently recorded. */
+/** @return Whether BPCHAR storage forms are  currently being counted. */
 [[nodiscard]] inline bool
 is_bpchar_source_observation_active() noexcept {
     return bpchar_lifetime_statistics_state.source_observation_active;
@@ -124,7 +125,7 @@ inline void record_vector_payload_allocation() noexcept {
     ++bpchar_lifetime_statistics_state.vector_payload_allocations;
 }
 
-/** @brief Records a payload free and detects live borrowed views. */
+/** Count, a payload free that occurs while any BPCHAR view is alive. */
 inline void record_payload_free() noexcept {
     if (bpchar_lifetime_statistics_state.live_views != 0)
         ++bpchar_lifetime_statistics_state.payload_frees_while_view_live;
@@ -136,7 +137,7 @@ inline void record_vector_payload_overwrite_free() noexcept {
     ++bpchar_lifetime_statistics_state.vector_payload_overwrite_frees;
 }
 
-/** @brief Records payload release attributed to a cleanup operation. */
+/** Count a payload frev under the supplied cleanup operation. */
 inline void record_vector_payload_cleanup_free(
         vector_payload_cleanup_kind kind) noexcept {
     record_payload_free();
@@ -176,7 +177,7 @@ inline void record_detoast_temporary_free() noexcept {
     ++bpchar_lifetime_statistics_state.detoast_temporary_frees;
 }
 
-/** @brief Records one BPCHAR source form for the active observation site. */
+/** Count a BPCHAR storage form at the specified site while observation is enabled. */
 inline void record_bpchar_source_form(
         bpchar_source_form form,
         bpchar_source_site site) noexcept {

@@ -34,11 +34,11 @@ path_builder_callback registered_path_builder = nullptr;
 export namespace bioseq::postgres::external {
 
 /**
- * @brief Registers the external-relation path builder.
+ * @brief Installs the external table planner callback.
  *
- * A second non-null registration is a programming error. Passing null clears
- * the slot. The slot belongs to the always-loaded PostgreSQL planner boundary,
- * so an extension built without external providers simply leaves it empty.
+ * Passing null clears the callback. Registering a non-null callback while
+ * one is already installed raises an error Builds without external providers
+ * leave this slot empty.
  */
 void register_path_builder(path_builder_callback builder)
 {

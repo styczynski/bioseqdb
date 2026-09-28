@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/coverage.cppm
- * @brief SQL three-valued, bag-preserving coverage partition model.
+ * @brief Assigns result rows to cached sources or new computation while preserving duplicates.
  */
 module;
 
@@ -21,7 +21,7 @@ enum class sql_bool : std::uint8_t {
     unknown = 2,
 };
 
-/** Model PostgreSQL WHERE acceptance: only TRUE passes. */
+/** Reports whether a SQL condition passes WHERE. False and unknon are rejected. */
 [[nodiscard]] constexpr bool passes_where(sql_bool value) noexcept {
     return value == sql_bool::true_value;
 }
@@ -31,7 +31,7 @@ enum class sql_bool : std::uint8_t {
     return value == sql_bool::true_value ? sql_bool::false_value : sql_bool::true_value;
 }
 
-/** One expensive-domain occurrence and its predicate truth values. */
+/** One row occurrence with its requested-query and cached-source predicate results. */
 struct coverage_row {
     std::uint64_t occurrence = 0;
     std::int64_t visible_value = 0;
@@ -39,17 +39,17 @@ struct coverage_row {
     std::vector<sql_bool> source_predicates;
 };
 
-/** Disjoint branch ownership plus the newly computed residual occurrences. */
+/** Records which row occurrences come from each cached source and which need fresh computation. */
 class coverage_assignment {
   public:
     explicit coverage_assignment(std::size_t source_count) : branches_(source_count) {}
 
-    /** Add one occurrence to its deterministic cached branch. */
+    /** Assigns a row occurrence to the  chosen cached source. */
     void append_branch(std::size_t source, std::uint64_t occurrence) {
         branches_[source].push_back(occurrence);
     }
 
-    /** Add one occurrence to the residual expensive-domain branch. */
+    /** Adds a row occurrence that needs fresh computation. */
     void append_residual(std::uint64_t occurrence) {
         residual_.push_back(occurrence);
     }
@@ -59,12 +59,12 @@ class coverage_assignment {
         return branches_[source];
     }
 
-    /** Return residual occurrence identifiers. */
+    /** Returns the row occurrences that need fresh computation. */
     [[nodiscard]] const std::vector<std::uint64_t>& residual() const noexcept {
         return residual_;
     }
 
-    /** Count every retained occurrence without value-based deduplication. */
+    /** Counts row occurrences across all branches, preserving duplicate values. */
     [[nodiscard]] std::size_t occurrence_count() const noexcept {
         std::size_t count = residual_.size();
         for (const auto& branch_rows : branches_) {
@@ -73,7 +73,7 @@ class coverage_assignment {
         return count;
     }
 
-    /** Return all occurrence IDs in ascending fixture order. */
+    /** Returns all row-occurrence IDs in ascending order. */
     [[nodiscard]] std::vector<std::uint64_t> all_occurrences() const {
         std::vector<std::uint64_t> occurrences;
         occurrences.reserve(occurrence_count());
@@ -91,8 +91,10 @@ class coverage_assignment {
 };
 
 /**
- * Apply the normative disjoint formula. Invalid earlier sources do not
- * exclude overlap from later valid sources or the residual.
+ * Assigns each requested row to the first valid cached source whose
+ * predicate is true. Rows that no valid source covers need fresh
+ * computation. SQL unknown values fail the predicate check, and equal
+ * row values remain separate occurrences.
  */
 [[nodiscard]] inline coverage_assignment partition_coverage(std::span<const coverage_row> rows,
                                                             std::span<const bool> source_validity) {
@@ -128,7 +130,7 @@ class coverage_assignment {
     return result;
 }
 
-/** Deterministic source-order inputs from the registry candidate model. */
+/** Values used to order cached sources before choosing  which rows each supplies. */
 struct coverage_source_order_key {
     bool complete = false;
     std::uint64_t estimated_covered_rows = 0;
@@ -137,7 +139,11 @@ struct coverage_source_order_key {
     cache_digest_256 digest{};
 };
 
-/** Compare nonnegative fractions exactly without cross-product overflow. */
+/**
+ * Compares nonnegative fractions without multiplying their numerators
+ * and denominators. Repeated division avoids overflow. A zero
+ * denominator sorts after any finite fraction.
+ */
 [[nodiscard]] constexpr bool fraction_less_exact(std::uint64_t left_numerator,
                                                  std::uint64_t left_denominator,
                                                  std::uint64_t right_numerator,
@@ -166,7 +172,10 @@ struct coverage_source_order_key {
     }
 }
 
-/** Compare sources using completion, benefit, density, sequence, then digest. */
+/**
+ * Prefers sources covering more rows, then completed sources and lower
+ * bytes per covered row Claim sequence and digest break remaining ties.
+ */
 [[nodiscard]] inline bool
 coverage_source_precedes(const coverage_source_order_key& left,
                          const coverage_source_order_key& right) noexcept {

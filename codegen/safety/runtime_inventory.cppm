@@ -433,7 +433,7 @@ using owned_call_index =
 
 }  // namespace runtime_inventory_detail
 
-/// Returns the deterministic revision 2 identity for a SQL/fault probe pair.
+/// Builds the revision 2 probe ID from a SQL function identity and fault key.
 [[nodiscard]] inline std::string runtime_probe_site_id(
     std::string_view sql_identity,
     std::string_view fault_key) {
@@ -450,7 +450,7 @@ using owned_call_index =
             + std::string{fault_key} + "\n");
 }
 
-/// Validates canonical runtime-probe identities and inventory shape.
+/// Checks the probe inventory fields and verifies each computed probe ID.
 inline void validate_runtime_probe_inventory(
     const runtime_probe_inventory& inventory) {
     serialization_detail::
@@ -468,7 +468,8 @@ inline void validate_runtime_probe_inventory(
     }
 }
 
-/// Joins compiler probe facts to exact recoverable ERROR ledger sites.
+/// Matches compiler-recorded test probes to recoverable ERROR calls in the report
+/// Input hashes and source locations must agree before a probe is linked.
 [[nodiscard]] inline runtime_probe_inventory
 build_runtime_probe_inventory(
     const safety_ledger& ledger,

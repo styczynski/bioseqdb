@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/runtime.cppm
- * @brief Process-wide instrumentation state and runtime gate.
+ * @brief Shared profiler state and a switch for region and loop timing.
  *
- * Each configuration owns persistent scan-wide state. A relaxed atomic gate
- * pauses profiling without changing the compiled feature set.
+ * The runtime switch controls new measurement scopes. Existing scopes can
+ * still finish and record their results.
  */
 module;
 
@@ -16,26 +16,26 @@ import bioseq.instrumentation.profiler_state;
 
 namespace bioseq::instrumentation::detail {
 
-/// Process-wide gate checked by profiling-enabled scope constructors.
+/// Process-wide switch checked when region and loop scopes begin
 inline std::atomic<bool> runtime_enabled_flag{true};
 
 }  // namespace bioseq::instrumentation::detail
 
 export namespace bioseq::instrumentation {
 
-/** @brief Return whether runtime instrumentation is currently enabled. */
+/** @brief Return whether new region and loop measurements are enabled. */
 [[nodiscard]]
 [[gnu::always_inline]]
 inline bool is_runtime_enabled() noexcept {
     return detail::runtime_enabled_flag.load(std::memory_order_relaxed);
 }
 
-/** @brief Enable or pause instrumentation without changing compiled features. */
+/** @brief Enable or pause new region and loop measurements. */
 inline void set_runtime_enabled(bool enabled) noexcept {
     detail::runtime_enabled_flag.store(enabled, std::memory_order_relaxed);
 }
 
-/** @brief Return persistent process-wide state for one configuration. */
+/** @brief Return shared persistent state for one configuration. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard]] inline profiler_state<p_configuration_type>& persistent_profiler_state() noexcept {
     static profiler_state<p_configuration_type> state;

@@ -1,10 +1,9 @@
 /**
  * @file external/tests/provider/run_live_test.cpp
- * @brief Live provider-run tests for NCBI, UniProt, and EBI.
+ * @brief Live smoke tests for configured providers without PostgreSQL.
  */
 
-// Exercise the provider run path without PostgreSQL for NCBI, UniProt, and EBI.
-// The run bridge receives the same normalized query shape as the PG executor.
+// Run, the providers directly with the query format used by PostgreSQL.
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
 #include <optional>
@@ -35,8 +34,7 @@ void run_and_report(std::string_view provider_name, query_target target) {
 
     normalized_external_query query;
     query.target = target;
-    // Match the PG CustomScan page size. A UniProt catalog body at this scale
-    // exceeds 64 KiB and exercises heap-backed response storage.
+    // Request a large catalog page to exercise larger response buffers.
     query.limit = std::optional<std::uint64_t>{1000};
 
     auto result = bioseq::external::run_external_query(
@@ -56,14 +54,13 @@ void run_and_report(std::string_view provider_name, query_target target) {
                      static_cast<int>(view.size()),
                      view.data());
     }
-    // The run path must not abort the process. A
-    // graceful error (network/parse) is acceptable. Reaching here means no crash.
+    // This smoke test accepts reported network or parsing errors.
+    // It checks that the run returns without aborting.
     SUCCEED();
 }
 
-// Run a record_location query for one provider with an accession=<gene_id>
-// equality predicate (exactly what the PG scan pushes), then report how many
-// genomic intervals were parsed onto the emitted catalog rows.
+// Query a GeneID through the accession filter and report the number
+// of genomic intervals attached to returned catalog rows.
 void run_location_and_report(std::string_view provider_name, std::string_view gene_id) {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();
@@ -116,9 +113,8 @@ void run_location_and_report(std::string_view provider_name, std::string_view ge
     SUCCEED();
 }
 
-// Run a sequences query for one provider with the region equality predicates
-// the PG scan pushes (assembly_database / chromosome / start0 / end0) and report
-// the number of sequence payloads plus their total base count.
+// Query a genome region using assembly, chromosome, and coordinate filters.
+// Report how many  sequence rows and bases were returned.
 void run_sequence_and_report(std::string_view provider_name,
                              std::string_view genome,
                              std::string_view chrom,
@@ -193,10 +189,8 @@ void run_sequence_and_report(std::string_view provider_name,
     SUCCEED();
 }
 
-// Run a sequence / sequence_chunk query for one provider keyed by an accession
-// equality predicate (exactly what the PG scan pushes for the sequences /
-// sequence_chunks relations) and report the number of sequence payloads, the
-// total base count, the final chunk index, and whether the record is closed.
+// Query an accession as a whole sequence or as chunks. Report the returned
+// base count, last chunk index, and whether an end-of-record marker arrived.
 void run_seq_by_accession_and_report(std::string_view provider_name,
                                      std::string_view accession,
                                      query_target target) {
@@ -259,10 +253,8 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
     SUCCEED();
 }
 
-// Run a taxonomy query for one provider with a scientific_name equality
-// predicate (what the PG scan pushes) and report how many taxonomy rows came
-// back and whether taxon 9606 (Homo sapiens) is among them. Exercises EBI's
-// lowering of a keyed lookup into its free-text search query.
+// Query a scientific name and report whether TaxID 9606 appears.
+// This exercises EBI's conversion of a name filter into search text.
 void run_named_taxonomy_and_report(std::string_view provider_name, std::string_view sci_name) {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();

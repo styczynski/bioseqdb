@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares slice IR carrier construction without importing its implementation.
+ * @brief Declares the graph that describes lazy sequence operations in a plan.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,25 +10,25 @@ export module bioseq.postgres.table:custom_scan_slice_path_carrier_contracts;
 import std;
 import :custom_scan_slice_path_codec_contract;
 
-/** @brief Add or reuse one producer in the slice IR. */
+/** @brief Adds an  expression, to the producer graph, reusing an eligible existing entry. */
 export [[nodiscard]] std::uint32_t slice_project_add_producer(
     slice_project_ir_builder& builder,
     Node* expression,
     bool distinct_consumer = false,
     bool force_value = false);
 
-/** @brief Associate sequence source Vars with one stable producer. */
+/** @brief Records which producer uses each source column, marking shared sources ambiguous. */
 export void slice_project_note_source_binding(
     slice_project_ir_builder& builder,
     Node* sequence_expression,
     std::uint32_t producer_id);
 
-/** @brief Build or reuse the IR node describing one expression. */
+/** @brief Describes an expression and its sequence operations in the producer graph. */
 export [[nodiscard]] std::uint32_t slice_project_build_ir_node(
     slice_project_ir_builder& builder,
     Node* expression);
 
-/** @brief Add one materialization boundary to the slice IR. */
+/** @brief Records a planned materialization and the earlier work it depends on. */
 export void slice_project_add_boundary(
     slice_project_ir_builder& builder,
     Node* sequence_expression,
@@ -37,7 +37,7 @@ export void slice_project_add_boundary(
     materialization_reason reason,
     bool preprojection);
 
-/** @brief Discover slice operations in a target and populate their IR. */
+/** @brief Finds lazy sequence operations in output expressions and records their producers. */
 export [[nodiscard]] bool slice_project_discover_target(
     PathTarget* target,
     slice_project_ir_builder& builder);

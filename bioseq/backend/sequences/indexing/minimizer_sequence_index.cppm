@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index.cppm
- * @brief Public facade for the direct minimizer sequence index.
+ * @brief Exports the direct minimizer sequence index and its build and read modules.
  */
 export module bioseq.indexing.minimizer_sequence;
 

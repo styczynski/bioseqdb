@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_segment_test.cpp
- * @brief Vulkan minimizer representation and segmented-route tests.
+ * @brief Compare minimizer record widths and sequence segments on the GPU.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -30,12 +30,12 @@ TEST_CASE("vulkan minimizer: minimizer_representation 16/32/64/128-bit layouts r
         SUCCEED("no hardware Vulkan device; skipped");
         return;
     }
-    // 16-bit: k_position_bits=10, hash fits 5 bits -> uint16 storage.
+    // Compare every supported minimizer record width with scalar output.
     using representation_16 = minimizer_representation<10u, 2u>;
     using representation_32 =
-        minimizer_representation<10u, 9u>;         // pos 10 + hash 21 -> uint32 storage
-    using representation_64 = minimap_sketch_data; // minimizer_representation<28,15>, 64-bit
-    using representation_128 = minimizer_representation<28u, 30u>; // no room in 64 -> 128-bit
+        minimizer_representation<10u, 9u>;
+    using representation_64 = minimap_sketch_data;
+    using representation_128 = minimizer_representation<28u, 30u>;
     static_assert(sizeof(representation_16) == 2);
     static_assert(sizeof(representation_32) == 4);
     static_assert(sizeof(representation_64) == 8);
@@ -75,9 +75,7 @@ TEST_CASE("vulkan minimizer: minimizer_representation 16/32/64/128-bit layouts r
     }
 }
 
-// ===========================================================================
-// Checked Vulkan segment-path tests.
-// ===========================================================================
+// GPU minimizers for selected sequene intervals.
 
 TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
           "[component:bioseq][layer:unit][feature:minimizer][resource:gpu]") {
@@ -98,20 +96,9 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
 
         constexpr std::size_t w = 10;
         constexpr std::size_t k = 15;
-        // The segment sketch uses fused tiled Vulkan execution for every supported
-        // alphabet. dna4 is still expected to be exact; dna5/generic may contain
-        // bounded tile-boundary extras but must cover every scalar minimizer.
-        //  (1) draw ranks from the NON-AMBIGUOUS letters only (ACGT, ranks 0..3).
-        //      The original periodic `i % alphabet_size` put an N every 5th base
-        //      for dna5 (every 15-mer spans an N → vacuous). ACGT here keeps
-        //      this segment case focused on window tiling rather than reset
-        //      handling. And
-        //  (2) make the length a MULTIPLE of letters_per_unit so the trailing
-        //      unit has zero padding — otherwise the scalar unit-iterator
-        //      sub-range processes the last unit's padding slots (decoded as A)
-        //      as spurious end-of-window minimizers that the GPU (which honours
-        //      tail_padding) correctly omits. This is a separate scalar/GPU
-        //      end-of-sequence discrepancy, independent of the tiled bug.
+        // Generate varied input and use whole packed words so final padding cannot
+        // affect the scalar comparison. Check exact dna4 output. For dna5, require
+        // every scalar minimizer and limit the number of extra GPU records.
         constexpr std::uint8_t k_non_ambiguous_rank_count =
             range_type::traits::alphabet_size < 4u
                 ? static_cast<std::uint8_t>(range_type::traits::alphabet_size)
@@ -272,9 +259,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     std::vector<typename configuration_type::alphabet_type> letters;
     constexpr std::size_t dna5_letter_count = range_type::traits::letters_per_unit * 50000u;
     letters.reserve(dna5_letter_count);
-    // Varied LCG ranks ensure that the dna5 sequence has
-    // minimizers. `(i*7 + i/31) % 5` is periodic and puts an N (rank 4) every
-    // 5th base, so every 15-mer contains an N → zero minimizers → empty pairs.
+    // Vary the dna5 letters so  some k-mer windows avoid N and produce minimizers.
     std::uint64_t lcg = 0x2545f4914f6cdd1dULL;
     for (std::size_t i = 0; i < dna5_letter_count; ++i) {
         lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -324,11 +309,9 @@ TEST_CASE("Vulkan borrowed segment-pair admission covers arena high-water",
         return;
     }
 
-    // Reproduce the ordering that exposed the regression: an earlier Vulkan
-    // operation leaves a large reusable arena allocation, then a small
-    // persisted-index segment borrows a slice from its outer owner.  Requested
-    // bytes for the small segment are much lower than this physical high-water;
-    // the borrowed slice must nevertheless cover the allocation that is live.
+    // Leave a large allocation in the reusable arena, then process a small
+    // segment. Its memory reservation must cover the allocation still held by
+    // the arena, including space beyond the segment's requested bytes.
     auto& runtime = vk::runtime::instance();
     constexpr std::uint64_t high_water_request = std::uint64_t{32} << 20u;
     REQUIRE(runtime.reusable_gpu_arena().ensure_capacity(high_water_request, 0u, 0u));

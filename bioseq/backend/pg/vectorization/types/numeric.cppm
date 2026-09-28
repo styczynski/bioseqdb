@@ -3,19 +3,11 @@
  * Converts signed 128-bit aggregate values to PostgreSQL Numeric storage.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/types/numeric.cppm
- *
- * Mini Numeric arithmetic ported from PostgreSQL core so the columnar
- * vectorised aggregate path can build Numeric return values (e.g. int8 SUM,
- * AVG) without calling into PostgreSQL's internal numeric_* helpers.
- *
- * Only the pieces needed by the int128 -> Numeric conversion are kept.
- * The internal Numeric layout types live in the global module fragment so
- * they share linkage with PG's own forward-declared `struct NumericData`.
- *
- *-------------------------------------------------------------------------
+/*
+ * Numeric conversion code adapted from PostgreSQL for vector BIGINT SUM and AVG.
+ * It contains only the parts needed to turn a signed 128-bit integer into Numeric.
+ * The NumericData definition stays in the global, module fragment to match
+ * PostgreSQL's forward declaration of that type.
  */
 module;
 
@@ -35,28 +27,26 @@ using numeric_digit = std::int16_t;
 } // namespace
 
 /**
- * Short form of an on-disk Numeric: header word carries sign+dscale+weight,
- * the digit array extends from n_data. Used when weight/dscale fit inside
- * 7 and 6 bits respectively (the common case).
+ * PostgreSQL's compact Numeric format. One header word stores the sign, display
+ * scale and weight, followed by base-10000 digits. The display scale is the
+ * number of decimal places, and the  weight is the exponent of the first digit
  */
 struct numeric_short {
     std::uint16_t n_header;                      /* Sign + display scale + weight */
-    numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
+    numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Base-10000 digits. */
 };
 
 /**
- * Long form of an on-disk Numeric. The header carries sign and scale, while weight is
- * stored in a second 16-bit field before the digit array.
+ * Numeric format for values whose scale or weight does not fit the compact
+ * header. The first word stores sign and scale, and the second stores weight.
  */
 struct numeric_long {
     std::uint16_t n_sign_dscale;                 /* Sign + display scale */
-    std::int16_t n_weight;                       /* Weight of 1st digit  */
-    numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
+    std::int16_t n_weight;                       /* Base-10000 exponent of the first digit. */
+    numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Base-10000 digits. */
 };
 
-/**
- * Union covering both short and long on-disk forms plus a raw header view.
- */
+/** Access the Numeric hader or the fields of its short or long format. */
 union numeric_choice {
     std::uint16_t n_header;       /* Header word */
     struct numeric_long n_long;   /* Long form (4-byte header) */
@@ -64,14 +54,14 @@ union numeric_choice {
 };
 
 /**
- * On-disk Numeric: varlena header followed by the representation union.
- * PostgreSQL forward-declares this struct in utils/numeric.h. This definition
- * matches the server representation consumed by the adapter.
+ * PostgreSQL Numeric storage: a byte-length header followed by the number.
+ * This definition completes the NumericData declaration in utils/numeric.h
+ * and must match the server's layout.
  */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL numeric ABI type name
 struct NumericData {
-    std::int32_t vl_len_;        /* varlena header (do not touch directly!) */
-    union numeric_choice choice; /* choice of format */
+    std::int32_t vl_len_;        /* Byte-length header. Access it through PostgreSQL varlena helpers. */
+    union numeric_choice choice; /* Numeric header and digits in the  selected format. */
 };
 
 static_assert(PG_VERSION_NUM >= 170000);
@@ -110,9 +100,9 @@ constexpr int numeric_short_weight_minimum = -(numeric_short_weight_mask + 1);
 constexpr std::uint16_t numeric_scale_mask = 0x3FFF;
 
 /**
- * In-memory working format for arithmetic. The digit buffer is owned by the
- * variable. `digits` points inside it so there is
- * room for carry-out at the top.
+ * Temporary base-10000 digits used while building a Numeric value.
+ * buffer owns the allocation. digits points inside it, leaving room before
+ * the first digit for a carry.
  */
 struct numeric_variable {
     int digit_count;
@@ -132,22 +122,18 @@ import bioseq.postgres.support;
 
 namespace {
 
-/**
- * Numeric field accessors mirror the server representation consumed by this
- * PostgreSQL-major-specific adapter. numeric_digit_count is non-constexpr
- * because it reads the runtime varlena header through VARSIZE.
- */
+/** Test whether Numeric uses the two-byte numeric header. */
 [[gnu::always_inline]] constexpr bool numeric_header_is_short(const NumericData* numeric) noexcept {
     return (numeric->choice.n_header & numeric_short_marker) != 0;
 }
 
-/** Returns the varlena header size for the active Numeric representation. */
+/** Return the total header size, including the varlena byte-length header. */
 [[gnu::always_inline]] constexpr int numeric_header_size(const NumericData* numeric) noexcept {
     return VARHDRSZ + static_cast<int>(sizeof(std::uint16_t)) +
            (numeric_header_is_short(numeric) ? 0 : static_cast<int>(sizeof(std::int16_t)));
 }
 
-/** Returns the display scale encoded by a finite Numeric value. */
+/** Return the number of decimal places stored for a finite Numeric value. */
 [[gnu::always_inline]] constexpr int numeric_display_scale(const NumericData* numeric) noexcept {
     return numeric_header_is_short(numeric)
                ? ((numeric->choice.n_short.n_header & numeric_short_scale_mask) >>
@@ -155,7 +141,7 @@ namespace {
                : (numeric->choice.n_long.n_sign_dscale & numeric_scale_mask);
 }
 
-/** Returns the base-10000 weight encoded by a finite Numeric value. */
+/** Return the base-10000 exponent of a finite value's first digit. */
 [[gnu::always_inline]] constexpr int numeric_weight(const NumericData* numeric) noexcept {
     if (numeric_header_is_short(numeric)) {
         const std::uint16_t header = numeric->choice.n_short.n_header;
@@ -167,14 +153,14 @@ namespace {
     return numeric->choice.n_long.n_weight;
 }
 
-/** Returns the immutable digit range stored after the Numeric header. */
+/** Return a  read-only pointer to the Numeric digits. */
 [[gnu::always_inline]] constexpr const numeric_digit*
 numeric_digits(const NumericData* numeric) noexcept {
     return numeric_header_is_short(numeric) ? numeric->choice.n_short.n_data
                                             : numeric->choice.n_long.n_data;
 }
 
-/** Returns the writable digit range stored after the Numeric header. */
+/** Return a writable pointer to the Numeric digits. */
 [[gnu::always_inline]] constexpr numeric_digit* numeric_digits(NumericData* numeric) noexcept {
     return numeric_header_is_short(numeric) ? numeric->choice.n_short.n_data
                                             : numeric->choice.n_long.n_data;
@@ -193,8 +179,8 @@ numeric_digits(const NumericData* numeric) noexcept {
 }
 
 /**
- * Allocates a fresh digit buffer with one spare entry so carry-out
- * can be stored without reallocation. Any prior buffer is freed.
+ * Replace the digit buffer with a zeroed allocation that has one spare leading
+ * digit, for a carry Free the previous buffer, if present.
  */
 void allocate_numeric_digits(numeric_variable* variable, int digit_count) {
     if (variable->buffer != nullptr)
@@ -205,10 +191,7 @@ void allocate_numeric_digits(numeric_variable* variable, int digit_count) {
     variable->digit_count = digit_count;
 }
 
-/**
- * Releases the digit buffer and leaves the variable in a NaN-shaped
- * unusable state.
- */
+/** Free the digit buffer, clear its pointers and mark the valce as NaN. */
 void release_numeric_digits(numeric_variable* variable) {
     if (variable->buffer != nullptr)
         pfree(variable->buffer);
@@ -217,7 +200,7 @@ void release_numeric_digits(numeric_variable* variable) {
     variable->sign = numeric_nan;
 }
 
-/** Releases a temporary numeric digit buffer at the C++ scope boundary. */
+/** Free a temporary Numeric digit buffer when this object leaves scope. */
 class numeric_variable_owner final {
   public:
     numeric_variable_owner() noexcept = default;
@@ -229,7 +212,7 @@ class numeric_variable_owner final {
     numeric_variable_owner(const numeric_variable_owner&) = delete;
     numeric_variable_owner& operator=(const numeric_variable_owner&) = delete;
 
-    /** Returns the owned working representation. */
+    /** Return the temporary value for conversion and packing. */
     [[nodiscard]] numeric_variable& get() noexcept {
         return value;
     }
@@ -239,9 +222,8 @@ class numeric_variable_owner final {
 };
 
 /**
- * Fills a numeric working variable from a signed 128-bit
- * integer. Zero is special-cased so packing emits the canonical
- * "zero with weight 0 positive" form.
+ * Write a signed 128-bit integer as base-10000 digits, with  no fractional part.
+ * Handle the minimum negative value without overflowing its signed type.
  */
 void assign_int128_to_numeric_variable(int128 value, numeric_variable* variable) {
     allocate_numeric_digits(variable, 40 / decimal_digits_per_numeric_digit);
@@ -275,9 +257,10 @@ void assign_int128_to_numeric_variable(int128 value, numeric_variable* variable)
 }
 
 /**
- * Packs a numeric working variable into the on-disk Numeric format. NaN /
- * Infinity emit the minimal short header. Finite values prefer short form
- * when display scale and weight fit.
+ * Allocate a PostgreSQL Numeric from the temporary digits, removing leading
+ * and trailing zero digits. Use the smaller header when scale and weight fit.
+ * NaN and infinities need only a header. Report an error if the packed fields
+ * cannot hold the value.
  */
 Numeric pack_numeric(const numeric_variable* variable) {
     Numeric packed_numeric;
@@ -353,7 +336,10 @@ Numeric pack_numeric(const numeric_variable* variable) {
 
 } // namespace
 
-/** Converts a signed 128-bit integer to an owned PostgreSQL Numeric value. */
+/**
+ * Convert a signed 128-bit integer to PostgreSQL Numeric for BIGINT SUM or AVG.
+ * Allocate the result in the current memory context and free the working digits.
+ */
 export Numeric int128_to_numeric(int128 value) {
     numeric_variable_owner working_variable;
 

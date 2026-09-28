@@ -1,10 +1,9 @@
 /**
  * @file formats.cppm
- * @brief Sequence header dialect definitions.
+ * @brief Known FASTA and FASTQ header formats and their fields.
  *
- * The constexpr tables describe known FASTA and FASTQ header dialects and the
- * normalisation rule used to match their fields to destination columns. Runtime
- * extraction lives in `bioseq.io.identifier_parser`.
+ * These tables map header fields to column names. The identifier parser
+ * uses them to read values from each header.
  */
 module;
 
@@ -25,11 +24,10 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::io::identifier_parser {
 
-// =====================================================================
-// Header format types
-// =====================================================================
+// Header format types.
 
-/// The header dialect. AUTO is detected once per file from sampled headers.
+/// Header  format. With `automatic`, the loader can sample headers to choose
+/// a format. Unrecognized structured headers use generic tags.
 enum class header_format : std::uint8_t {
     automatic = 0,
     plain,
@@ -50,8 +48,8 @@ enum class header_format : std::uint8_t {
 
 /// Where a field's bytes come from inside a header.
 enum class field_origin : std::uint8_t {
-    identifier,  // the leading id / metadata-stripped header
-    positional,  // the i-th primary-delimiter ('|' or '/') field
+    identifier,  // whole header, with optional metadata removal
+    positional,  // zero-based field separated by the format delimiter
     description, // free text between the id block and the first metadata tag
     equals_tag,  // KEY=VALUE   (value runs to the next recognised tag/end)
     bracket_tag, // [KEY=VALUE]
@@ -60,17 +58,14 @@ enum class field_origin : std::uint8_t {
 /// How metadata is encoded in a format.
 enum class metadata_style : std::uint8_t { none, equals, bracket, both };
 
-/// positional field marker: "this field is not a positional field".
+/// Marks a field that has no positional index.
 inline constexpr std::uint16_t no_position = 0xFFFF;
 
-// =====================================================================
-// Name normalization
-// =====================================================================
+// Name normalization.
 
-/// Lowercase short header and column names while dropping '_' and '-'.
-/// `out` must hold at least `in.size()` bytes. Returns the written view into it.
-/// Reuses `lowercase_ascii_character` so runtime matching and compile-time
-/// table validation apply the same ASCII rule.
+/// Normalizes names by lowercasing ASCII letters and removing '_' and '-'.
+/// Writes into `out`, which must hold `in.size()` bytes.
+/// The returned view borrows that buffer.
 [[nodiscard]] inline std::string_view normalise_name(std::string_view in,
                                                      std::span<char> out) noexcept {
     std::size_t written_count = 0;
@@ -82,10 +77,8 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
     return std::string_view{out.data(), written_count};
 }
 
-/// `consteval` companion of `normalise_name`: true iff normalising `raw`
-/// (lower-case, drop '_'/'-') yields exactly `normalised`. Used both to validate
-/// the hand-written `normalised_key` constants at compile time and to compare a runtime
-/// name against a constant without a scratch buffer.
+/// Compares a raw, name with an already normalized name without a scratch  buffer.
+/// Used for compile-timy table checks and runtime format lookup.
 [[nodiscard]] constexpr bool normalised_equals(std::string_view raw,
                                                std::string_view normalised) noexcept {
     std::size_t j = 0;
@@ -100,15 +93,11 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
     return j == normalised.size();
 }
 
-// =====================================================================
-// Field and format definitions
-// =====================================================================
+// Field and format definitions.
 
-/// One known field of a format. `normalised_key` is the *normalised canonical* key the
-/// parser emits for this field. `token` is the header short token, such as "OS".
-/// `aliases` are extra spellings from the reference parsers / common schema
-/// styles. At resolution time `norm(canonical)`, `norm(token)`, and `norm(alias)`
-/// each match a table column. The extractor always emits the single `normalised_key`.
+/// One header field and the names a destination column can use to select it
+/// A column may match the full name, a short token such as "OS", or an alias.
+/// Named routes use `normalised_key` when the parser sends the field to a writer.
 struct header_field_definition {
     std::string_view canonical;      // long name, e.g. "organism_name"
     std::string_view token;          // header token, e.g. "OS" ("" if none)
@@ -118,19 +107,18 @@ struct header_field_definition {
     std::uint16_t position; // Positional index, or no_position for other origins.
 };
 
-/// A complete format definition. `fields` spans a per-format static array.
+/// Delimiter, metadata rules, and fields for one header format.
+/// The field span refers to a static table.
 struct header_format_definition {
     header_format id;
-    std::string_view sql_name; // 'uni_prot'
-    char primary_delimiter;    // '|', '/', or '\0'
+    std::string_view sql_name; // SQL format name, for example 'uni_prot'
+    char primary_delimiter;    // field delimiter, or '\0' when fields are  not delimited
     metadata_style metadata;
     std::span<const header_field_definition> fields;
-    std::uint16_t identifier_block_field_count = 0; // ncbi identifier prefix
+    std::uint16_t identifier_block_field_count = 0; // number of prefix fields before the NCBI description or PDB chain
 };
 
-// =====================================================================
-// Alias tables
-// =====================================================================
+// Alternate field names.
 
 inline constexpr std::array<std::string_view, 2> identifier_aliases{{"id", "identifier"}};
 inline constexpr std::array<std::string_view, 1> entry_aliases{{"entry"}};
@@ -143,9 +131,7 @@ inline constexpr std::array<std::string_view, 3> genbank_identifier_aliases{
 inline constexpr std::array<std::string_view, 2> accession_identifier_aliases{{"id", "identifier"}};
 inline constexpr std::array<std::string_view, 1> name_aliases{{"name"}};
 
-// =====================================================================
-// Per-format field tables
-// =====================================================================
+// Fields for each supported format.
 
 // UniProtKB: db|accession|entry block plus equals tags.
 inline constexpr std::array<header_field_definition, 11> uniprotkb_fields{{
@@ -229,9 +215,9 @@ inline constexpr std::array<header_field_definition, 5> ncbi_gi_fields{{
     {"taxon", "", "taxon", {}, field_origin::bracket_tag, no_position},
 }};
 
-// NCBI PDB: positional identifier prefix, chain, and trailing organism.
-// `chain` is description-origin (key route) because parse_ncbi splits it out of
-// parts[2]. It must not bind the whole field through a positional route.
+// NCBI PDB: identifier prefix, chain, description, and organism.
+// The chain shares a pipe-delimited field with the description. `parse_ncbi`
+// splits that field, so the chain uses a named route.
 inline constexpr std::array<header_field_definition, 6> ncbi_pdb_fields{{
     {"pdb", "", "pdb", {}, field_origin::positional, 0},
     {"pdb_id", "", "pdbid", accession_identifier_aliases, field_origin::positional, 1},
@@ -297,15 +283,12 @@ inline constexpr std::array<header_field_definition, 15> imgt_fields{{
 
 inline constexpr std::array<header_field_definition, 0> no_fields{};
 
-// =====================================================================
-// Format lookup
-// =====================================================================
+// Format lookup.
 
 inline constexpr std::array<header_format_definition,
                             static_cast<std::size_t>(header_format::count)>
     header_format_definitions{{
-        // id                       sql_name      delim  metadata                          fields
-        // idblock
+        // format, SQL name, delimiter, metadata style, fields, identifier prefix length
         {header_format::automatic, "auto", '\0', metadata_style::both, no_fields, 0},
         {header_format::plain, "plain", '\0', metadata_style::none, no_fields, 0},
         {header_format::uniprotkb, "uni_prot", '|', metadata_style::equals, uniprotkb_fields, 0},
@@ -322,15 +305,14 @@ inline constexpr std::array<header_format_definition,
         {header_format::imgt, "imgt", '|', metadata_style::none, imgt_fields, 0},
     }};
 
-/// O(1) lookup: header_format -> its definition.
+/// Returns the definition for a valid format value.
+/// `count` and out-of-range values are invalid.
 [[nodiscard]] inline const header_format_definition&
 header_format_definition_for(header_format f) noexcept {
     return header_format_definitions[static_cast<std::size_t>(f)];
 }
 
-// =====================================================================
-// Compile-time table validation
-// =====================================================================
+// Compile-time table checks.
 
 /// Verify that every emitted field key is the normalized canonical name.
 [[nodiscard]] consteval bool all_norm_keys_canonical() {
@@ -342,7 +324,7 @@ header_format_definition_for(header_format f) noexcept {
 }
 static_assert(all_norm_keys_canonical(), "header field keys must match normalised canonical names");
 
-/// Verify that definitions are dense and ordered by `header_format` value.
+/// Checks that each format value equals its  index in the lookup table.
 [[nodiscard]] consteval bool format_table_is_dense_and_ordered() {
     for (std::size_t i = 0; i < header_format_definitions.size(); ++i)
         if (static_cast<std::size_t>(header_format_definitions[i].id) != i)
@@ -352,13 +334,11 @@ static_assert(all_norm_keys_canonical(), "header field keys must match normalise
 static_assert(format_table_is_dense_and_ordered(),
               "header_format_definitions must be dense and ordered by header_format value");
 
-// =====================================================================
-// Format-name parsing
-// =====================================================================
+// Format-name parsing.
 
-/// Map a SQL format name ('auto','uni_prot','uni_ref',…) to its enum,
-/// case/separator-insensitively. Returns a human-readable error listing the
-/// valid names on no match (mapped to ereport by the PG caller).
+/// Parses a SQL format name such as 'auto' or 'uni_prot'.
+/// Ignores ASCII case, underscores, and hyphens. Unknown names eturn an error.
+/// The error lists valid names unless the input exceeds the 64-byte limit
 [[nodiscard]] inline std::expected<header_format, std::string>
 parse_header_format_name(std::string_view name) {
     std::array<char, 64> scratch{};

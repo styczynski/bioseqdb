@@ -1,10 +1,6 @@
 /**
  * @file runtime.cppm
- * @brief Exposes the Vulkan runtime API and its operation receipt contracts.
- *
- * The facade preserves the public module name while semantic partitions own
- * receipt types, frontend wire types, runtime layout, device lifetime, caches,
- * and GPU algorithm implementations.
+ * @brief Public interface to the Vulkan runtime and its GPU input and  result types.
  */
 
 export module bioseq.gpu.vulkan.runtime;

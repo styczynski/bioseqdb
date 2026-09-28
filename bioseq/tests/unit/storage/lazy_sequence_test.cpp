@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies resident, fragmented, erased, and admitted lazy-sequence contracts.
+ * @brief Tests sequence views over contiguous and fragmented storage, including copies made under a memory budget.
  */
 
 #include <cstring>
@@ -36,7 +36,7 @@ using namespace seq::literals;
 
 namespace {
 
-/** Deterministic observation of the existing two-sample materialization boundary. */
+/** Records the memory permit at both footprint samples during packed copying. */
 struct packed_transaction_probe {
     inline static thread_local packed_transaction_probe* active = nullptr;
     bioseq::parallelism::memory_permit* pending;
@@ -63,9 +63,7 @@ struct packed_transaction_probe {
     }
 };
 
-// The mixed-libc++ ASAN lane waives the entire libc++ container-poison
-// category. This contract validates only the independent ordinary
-// allocation-redzone and freed-storage poisoning that must remain active.
+// Check that ASAN still poisons allocation redzones and freed memory.
 TEST_CASE("ASAN mixed-libcxx lane retains heap redzone and freed-storage poisoning",
           "[component:bioseq][layer:unit][feature:storage]") {
 #if __has_feature(address_sanitizer)
@@ -99,7 +97,7 @@ using bioseq::storage::resident_sequence_scanner;
 using bioseq::storage::sequence_scanner;
 using bioseq::storage::sequence_size_t;
 
-/** @brief Bounded capture buffer for payload-allocation observer callbacks. */
+/** @brief Stores up to eight allocation events and flags overflow. */
 struct payload_observer_probe {
     std::array<bioseq::storage::sequence_payload_allocation_event, 8> events{};
     std::size_t count{};
@@ -107,9 +105,9 @@ struct payload_observer_probe {
 };
 
 /**
- * @brief Records one payload allocation without throwing across the callback boundary.
- * @param[in,out] opaque Pointer to the owning `payload_observer_probe`.
- * @param[in] event Allocation event to append.
+ * @brief Saves an allocation event, or marks overflow when the test buffer is full.
+ * @param[in,out] opaque Pointer  to the `payload_observer_probe`.
+ * @param[in] event Allocation event to save.
  */
 void collect_payload_allocation_noexcept(
     void* opaque,
@@ -124,23 +122,22 @@ void collect_payload_allocation_noexcept(
     probe.events[probe.count++] = event;
 }
 
-using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>; // 32 letters / uint64 unit
+using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>; // 32 DNA4 bases per uint64_t.
 using range_t = compact_sequence_range<dna4_u64>;
 
-// 2 storage units per fragment => 64 dna4 letters per fragment. Small enough
-// that every multi-unit sequence crosses several fragment boundaries.
+// Each fragment holds two storage units, or 64 DNA4 bases.
 using chunked2 = chunked_span_sequence_scanner<std::uint64_t, 2>;
-using chunked1 = chunked_span_sequence_scanner<std::uint64_t, 1>; // worst case: 32 letters/frag
+using chunked1 = chunked_span_sequence_scanner<std::uint64_t, 1>; // 32 DNA4 bases per fragment.
 
 using facade_t = lazy_sequence_view<seq::dna4>;
 using existing_fragmented_t = lazy_sequence<dna4_u64, chunked2>;
 using existing_flat_t = lazy_sequence<dna4_u64, resident_sequence_scanner<std::uint64_t>>;
 
 /**
- * @brief Checks that each concrete storage profile erases to one alphabet facade.
- * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
- * @return `true` when flat and fragmented owners meet the same view contract.
+ * @brief Checks that flat and fragmented storage produce the same alphabet view type.
+ * @tparam p_alphabet Sequence, alphabet.
+ * @tparam p_unit Packed storage unqt.
+ * @return Whether both storage types satisfy the view requirements.
  */
 template <class p_alphabet, class p_unit> consteval bool canonical_adapter_profile_contract() {
     using instance_t = sequence_custom_alphabet<p_alphabet, p_unit>;
@@ -162,9 +159,7 @@ template <class p_alphabet, class p_unit> consteval bool canonical_adapter_profi
                           view_type>;
 }
 
-// Every supported alphabet and physical-width profile must erase direct-flat,
-// resident lazy, and fragmented lazy storage to
-// exactly one alphabet-specialized facade type.
+// DNA4 and DNA5 use one view type per alphabet across all four storage widths.
 static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint8_t>());
 static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint16_t>());
 static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint32_t>());
@@ -195,10 +190,10 @@ static_assert(bioseq::storage::packed_letters_per_unit(4u, 5u) == 6u);
 static_assert(bioseq::storage::packed_letters_per_unit(3u, 5u) == 0u);
 
 /**
- * @brief Generates deterministic DNA4 symbols from a linear-congruential stream.
- * @param[in] n Number of symbols to generate.
- * @param[in] seed Initial generator state.
- * @return Generated DNA4 sequence.
+ * @brief Makes repeatable DNA4 test data from a seed.
+ * @param[in] n Number of bases.
+ * @param[in] seed Initial random  generator state.
+ * @return Generated sequence.
  */
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n,
                                                std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
@@ -214,14 +209,14 @@ static_assert(bioseq::storage::packed_letters_per_unit(3u, 5u) == 0u);
 }
 
 /**
- * @brief Compares one view orientation with the packed-range oracle.
- * @tparam p_is_reversed Whether symbols are read from the reverse orientation.
- * @tparam p_write_reversed Whether output order is reversed.
+ * @brief Checks a lazy view against the same slice read from a packed range.
+ * @tparam p_is_reversed Read coordinates on the reverse-complement strand.
+ * @tparam p_write_reversed Reverse the output order.
  * @tparam p_view Lazy view type.
- * @param[in] baseline Packed-range oracle.
- * @param[in] view Lazy view to inspect.
- * @param[in] from Inclusive source coordinate.
- * @param[in] to Exclusive source coordinate.
+ * @param[in] baseline Packed range used for comparison.
+ * @param[in] view View to check.
+ * @param[in] from Inclusive start coordinate.
+ * @param[in] to Exclusive end coordinate.
  */
 template <bool p_is_reversed, bool p_write_reversed, class p_view>
 void require_orientation_matches(const range_t& baseline,
@@ -235,7 +230,7 @@ void require_orientation_matches(const range_t& baseline,
     REQUIRE(observed == expected);
 }
 
-/** @brief Mutable backing and callback counters for the erased-view fixture. */
+/** @brief Test backend data, callback counts and switches for simulated failures. */
 struct mock_lazy_state {
     std::vector<std::uint8_t> ranks;
     std::optional<facade_t::resident_packed_sequence> resident;
@@ -249,14 +244,14 @@ struct mock_lazy_state {
 };
 
 /**
- * @brief Copies a requested rank window from the erased mock backend.
- * @tparam p_is_reversed Whether to read the reverse orientation.
- * @tparam p_write_reversed Whether to reverse output order.
+ * @brief Copies a slice from the mock backend and counts the read
+ * @tparam p_is_reversed Read coordinates on the reverse-complement strand.
+ * @tparam p_write_reversed Reverse the output order.
  * @param[in,out] opaque Pointer to `mock_lazy_state`.
- * @param[in] from Inclusive logical coordinate.
- * @param[in] length Number of symbols to copy.
- * @param[out] scratch Destination buffer owned by the caller.
- * @return `scratch.data()` after the copy.
+ * @param[in] from Start coordinate on the selected strand.
+ * @param[in] length Number of  bases to copy.
+ * @param[out] scratch Caller buffer with room for `length` ranks.
+ * @return `scratch.data()`.
  */
 template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t* mock_read_at(void const* opaque,
@@ -284,12 +279,12 @@ template <bool p_is_reversed, bool p_write_reversed>
     return scratch.data();
 }
 
-/** @brief Returns the logical length of an erased mock backend. */
+/** @brief Returns the number of ranks in the mock backend. */
 [[nodiscard]] sequence_size_t mock_bp_size(void const* opaque) noexcept {
     return static_cast<const mock_lazy_state*>(opaque)->ranks.size();
 }
 
-/** @brief Returns the optional resident descriptor advertised by the mock backend. */
+/** @brief Counts the probe and returns the configured descriptor without checking the request. */
 [[nodiscard]] facade_t::resident_packed_result
 mock_resident_probe(void const* opaque, sequence_size_t, sequence_size_t, std::uint8_t) noexcept {
     auto& state = *const_cast<mock_lazy_state*>(static_cast<const mock_lazy_state*>(opaque));
@@ -297,18 +292,20 @@ mock_resident_probe(void const* opaque, sequence_size_t, sequence_size_t, std::u
     return state.resident;
 }
 
-/** @brief Reports whether the mock backend may cross worker boundaries. */
+/** @brief Returns the test setting for sharing this backend between workers. */
 [[nodiscard]] bool mock_worker_shareable(void const* opaque) noexcept {
     return static_cast<const mock_lazy_state*>(opaque)->worker_shareable;
 }
 
 /**
- * @brief Attempts a complete packed copy from the mock backend.
+ * @brief Copies the mock sequence into 64-bit packed storage when enabled.
+ *
+ * The failure switch throws after clering the destination, so tests can check cleanup.
  * @param[in,out] opaque Pointer to `mock_lazy_state`.
  * @param[out] destination Packed destination storage.
- * @param[in] unit_count Number of requested destination units.
- * @param[in] requested_width Requested storage width in bytes.
- * @return `true` only when bulk copy is enabled and the shape is exact.
+ * @param[in] unit_count Available units, which must match the full sequence.
+ * @param[in] requested_width Requested unit width in bytes.
+ * @return Whether the copy succeeded.
  */
 [[nodiscard]] bool mock_copy_packed_sequence(void const* opaque,
                                              void* destination,
@@ -337,7 +334,7 @@ mock_resident_probe(void const* opaque, sequence_size_t, sequence_size_t, std::u
     return true;
 }
 
-/// Callback table used by every erased mock view.
+/// Callbacks shared by the mock sequence views.
 inline const facade_t::backend_ops mock_ops{
     .bp_size = &mock_bp_size,
     .read_at =
@@ -353,17 +350,17 @@ inline const facade_t::backend_ops mock_ops{
 };
 
 /**
- * @brief Erases a mock state into the canonical DNA4 lazy facade.
- * @param[in,out] state Backing state that must outlive the returned view.
- * @return Non-owning lazy view over `state`.
+ * @brief Makes a DNA4 view backed by the mock callbacks.
+ * @param[in,out] state Backing state, which must outlive  the view.
+ * @return View that borrows `state`.
  */
 [[nodiscard]] facade_t make_mock_view(mock_lazy_state& state) noexcept {
     return facade_t{std::addressof(state), std::addressof(mock_ops)};
 }
 
 /**
- * @brief Checks growing and fixed rank-pack sinks for one alphabet-width profile.
- * @tparam p_alphabet Sequence alphabet.
+ * @brief Checks fixed and growing rank buffers against independently packed values.
+ * @tparam p_alphabet Sequence, alphabet.
  * @tparam p_unit Packed storage unit.
  */
 template <class p_alphabet, class p_unit> void require_rank_pack_width() {
@@ -429,7 +426,7 @@ template <class p_alphabet, class p_unit> void require_rank_pack_width() {
     }
 }
 
-/** @brief Appends streamed rank chunks into one owned vector. */
+/** @brief Collects streamed rank chunks in a vector. */
 struct collecting_rank_writer {
     std::vector<std::uint8_t> ranks;
 
@@ -439,12 +436,12 @@ struct collecting_rank_writer {
 };
 
 /**
- * @brief Checks a transformed stream against an independently indexed oracle.
- * @tparam p_transform Orientation and complement transform.
+ * @brief Checks a transformed rank stream against direct indexing of the source.
+ * @tparam p_transform Requested reversal and complement.
  * @param[in] view Lazy source view.
- * @param[in] source Forward ranks used by the oracle.
- * @param[in] from Inclusive source coordinate.
- * @param[in] to Exclusive source coordinate.
+ * @param[in] source Forward ranks used for comparison.
+ * @param[in] from Inclusive start coordinate.
+ * @param[in] to Exclusive end coordinate.
  */
 template <bioseq::storage::sequence_transform p_transform>
 void require_stream_transform(facade_t view,
@@ -468,11 +465,11 @@ void require_stream_transform(facade_t view,
 }
 
 /**
- * @brief Checks admitted materialization for one requested physical width.
+ * @brief Checks packed copies, moved views and memory reservations for one storage width.
  * @tparam p_unit Expected packed storage unit.
- * @param[in] source Lazy source view.
- * @param[in] expected Expected ranks for the selected subrange.
- * @param[in] width Requested storage width in bytes.
+ * @param[in] source Lazy source view
+ * @param[in] expected Ranks expected from the slice starting at position 3.
+ * @param[in] width Requested unit width in bytes.
  */
 template <class p_unit>
 void require_materialized_width(facade_t source,
@@ -513,7 +510,7 @@ void require_materialized_width(facade_t source,
     REQUIRE(admission.reserved_bytes() == before);
 }
 
-/** @brief Increments the release counter used by retained-view ownership tests. */
+/** @brief Counts calls to the adopted sequence's release callback. */
 void increment_release_count(void* opaque) noexcept {
     ++*static_cast<std::size_t*>(opaque);
 }
@@ -534,9 +531,9 @@ TEST_CASE("resident lazy_sequence is pointer-sized and forwards",
     REQUIRE(lazy.size() == range.size());
     REQUIRE(lazy.padding() == range.padding());
     REQUIRE(lazy.fragment_count() == 1u);
-    // read_cptr returns the same pointer the underlying range would.
+    // The resident view  should return the original storage pointer.
     REQUIRE(lazy.read_cptr(lazy.cbegin()) == range.read_cptr(range.cbegin()));
-    // bit-cast view is available on the no-fragment side.
+    // Contiguous storage also allows a view with a different unit width.
     auto view = lazy.template bit_cast_to_storage_unit<std::uint32_t>();
     REQUIRE(view.bp_size() == range.bp_size());
 }
@@ -576,12 +573,11 @@ TEST_CASE("read_cptr zero-copy fast path", "[component:bioseq][layer:unit][featu
     lazy_sequence<dna4_u64, chunked2> lazy{chunked2::from_range(range)};
 
     std::array<std::uint64_t, 4> scratch{};
-    // A request that fits inside one fragment returns a pointer INTO the
-    // fragment (never into scratch).
+    // A read contained in one fragment should return its storage directly.
     auto it = lazy.cbegin(); // unit 0, fragment 0
     const std::uint64_t* p = lazy.read_cptr(it, std::span<std::uint64_t>(scratch), 1);
     REQUIRE(p != scratch.data());
-    // The pointed-at unit equals the original packed storage unit 0.
+    // Check the returned unit agaist the original packed range.
     REQUIRE(*p == *range.read_cptr(range.cbegin()));
 }
 
@@ -592,8 +588,7 @@ TEST_CASE("read_cptr stitches across a fragment boundary",
     const std::uint64_t* base = range.read_cptr(range.cbegin());
     lazy_sequence<dna4_u64, chunked2> lazy{chunked2::from_range(range)};
 
-    // Position at the last unit of fragment 0 (unit index 1), ask for 2 units:
-    // straddles into fragment 1 → must stitch into scratch.
+    // This read spans two fragments, so it must copy both units into scratch.
     auto it = lazy.cbegin();
     ++it; // unit 1
     std::array<std::uint64_t, 2> scratch{};
@@ -634,14 +629,14 @@ TEST_CASE("rank_window_reader round-trip matches encoded ranks",
     const auto baseline = range.template to_encoded_vector<false>(0, range.bp_size());
     auto reader = lazy.template rank_reader<false, false, std::uint8_t, 2>();
 
-    // Whole sequence (stitches across fragments into scratch).
+    // Reading the whole sequence requires joining ranks from several fragments.
     std::vector<std::uint8_t> scratch(range.bp_size());
     const std::uint8_t* whole =
         reader.read_at(0, range.bp_size(), std::span<std::uint8_t>(scratch));
     for (std::size_t i = 0; i < baseline.size(); ++i)
         REQUIRE(whole[i] == baseline[i]);
 
-    // Sub-region that fits one fragment (zero-copy: returns a slot pointer).
+    // This slice fits in one decoded fragment slot.
     std::array<std::uint8_t, 16> small{};
     const std::uint8_t* sub = reader.read_at(10, 16, std::span<std::uint8_t>(small));
     for (std::size_t i = 0; i < 16; ++i)
@@ -650,7 +645,7 @@ TEST_CASE("rank_window_reader round-trip matches encoded ranks",
 
 TEST_CASE("rank_window_reader slot ring is bounded",
           "[component:bioseq][layer:unit][feature:storage]") {
-    auto data = make_dna4(2000); // ~63 storage units → many fragments at frag=2
+    auto data = make_dna4(2000); // 63 storage units across 32 fragments.
     range_t range(data);
     lazy_sequence<dna4_u64, chunked2> lazy{chunked2::from_range(range)};
 
@@ -673,12 +668,12 @@ TEST_CASE("copy_ranks preserves forward and reverse-complement parity",
         {{0, 10}, {30, 90}, {60, 70}, {100, 256}, {0, 300}}};
     for (auto [from, to] : regions) {
         const std::size_t len = to - from;
-        // forward, no complement
+        // Forward  strand.
         std::vector<std::uint8_t> base_fwd(len), got_fwd(len);
         range.template to_encoded_into<false, false>(std::span<std::uint8_t>(base_fwd), from, to);
         lazy.template copy_ranks<false, false>(std::span<std::uint8_t>(got_fwd), from, to);
         REQUIRE(got_fwd == base_fwd);
-        // reverse + complement (the KSW2 reverse-strand path)
+        // Reverse-complement strand, with reversed output order.
         std::vector<std::uint8_t> base_rc(len), got_rc(len);
         range.template to_encoded_into<true, true>(std::span<std::uint8_t>(base_rc), from, to);
         lazy.template copy_ranks<true, true>(std::span<std::uint8_t>(got_rc), from, to);
@@ -688,7 +683,7 @@ TEST_CASE("copy_ranks preserves forward and reverse-complement parity",
 
 TEST_CASE("fragmented tally_symbol_counts matches the resident result",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // The chunked-lazy tally must equal the resident-scanner result.
+    // Compare base counts from contiguous and fragmented storage.
     auto data = make_dna4(128);
     range_t range(data);
     auto baseline_lazy = make_resident_lazy_sequence(range);
@@ -723,7 +718,7 @@ TEST_CASE("fragment_cache push, find, evict, and generation counter",
     REQUIRE(cache.slot_at(f->first) == 20);
     REQUIRE(cache.is_valid_at(i0, g0));
 
-    // Fill to capacity then overflow: eviction frees the oldest, generation grows.
+    // Fill the cache, then check that inserting another value evicts the oldest.
     cache.push(30, noevict);
     cache.push(40, noevict);
     REQUIRE(cache.valid_count() == 4u);
@@ -1048,7 +1043,7 @@ TEST_CASE("admitted packed owners retain permits and stable views across moves",
           "[component:bioseq][layer:unit][feature:storage]") {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
-    /// Restores the process-wide admission cap after the width matrix unwinds.
+    /// Restores the shared memory limit when this test leaves scope.
     struct cap_restore {
         bioseq::parallelism::memory_admission_controller* admission;
         std::uint64_t cap;
@@ -1180,12 +1175,12 @@ TEST_CASE("admitted packed move construction holds a saturated budget and backin
         REQUIRE(admission.reserved_bytes() == exact_retained);
         admission.set_index_memory_cap_bytes(exact_retained);
 
-        // First move happens before any facade is issued.
+        // Move once before issuing a view.
         owner_type moved_before_view{std::move(initial)};
         REQUIRE(moved_before_view.descriptor().units == backing);
         const facade_t issued = moved_before_view.view();
 
-        // The second move happens after the facade captured stable_state.
+        // Move again and check that the previously issued view still works.
         owner_type moved_after_view{std::move(moved_before_view)};
         REQUIRE(moved_after_view.descriptor().units == backing);
         REQUIRE(admission.reserved_bytes() == exact_retained);
@@ -1400,8 +1395,8 @@ TEST_CASE("streaming consumers never probe poison resident storage",
         view.bp_size(),
         4u);
     REQUIRE(resident.route == bioseq::storage::sequence_access_route::materialize_admitted);
-    /* Typed CPU planning probes only canonical u32 storage. It must not ask
-     * for an aliasing u64 byte view. Admitted fallback does not re-probe. */
+    /* Planning checks for resident u32 storage once.
+     * The packed copy should use rank reads without probing again. */
     REQUIRE(state.resident_probe_count == 1u);
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t reserved_before = admission.reserved_bytes();
@@ -1578,7 +1573,7 @@ TEST_CASE("packed materialization callback failure unwinds touched storage befor
         REQUIRE(admission.reserved_bytes() == 0u);
     }
 
-    // Retry at exactly the same cap: the failed attempt must not retain a lease.
+    // Retry with  the same memory limit to check that failure released its reservation.
     state.bulk_copy_throw_after_touch = false;
     {
         auto permit = admission.try_reserve(bound);

@@ -1,6 +1,6 @@
 /**
  * @file generation_writer_rows.cppm
- * @brief Defines bounded immutable generation-row writing and validation.
+ * @brief Write generation rows in batches and reread them before publication.
  */
 module;
 
@@ -36,23 +36,23 @@ import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::invoke_pg_as_cpp
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
+import bioseq.indexing.storage;           // index storage concepts
 import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // minimizer fragment file format
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // decode sequence bases in batches
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -71,9 +71,10 @@ import :catalog_row_io;
 import :file_actions;
 import :fragment_image;
 export namespace bioseq::storage::indexing {
-/// Relation-owning sink factory target used directly by the existing common
-/// three-scan generation encoder. It cannot publish the head and therefore cannot
-/// make an incompletely reread generation visible.
+/// Write the rows of one generation and verify them before publication.
+/// Buffer inserts within row and byte limits, then reread, the manifest,
+/// directory  and payload against the encoder's checksums. A successful reread
+/// produces the token required to publish the active head.
 class index_storage_fragment_generation_row_sink {
   private:
     enum class write_stage : std::uint8_t {
@@ -164,10 +165,9 @@ class index_storage_fragment_generation_row_sink {
         stage_ = write_stage::failed;
         pg_poisoned_ = true;
         validation_source_authorization_.reset();
-        // Do not call any PostgreSQL cleanup routine while propagating an
-        // ERROR converted at a leaf. Slots, scans, snapshots, catalog state
-        // and relation locks remain registered with PostgreSQL's current
-        // ResourceOwner and are reclaimed by statement/transaction abort.
+        // Let PostgreSQL reclaim slots, scans, snapshots and relation locks when
+        // the statement or transaction aborts. Avoid further PostgreSQL calls
+        // while the original error propagates.
         pending_slots_.clear();
         std::vector<TupleTableSlot*>{}.swap(pending_slots_);
         rows_in_batch_ = 0;
@@ -482,9 +482,8 @@ class index_storage_fragment_generation_row_sink {
         return write_validated_row_(*validated);
     }
 
-    /// grouped-SoA payload owner: compute the address-bound CRC once, bind it
-    /// into an unforgeable validated token, form the tuple from that token, and
-    /// return the exact checksum for manifest folding.
+    /// Validate and write a grouped SoA payload row, computing its CRC once.
+    /// Return the checksum so the encoder can include it in the mxnifest.
     [[nodiscard]] std::expected<minimizer_generation_row_write_receipt,
                                 minimizer_generation_encoding_error>
     write_grouped_soa_payload(const unchecked_minimizer_generation_row_view& row) {
@@ -550,10 +549,9 @@ class index_storage_fragment_generation_row_sink {
             const bool mapped_minimizer_fragment_image =
                 identity_.index_name == k_minimizers_per_fragment_index_name;
             std::unique_ptr<minimizer_fragment_image_writer> fragment_image_writer;
-            /* The sidecar path/header intentionally encode the minimizer-fragment
-             * source identity, not a logical-index discriminator. The minimizer-sequence
-             * grouped-SoA route keeps the authoritative PostgreSQL payload and therefore
-             * must not create or overwrite this minimizer-fragment-only image. */
+            /* Only minimizer-fragment indexes use this mapped file format.
+             * Minimizer-sequence indexes keep  their payload in PostgreSQL, so
+             * they must leave the fragment index file alone */
             if (mapped_minimizer_fragment_image) {
                 fragment_image_writer = std::make_unique<minimizer_fragment_image_writer>(
                     identity_, query_key_, generation_id_);
@@ -910,10 +908,9 @@ class index_storage_fragment_generation_row_sink {
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [this] { systable_endscan_ordered(validation_scan_); });
             validation_scan_ = nullptr;
-            // The S1 PK is the physical authority: every global control
-            // sub-key precedes every derived position sub-key. Wire payload
-            // checksums use emitter order, so the sink validates that aggregate
-            // before this physical reread.
+            // The primary key orders all control rows before all position rows.
+            // This reread checks each extent and the total size. The checksum
+            // of emitted rows was already checked before the reread.
             if (!payload_complete || entry_chunk != 0 ||
                 reread_payload_rows != expected_payload_rows ||
                 reread_payload_bytes != expected_payload_bytes ||

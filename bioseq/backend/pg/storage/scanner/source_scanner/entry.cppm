@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_scanner/entry.cppm
- * @brief Representation-specific source-scanner entry lifecycle.
+ * @brief Cache scanners in a read session and read ranks or packed sequence data.
  */
 module;
 
@@ -35,18 +35,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager; // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;          // scanner concepts
-import bioseq.storage.lazy_sequence;    // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;
+import bioseq.postgres.storage.manager;
+import bioseq.storage.scanner;          // Sequence source callbacks and read  sessions.
+import bioseq.storage.lazy_sequence;    // Source-backed sequence types.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;                 // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.storage.size;
+import bioseq.postgres.storage.metadata;
+import bioseq.sequences;                 // Packed sequence types and alphabet traits.
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
@@ -55,10 +55,9 @@ export namespace bioseq::storage {
 
 namespace sequence_source_detail {
 
-/// Compute packed-unit padding for one locator and sequence representation.
-/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
-/// @param locator Locator whose logical length is measured in letters.
-/// @return Number of unused letters in the final packed unit.
+/// @return Unused letters in the locator's last packed unit for this sequence type.
+/// @tparam p_sequence_instance Alphabet and packed storage type.
+/// @param locator Locator whose length is measured in letters.
 template <class p_sequence_instance>
 [[nodiscard]] constexpr std::uint16_t
 locator_padding_letters(const sequence_locator& locator) noexcept {
@@ -68,12 +67,12 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
     return static_cast<std::uint16_t>(remainder == 0u ? 0u : letters_per_unit - remainder);
 }
 
-/// Validate locator revision, fragment count and optional trailing padding.
-/// @param locator Locator whose physical geometry is checked.
-/// @param stored_type Persisted alphabet and packed-unit width.
-/// @param last_padding_letters Observed unused-letter count.
-/// @param validate_padding Whether the observed padding participates in validation.
-/// @return Whether type dispatch succeeded and every selected invariant holds.
+/// Check the locator version, reserved fields, sourve epoch and fragment count.
+/// @param stored_type Alphabet and packed-unit width used to interpret the length.
+/// @param last_padding_letters Padding to check when `validate_padding` is true.
+/// @return Whether the type is supported and all requested checks pass.
+/// @param locator Locator, to check.
+/// @param validate_padding Whether  to compare the supplied padding.
 [[nodiscard]] inline bool locator_geometry_is_valid(const sequence_locator& locator,
                                                     compact_sequence_stdc_type_params stored_type,
                                                     std::uint16_t last_padding_letters,
@@ -106,14 +105,14 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
     return dispatched && valid;
 }
 
-/// Decode one rank interval from cached packed fragments.
-/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
-/// @param entry Type-erased entry containing the matching concrete scanner.
-/// @param transform Identity, reverse, complement, or reverse-complement mapping.
-/// @param source_from Zero-based logical-letter offset in the source.
-/// @param output Destination rank bytes written completely on success.
-/// @throws PostgreSQL ERROR for truncated fragments, invalid ranks, or an
-/// unsupported complement operation.
+/// Read an interval as decoded alphabet ranks, applying the requested transformation.
+/// @param entry Entry holding the matching concrete scanner.
+/// @param transform Forward, reverse, complement or reverse-complement order
+/// @param source_from First letter of the source interval, counted from zero.
+/// @param output Buffer that receives every rank on success.
+/// @throws C++ exception for failed reads, truncated fragments, invalid ranks
+/// or a complement operation  unsupported by the alphabet.
+/// @tparam p_sequence_instance Alphabet and packed storage type.
 template <class p_sequence_instance>
 inline void typed_scanner_read_ranks(source_scanner_entry& entry,
                                      sequence_transform transform,
@@ -182,12 +181,12 @@ inline void typed_scanner_read_ranks(source_scanner_entry& entry,
     }
 }
 
-/// Copy one bounded interval of native packed units without rank decoding.
-/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
-/// @param entry Type-erased entry containing the matching concrete scanner.
-/// @param first_unit Zero-based physical storage-unit offset in the source.
-/// @param output Exact caller-owned byte span receiving native packed units.
-/// @throws PostgreSQL ERROR for invalid geometry or truncated fragments.
+/// Copy packed units across fragment boundaries without decoding letters.
+/// @param entry Entry holding the matching concrete scanner.
+/// @param first_unit First storage unit to read, counted from zero.
+/// @param output Destination bytes. Its size must be a multiple of the unt width.
+/// @throws C++ exception for an invalid range, truncated fragment or read failure.
+/// @tparam p_sequence_instance Alphabet and packed storage type.
 template <class p_sequence_instance>
 inline void typed_scanner_read_packed_units(source_scanner_entry& entry,
                                             std::uint64_t first_unit,
@@ -249,10 +248,10 @@ inline void typed_scanner_read_packed_units(source_scanner_entry& entry,
     }
 }
 
-/// Finish and destroy one successfully used concrete scanner.
-/// @tparam p_sequence_instance Concrete scanner representation.
-/// @param entry Entry whose PostgreSQL resources and object lifetime are ended.
-/// @throws A translated PostgreSQL error when resource finalization fails.
+/// Release PostgreSQL resources and destroy a successfully used  scanner.
+/// @throws C++ exception if resource cleanup fails.
+/// @tparam p_sequence_instance Alphabet and packed storage type.
+/// @param entry Entry whose scanner is cleaned up and destroyed.
 template <class p_sequence_instance>
 inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
     using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
@@ -266,9 +265,9 @@ inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
     entry.constructed = false;
 }
 
-/// Abandon and destroy one concrete scanner after failure.
-/// @tparam p_sequence_instance Concrete scanner representation.
-/// @param entry Entry made inert without propagating cleanup errors.
+/// Destroy a failed scanner, leaving its PostgreSQL resources to parent cleanup.
+/// @tparam p_sequence_instance Alphabet and packed storage type.
+/// @param entry Entry whose scanner is abandoned and destroyed.
 template <class p_sequence_instance>
 inline void abort_typed_scanner_entry_noexcept(source_scanner_entry& entry) noexcept {
     using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
@@ -282,8 +281,9 @@ inline void abort_typed_scanner_entry_noexcept(source_scanner_entry& entry) noex
     entry.constructed = false;
 }
 
-/// Abort a type-erased scanner entry and release its domain retain.
-/// @param opaque Pointer to a `source_scanner_entry`, or null for no work.
+/// Abort an entry and release its reference to the read domain.
+/// A null pointer does nothing.
+/// @param opaque Scanner entry pointer, or null.
 inline void abort_source_scanner_entry_noexcept(void* opaque) noexcept {
     auto* entry = static_cast<source_scanner_entry*>(opaque);
     if (entry == nullptr) {
@@ -299,9 +299,11 @@ inline void abort_source_scanner_entry_noexcept(void* opaque) noexcept {
     entry->domain = nullptr;
 }
 
-/// Finish a type-erased scanner entry before releasing its domain retain.
-/// @param opaque Pointer to a `source_scanner_entry`, or null for no work.
-/// @throws PostgreSQL ERROR when concrete finalization reports any failure.
+/// Finish a  scanner entry, then release its read-domain reference.
+/// A null pointer does nothing
+/// @throws PostgreSQL ERROR if scanner cleanup fails. C++ exceptions are
+/// caught before reporting the failure to PostgreSQL.
+/// @param opaque Scanner entry pointer, or null.
 inline void finish_source_scanner_entry(void* opaque, bool) {
     auto* entry = static_cast<source_scanner_entry*>(opaque);
     if (entry == nullptr) {
@@ -347,12 +349,12 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
     entry->domain = nullptr;
 }
 
-/// Construct a representation-specific scanner in the read-session context.
-/// @param opaque Borrowed `source_scanner_factory_argument` valid for this call.
-/// @param payload_context Memory context owning the entry and concrete scanner.
-/// @return Type-erased scanner entry allocated in `payload_context`.
-/// @throws PostgreSQL ERROR when representation dispatch, domain retain, or
-/// concrete scanner construction fails.
+/// Create a, scanner for the stored alphabet and packed-unit width.
+/// The entry holds a counted read-domain referene and lives in the session context.
+/// @param opaque Borrowed `source_scanner_factory_argument`.
+/// @param payload_context Context owning the entry and scanner.
+/// @return Scanner entry allocated in `payload_context`.
+/// @throws PostgreSQL ERROR if dispatch, reference counting or construction fails.
 [[nodiscard]] inline void* create_source_scanner_entry(void* opaque,
                                                        MemoryContext payload_context) {
     auto const& factory = *static_cast<const source_scanner_factory_argument*>(opaque);
@@ -447,17 +449,18 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
     return entry;
 }
 
-/// Execute one backend-thread rank read after validating domain and range.
+/// Read decoded ranks through  a scanner cached by this session.
+/// The caller must be on the domain's backend thread. Check that the domain
+/// is still readable and the requested interval fits the locator before reading.
+/// @param source_from First source letter, counted from zero.
+/// @param output Buffer receiving the requested ranks.
+/// @return `ok` once the buffer is filled.
+/// @throws PostgreSQL ERROR for an invalid source, range or failed read.
 /// @param domain Live domain owned by the current backend thread.
-/// @param session Backend-thread read session that caches scanner entries.
-/// @param locator Verified source locator.
-/// @param stored_type Persisted alphabet and packed-unit width.
-/// @param transform Requested logical orientation.
-/// @param source_from Zero-based source offset in letters.
-/// @param output Destination rank bytes.
-/// @return `ok` after filling the requested interval.
-/// @throws PostgreSQL ERROR when the domain ended, the range is invalid, or
-/// scanner creation and reading fails.
+/// @param session Session that caches scanner entries.
+/// @param locator Checked source locator.
+/// @param stored_type Stored alphabet and packed-unit width.
+/// @param transform Requested sequence transformation.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
                              pg_sequence_read_session& session,
@@ -521,9 +524,9 @@ read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
-    /* The session entry and its abort callback are installed before this raw
-     * PostgreSQL ERROR.  The outer source-ABI boundary must convert it to C++ so
-     * every view shell can abort the session before rethrowing the PostgreSQL error. */
+    /* Install  the entry and its abort callback before raising this test error.
+     * The outer read wrapper converts it to a C++ exception so the lazy view
+     * can abort its session before passing the error back to PostgreSQL. */
     inject_pg_sequence_source_failure(sequence_source_failure::read_before_scanner);
 #endif
 
@@ -567,14 +570,17 @@ read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
     return pg_sequence_source_read_status::ok;
 }
 
-/// Execute one backend-thread native packed-unit read after validating identity.
+/// Copy packed units through a scanner cached by this session.
+/// The caller must be on the domain's backend thread Validate the sxurce
+/// and requested range before reading.
+/// @param first_unit First packed unit, counted from zero.
+/// @param output Destination bytes, sized to a multiple of the stored unit width.
+/// @return `ok` once the requested units are copied.
+/// @throws PostgreSQL ERROR for an invalid  source, range or failed read.
 /// @param domain Live domain owned by the current backend thread.
-/// @param session Backend-thread read session that caches scanner entries.
-/// @param locator Verified source locator.
-/// @param stored_type Persisted alphabet and packed-unit width.
-/// @param first_unit Zero-based physical storage-unit offset.
-/// @param output Destination bytes, exactly divisible by the stored unit width.
-/// @return `ok` after copying the requested native units.
+/// @param session Session that caches scanner entries.
+/// @param locator Checked source locator.
+/// @param stored_type Stored alphabet and packed-unit width.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
                                     pg_sequence_read_session& session,
@@ -697,10 +703,11 @@ read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
     return pg_sequence_source_read_status::ok;
 }
 
-/// Reject cross-thread calls before entering any PostgreSQL boundary.
-/// @param opaque Type-erased source domain.
-/// @param session Read session whose backend token must match the domain.
-/// @return `wrong_thread` for a mismatched backend, otherwise the checked read status.
+/// Read ranks after checking that the domain and session belong to this thread.
+/// @return `wrong_thread` for a missing domain or mismatched thread.
+/// @throws C++ exception, if the PostgreSQL read fails.
+/// @param opaque Source-domain pointer.
+/// @param session Session whose backend thread must match the domain.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_ranks(const void* opaque,
                   pg_sequence_read_session& session,
@@ -711,8 +718,8 @@ read_domain_ranks(const void* opaque,
                   std::span<std::uint8_t> output) {
     auto* domain = const_cast<pg_sequence_source_domain*>(
         static_cast<const pg_sequence_source_domain*>(opaque));
-    /* This check must remain before invoke_pg_as_cpp: its PG_TRY boundary and
-     * ErrorData machinery are backend-thread-only. */
+    /* Check the thread before calling invoke_pg_as_cpp. PostgreSQL's error
+     * handlers and ErrorData can only be used on the backend thread. */
     if (domain == nullptr || !domain->backend_thread.is_current() ||
         !session.backend_thread.is_current() ||
         domain->backend_thread.owner != session.backend_thread.owner) {
@@ -728,7 +735,9 @@ read_domain_ranks(const void* opaque,
         });
 }
 
-/// Reject cross-thread packed reads before entering any PostgreSQL boundary.
+/// Copy packed units after checking the  domain and session belong to this thread.
+/// @return `wrong_thread` for a missing domain or mismatched thread.
+/// @throws C++ exception if the PostgreSQL read fails.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_packed_units(const void* opaque,
                          pg_sequence_read_session& session,
@@ -753,8 +762,7 @@ read_domain_packed_units(const void* opaque,
         });
 }
 
-/// Return the immutable type-erased source-domain backend table.
-/// @return Process-lifetime callback table.
+/// @return Shared callbacks for counting references and identifying and reading a domain.
 [[nodiscard]] inline const pg_sequence_source_backend_ops& source_backend_ops() noexcept {
     static const pg_sequence_source_backend_ops ops{
         .retain = retain_domain,

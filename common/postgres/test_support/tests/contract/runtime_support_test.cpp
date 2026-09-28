@@ -2017,8 +2017,8 @@ TEST_CASE(
         tree.owned_root() / "published-resource";
     const std::filesystem::path vanished_entry =
         tree.owned_root() / "vanished-resource";
-    // A name whose target vanished forces the same descendant ENOENT that a
-    // concurrent publish/rename can surface between iteration and status.
+    // A dangling symlink produces ENOENT when the sampler reads its target.
+    // This checks the handling used wheo a file disappears during a scan.
     REQUIRE(
         ::symlink(missing_target.c_str(), vanished_entry.c_str()) == 0);
     const auto raced_sample =
@@ -2207,15 +2207,15 @@ TEST_CASE(
     "[component:common][layer:contract][feature:process_supervision]") {
     temporary_resource_journal_tree tree;
 
-    // libc++ on macOS reports an absent entry through the error-code channel.
-    // ENOENT is normal absence, not an indeterminate inspection failure.
+    // A missing entry must produce false even when the filesystem API
+    // reports ENOENT through its error-code output.
     const auto absent =
         is_supervision_path_entry_present_no_follow_for_testing(
             tree.owned_root() / "absent");
     REQUIRE(absent.has_value());
     CHECK_FALSE(*absent);
 
-    // NAME_MAX overflow is a genuine lookup error and must stay fail-closed.
+    // An overlong filename must produce  an unknown result, since the lookup failed.
     const std::string overlong_name(1024U, 'x');
     const auto inspection_error =
         is_supervision_path_entry_present_no_follow_for_testing(

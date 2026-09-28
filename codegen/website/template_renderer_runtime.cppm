@@ -18,9 +18,9 @@ module;
 
 export module bioseq.codegen.website.template_renderer_runtime;
 
-// LLVM's module graph is built without RTTI; Jinja's reflection requires it.
-// Keep implementation ownership in this independent named module and link
-// the ABI entry points without importing an incompatible RTTI-enabled BMI.
+// Jinja reflection needs RTTI, while LLVM may be built without it.
+// Compile this module separately with RTTI and expose linked functions
+// so the rest of codegen can call it without importing the module.
 namespace bioseq::codegen::website {
 namespace detail {
 
@@ -68,7 +68,7 @@ extern "C" int bioseq_render_inline_json_template(const std::string& template_te
         diagnostic_output = "JSON render context must be an object";
         return 3;
     }
-    // The context must outlive rendering because Jinja reflects it lazily.
+    // Keep the JSON context alive until Jinja finishes reading its reflected values.
     jinja2::ValuesMap values;
     for (const auto& member : context.as_object()) {
         values.emplace(std::string(member.key()), jinja2::Reflect(member.value()));
@@ -101,8 +101,8 @@ extern "C" int bioseq_render_template_file(const std::string& templates_dir,
     jinja2::TemplateEnv environment;
     auto filesystem = std::make_shared<jinja2::RealFileSystem>(templates_dir);
     environment.AddFilesystemHandler(std::string(), filesystem);
-    // Bind the context into the global scope. Jinja2Cpp clones a non-scoped
-    // block without its external scope, but retains environment globals.
+    // Put page data in environment globals so inherited non-scoped Jinja
+    // blocks can still read it when their outer scope is dropped.
     for (const auto& member : context.as_object()) {
         environment.AddGlobal(std::string(member.key()), jinja2::Reflect(member.value()));
     }

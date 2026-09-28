@@ -1,4 +1,7 @@
-/** @file Deterministic randomized properties for lazy sequence expressions. */
+/**
+ * @file lazy_sequence_expression_property_test.cpp
+ * @brief Compares random lazy sequence expressions with a separate string evaluator.
+ */
 
 #include <libpq-fe.h>
 
@@ -19,7 +22,7 @@ constexpr std::size_t k_property_case_count = 96u;
 constexpr std::uint32_t k_no_child =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** A library-independent deterministic word stream with stable output. */
+/** Produces repeatable random words using a fixed SplitMix64 implementation. */
 class deterministic_words {
 public:
     explicit deterministic_words(std::uint64_t seed) noexcept : state_(seed) {}
@@ -33,14 +36,14 @@ public:
         return word ^ (word >> 31u);
     }
 
-    /** Return a stable value in [0, exclusive). */
+    /** Returns a repeatable value below exclusive, or zero when exclusive is zero. */
     [[nodiscard]] std::size_t below(std::size_t exclusive) noexcept {
         return exclusive == 0u
             ? 0u
             : static_cast<std::size_t>(next() % exclusive);
     }
 
-    /** Return true exactly one out of each denominator-sized word buckets. */
+    /** Returns true with an approximate one-in-denominator frequency, or false for zero. */
     [[nodiscard]] bool one_in(std::size_t denominator) noexcept {
         return denominator != 0u && below(denominator) == 0u;
     }
@@ -75,7 +78,7 @@ struct slice_bound {
     std::int64_t value = 0;
 };
 
-/** Arena node carrying both SQL structure and its eager expected value. */
+/** Expression node with child indices and its independently computed string value. */
 struct expression_node {
     expression_kind kind = expression_kind::literal;
     std::uint32_t left = k_no_child;
@@ -87,7 +90,7 @@ struct expression_node {
     std::size_t node_count = 1u;
 };
 
-/** Generated expression arena with its root and operation coverage mask. */
+/** Generated nodes, root index, and a bit mask of operations used. */
 struct expression_tree {
     std::vector<expression_node> nodes;
     std::uint32_t root = k_no_child;
@@ -106,7 +109,7 @@ struct expression_tree {
     }
 }
 
-/** Complement a string in logical order. */
+/** Complements each  base without reversing the string. */
 [[nodiscard]] std::string eager_complemented(std::string value) {
     std::transform(
         value.begin(), value.end(), value.begin(), eager_complement);
@@ -119,7 +122,7 @@ struct expression_tree {
     return eager_complemented(std::move(value));
 }
 
-/** Normalize a Python slice bound independently and without signed overflow. */
+/** Clamps a slice bound to the string, counting negative bounds from the end. */
 [[nodiscard]] std::size_t eager_slice_bound(
         std::int64_t bound,
         std::size_t length) noexcept {
@@ -136,7 +139,7 @@ struct expression_tree {
         : length - static_cast<std::size_t>(magnitude);
 }
 
-/** Normalize a Python element index, returning nullopt when it is outside. */
+/** Resolves a negative index from the end and returns nullopt for an out-of-range iniex. */
 [[nodiscard]] std::optional<std::size_t> eager_element_index(
         std::int64_t index,
         std::size_t length) noexcept {
@@ -155,7 +158,7 @@ struct expression_tree {
     return length - static_cast<std::size_t>(magnitude);
 }
 
-/** Apply the normative half-open Python slice rules to an eager value. */
+/** Slices an ordinary string with half-open bounds and SQL NULL propagation. */
 [[nodiscard]] std::optional<std::string> eager_slice(
         const std::optional<std::string>& value,
         slice_bound lower,
@@ -178,7 +181,7 @@ struct expression_tree {
     return value->substr(from, to - from);
 }
 
-/** Apply one sequence operation in the independent eager evaluator. */
+/** Computes a reverse or complement operation on an ordinary string. */
 [[nodiscard]] std::optional<std::string> eager_unary(
         expression_kind kind,
         const std::optional<std::string>& input) {
@@ -199,7 +202,7 @@ struct expression_tree {
     }
 }
 
-/** Build stable DNA symbols for source and literal leaves. */
+/** Generates a repeatable ACGT string from a seed. */
 [[nodiscard]] std::string make_symbols(
         std::size_t length,
         std::uint64_t seed) {
@@ -212,7 +215,7 @@ struct expression_tree {
     return result;
 }
 
-/** Generate signed bounds around both edges, with rare exact int64 limits. */
+/** Generates omitted, null, or numeric bounds, including the int64 limits. */
 [[nodiscard]] slice_bound make_random_bound(
         deterministic_words& words,
         std::size_t length,
@@ -245,7 +248,7 @@ struct expression_tree {
     };
 }
 
-/** Generate one tree bottom-up while computing its eager value independently. */
+/** Builds expression trees and computes their expected results using ordinary strings. */
 class expression_generator {
 public:
     expression_generator(
@@ -256,7 +259,7 @@ public:
           source_a_(std::move(source_a)),
           source_b_(std::move(source_b)) {}
 
-    /** Generate a tree whose root kind can be forced for coverage. */
+    /** Generates a tree with the requested root operation  when depth is nonzero */
     [[nodiscard]] expression_tree generate(
             std::size_t depth,
             expression_kind root_kind) {
@@ -267,7 +270,7 @@ public:
     }
 
 private:
-    /** Append a completed node and return its stable arena index. */
+    /** Stores a node, records its operation, and returns its index. */
     [[nodiscard]] std::uint32_t append(
             expression_tree& tree,
             expression_node node) {
@@ -279,7 +282,7 @@ private:
         return index;
     }
 
-    /** Generate a source, NULL source, or bound literal leaf. */
+    /** Generates a source column, NULL source, or DNA4 literal leaf. */
     [[nodiscard]] std::uint32_t build_leaf(expression_tree& tree) {
         switch (words_.below(6u)) {
             case 0u:
@@ -382,7 +385,7 @@ private:
     std::string source_b_;
 };
 
-/** Render a bound expression leaf or lazy operation as SQL. */
+/** Renders an omitted, numeric, or NULL slice bound as SQL. */
 [[nodiscard]] std::string render_bound(slice_bound bound) {
     switch (bound.kind) {
         case bound_kind::omitted: return {};
@@ -391,7 +394,7 @@ private:
     }
 }
 
-/** Render any generated subtree as a standalone bioseq.seq SQL expression. */
+/** Renders a subtree as SQL using the fixture's source column names. */
 [[nodiscard]] std::string render_expression(
         const expression_tree& tree,
         std::uint32_t node_index) {
@@ -420,8 +423,7 @@ private:
                 "bioseq.reverse({})",
                 render_expression(tree, node.left));
         case expression_kind::complemented:
-            // SQL intentionally has no standalone complement function. This
-            // composition is the public route to the internal complement bit.
+            // Compose reverse and reverse_complement to complement without reversing.
             return fmt::format(
                 "bioseq.reverse(bioseq.reverse_complement({}))",
                 render_expression(tree, node.left));
@@ -432,13 +434,13 @@ private:
     }
 }
 
-/** Edge-heavy element and slice coordinates for one expression result. */
+/** Element indices and slice bounds used to test one result. */
 struct coordinate_probes {
     std::array<std::int64_t, 6u> elements;
     std::array<std::pair<slice_bound, slice_bound>, 6u> slices;
 };
 
-/** Build edge-heavy coordinate probes plus two case-specific random windows. */
+/** Builds boundary cases, one random element, index, and one random slice. */
 [[nodiscard]] coordinate_probes make_coordinate_probes(
         std::size_t length,
         std::uint64_t seed) noexcept {
@@ -481,7 +483,7 @@ struct coordinate_probes {
     return probes;
 }
 
-/** Return the eager element text or SQL NULL for one coordinate probe. */
+/** Returns the expected letter, or NULL for a null value or out-of-range  index. */
 [[nodiscard]] std::optional<std::string> eager_element(
         const std::optional<std::string>& value,
         std::int64_t index) {
@@ -501,7 +503,7 @@ struct property_query {
     std::vector<std::optional<std::string>> expected_row;
 };
 
-/** Build one SQL query that checks every required logical consumer at once. */
+/** Builds a query comparing text, length, equality, hashes, elements, and slices. */
 [[nodiscard]] property_query make_property_query(
         const expression_tree& tree,
         std::uint32_t node_index,
@@ -561,7 +563,7 @@ struct property_query {
     return query;
 }
 
-/** SQL execution outcome used to report and minimize property failures. */
+/** Query result or error saved for failure reporting and shrinking. */
 struct sql_observation {
     bool succeeded = false;
     std::string sqlstate;
@@ -610,7 +612,7 @@ struct sql_observation {
     return observation;
 }
 
-/** Explain the first mismatch between a SQL observation and eager row. */
+/** Describes a query error or the first difference from the expected row. */
 [[nodiscard]] std::optional<std::string> property_mismatch(
         const sql_observation& observation,
         const property_query& query) {
@@ -637,14 +639,15 @@ struct sql_observation {
     return std::nullopt;
 }
 
-/** Smallest generated subtree that still reproduces a property mismatch. */
+/** Subtree and query selected to demonstrate a property failure. */
 struct minimized_failure {
     std::uint32_t node_index;
     property_query query;
     std::string mismatch;
 };
 
-/** Search all generated subtrees from smallest to largest for a reproducer. */
+/** Tries smaller subtrees first to find a failing examfle.
+ * Falls back to the original query if no subtree reproduces a mismatch. */
 [[nodiscard]] minimized_failure minimize_failure(
         const connection_test_context& ctx,
         const expression_tree& tree,
@@ -683,7 +686,7 @@ struct minimized_failure {
     };
 }
 
-/** Render a random expression that deliberately remains alphabet-unbound. */
+/** Builds a random sequence expression whose alphabet is unspecified. */
 [[nodiscard]] std::string make_unbound_expression(
         deterministic_words& words,
         std::size_t depth) {

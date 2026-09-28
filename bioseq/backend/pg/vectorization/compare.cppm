@@ -3,14 +3,7 @@
  * Compares one vector column with one PostgreSQL scalar constant.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/compare.cppm
- *
- * Typed comparison of one vector column and one scalar constant.
- *
- *-------------------------------------------------------------------------
- */
+
 module;
 
 #include <bioseq/pg_compat.h>
@@ -56,12 +49,12 @@ inline constexpr comparison_operation reversed_comparison_operation = [] {
 }();
 
 template <auto p_sql_type, class p_lane>
-/** Owns a PostgreSQL vector result while the generic comparator populates it. */
+/** Holds the PostgreSQL Boolean vector filled by the comparison code. */
 class postgres_comparison_result_sink final {
   public:
     using result_type = bioseq::postgres::support::vector_result<p_sql_type, p_lane>;
 
-    /** Allocates result lanes for one comparison batch. */
+    /** Allocate one Boolean result and null flag per input row. */
     void allocate(std::uint32_t lane_count) {
         result.emplace(result_type::allocate(lane_count));
     }
@@ -86,7 +79,7 @@ class postgres_comparison_result_sink final {
 };
 
 template <comparison_operation p_operation, class p_column, class p_constant>
-/** Applies a fixed-width comparison directly to contiguous vector lanes. */
+/** Compare eych fixed-width column value with the scalar and keep NULL rows NULL. */
 [[nodiscard]] auto compare_contiguous_column(p_column column, p_constant constant) {
     const std::uint32_t lane_count = static_cast<std::uint32_t>(column.size());
     postgres_comparison_result_sink<bioseq::sql::pg::boolean, bool> sink;
@@ -96,7 +89,7 @@ template <comparison_operation p_operation, class p_column, class p_constant>
 }
 
 template <comparison_operation p_operation>
-/** Compares normalized character values with PostgreSQL collation semantics. */
+/** Compare character values without trailing spaces, using their shared PostgreSQL collation. */
 [[nodiscard]] bool compare_character_values(const bioseq::postgres::support::bpchar_view& left,
                                             const bioseq::postgres::support::bpchar_view& right) {
     const std::string_view left_bytes = left.normalized_bytes();
@@ -118,7 +111,7 @@ template <comparison_operation p_operation>
 }
 
 template <comparison_operation p_operation, bool p_column_is_left, class p_column, class p_constant>
-/** Compares decoded character lanes while preserving per-lane null flags. */
+/** Decode  each non-NULL character value and compare it with the scalar. */
 [[nodiscard]] auto compare_decoded_column(p_column column, const p_constant& constant) {
     using result_type = bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>;
     result_type result = result_type::allocate(column.size());
@@ -148,7 +141,7 @@ template <comparison_operation p_operation,
           class p_left_lane,
           auto p_right_sql_type,
           class p_right_lane>
-/** Compares exactly one vector column operand with one scalar operand. */
+/** Compare a vector column with a scalar on either side and return a Boolean vector. */
 [[nodiscard]] inline bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 compare_vector_operands(
     bioseq::postgres::support::vector_operand<p_left_sql_type, p_left_lane> left,

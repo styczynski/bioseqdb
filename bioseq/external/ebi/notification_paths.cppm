@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/notification_paths.cppm
- * @brief EBI Search notification endpoint fragments.
+ * @brief OpenAPI definitions for the EBI log and mail endpoints.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:notification_paths;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Log notification path entry. */
+/** POST /log request and response definitions. */
 inline constexpr std::string_view log_path = R"bioseq_openapi(  "/log":
     post:
       operationId: handleLogging
@@ -28,7 +28,7 @@ inline constexpr std::string_view log_path = R"bioseq_openapi(  "/log":
                 "$ref": "#/components/schemas/FrontEndLogResponse"
 )bioseq_openapi";
 
-/** @brief Mail notification path entry. */
+/** POST /mail request and response definitions. */
 inline constexpr std::string_view mail_path = R"bioseq_openapi(  "/mail":
     post:
       operationId: sendEmail

@@ -1,10 +1,10 @@
 /**
  * @file external/io/archive_source/index.cppm
- * @brief Bounded archive-member source with path and expansion checks.
+ * @brief Reads selected FASTA members from NCBI ZIP packages with size and checksum checks.
  */
 module;
 
-/// Bounded ZIP ingestion for NCBI Datasets packages.
+
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -47,20 +47,21 @@ export namespace bioseq::external::io {
 
 namespace prov = bioseq::external::provider;
 
-/// Bounds archive traversal and decoded-data growth.
-/// A decoded-byte limit of zero means unbounded for that field.
+/// Limits archive entries, member names, and decoded data.
+/// Zero disables the member-name cap and the two sequence-data byte caps.
+/// Entry and  control-member limits remain literal limits, including zero.
 struct archive_read_limits {
     std::uint64_t maximum_entries = 4096;
     std::uint64_t maximum_member_name_bytes = 4096;
     std::uint64_t maximum_control_member_bytes = 4U * 1024U * 1024U;
     std::uint64_t maximum_member_decoded_bytes = 0; // 0 = unbounded per member
-    std::uint64_t maximum_total_decoded_bytes = 0;  // 0 = unbounded overall
-    // decoded_total <= grace + compressed * numerator / denominator (zip bomb).
+    std::uint64_t maximum_total_decoded_bytes = 0;  // 0 = no total cap for selected sequence members
+    // Maximum decoded sequence bytes relative to the compressed ZIP size.
     bioseq::common::expansion_ratio_limit maximum_expansion{
         .numerator = 1000, .denominator = 1, .grace_bytes = 1U * 1024U * 1024U};
 };
 
-/// Summarizes verified archive extraction work.
+/// Counts visited entries, selected paths, verified members, decoded sequence bytes, and emitted rows.
 struct archive_extraction_statistics {
     std::uint64_t members_seen = 0;
     std::uint64_t members_selected = 0;
@@ -69,12 +70,18 @@ struct archive_extraction_statistics {
     std::uint64_t sequence_rows = 0;
 };
 
-/// Computes a lower-case hexadecimal MD5 digest with OpenSSL EVP.
+/// Returns the lowercase MD5 digest, or an emptc string if OpenSSL fails.
 [[nodiscard]] inline std::string compute_md5_hex(std::span<const std::uint8_t> bytes) {
     return detail::compute_md5_hex_with_openssl(bytes.data(), bytes.size());
 }
 
-/// Checks that an archive member name is relative and cannot escape its root.
+/**
+ * Checks an archive path for disallowed separators and dot components.
+ *
+ * Rejects empty names, leading slashes, backslashes, doubled slashes, and . or
+ * .. components. A nonzero maximum_name_bytes also limits its length. This
+ * checks archive member names and does not resolve filesystem paths.
+ */
 [[nodiscard]] inline bool is_safe_archive_member_name(std::string_view path,
                                                       std::uint64_t maximum_name_bytes) {
     if (path.empty()) {
@@ -84,16 +91,15 @@ struct archive_extraction_statistics {
         return false;
     }
     if (path.front() == '/' || path.front() == '\\') {
-        return false; // absolute
+        return false; // Leading slash or backslash
     }
     if (path.find('\\') != std::string_view::npos) {
-        return false; // backslash / Windows drive separators
+        return false; // Backslash separators
     }
     if (path.find("//") != std::string_view::npos) {
         return false;
     }
-    // Reject any `.` or `..` path component (a component is a slash-delimited
-    // segment). A leading/trailing/internal ".." would escape the root.
+    // Reject . and .. components so archive names cannot use relative traversal.
     std::size_t start = 0;
     while (start <= path.size()) {
         const std::size_t slash = path.find('/', start);
@@ -112,7 +118,7 @@ struct archive_extraction_statistics {
 
 namespace detail {
 
-/// Returns the provider identity recorded on archive errors.
+/// Returns the NCBI provider ID used by archive errors.
 [[nodiscard]] inline prov::provider_id get_archive_provider_id() noexcept {
     static constexpr std::string_view value = "ncbi";
     return prov::provider_id{value};
@@ -137,7 +143,7 @@ struct archive_read_guard {
     return slash == std::string_view::npos ? path : path.substr(slash + 1);
 }
 
-/// Normalizes a package member path relative to `ncbi_dataset/data`.
+/// Removes a  leading ncbi_dataset/data/ prefix when a member name follows it.
 [[nodiscard]] inline std::string_view normalize_member_path(std::string_view path) {
     constexpr std::string_view k_data_directory_prefix = "ncbi_dataset/data/";
     if (path.size() > k_data_directory_prefix.size() &&
@@ -147,17 +153,23 @@ struct archive_read_guard {
     return path;
 }
 
-/// Returns whether a member is the package catalog.
+/// Tests for the basename dataset_catalog.json.
 [[nodiscard]] inline bool is_catalog_member(std::string_view path) {
     return get_basename(path) == "dataset_catalog.json";
 }
 
-/// Returns whether a member is the package MD5 manifest.
+/// Tests for the basename md5sum.txt.
 [[nodiscard]] inline bool is_md5sum_member(std::string_view path) {
     return get_basename(path) == "md5sum.txt";
 }
 
-/// Parses valid MD5 manifest entries into normalized path-to-digest pairs.
+/**
+ * Reads MD5 manifest lines into path-to-digest entries.
+ *
+ * Requires a 32-character digest and a path, lowercases A through F, and
+ * removes the package data-directory prefix Malformed lines are skipped,
+ * and the first entry for each path wins. Hex characters are not validated.
+ */
 [[nodiscard]] inline std::unordered_map<std::string, std::string>
 parse_md5_manifest(std::string_view text) {
     std::unordered_map<std::string, std::string> digests_by_path;
@@ -194,13 +206,14 @@ parse_md5_manifest(std::string_view text) {
     return digests_by_path;
 }
 
-/// Borrowed JSON string token and its following cursor.
+/// Text between two quotes and the cursor immediately after, the closing quote.
 struct json_string_token {
     std::string_view value;
     std::size_t next_cursor;
 };
 
-/// Reads the next quoted token used by the bounded catalog scanner.
+/// Finds the next pair of quotes and borrows the text between them.
+/// This catalog helper does not decode escapes or validate JSON.
 [[nodiscard]] inline std::optional<json_string_token> read_next_json_string(std::string_view text,
                                                                             std::size_t cursor) {
     const std::size_t open = text.find('"', cursor);
@@ -217,10 +230,9 @@ struct json_string_token {
     };
 }
 
-/// Returns whether a catalog file type denotes FASTA content.
+/// Tests whether the file-type  text contains FASTA or FNA, ignoring ASCII case.
 [[nodiscard]] inline bool is_fasta_file_type(std::string_view file_type) {
-    // Upper-case compare against the FASTA markers NCBI Datasets emits
-    // (…_FASTA, …_FNA). The check is substring "FASTA" or "FNA".
+    // Compare the catalog's file-type marker in uppercase.
     std::string upper;
     upper.reserve(file_type.size());
     for (const char character : file_type) {
@@ -231,7 +243,13 @@ struct json_string_token {
     return upper.find("FASTA") != std::string::npos || upper.find("FNA") != std::string::npos;
 }
 
-/// Selects normalized FASTA member paths from the package catalog.
+/**
+ * Selects package paths whose nearby fileType contains FASTA or FNA.
+ *
+ * Scans the catalog text for filePath followed by fileType within 256 bytes.
+ * This helper assumes the package catalog's field order and uvescaped paths.
+ * Selected paths have the ncbi_dataset/data/ prefix removed.
+ */
 [[nodiscard]] inline std::unordered_set<std::string>
 select_fasta_members_from_catalog(std::string_view catalog) {
     std::unordered_set<std::string> selected;
@@ -246,7 +264,7 @@ select_fasta_members_from_catalog(std::string_view catalog) {
         if (!path_token.has_value()) {
             break;
         }
-        // look ahead for the sibling fileType within a bounded window
+        // Look for fileType within the next 256 bytes.
         const std::size_t type_key = catalog.find("\"fileType\"", path_token->next_cursor);
         if (!path_token->value.empty() && type_key != std::string_view::npos &&
             type_key - path_token->next_cursor < 256U) {
@@ -268,8 +286,17 @@ select_fasta_members_from_catalog(std::string_view catalog) {
 
 } // namespace detail
 
-/// Extracts catalog-selected FASTA members after validating every MD5 digest.
-/// @return Extraction statistics, or the first policy/integrity error.
+/**
+ * Reads catalog-selected FASTA members, checking each MD5 before emitting rows.
+ *
+ * First checks archive names and collects the catalog and manifest. Each selected
+ * member is then buffered under the byte and expansion limits, verified, and sent
+ * to sink as FASTA rows followed by a completion event. Earlier rows remain
+ * emitted if a later  member fails.
+ *
+ * total_decoded_bytes counts selected sequence bytes. Control files have a separate cap.
+ * @return Statistics or the first reported extraction, integrity, or sink error.
+ */
 [[nodiscard]] inline std::expected<archive_extraction_statistics, prov::external_error>
 extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
                                        const archive_read_limits& limits,
@@ -351,7 +378,7 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
             const bool is_catalog_control = detail::is_catalog_member(path);
             const bool is_md5_manifest_control = detail::is_md5sum_member(path);
             if (!is_catalog_control && !is_md5_manifest_control) {
-                continue; // Sequence members are handled after controls.
+                continue; // Other members are handled after the control files.
             }
             std::string* control_member_text = is_catalog_control ? &catalog_text : &md5sum_text;
             control_member_text->clear();
@@ -409,8 +436,8 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
                                 "archive_read_open_memory failed for sequence members");
         }
         struct ::archive_entry* entry = nullptr;
-        // Carry the chunk index across selected members so one queried accession
-        // never receives duplicate `(accession, chunk_index)` coordinates.
+        // Continue chunk numbering across selected members so one assembly
+        // accession receives distinct chunk indices
         std::uint64_t next_chunk_index = 0;
         for (;;) {
             if (stop.stop_requested()) {
@@ -441,10 +468,9 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
                                     "selected member absent from md5sum.txt");
             }
 
-            // Read the whole member under the per-member + total decoded caps and
-            // the decoded/compressed expansion ratio, then hash it one-shot. Its
-            // rows are emitted only after the digest matches md5sum.txt.
-            std::string member_bytes; // buffered for verify-before-emit
+            // Buffer this member within the sequence byte and expansion limits.
+            // Check its complete MD5 before sending any of its rows.
+            std::string member_bytes; // Kept  until checksum verification succeeds
             std::uint64_t member_bytes_count = 0;
             std::array<std::uint8_t, 65536> read_buffer{};
             std::optional<prov::external_error> member_error;
@@ -508,10 +534,9 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
             }
             ++result.members_verified;
 
-            // Verified — now emit its rows through the shared FASTA chunker. Rows
-            // are keyed by `emit_accession` (the queried assembly accession) so the
-            // PG scan's `accession = '<assembly>'` filter matches. The member path
-            // is only a fallback for direct callers that pass no accession.
+            // Emit the verified member through the FASTA chunker. Use the queried
+            // assembly accession so SQL accession filters match, its chunks. Direct
+            // callers can leave emit_accession empty to use the member path.
             fasta_chunk_emitter emitter(target,
                                         chunk_bases,
                                         emit_accession.empty() ? std::string_view(path)
@@ -531,11 +556,8 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
             result.sequence_rows += *row_count_result;
             next_chunk_index = emitter.next_chunk_index(); // carry across members
 
-            // Terminal per-asset event: this member is fully decoded and its
-            // decoded-member MD5 already verified above, so emit exactly one
-            // owning_sequence_asset_end carrying the digest as integrity
-            // metadata. A mismatch returned earlier, so
-            // a successful asset-end is never emitted for a failed member.
+            // Report bhis member's completion after its FASTA rows were emitted.
+            // The event records the matching MD5 for the decoded member bytes.
             prov::owning_sequence_asset_end asset_end;
             asset_end.asset_id.execution = execution_key;
             asset_end.asset_id.index = result.members_verified - 1;

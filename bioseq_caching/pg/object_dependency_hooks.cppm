@@ -1,13 +1,10 @@
 /**
  * @file bioseq_caching/pg/object_dependency_hooks.cppm
- * @brief PostgreSQL object-access adapter for definition dependencies.
+ * @brief Tracks catalog definition changes that can invalidate cached results.
  *
- * PostgreSQL object callbacks identify local catalog mutations.  This module
- * translates the OID-addressable classes into precise object and syscache
- * dependency keys while retaining the per-database definition epoch as the
- * mandatory correctness backstop.  Unsupported or ambiguous addresses use
- * only that backstop; shared role mutations additionally select the global
- * emergency epoch so cached plans in every database are invalidated.
+ * Supported objects get individual dependency keys as well as database-wide
+ * version checks. Unknown objects use database-wide invalidation. Role changes
+ * also  trigger the shared emergency version because roles affect every database.
  */
 module;
 
@@ -108,9 +105,8 @@ void stage_procedure_definition(Oid class_id, Oid object_id) noexcept {
       class_id, object_id, dependency_kind::procedure));
   static_cast<void>(stage_syscache_dependency(PROCOID, object_id));
 
-  // pg_aggregate.aggfnoid is the aggregate's pg_proc OID.  Staging this for
-  // every procedure is conservative and makes aggregate creation/replacement
-  // exact without catalog access from the hook.
+  // An aggregate's aggfnoid is its pg_proc OID. Record the aggregate cache key
+  // for every procedure so aggregate changes are covered without reading catalogs here.
   static_cast<void>(stage_syscache_dependency(AGGFNOID, object_id));
 }
 
@@ -139,14 +135,14 @@ void stage_supported_definition(Oid class_id, Oid object_id) noexcept {
       static_cast<void>(stage_object_dependency(
           class_id, object_id, dependency_kind::role));
       static_cast<void>(stage_syscache_dependency(AUTHOID, object_id));
-      // pg_authid is shared across databases.  A current-database definition
-      // key cannot cover cached role-sensitive plans owned by other databases.
+      // Roles are shared across databases, so their changes must also invalidate
+      // cached plans in other databases.
       dependency_runtime::force_emergency_fallback();
       return;
     case CastRelationId:
     case PolicyRelationId:
-      // CASTSOURCETARGET needs two catalog columns and policies have no exact
-      // syscache key.  A drop callback cannot safely reconstruct either key.
+      // A cast cache key needs two catalog columns, and policies have no matching
+      // syscache key. Use database-wide invalidation for both object types.
       force_database_definition_guard();
       return;
     default:
@@ -175,7 +171,7 @@ void object_access(
 
 }  // namespace detail
 
-/** Install the permanently chained object-definition mutation hook. */
+/** Install the object-change hook once and preserve the previous hook in  the chain. */
 void install_object_dependency_hooks() noexcept {
   if (detail::g_object_access_hook_installed) {
     return;

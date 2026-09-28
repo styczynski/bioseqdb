@@ -1,6 +1,6 @@
 /**
  * @file read_test.cpp
- * @brief Tests direct hash32 query planning and posting traversal.
+ * @brief Checks direct-index lookups, occurrence limits and reads of selected positions.
  */
 
 #include <cstring>
@@ -21,7 +21,7 @@ TEST_CASE("direct hash32 index differentially resolves absent singleton duplicat
         {.hash = (std::numeric_limits<std::uint32_t>::max)(),
          .target_bp = 11u,
          .target_strand_one = true},
-        // An exact duplicate occurrence remains authoritative, not deduped.
+        // Keep duplicate occurrences in the stored counts and position lists.
         {.hash = (std::numeric_limits<std::uint32_t>::max)(),
          .target_bp = 11u,
          .target_strand_one = true},
@@ -63,7 +63,7 @@ TEST_CASE("direct hash32 index differentially resolves absent singleton duplicat
     const oracle_type oracle = make_oracle(input);
     require_matches_oracle(
         *query_plan, queries, oracle, (std::numeric_limits<std::uint64_t>::max)());
-    // Duplicate query occurrences share one unique target selection.
+    // Repeated queries for one hash share the same target position list
     CHECK(query_plan->selections.size() == oracle.size());
     CHECK(query_plan->stats.unique_selected_hash_count == oracle.size());
     CHECK(query_plan->stats.selected_posting_count == input.size());
@@ -171,9 +171,7 @@ TEST_CASE("direct hash32 point lookup examines a probe chain rather than every t
     const auto view = validate_or_fail(image, build_options.identity);
     const std::array query{
         idx::direct_index_query_occurrence{
-            // mix_hash32(0)==0 and hash zero is inserted first, so this is a
-            // deterministic one-control probe rather than a probabilistic
-            // assertion about the avalanche mixer's low bits.
+            // Hash zero maps to slot zero and is  inserted first, giving a predictable short lookup.
             .hash = 0u,
             .query_strand_one = false},
     };
@@ -211,8 +209,8 @@ TEST_CASE("compact exact-domain hash32 monotonic batch derives dense ranks and o
                             encoded_position(20u, true),
                         },
                 },
-                // Count four exceeds the configured max_occ=3. Neither
-                // its membership bit, descriptor, nor postings are persisted.
+                // This hash occurs four times, above the stored limit of three.
+                // Omit its membership bit, descriptor and positions.
                 compact_test_run{
                     .header = {.hash = 300u, .global_count = 4u, .target_strand_zero_count = 2u},
                     .encoded_positions =
@@ -408,8 +406,7 @@ TEST_CASE("compact hash32 unique lookup caches one four-word membership rank gro
     REQUIRE(same_group.has_value());
     CHECK(same_group->selections.size() == 8u);
     CHECK(same_group->stats.rank_checkpoints_examined == 1u);
-    // Thirteen present/absent lookups physically load exactly one cached
-    // four-word group, not one to four words again for every hash.
+    // All thirteen lookups share one cached group of four membership words.
     CHECK(same_group->stats.membership_words_examined == 4u);
     CHECK(same_group->stats.descriptors_examined == 8u);
 
@@ -681,8 +678,7 @@ TEST_CASE("compact exact-domain hash32 applies runtime max-occ below the persist
     CHECK(equal->selections[1].query_ordinal == 2u);
     CHECK(equal->selections[2].dense_ordinal == 2u);
     CHECK(equal->selections[2].query_ordinal == 3u);
-    // Returned capacity is exactly c: a hypothetical c+1 push would need a
-    // growth, while all c query-time pushes provably performed none.
+    // The returned vector has room only for its results. Filling it required no growth.
     CHECK(equal->selections.size() + 1u > equal->selections.capacity());
 
     std::vector<std::tuple<std::uint32_t,
@@ -822,8 +818,8 @@ TEST_CASE("compact exact-domain hash32 applies runtime max-occ below the persist
     CHECK(first_shard->descriptors_examined + second_shard->descriptors_examined ==
           bulk_visited->descriptors_examined);
 
-    // The authenticated accessor is intentionally reusable: a second pass
-    // over the same shard boundaries does not rescan the whole plan seal.
+    // Reuse the validated accessor for another pass over the same selection ranges.
+    // Its plan checksum was checkec when the accessor was created.
     std::uint64_t second_pass_callbacks = 0u;
     for (const auto [selection_begin, selection_end] : std::array{
              std::pair{std::uint64_t{0u}, std::uint64_t{2u}},

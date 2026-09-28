@@ -1,6 +1,6 @@
 /**
  * @file open_validation.cppm
- * @brief Opens and validates authenticated direct hash32 images.
+ * @brief Open direct-index images and check their stored layout and data.
  */
 export module bioseq.indexing.compact_hash32_direct_index:open_validation;
 
@@ -9,17 +9,16 @@ import :wire_format;
 
 export namespace bioseq::indexing {
 
-/// Bounded timed-open for a compact-hash32 section nested in an owning mapped
-/// image.  This function reads exactly the fixed 256-byte direct header.  It
-/// validates all persisted sizes and offsets arithmetically, but leaves the
-/// intentionally O(image) payload CRC/padding/dictionary scrub to
+/// Open a compact hash32 index by checking only its 256-byte header.
+/// Verify  the identity, checksums of the header, and section bounds wxthout
+/// reading the potentially large payload. Full payload checks belong to
 /// validate_compact_hash32_direct_index().
-/// The returned view shares ownership of the mapped bytes through `mapped_owner`.
 ///
-/// @param mapped_owner Lifetime anchor for the mapping containing `direct_section`.
-/// @param direct_section Exact byte range of the nested compact index image.
-/// @param options Expected identity, geometry, occurrence cap, and optional header receipt.
-/// @return An owning bounded view, or an error without reading payload bytes.
+/// @param mapped_owner Shared owner that keeps the mapped image alive.
+/// @param direct_section Complete byte range of the compact index.
+/// @param options Expected identity, hash domain, occurrence cap, and optional
+/// checksum of the complete header.
+/// @return A view that keeps mapped_owner alive, or a header-check error.
 [[nodiscard]] inline std::expected<compact_hash32_bounded_open_view, direct_inverted_index_error>
 open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owner,
                                          std::span<const std::byte> direct_section,
@@ -38,9 +37,8 @@ open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owne
         }
     }
 
-    // From this point until the owning view is constructed, every load is
-    // confined to this fixed span.  In particular, no padding byte or section
-    // checksum target is examined by the timed-open path.
+    // Restrict reads to the header. Payload checksums and padding are checked
+    // by the full validator.
     const std::span<const std::byte> header_bytes =
         direct_section.first(k_compact_hash32_direct_index_header_bytes);
     if (read_le<std::uint64_t>(header_bytes, 0u) != k_compact_hash32_direct_index_magic) {
@@ -149,8 +147,8 @@ open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owne
     header.materialized_posting_count =
         header.accepted_posting_count - header.inline_singleton_count;
 
-    // Validate every untrusted interval directly before deriving the stricter
-    // canonical layout.  No span/subspan is formed for these payload ranges.
+    // Check section bounds before  calculating the expected layout. These are
+    // offset calculations only, so the payload stays unread.
     const std::array sections{
         std::pair{header.membership_offset, header.membership_bytes},
         std::pair{header.rank_offset, header.rank_bytes},
@@ -219,16 +217,16 @@ open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owne
     };
 }
 
-/// Validate an entire compact hash32 image and expose its borrowed persisted sections.
+/// Check the complete compact hash32 index, including all stored positions.
+/// Verify section sizes and CRCs, zero padding, membership counts, and each
+/// hash's posting list Positions must stay within the target, and never decrease
+/// within each strand. Equal positions are allowed.
 ///
-/// Checks the little-endian header, canonical section geometry, zero padding, section CRCs,
-/// membership ranks, descriptors, posting order, coordinates, and accounting before returning.
-///
-/// @param image Complete immutable image, which must outlive the returned view.
-/// @param expected_identity Identity required from the persisted header.
-/// @param expected_max_occ_cap Build-time occurrence cap required from the header.
-/// @param expected_geometry Hash-domain geometry required from the header.
-/// @return A borrowed view after exhaustive validation, or the first validation error.
+/// @param image Complete image, kept alive and unchanged while the view is used.
+/// @param expected_identity Required generation and source  identity.
+/// @param expected_max_occ_cap Required occurrence limit used when building.
+/// @param expected_geometry Required hash domain.
+/// @return A view borrowing image, or the first validation error.
 [[nodiscard]] inline std::expected<compact_hash32_direct_index_view, direct_inverted_index_error>
 validate_compact_hash32_direct_index(std::span<const std::byte> image,
                                      const direct_index_identity& expected_identity,
@@ -365,7 +363,7 @@ validate_compact_hash32_direct_index(std::span<const std::byte> image,
         layout->image_bytes != header.image_bytes) {
         return std::unexpected(direct_inverted_index_error::section_layout);
     }
-    // Form a persisted section only after canonical offsets and lengths have been validated.
+    // The checed layout makes these section slices safe to read.
     const auto section = [&image](std::uint64_t offset, std::uint64_t bytes) {
         return image.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(bytes));
     };
@@ -431,7 +429,7 @@ validate_compact_hash32_direct_index(std::span<const std::byte> image,
                 }
                 std::array<std::uint64_t, 2> previous_bp{};
                 std::array<bool, 2> have_previous_bp{};
-                // Check one descriptor posting while retaining per-strand coordinate order.
+                // Reject wrong strands, positions outside the target, and decreasing positions within a strand.
                 const auto validate_encoded =
                     [&header, &descriptor, &have_previous_bp, &previous_bp](
                         std::uint64_t encoded, std::uint64_t ordinal) noexcept {
@@ -475,7 +473,7 @@ validate_compact_hash32_direct_index(std::span<const std::byte> image,
                 accepted_postings_seen += descriptor.global_count;
                 ++accepted_seen;
                 word &= word - 1u;
-                static_cast<void>(bit); // bit identifies the authoritative hash32.
+                static_cast<void>(bit); // The bit position determines the hash represented by this descriptor.
             }
         }
     }
@@ -493,23 +491,18 @@ validate_compact_hash32_direct_index(std::span<const std::byte> image,
 
 export namespace bioseq::indexing {
 
-/// Exhaustively validate a hash-major direct-index image.
+/// Check a complete direct index that stores hashes in an open-addressed table.
+/// Verify section CRCs and table lookups, then check each posting list and any
+/// fragment summaries. The  returned view borrows the supplied bytes.
 ///
-/// Authenticates all little-endian sections and walks the occupancy dictionary, controls,
-/// optional fragment summaries, and sorted postings. The returned view borrows `image`.
-///
-/// @param image Complete immutable image, which must outlive the returned view.
-/// @param expected_identity Identity required from the persisted header.
-/// @return A borrowed view after exhaustive validation, or the first validation error.
+/// @param image Complete image, kept alive and unchanged while the view is used.
+/// @param expected_identity Required generation and source identity.
+/// @return A checked view, or the first validation error.
 [[nodiscard]] inline std::expected<direct_inverted_index_view, direct_inverted_index_error>
 validate_direct_inverted_index(std::span<const std::byte> image,
                                const direct_index_identity& expected_identity) {
-    // This is the exact/offline validator: it authenticates and semantically
-    // walks every section, including postings.  The returned view still owns
-    // no heap copy.  A production mapped-file open should pair publication-
-    // time use of this routine with a constant-time descriptor/inode-bound
-    // open and lazy extent CRCs. Silently weakening this exact API would make
-    // corruption tests pass without proving the persisted image.
+    // Read every section and validate its contents here. Call this full check
+    // when publishing or checking an image, since it also scans all postings.
     using namespace direct_index_detail;
     if (image.size() < k_direct_inverted_index_header_bytes) {
         return std::unexpected(direct_inverted_index_error::image_size);
@@ -608,7 +601,7 @@ validate_direct_inverted_index(std::span<const std::byte> image,
         expected_layout->image_bytes != header.image_bytes) {
         return std::unexpected(direct_inverted_index_error::section_layout);
     }
-    // Form an exact section span after the persisted layout has matched the canonical layout.
+    // Read section slices only after their offsets match the expected layout.
     const auto exact = [&image](std::uint64_t offset, std::uint64_t count) {
         return image.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(count));
     };

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares scan path costing and admission without importing implementation logic.
+ * @brief Declares scan costing and filter selection for columnar paths.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -29,7 +29,7 @@ export void cost_bioseq_column_paths(
     RelOptInfo* rel,
     Oid relation_id);
 
-/** @brief Return storage or mmsearch clauses that this base relation can own. */
+/** @brief Returns candidate storage filters and mmsearch calls for this base relation. */
 export List* filter_pushdown_clauses(
     PlannerInfo* root,
     RelOptInfo* rel,
@@ -38,11 +38,11 @@ export List* filter_pushdown_clauses(
 /** @brief Collect join clauses that are eligible for base-relation pushdown. */
 export List* find_pushdown_join_clauses(PlannerInfo* root, RelOptInfo* rel);
 
-/** @brief Find outer relations needed by the admitted join clauses. */
+/** @brief Finds additional outer relations that could supply scan parameters. */
 export Relids find_candidate_relids(
     PlannerInfo* root,
     RelOptInfo* rel,
     List* join_clauses);
 
-/** @brief Choose the bounded parameterization-search depth. */
+/** @brief Limits the number of outer dependencies considered for each scan path */
 export int choose_depth_limit(int n_candidates);

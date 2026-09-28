@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises transformed-owner and DSM runtime EXPLAIN contracts.
+ * @brief Checks EXPLAIN for transformed mmsearch inputs and shared-memory counters.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -91,7 +91,7 @@ TEST_CASE("mmsearch slice boundaries follow the selected minimizer route",
 #ifdef BIOSEQ_TEST_INDEXES
 namespace {
 
-/** EXPLAIN formats exercised by DSM snapshot property checks. */
+/** EXPLAIN formats used to check shared-memory counter snapshots. */
 enum class dsm_explain_format {
     text,
     json,
@@ -99,7 +99,7 @@ enum class dsm_explain_format {
     xml,
 };
 
-/** Require one DSM snapshot property with format-specific serialization. */
+/** Checks that an EXPLAIN property has the expected value in the selected format. */
 void require_dsm_snapshot_property(std::span<const std::string> plan,
                                    dsm_explain_format format,
                                    std::string_view name,
@@ -128,7 +128,7 @@ void require_dsm_snapshot_property(std::span<const std::string> plan,
     }
 }
 
-/** Arm one test-only DSM snapshot fixture in the current backend. */
+/** Selects a shared-memory snapshot test case for the current backend. */
 void arm_dsm_snapshot(const connection_test_context& ctx, std::string_view mode) {
     exec_sql(ctx, fmt::format("SELECT bioseq_internal.arm_slice_dsm_fixture('{}');", mode));
 }

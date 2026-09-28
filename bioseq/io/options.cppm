@@ -11,15 +11,13 @@ export module bioseq.io.options;
 
 export namespace bioseq::io {
 
-/// Which file format `read_sequences_file` is being asked to parse. The
-/// callers select one format through the template parameter. The reader does
-/// not auto-detect per record.
+/// Sequence format selected by the eader template for the whole input.
 enum class sequence_file_format : std::uint8_t {
     fasta = 0,
     fastq = 1,
 };
 
-/// I/O backend knobs (buffer sizes, mmap thresholds, gzip auto-detection).
+/// Input buffers, memory mapping, and gzip settings.
 struct io_options {
     /// Initial byte capacity of each aligned refill slab.
     std::size_t initial_buffer_size = 1 * 1024 * 1024;
@@ -31,24 +29,23 @@ struct io_options {
     bool stream_madvise = true;
     bool gzip_auto_detect = true;
 
-    /// Enable parallel gzip above the configured compressed-size threshold.
+    /// Enables parallel gzip for mapped files at least as large as the configured threshold.
     bool parallel_gzip_enabled = true;
     std::size_t parallel_gzip_min_compressed_bytes = 16ULL * 1024 * 1024;
     /// 0 = use default_parallel_gzip_chunk_size = 4 MiB.
     std::size_t parallel_gzip_chunk_bytes = 0;
-    /// 0 = auto (`hardware_concurrency() - 2`, capped at 6).
+    /// Zero chooses an automatic count, leaving two worker slots free when  possible.
     std::size_t parallel_gzip_thread_count = 0;
     bool parallel_gzip_verify_crc = true;
 };
 
-/// Concurrency knobs (thread counts, ring sizes, batch shape).
+/// Worker counts, queue sizes, and batch sizes for the reader.
 struct concurrency_options {
     std::size_t worker_count = 0;
-    /// Number of parsing threads for mmap parallel mode. 0 = auto
-    /// (use std::thread::hardware_concurrency capped to 8). 1 forces the
-    /// sequential single-threaded mmap path. N > 1 selects exactly N parser
-    /// shards. The parallel path activates only on the mmap zero-copy
-    /// path with file_size >= mmap_parallel_min_bytes.
+    /// Parser count for a large memory-mapped input when `worker_count` is zero
+    /// Zero uses the available pool size, capped by `mmap_parallel_max_shards`.
+    /// One selects sequential parsing. Parallel parsing also requires the zero-copy
+    /// path and a file at least `mmap_parallel_min_bytes` long.
     std::size_t parser_count = 0;
     std::size_t io_buffer_pool_size = 8;
     std::size_t ring_capacity = 32;
@@ -59,25 +56,23 @@ struct concurrency_options {
     /// parsing. Smaller files use the sequential mmap path to avoid
     /// shard setup and per-shard storage overhead.
     std::size_t mmap_parallel_min_bytes = static_cast<std::size_t>(1024) * 1024 * 1024;
-    /// Hard cap on shard count even when more hardware threads are available.
+    /// Maximum parser count chosen automatically when `parser_count` is zero.
     std::size_t mmap_parallel_max_shards = 8;
 };
 
-/// Encoder knobs (alphabet validation, FASTQ strictness).
+/// Sequence alphabet and FASTQ parsing settings.
 struct encoder_options {
     bool strict_alphabet = false;
     bool strict_fastq = true;
 };
 
-/// Diagnostics knobs (progress traces).
+/// Progress-reporting settings.
 struct diagnostics_options {
     bool trace_progress = false;
     std::size_t trace_interval_bytes = 64ull * 1024 * 1024;
 };
 
-/// Top-level options aggregate. Composed of four orthogonal sub-structs
-/// so designated initialisation reads cleanly. Default constructor gives
-/// sensible defaults for every field.
+/// Reader settings grouped by input, concurrency, encoding, and diagnostics.
 struct reader_options {
     io_options io{};
     concurrency_options concurrency{};
@@ -87,54 +82,29 @@ struct reader_options {
 
 inline constexpr reader_options default_reader_options{};
 
-/// Knobs for the FASTA / FASTQ writer. The writer's hot path is
-/// (a) decode packed sequence words → ASCII, (b) inject newlines for
-/// FASTA wrap, (c) pwrite the per-thread output chunk to the file's
-/// disjoint range claimed via an atomic offset. The defaults are
-/// selected to bound syscall frequency and per-thread memory use.
+/// Formatting and  output-buffer settings for FASTA and FASTQ writers.
 struct writer_options {
-    /// Per-line width for FASTA bodies (letters before a `\n`). 0 = no
-    /// wrapping (one giant line per record). Default 0 = no wrapping
-    /// for maximum throughput. The FASTA specification accepts arbitrary line
-    /// lengths and bioseq's reader handles single-line bodies fine.
-    /// Set to 80 for kseq++-canonical output.
+    /// Letters per FASTA body line. Zero writes each sequence on one lne.
     std::size_t fasta_line_width = 0;
 
-    /// Size (in bytes) of one producer-thread's output chunk. The
-    /// chunk fills with formatted bytes. Once it crosses
-    /// `flush_threshold_bytes` the thread reserves a disjoint file
-    /// range via atomic-fetch-add and pwrites the chunk in one
-    /// syscall.
+    /// Initial capacity, of each producer's output and decode buffers, in bytes.
+    /// A large record can grow the buffers beyond this value.
     std::size_t chunk_capacity_bytes = 64 * 1024 * 1024;
 
-    /// Threshold at which a producer thread flushes its chunk. Below
-    /// the chunk capacity by a small margin so that a single record's
-    /// formatting can't overrun the chunk in one write call.
+    /// Flush a producer's pending bytes before the next record once this size is reached.
     std::size_t flush_threshold_bytes = 64 * 1024 * 1024 - 64 * 1024;
 
-    /// When the format is FASTQ, refuse to write a record whose
-    /// quality span length doesn't match the sequence's letter count.
-    /// Default false: real-world FASTQ corpora (e.g. SRR datasets)
-    /// occasionally contain records where the qual string is one byte
-    /// off from the sequence. The writer truncates quality to the
-    /// sequence's letter count instead of aborting. Set true to
-    /// enforce strict matching.
+    /// Reject FASTQ quality lengths that differ from the decoded sequence length.
+    /// When false, excess quality bytes are removed and missing bytes become '!'.
     bool strict_fastq_quality_length = false;
 
-    /// If true, a record larger than `chunk_capacity_bytes` is
-    /// streamed in pieces (multiple pwrite calls per record). If
-    /// false, oversize records bypass the chunk entirely and pwrite
-    /// directly. Default true keeps thread-local behaviour predictable.
+    /// Reserved setting. Oversized records currently follow the chosen write method.
+    /// Use `write_record_streamed` to  write a record in slices.
     bool stream_oversize_records = true;
 
-    /// Pre-allocate the output file to this size and mmap it for
-    /// writing. The writer's per-thread chunks then commit via
-    /// userspace memcpy into the mapped region (no kernel pwrite
-    /// memcpy). After close, the file is `ftruncate`d down to the
-    /// actual bytes written. Set to 0 (default) to use the
-    /// pwrite-based sink (no size-hint required). When non-zero, the
-    /// hint MUST be a generous upper bound on the output file size
-    /// — exceeding it surfaces as a writer error at flush time.
+    /// Maximum file size to map for output. Zero selects the pwrite sink.
+    /// A mapped write fails if it exceeds this capacity. Closing the mapped
+    /// sink resizes the file to the total number of reserved bytes.
     std::size_t output_capacity_hint = 0;
 };
 

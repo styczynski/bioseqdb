@@ -1,6 +1,6 @@
 /**
  * @file index_relation_identity.cppm
- * @brief Reads the physical PostgreSQL identity used by index storage.
+ * @brief Find the database, tablespace and table file used to name index storage.
  */
 module;
 
@@ -18,7 +18,7 @@ import bioseq.postgres.support;
 
 export namespace bioseq::storage::indexing {
 
-/// Physical identity used to bind index storage to a PostgreSQL relation.
+/// Database, tablespace and table file used to identify index storage.
 struct relation_identity {
     Oid db_oid;
     Oid tablespace_oid;
@@ -26,14 +26,14 @@ struct relation_identity {
 };
 
 /**
- * @brief Reads the current physical identity of a user relation.
+ * @brief Read a table's storage identity under AccessShareLock.
  *
- * The relation is held under `AccessShareLock` only while its tablespace and
- * relfilenode are copied. Invalid physical fields are returned when the
- * relation cannot be opened.
+ * The lock is released before  return. If the table cannot be opened, the
+ * tablespace and file number are invalid. A table with no, file number uses
+ * its relation OID in that field.
  *
- * @param[in] user_relid OID of the relation to inspect.
- * @return Database, tablespace and relfilenode identity for the relation.
+ * @param[in] user_relid Table OID to inspect.
+ * @return The current database OID, tablespace and table file number.
  */
 [[nodiscard]] inline relation_identity index_relation_identity(Oid user_relid) {
     relation_identity id{MyDatabaseId, InvalidOid, InvalidOid};

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares stable CustomScan executor method tables without importing implementations.
+ * @brief PostgreSQL execution callbacks for Bioseq scans and sequence joins.
  */
 module;
 struct Node;
@@ -17,7 +17,7 @@ export module bioseq.postgres.table:custom_scan_execution_method_contracts;
 /** @brief Allocate executor state for a planned Bioseq base scan. */
 export Node* bioseq_column_scan_create_custom_scan_state(CustomScan* cscan);
 
-/** @brief Allocate executor state for a planned batched join. */
+/** Allocate executor state  for a planned sequence join. */
 export Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan);
 
 /** @brief Initialize a Bioseq scan within the executor query context. */
@@ -34,7 +34,7 @@ export void bioseq_column_scan_end_custom_scan(CustomScanState* node);
 /** @brief Reset a Bioseq scan for a new executor pass. */
 export void bioseq_column_scan_rescan_custom_scan(CustomScanState* node);
 
-/** @brief Render Bioseq scan planning and runtime properties for EXPLAIN. */
+/** Show Bioseq scan settings and execution statistics in EXPLAIN. */
 export void bioseq_column_scan_explain_custom_scan(CustomScanState* node,
                                                    List* ancestors,
                                                    ExplainState* es);
@@ -53,39 +53,39 @@ export void bioseq_per_row_join_end_custom_scan(CustomScanState* node);
 /** @brief Reset a per-row join and its child for another executor pass. */
 export void bioseq_per_row_join_rescan_custom_scan(CustomScanState* node);
 
-/** @brief Render per-row join planning and execution properties for EXPLAIN. */
+/** Show per-row join settings and execution statistics in EXPLAIN. */
 export void bioseq_per_row_join_explain_custom_scan(CustomScanState* node,
                                                     List* ancestors,
                                                     ExplainState* es);
 
-/** @brief Detect whether a shared BatchJoin state carries the per-row recipe. */
+/** Check whether a shared join state contains the one-child per-row, plan. */
 export [[nodiscard]] bool
 bioseq_batch_join_is_post_join_recipe(CustomScanState const* node) noexcept;
 
-/** @brief Initialize a batched join and both of its executor children. */
+/** Validate and initialize a batched or per-row sequence join. */
 export void bioseq_batch_join_begin_custom_scan(CustomScanState* node,
                                                 EState* estate,
                                                 int eflags);
 
-/** @brief Produce the next batched-join tuple without the per-row dispatch shim. */
+/** Produce the next result of the two-cheld batch join. */
 export TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(CustomScanState* node);
 
-/** @brief Produce the next tuple from either shared BatchJoin execution recipe. */
+/** Return the next result from a batched or per-row sequence join. */
 export TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node);
 
-/** @brief Release a batched join's executor resources. */
+/** Release resources for a batched or per-row sequence join. */
 export void bioseq_batch_join_end_custom_scan(CustomScanState* node);
 
-/** @brief Reset a batched join and its children for another executor pass. */
+/** Restart  a sequence join and its child plans. */
 export void bioseq_batch_join_rescan_custom_scan(CustomScanState* node);
 
-/** @brief Render batched-join planning and runtime properties for EXPLAIN. */
+/** Show sequence-join settings and execution statistics in EXPLAIN. */
 export void bioseq_batch_join_explain_custom_scan(CustomScanState* node,
                                                   List* ancestors,
                                                   ExplainState* es);
 
-/** @brief Returns the stable executor method table for base Bioseq scans. */
+/** Return PostgreSQL's execution callbacks for Bioseq table scans. */
 export [[nodiscard]] const CustomExecMethods* bioseq_column_scan_execute_methods() noexcept;
 
-/** @brief Returns the stable executor method table for batched Bioseq joins. */
+/** Return PostgreSQL's shared execution callbacks for sequence joins. */
 export [[nodiscard]] const CustomExecMethods* bioseq_batch_join_execute_methods() noexcept;

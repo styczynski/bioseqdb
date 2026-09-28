@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Rewrites and verifies join output references after setrefs.
+ * @brief Prepares and checks join output references before PostgreSQL runs setrefs.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -34,7 +34,7 @@ export import :custom_scan_join_plan_setrefs_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Finds the last exact scan-target expression within a validated result range. */
+    /** @brief Finds the last matching expression within the requested scan  output columns. */
     [[nodiscard]] TargetEntry*
     batch_join_find_exact_scan_entry(List* scan_tlist,
                                      const Node* expression,
@@ -42,9 +42,9 @@ export {
                                      const AttrNumber maximum_resno) noexcept {
         if (expression == nullptr)
             return nullptr;
-        /* Sites are appended after inherited child columns.  Search backwards
-         * within the caller's validated range so an outer owner binds the site it just
-         * registered, never the first equal identity inherited from a descendant. */
+        /* New helper sites follow inherited child columns. Search backwards
+         * within the requested range so this owner can select its newly
+         * registered result when an equal expression exists below it */
         for (int index = list_length(scan_tlist) - 1; index >= 0; --index) {
             TargetEntry* entry = reinterpret_cast<TargetEntry*>(list_nth(scan_tlist, index));
             if (entry != nullptr && entry->resno >= minimum_resno &&
@@ -54,7 +54,7 @@ export {
         return nullptr;
     }
 
-    /** @brief Finds the unique semantically equal helper entry within a scan-target range. */
+    /** @brief Finds a single matching helper in the requested output columns, allowing a PlaceHolderVar wrapper. */
     [[nodiscard]] TargetEntry*
     batch_join_find_unique_semantic_helper_entry(List* scan_tlist,
                                                  Node* identity,
@@ -89,7 +89,7 @@ export {
         return result;
     }
 
-    /** @brief Finds a scan-target Var with the same complete planner identity. */
+    /** @brief Finds the same Var by relation, column, type, query level, and NULL-producing joins. */
     [[nodiscard]] TargetEntry* batch_join_find_compatible_var_entry(List* scan_tlist,
                                                                     const Var* var) noexcept {
         if (var == nullptr)
@@ -140,7 +140,7 @@ export {
         return InvalidAttrNumber;
     }
 
-    /** @brief Raises a precise PostgreSQL error when an output dependency lacks scan coverage. */
+    /** @brief Reports the missing input column or match helper when the output cannot bind to the scan tuple. */
     void validate_batch_join_setrefs_coverage(List* output_tlist, List* scan_tlist) {
         const bioseq_stub_oids& oids = get_cached_stub_oids();
         batch_join_setrefs_coverage coverage{scan_tlist, &oids, nullptr, nullptr};
@@ -176,12 +176,12 @@ export {
     }
 
     /**
-     * @brief Resolves the authoritative PHV id for a Plan-only helper carrier.
+     * @brief Finds the PlaceHolderVar id for a helper carried as a hidden plan output.
      *
-     * The same helper is commonly represented by a positive-id PHV in the
-     * processed target and by its stripped FuncExpr in a non-projecting locator
-     * child.  Preserve the authoritative PHV id in the site codec when present;
-     * finalized binding then accepts only that exact PHV-to-bare transition.
+     * The processed output may wrap a  helper in a PlaceHolderVar while the
+     * locator child carries its bare FuncExpr. Save the original phid in the
+     * helper record so final binding can recognize that change. Reject
+     * conflicting positive ids.
      */
     [[nodiscard]] bool batch_join_plan_only_helper_phid(List* authoritative_identities,
                                                         Node* carrier_identity,

@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_spill.cppm
- * @brief BufFile-backed run spilling, rerouting, merging, and release operations.
+ * @brief Store sorted minimizer runs, regroup them by sequence position and reletse their resources.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,9 +10,9 @@ extern "C" {
 #include "miscadmin.h"
 }
 
-// Clang 22 must see these textual libc++ declarations before deserializing
-// header-backed dependency BMIs; importing std first makes aligned operator new
-// appear as two unrelated candidates during container allocation.
+// With Clang 22, include these libc++ declarations before importing modules
+// that use them. Importing std first can leave container allocation with two
+// conflicting declarations of aligned operator new
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -27,7 +27,7 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_spill;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // PostgreSQL calls with C++ error handling.
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.storage.indexing.sorted_runs;
 import :catalog;
@@ -39,9 +39,9 @@ export import :fragment_storage_contract;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Adds a sorted pair span to the handle's general run store.
- * @param[in] sorted Hash-position pairs in canonical sorted order.
- * @return Zero-based identifier of the added run.
+ * @brief Add a borrowed run to the index build's sorted-run store.
+ * @param[in] sorted Pairs sorted by minimizer hash and encoded position.
+ * @return Run  number, starting at zero.
  */
 std::size_t fragment_index_storage::spill_sorted_run(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
@@ -49,9 +49,9 @@ std::size_t fragment_index_storage::spill_sorted_run(
 }
 
 /**
- * @brief Transfers a sorted pair vector into the handle's general run store.
- * @param[in] sorted Owned hash-position pairs in canonical sorted order.
- * @return Zero-based identifier of the added run.
+ * @brief Give a sorted run to the store, keeping it in memory when the budget permits.
+ * @param[in] sorted Owned pairs sorted by hash and encoded position.
+ * @return Run number, starting at zero.
  */
 std::size_t fragment_index_storage::spill_sorted_run_owned(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
@@ -59,11 +59,11 @@ std::size_t fragment_index_storage::spill_sorted_run_owned(
 }
 
 /**
- * @brief Transfers an admitted sorted pair vector into the general run store.
- * @param[in] sorted Owned hash-position pairs in canonical sorted order.
- * @param[in] admitted_bytes Bytes covered by the supplied memory permit.
- * @param[in] permit Admission token transferred with the vector capacity.
- * @return Zero-based identifier of the added run.
+ * @brief Transfer a sorted run together with its existing memory, reservation.
+ * @param[in] sorted Owned pairs sorted by hash and encoded position.
+ * @param[in] admitted_bytes Reserved bytes covering the vector capacity.
+ * @param[in] permit Memory reservation transferred with the vector.
+ * @return Run number, starting at zero.
  */
 std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
@@ -74,8 +74,8 @@ std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
 }
 
 /**
- * @brief Demotes resident general runs until the requested admission may fit.
- * @param[in] bytes_needed Additional working-set bytes requested by the caller.
+ * @brief Move runs to temporary files to make room for the next  allocation.
+ * @param[in] bytes_needed Additional bytes the caller wants to reserve.
  */
 void fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes_needed) {
     if (sorted_runs_.has_value()) {
@@ -84,12 +84,13 @@ void fragment_index_storage::demote_resident_runs_until_available(std::uint64_t 
 }
 
 /**
- * @brief Starts a fresh logical generation for per-segment spill runs.
+ * @brief Start a new set of sorted runs grouped by target position.
  *
- * Existing segment runs are closed before a new nonzero generation token is
- * published. Token exhaustion invalidates the returned binding.
+ * Close existing segment runs and assign a new token so replay data from an
+ * earlier build cannot be reused. Exhausting the token counter returns an
+ * invalid identity.
  *
- * @return Generation token and initial mutation revision for spill replay.
+ * @return New generation token with its mutation revisiow set to zero.
  */
 direct_minimizer_spill_storage_binding fragment_index_storage::begin_segment_spill_generation() {
     if (segment_spill_pg_poisoned_) {
@@ -134,7 +135,7 @@ direct_minimizer_spill_storage_binding fragment_index_storage::begin_segment_spi
     return segment_spill_binding_;
 }
 
-/// @brief Advances the spill mutation revision or invalidates it on overflow.
+/// @brief Record changed spill contents, invalidating the identity if the revision overflows.
 void fragment_index_storage::record_segment_spill_mutation_() noexcept {
     if (!segment_spill_binding_.valid()) {
         return;
@@ -147,10 +148,10 @@ void fragment_index_storage::record_segment_spill_mutation_() noexcept {
 }
 
 /**
- * @brief Adds one sorted run to a position-segment spill store.
- * @param[in] position_segment Zero-based target-position segment.
- * @param[in] sorted Hash-position pairs in canonical sorted order.
- * @return Zero-based identifier of the added run within the segment.
+ * @brief Add a sorted run to the store for one  target-position segment
+ * @param[in] position_segment Target segment number, starting at zero.
+ * @param[in] sorted Pairs sorted by minimizer hash and encoded position.
+ * @return Run number within this segment, starting at zero.
  */
 std::size_t fragment_index_storage::spill_sorted_segment_run(
     std::uint32_t position_segment,
@@ -180,16 +181,16 @@ std::size_t fragment_index_storage::spill_sorted_segment_run(
     }
     try {
         if (!active_segment_write_buffer_owner_.has_value()) {
-            // Validate a pre-existing destination honestly while allowing the
-            // first segment to acquire its writer lazily in spill_sorted_run.
+            // Check the destination writer state. The first spill allocates its buffer
+            // when needed.
             if (!iterator->second.try_transfer_completed_write_buffer_to(iterator->second)) {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer-sequence spill writer ownership is invalid");
             }
             active_segment_write_buffer_owner_ = position_segment;
         } else if (*active_segment_write_buffer_owner_ != position_segment) {
-            // The destination entry and its admitted metadata already exist.
-            // Re-find the source by ordinal because insertion may relocate it.
+            // Inserting the destination may move vector entries. Find the source again
+            // by segment number before transferring its write buffer.
             const auto source = std::lower_bound(
                 segment_sorted_runs_.begin(),
                 segment_sorted_runs_.end(),
@@ -205,10 +206,8 @@ std::size_t fragment_index_storage::spill_sorted_segment_run(
             }
             active_segment_write_buffer_owner_ = position_segment;
         }
-        // sorted_pair_run_store may compact/demote physical runs internally. Those
-        // transformations preserve the exact canonical pair stream. The mutation
-        // revision increment names the logical run injection, not its
-        // eventual memory-vs-BufFile representation.
+        // Adding this run changes the replay input, so advance  its revision. Moving
+        // existing runs between memory and temporary files preserves their contents.
         const std::size_t run = iterator->second.spill_sorted_run(sorted);
         inject_minimizer_generation_failure_as_cpp(
             minimizer_generation_failure_injection::minimizer_sequence_spill,
@@ -228,15 +227,16 @@ std::size_t fragment_index_storage::spill_sorted_segment_run(
 }
 
 /**
- * @brief Repartitions every segment run for a new target-position span.
+ * @brief Regroup stored minimizers after the target segment size changes.
  *
- * Replay is streaming and memory-admitted. The replacement is published only
- * after every source store has merged and closed successfully.
+ * Merge the old runs in batches, check, each position and send it to its new
+ * segment. Replace the old stores after the vull pass succeeds. Temporary
+ * batches and segment metadata are covered by memory reservations.
  *
- * @param[in] old_span Previous segment width in target bases.
- * @param[in] new_span Replacement segment width in target bases.
- * @param[in] target_length Total target length in bases.
- * @return `true` when all pairs were valid and the replacement was published.
+ * @param[in] old_span Previous segment width in bases.
+ * @param[in] new_span New segment width in bases.
+ * @param[in] target_length Target length in bases.
+ * @return True when regrouping succeeds, or false for invalid sizes, identity or positions.
  */
 bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                                                   std::uint64_t new_span,
@@ -248,18 +248,18 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         }
         return false;
     }
-    // Couples replacement segment metadata with the permit covering its capacity.
+    // Keep  the replacement segment list with the memory reservation for its capacity.
     struct admitted_segment_runs {
         bioseq::parallelism::memory_permit permit;
         std::vector<segment_run_entry_type> values;
     } rerouted;
     std::optional<std::uint32_t> rerouted_active_write_buffer_owner;
-    // Bounds transient replay ownership to one admitted pair batch.
+    // Reuse one reserved batch while copying pairs into their new segments.
     struct admitted_pair_batch {
         bioseq::parallelism::memory_permit permit;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> values;
     } routed_batch;
-    // Grows a vector only while its retained and peak capacity are admitted.
+    // Reserve space for both the old and replacement allocations before growing a vector
     const auto ensure_capacity = []<class p_value_type>(bioseq::parallelism::memory_permit& permit,
                                                         std::vector<p_value_type>& values,
                                                         std::size_t required) -> bool {
@@ -304,7 +304,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         permit.shrink_to(exact);
         return true;
     };
-    // Finds or creates the sorted-run store for one replacement segment.
+    // Find or create the run store for the new segment.
     const auto rerouted_store =
         [&rerouted,
          &rerouted_active_write_buffer_owner,
@@ -331,8 +331,8 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
             }
             rerouted_active_write_buffer_owner = segment;
         } else if (*rerouted_active_write_buffer_owner != segment) {
-            // The destination metadata is already admitted. Re-find the source
-            // by ordinal because destination insertion may have relocated it.
+            // Insertion may have moved the source entry. Find it again by segment number
+            // before transferring the write buffer.
             const auto source = std::lower_bound(
                 rerouted.values.begin(),
                 rerouted.values.end(),
@@ -352,8 +352,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
     };
     bool valid = true;
     try {
-        // Reroute consumes immutable source runs. Drop every completed source
-        // writer before the first reader or replacement allocation is admitted.
+        // Release completed write buffers before reserving memory  for readers and new runs.
         for (auto& [segment, runs] : segment_sorted_runs_) {
             (void)segment;
             runs.release_completed_write_buffer();
@@ -420,8 +419,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                                     routed_batch.values});
                         offset = end;
                     }
-                    // Streaming preserves hash/position order and
-                    // bounds transient ownership to one admitted batch.
+                    // Each batch keeps the original hash and position order.
                 });
             });
             if (!valid) {
@@ -431,9 +429,8 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                 return false;
             }
         }
-        // Every source store has been replayed successfully. Close its PostgreSQL
-        // handles at a checked boundary before publication of the replacement;
-        // the replacement stores remain open for qualification/encode replay.
+        // All old runs have been copied. Close their files before replacing the stores,
+        // and keep the new stores open for the remaining build steps.
         for (auto& [segment, runs] : segment_sorted_runs_) {
             (void)segment;
             runs.release_runs();
@@ -472,16 +469,16 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
     return true;
 }
 
-/// @brief Returns current resource and merge counters for the general run store.
+/// @brief Return statistics for the general run store, or zero counters if it is absent.
 sorted_run_store_stats fragment_index_storage::sorted_run_stats() const noexcept {
     return sorted_runs_.has_value() ? sorted_runs_->stats() : sorted_run_store_stats{};
 }
 
 /**
- * @brief Copies final general-run counters into backend-local build diagnostics.
+ * @brief Save general-run statistis for SQL diagnostics before releasing the store.
  *
- * The snapshot is taken before run resources are released so file and resident
- * byte counts describe the completed row build.
+ * Record the sequence identity along with memory, temporary-file and  merge
+ * counts while the completed build's resources are still available.
  */
 void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
     if (!sorted_runs_.has_value()) {
@@ -536,7 +533,7 @@ void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
         static_cast<unsigned long long>(st.position_spill_count));
 }
 
-/// @brief Releases every run without invoking a checked PostgreSQL boundary.
+/// @brief Drop, run handles without PostgreSQL calls and invalidate saved replay state.
 void fragment_index_storage::release_runs_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->release_runs_noexcept();
@@ -552,10 +549,10 @@ void fragment_index_storage::release_runs_noexcept() noexcept {
 }
 
 /**
- * @brief Closes every general and segment run through checked PostgreSQL calls.
+ * @brief Close the general and segment run stores.
  *
- * A PostgreSQL error poisons the spill binding and abandons remaining handles
- * so transaction abort can reclaim their PostgreSQL-owned resources.
+ * If PostgreSQL reports an error, mark the spill state unusable and leave its
+ * remaining PostgreSQL resources to transaction cleanup.
  */
 void fragment_index_storage::release_runs() {
     try {
@@ -588,10 +585,10 @@ void fragment_index_storage::release_runs() {
 }
 
 /**
- * @brief Abandons all PostgreSQL-owned handle state during error unwinding.
+ * @brief Leave PostgreSQL resources to transaction cleanup after an error.
  *
- * No PostgreSQL cleanup function is called. The failing transaction remains
- * responsible for memory contexts, relation references, and temporary files.
+ * Clear borrowed handles and release C++ buffers. PostgreSQL will reclaim its
+ * memory contexts and temporary files when the transaction aborts.
  */
 void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
@@ -607,10 +604,8 @@ void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
     segment_spill_binding_ = {};
     segment_spill_pg_poisoned_ = true;
 
-    // Memory contexts, relation references, and any palloc-backed scratch are
-    // owned by the failing transaction. Null them without invoking PostgreSQL
-    // cleanup while the exact leaf error unwinds; abort reclaims them through
-    // their original PG owners.
+    // PostgreSQL error cleanup owns these contexts and buffers now Clear our
+    // pointers so later  C++ destruction cannot try to use them.
     own_mctx_ = nullptr;
     index_relid_ = InvalidOid;
     decoded_ = nullptr;
@@ -641,19 +636,23 @@ void fragment_index_storage::close_checked() {
 }
 
 /**
- * @brief Writes one serialized index chunk through an isolated storage handle.
- * @param[in] user_relid Owning user relation OID.
- * @param[in] db_oid Database OID in the storage identity.
- * @param[in] tablespace_oid Tablespace OID in the storage identity.
- * @param[in] main_relfilenode Main relation relfilenode.
- * @param[in] column_attno One-based PostgreSQL column number.
- * @param[in] index_name Stable index policy name borrowed for this call.
- * @param[in] bucket_idx Storage bucket number.
- * @param[in] shard_idx Storage shard number.
- * @param[in] sequence_rowno Logical sequence row number.
- * @param[in] sub_key Logical stream within the sequence row.
- * @param[in] chunk_no Zero-based chunk number.
- * @param[in] bytes Serialized payload copied into PostgreSQL storage.
+ * @brief Write an encoded index chunk using a temporary storage handle.
+ *
+ * Close the handle after a successful write, and release C++ objects before
+ * rethrowing a PostgreSQL error so transaction cleanup can reclaim its resources.
+ *
+ * @param[in] user_relid User table OID.
+ * @param[in] db_oid Database OID.
+ * @param[in] tablespace_oid Tablespace OID.
+ * @param[in] main_relfilenode Main table file number.
+ * @param[in] column_attno Sequence column number, starting at one.
+ * @param[in] index_name Index name borrowed for tdis call.
+ * @param[in] bucket_idx Storage bucket.
+ * @param[in] shard_idx Storage shard.
+ * @param[in] sequence_rowno Sequence row number.
+ * @param[in] sub_key Chunk group within the sequence index.
+ * @param[in] chunk_no Chunk number, starting  at zero.
+ * @param[in] bytes Encoded payload copied into PostgreSQL storage.
  */
 inline void write_serialized_index_chunk_pg(Oid user_relid,
                                             Oid db_oid,

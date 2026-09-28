@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/checked_math.cppm
- * @brief Overflow-safe arithmetic and endian-stable integer primitives.
+ * @brief Checked arithmetic and little-endian integer encoding for the cache.
  */
 module;
 
@@ -53,12 +53,12 @@ checked_narrow(p_source_type value) noexcept {
     return static_cast<p_destination_type>(value);
 }
 
-/** Return the wire-format endianness of the current host. */
+/** Reports whether this host stores integers in little-endian order. */
 [[nodiscard]] constexpr bool host_is_little_endian() noexcept {
     return std::endian::native == std::endian::little;
 }
 
-/** Append one fixed-width integer in canonical little-endian order. */
+/** Appends an integer or enum valu in little-endian byte order. */
 template <class p_integer_type>
     requires(std::is_integral_v<p_integer_type> || std::is_enum_v<p_integer_type>)
 void append_little_endian(std::vector<std::byte>& destination, p_integer_type value) {
@@ -96,7 +96,7 @@ read_little_endian(std::span<const std::byte> source, std::size_t& cursor) noexc
     }
 }
 
-/** Return a checked subspan without pointer arithmetic before validation. */
+/** Returns a byte range after checking that it fits inside the source. */
 [[nodiscard]] inline std::expected<std::span<const std::byte>, math_error> checked_subspan(
     std::span<const std::byte> source, std::uint64_t offset, std::uint64_t length) noexcept {
     if (!checked_range(offset, length, source.size())) {

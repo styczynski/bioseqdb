@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/safety_runtime_probe.cppm
- * @brief Runtime instrumentation for PostgreSQL ERROR-boundary tests.
+ * @brief Record cleanup events and inject faults in PostgreSQL error tests.
  */
 module;
 
@@ -26,8 +26,11 @@ export namespace bioseq::postgres::support::safety_runtime_probe {
 
 namespace detail {
 
-/** Returns the validated runtime probe callback table when instrumentation is
- * active. */
+/**
+ * Find the test callbacks when runtime probes are enabled.
+ * Return nullptr if the table is absent or its revision, size  or required
+ * callbacks do not match.
+ */
 [[nodiscard]] inline const safety_runtime_probe_abi::probe_api* find_active_api() noexcept {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
     void** const slot = find_rendezvous_variable(safety_runtime_probe_abi::k_rendezvous_name);
@@ -46,7 +49,7 @@ namespace detail {
 #endif
 }
 
-/** Records one event through the active callback table. */
+/** Send an event to the test harness when probes are enabled and registered. */
 inline void record_event(safety_runtime_probe_abi::event_kind kind,
                          std::string_view name) noexcept {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
@@ -72,7 +75,7 @@ inline void record_cleanup_complete(std::string_view name) noexcept {
     detail::record_event(safety_runtime_probe_abi::event_kind::cleanup_complete, name);
 }
 
-/** Records arrival at one generated runtime-safety site. */
+/** Record that execution reached a generated safety-check site */
 inline void record_site_visit(std::string_view site_reference) noexcept {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
     const auto* api = detail::find_active_api();
@@ -95,10 +98,10 @@ inline void record_site_visit(std::string_view site_reference) noexcept {
 #endif
 }
 
-/** Test-only lifetime whose destructor records ordinary C++ unwinding. */
+/** Test object that records when its C++ destructor runs. */
 class destructor_sentinel final {
   public:
-    /** Binds the emitted destructor event to @p name. */
+    /** Borrow an event name that must stay alive until this object is destroyed. */
     explicit destructor_sentinel(std::string_view name) noexcept : name_{name} {}
 
     destructor_sentinel(const destructor_sentinel&) = delete;

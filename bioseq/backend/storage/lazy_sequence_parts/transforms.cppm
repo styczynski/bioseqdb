@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence_parts/transforms.cppm
- * @brief Bounded logical-rank transforms, comparison, and hashing.
+ * @brief Transforms, compares, and hashes lazy sequence ranks in bounded chunks.
  */
 export module bioseq.storage.lazy_sequence:transforms;
 
@@ -15,7 +15,14 @@ import bioseq.sequences.rank_pack;
 
 export namespace bioseq::storage {
 
-/** @brief Stream a logical subrange in the requested orientation without flattening it. */
+/**
+ * Streams [from, to) to output.append_ranks in the requested orientation.
+ *
+ * Reads bounded chunks and reverses their traversal  when needed. Complement
+ * transforms require a complementable alphabet Stops if the writer returns
+ * false or a failed rank_pack_status.
+ * @throws std::invalid_argument If coordinates are invalid or exceed size_t.
+ */
 template <sequence_transform p_transform, sequence_alphabet p_alphabet, class p_output_writer>
 void stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
                               std::uint64_t from,
@@ -82,7 +89,7 @@ void stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
     }
 }
 
-/** @brief Lexicographically compare two logical-rank sequences. */
+/** Compares sequences by rank, using length to order equal prefixes. Returns -1, 0, or 1. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] int compare_lazy_sequences(lazy_sequence_view<p_alphabet> left,
                                          lazy_sequence_view<p_alphabet> right) {
@@ -173,7 +180,9 @@ template <sequence_alphabet p_alphabet>
     return writer.finish(view.bp_size());
 }
 
-/// Copy ranks through the bounded rank-window reader into contiguous output.
+/// Copies [from, to) into destination through the rank-window reader.
+/// p_is_reversed uses reverse-complement coordinates. p_write_reversed
+/// reverses the selected output interval again.
 template <bool p_is_reversed, bool p_write_reversed = false, sequence_alphabet p_alphabet>
 [[gnu::always_inline]] inline void copy_sequence_ranks(lazy_sequence_view<p_alphabet> sequence,
                                                        std::span<std::uint8_t> destination,

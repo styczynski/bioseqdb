@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns SliceProject opcodes, codec fields, and cost estimates.
+ * @brief Defines SliceProject plan records and estimates sequence-work costs.
  */
 module;
 extern "C" {
@@ -48,15 +48,10 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /* ========================================================================
-     * Lazy sequence projection
-     *
-     * The executable expression remains PostgreSQL's targetlist expression.  The
-     * codec below is deliberately symbolic: it records the lazy sequence algebra
-     * for EXPLAIN and validation while core ExprState/ProjectionInfo preserves
-     * CASE, NULL, STRICT, volatility and error semantics.  Every serialized value
-     * is a PostgreSQL Node, so copy/equal/out/read and setrefs remain core-owned.
-     * ====================================================================== */
+    /* PostgreSQL evaluates the original target expressions, preserving CASE,
+     * NULL handling, volatility and errors. These records describe sequence
+     * operations for EXPLAIN and validation They use PostgreSQL nodes so
+     * normal plan copying, serialization and reference rewriting can handle them. */
 
     /** @brief Magic integer written to the first SliceProject plan header field (BSP1). */
     inline constexpr int k_bioseq_slice_project_magic = 0x42535031; /* BSP1 */
@@ -111,11 +106,11 @@ export {
         k_slice_node_flags = 10,
     };
 
-    /** @brief Bit flags attached to a SliceProject IR node. */
+    /** @brief Flags describing an expression in the SliceProject graph. */
     enum slice_project_node_flags : int {
-        /** @brief Node may change per evaluation and cannot be cached across calls. */
+        /** @brief The expression contains a  volatile function. */
         k_slice_node_volatile = 1 << 0,
-        /** @brief Expression shape is not represented in the lazy codec. */
+        /** @brief The expression is kept as a whole source in the graph. */
         k_slice_node_opaque = 1 << 1,
     };
 
@@ -213,9 +208,9 @@ export {
         return "unknown";
     }
 
-    /* PG17 represents an omitted slice bound as either NIL or a one-cell List
-     * whose cell contains nullptr.  Both forms are canonical omission; no nullptr
-     * may enter custom_exprs and deparse as an empty string. */
+    /* PG17 uses NIL or a single null cell for an omitted slice bound.
+     * Treat both as absent so custom_exprs never gets a null expression
+     * that EXPLAIN would print as an empty string. */
     [[nodiscard]] inline Node* slice_project_subscript_bound(List* expressions) {
         if (expressions == NIL)
             return nullptr;
@@ -247,7 +242,7 @@ export {
             }
             Node* lower = slice_project_subscript_bound(subscript->reflowerindexpr);
             Node* upper = slice_project_subscript_bound(subscript->refupperindexpr);
-            /** @brief Returns a compile-time INT8 bound when @p expression is a non-null constant. */
+            /** @brief Reads a non-NULL bigint constant used as a slice bound. */
             auto constant_bound = [](Node* expression) -> std::optional<std::int64_t> {
                 Const* constant = try_cast_pg_node<Const>(expression);
                 if (constant == nullptr || constant->constisnull || constant->consttype != INT8OID)
@@ -270,9 +265,8 @@ export {
                     return bioseq::storage::negative_magnitude(*lo) -
                            bioseq::storage::negative_magnitude(*hi);
                 }
-                /* A negative lower with a nonnegative upper depends on the
-                 * unknown source length; do not mislabel an upper bound as an
-                 * exact selected-range estimate. */
+                /* Crossing from a negative lower bound to a nonnegative upper bound
+                 * needs the source length. Keep the unknown-length estimate here. */
                 return 4096u;
             }
             return 4096u;
@@ -311,9 +305,9 @@ export {
         return 4096u;
     }
 
-    /* Cost only executable operands, in SQL argument order.  In particular the
-     * rendezvous FuncExpr itself (whose support function deliberately costs
-     * 100000) must never enter an owning path's cost tree. */
+    /* Cost mmsearch arguments in SQL order. Its scalar support cost  is a
+     * planner penalty, so, the owning custom scan estimates alignment work
+     * separately instead of inheriting that penalty. */
     [[nodiscard]] List* mmsearch_operand_cost_exprs(FuncExpr const* expression,
                                                     bioseq_stub_oids const& oids) {
         if (expression == nullptr || !is_mmsearch_funcid(expression->funcid, oids) ||
@@ -331,7 +325,7 @@ export {
         return operands;
     }
 
-    /** @brief Estimates symbol count for one mmsearch operand expression. */
+    /** @brief Estimates mmsearch operand length, using a sequence constant's stored length when available. */
     [[nodiscard]] std::uint64_t estimate_mmsearch_operand_symbols(Node* expression,
                                                                   bioseq_stub_oids const& oids) {
         if (expression == nullptr)
@@ -351,7 +345,13 @@ export {
         return 4096u;
     }
 
-    /** @brief Computes planner startup and per-tuple costs from length, batch, and byte estimates. */
+    /**
+     * @brief Estimates startup and per-row costs for a cjstom scan that runs mmsearch.
+     *
+     * Accounts for operand lengths, batch count and sequence data that must be
+     * materialized, with an index-read startup allowance when applicable.
+     * Returns finite, nonnegative costs for PostgreSQL to compare with other paths.
+     */
     [[nodiscard]] owned_mmsearch_cost
     estimate_owned_mmsearch_cost(std::uint64_t target_length_estimate,
                                  std::uint64_t query_length_estimate,
@@ -360,7 +360,7 @@ export {
                                  std::uint32_t planned_batch_size,
                                  std::uint64_t planned_materialized_bytes) noexcept {
         constexpr Cost maximum = std::numeric_limits<Cost>::max() / 32.0;
-        /** @brief Clamps a non-negative planner cost to a finite ceiling. */
+        /** @brief Keeps a cost within the nonnegative, finite range used by  the planner */
         auto finite_cost = [](long double value) noexcept -> Cost {
             constexpr long double limit =
                 static_cast<long double>(std::numeric_limits<Cost>::max() / 32.0);
@@ -401,7 +401,7 @@ export {
         return result;
     }
 
-    /** @brief Mutable accumulator for SliceProject IR nodes, records, and plan totals during planning. */
+    /** @brief Collects sequence expressions, producer dependencies and size estimates while planning. */
     struct slice_project_ir_builder {
         const bioseq_stub_oids* oids = nullptr;
         CmdType command_type = CMD_UNKNOWN;
@@ -424,7 +424,7 @@ export {
         bool found = false;
     };
 
-    /** @brief Serializes the SliceProject plan header from one completed IR builder. */
+    /** @brief Writes plan counts and size estimates from the completed SliceProject builder. */
     [[nodiscard]] List* slice_project_header(const slice_project_ir_builder& builder) {
         List* header = list_make5(makeInteger(k_bioseq_slice_project_magic),
                                   makeInteger(k_bioseq_slice_project_codec_version),

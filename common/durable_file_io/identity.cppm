@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/identity.cppm
- * @brief Internal regular-file identity capture and comparison.
+ * @brief Read file metadata and compare it to detect replacement or changes.
  */
 module;
 

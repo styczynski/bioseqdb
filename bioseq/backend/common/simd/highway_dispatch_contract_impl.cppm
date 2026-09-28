@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Highway target inventory implementation for the neutral contract.
+ * @brief Finds runnable Highway targets and converts target bits to names.
  */
 module;
 

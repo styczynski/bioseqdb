@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Validates finalized match-owner descriptors and carrier equivalence.
+ * @brief Checks that saved match bindings still identify the right scan and helper expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,7 +39,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Validates a finalized owner descriptor and returns its stable plan-node id. */
+    /** @brief Validates a saved match-owner descriptor and returns the matching plan-node ID. */
     [[nodiscard]] int validate_finalized_match_owner_descriptor_value(CustomScan* scan,
                                                                       List* descriptor) {
         if (scan == nullptr || descriptor == NIL) {
@@ -73,7 +73,7 @@ export {
         return stable_id;
     }
 
-    /** @brief Validates an owner descriptor stored at a CustomScan private-data index. */
+    /** @brief Reads and validates a  match-owner descriptor from CustomScan private data. */
     [[nodiscard]] int validate_finalized_match_owner_descriptor(CustomScan* scan,
                                                                 const int descriptor_index) {
         Node* descriptor_node =
@@ -91,8 +91,12 @@ export {
     }
 
     /**
-     * @brief Validates the base-owner executor image and installs its runtime bindings.
-     * @return The finalized target recipe, or null when the scan has no base owner.
+     * @brief Loads a base scan's match target and helper bindings after checking them
+     *
+     * Check the target relation and sequence-column types against the open relation.
+     * Each helper must name this match target or a permitted column from its source.
+     *
+     * @return The target expression, or null when the scan has no saved match owner.
      */
     [[nodiscard]] Node* initialize_base_match_owner_runtime(CustomScan* scan,
                                                             Relation relation,
@@ -228,7 +232,13 @@ export {
         return nullptr;
     }
 
-    /** @brief Follows setrefs slot coordinates to verify one canonical helper argument. */
+    /**
+     * @brief Follows executor slot references bacx to a helper's saved argument.
+     *
+     * PostgreSQL may replace, column references with output-slot references during
+     * setrefs. Follow  the corresponding child or scan target list, checking types
+     * along the way. Stop on an unsupported reference or excessive nesting.
+     */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees_impl(
         Plan* context, Node* translated, Node* canonical, const unsigned int depth) noexcept {
         if (depth > 16u)
@@ -251,8 +261,8 @@ export {
             return false;
         if (!bioseq_is_concrete_rte_varno(canonical_var->varno))
             return false;
-        /* A concrete Var can only differ by the statement rtable offset and must
-         * retain its physical attribute identity. */
+        /* Allow relation numbers to shift during setrefs, but require the same
+         * physical column and the type metadata checked above. */
         if (bioseq_is_concrete_rte_varno(translated_var->varno)) {
             return translated_var->varattno == canonical_var->varattno;
         }
@@ -297,22 +307,20 @@ export {
             exprCollation(source_expression) != translated_var->varcollid ||
             equal(source_expression, translated))
             return false;
-        /* Resolve the exact setrefs slot rather than accepting its type metadata as
-         * provenance.  A nested special Var is followed only through the concrete
-         * child/scan tlist which owns that slot; cycles and unsupported INDEX_VAR
-         * namespaces fail closed. */
+        /* Follow this slot to its source expression. The depth limit and the
+         * checks above stop cycles or references we cannot resolve. */
         return finalized_match_helper_argument_translation_agrees_impl(
             source_context, source_expression, canonical, depth + 1u);
     }
 
-    /** @brief Verifies that a translated helper argument resolves to its canonical source. */
+    /** @brief Checks that an executor helper argument still refers to its saved source  expression. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(
         CustomScan* scan, Node* translated, Node* canonical) noexcept {
         return finalized_match_helper_argument_translation_agrees_impl(
             scan == nullptr ? nullptr : &scan->scan.plan, translated, canonical, 0u);
     }
 
-    /** @brief Checks allowed PHV and bare-identity shapes for a finalized carrier site. */
+    /** @brief Checks whether a saved helper site permits these PlaceHolderVar wrappers. */
     [[nodiscard]] constexpr bool
     finalized_match_helper_carrier_shape_supported(const int site_phid,
                                                    const bool supplied_is_phv,
@@ -339,14 +347,12 @@ export {
     static_assert(!finalized_match_helper_carrier_shape_supported(7, false, 0, false, true, true));
 
     /**
-     * @brief Checks whether a scan entry and dummy carrier encode the same finalized helper.
+     * @brief Checks that a scan output and a child helper expression describe the same call.
      *
-     * custom_scan_tlist, custom_private, and a descendant dummy targetlist cross
-     * different setrefs coordinate domains.  A phid-zero site accepts only the
-     * exact bare identity.  A positive phid accepts either its live non-nulling
-     * owner PHV or the bare descriptor produced when setrefs strips that PHV;
-     * both require the leaf carrier's exact canonical argument and full function
-     * ABI. A carrier-side PHV is never a dummy leaf carrier.
+     * A site saved without a PlaceHolderVar requires equal bare expressions. For a
+     * saved PlaceHolderVar, accept its matching non-nulling wrapper or the expression
+     * left after setrefs removes it Check function metadata and trace the argument
+     * back to its saved source. The child expression must be bare.
      */
     [[nodiscard]] bool
     finalized_match_helper_carrier_equivalent(CustomScan* scan,
@@ -400,7 +406,13 @@ export {
                    scan, supplied_argument, canonical_argument);
     }
 
-    /** @brief Counts finalized sites in one BatchJoin that own a helper carrier identity. */
+    /**
+     * @brief Counts matching helper bindings in a batch or per-row jrin scan.
+     *
+     * Return 0 for  no match, 1 for a unique binding, and 2 for multiple matches or
+     * malformed site data. Callers use this result to reject ambiguous ownership.
+     * When requested, record details of the first comparison for diagnostics.
+     */
     [[nodiscard]] std::size_t finalized_batch_owner_matching_site_count(
         CustomScan* scan,
         Node* identity,
@@ -564,10 +576,9 @@ export {
                 audit->carrier_argument_canonical = equal(helper_argument, canonical_argument);
                 audit->equivalent = equivalent;
             }
-            /* custom_private retains planner coordinates while custom_scan_tlist and
-             * the carrier identity are post-setrefs.  Stable site ownership plus the
-             * exact supplied expression is the cross-domain identity; comparing their
-             * argument Vars directly would reject valid rtable-offset plans. */
+            /* Saved arguments use planner relation numbers. Match the finalized
+             * site and its supplied expression so setrefs relation offsets do not
+             * make a valid helper binding appear different. */
             if (supplied != nullptr && supplied->resno == resno && equivalent &&
                 static_cast<Oid>(intVal(list_nth(site, k_match_site_funcid))) == helper->funcid &&
                 intVal(list_nth(site, k_match_site_typmod)) == exprTypmod(identity) &&

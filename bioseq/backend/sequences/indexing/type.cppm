@@ -1,9 +1,9 @@
 /**
  * @file type.cppm
- * @brief Persisted index layouts, sub-key namespaces, and update policy.
+ * @brief Index storage layouts, reserved keys and update policies.
  *
- * This module has no PostgreSQL dependency. Allocation and varlena limits are
- * mirrored here and checked again by the PostgreSQL storage boundary.
+ * PostgreSQL storage also checks the allocation limits defined  here.
+ * This module can be used without PostgreSQL headers.
  */
 module;
 #include <array>
@@ -16,7 +16,7 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
 
-/** @brief Identifies the persisted storage layout of a sequence index. */
+/** @brief Chooses how an index is stored for a sequence or table. */
 enum class sequence_index_layout : std::uint8_t {
     /// @brief Stores multiple chunks under each sequence-local sub-key.
     fragment_chunks = 1,
@@ -26,11 +26,7 @@ enum class sequence_index_layout : std::uint8_t {
     table_chunks = 3,
 };
 
-/**
- * @brief Returns the persisted SQL spelling of an index layout.
- * @param layout Layout to name
- * @return Stable SQL spelling of the layout
- */
+/** @brief Returns the SQL name of a layout, or "unknown" for an invalid value. */
 [[nodiscard]] constexpr std::string_view sequence_index_layout_name(
         sequence_index_layout layout) noexcept {
     switch (layout) {
@@ -48,11 +44,7 @@ enum class index_update_policy : std::uint8_t {
     /// @brief Maintains the index during sequence insertion.
     update_on_insert = 1,
 };
-/**
- * @brief Returns the persisted SQL spelling of an update policy.
- * @param policy Policy to name
- * @return Stable SQL spelling of the policy
- */
+/** @brief Returns UPDATE_ON_INSERT or UPDATE_MANUALLY for the given policy. */
 [[nodiscard]] constexpr std::string_view index_update_policy_name(
         index_update_policy policy) noexcept {
     return policy == index_update_policy::update_on_insert
@@ -60,11 +52,10 @@ enum class index_update_policy : std::uint8_t {
 }
 
 /**
- * @brief Selects the implementation used to sort one minimizer-pair run.
+ * @brief Chooses how to sort minimizer hash-position pairs.
  *
- * The explicit ordinals cross the PostgreSQL background-worker metadata
- * boundary. Keep them stable and keep this policy in the PostgreSQL-free
- * indexing layer so core sort code never imports generated GUC storage.
+ * PostgreSQL background workers receive these numeric values in their task
+ * metadata. Keep the values stable
  */
 enum class pair_run_sort_implementation : std::int32_t {
     /// @brief Uses the standard-library comparison sorter.
@@ -89,11 +80,7 @@ static_assert(static_cast<std::int32_t>(
 static_assert(static_cast<std::int32_t>(
                   pair_run_sort_implementation::simd_u128_vec_stream_4) == 4);
 
-/**
- * @brief Checks whether an integer names a supported pair-run sorter.
- * @param ordinal Integer received across the configuration boundary
- * @return `true` when the ordinal maps to a sorter
- */
+/** @brief Checks whether a configuration value names a supported pair sorter. */
 [[nodiscard]] constexpr bool pair_run_sort_implementation_ordinal_valid(
         std::int32_t ordinal) noexcept {
     return ordinal >= static_cast<std::int32_t>(
@@ -103,13 +90,11 @@ static_assert(static_cast<std::int32_t>(
 }
 
 /**
- * @brief Selects the persisted-index requirement for one target read.
- *
- * This is target-independent and travels unchanged from the SQL options
- * decoder to the typed processor. It is not a GUC-derived execution hint.
+ * @brief Sets the caller's requirement for using a stored minimizer index.
+ * The SQL options decoder passes this requirement to the sequence procesor.
  */
 enum class index_read_requirement : std::uint8_t {
-    /// @brief Allows either a compatible persisted index or fallback routing.
+    /// @brief Allows a  compatible stored index or an index built for the query.
     allow = 0,
     /// @brief Requires the persisted index to be absent.
     require_absent = 1,
@@ -121,11 +106,7 @@ static_assert(static_cast<std::uint8_t>(index_read_requirement::require_absent) 
 static_assert(static_cast<std::uint8_t>(
                   index_read_requirement::require_compatible_persisted) == 2);
 
-/**
- * @brief Returns the option spelling of a persisted-index requirement.
- * @param requirement Requirement to name
- * @return Stable option spelling of the requirement
- */
+/** @brief Returns the option name of an index requirement, or "unknown". */
 [[nodiscard]] constexpr std::string_view index_read_requirement_name(
         index_read_requirement requirement) noexcept {
     switch (requirement) {
@@ -137,11 +118,7 @@ static_assert(static_cast<std::uint8_t>(
     return "unknown";
 }
 
-/**
- * @brief Checks whether an integer names a persisted-index requirement.
- * @param ordinal Integer received across the options boundary
- * @return `true` when the ordinal maps to a requirement
- */
+/** @brief Checks whether an options value names a supported index requirement. */
 [[nodiscard]] constexpr bool index_read_requirement_ordinal_valid(
         std::int32_t ordinal) noexcept {
     return ordinal >= static_cast<std::int32_t>(index_read_requirement::allow)
@@ -156,16 +133,12 @@ constexpr std::string_view k_minimizers_per_sequence_index_name = "minimizers_pe
 /// @brief Persisted name of the symbol-count index.
 constexpr std::string_view k_symbol_counts_index_name = "symbol_counts";
 
-/** @brief Lists minimizer indexes in persistence preference order. */
+/** @brief Lists supported minimizer indexes, with the per-fragment index first. */
 constexpr std::array<std::string_view, 2> k_minimizer_index_names = {
     k_minimizers_per_fragment_index_name,
     k_minimizers_per_sequence_index_name,
 };
-/**
- * @brief Checks whether a name identifies a registered minimizer index.
- * @param name Index name to inspect
- * @return `true` for a supported minimizer index name
- */
+/** @brief Checks whether name identifies one of the supported minimizer indexes. */
 [[nodiscard]] constexpr bool is_minimizer_index_name(
         std::string_view name) noexcept {
     for (std::string_view candidate : k_minimizer_index_names) {
@@ -184,11 +157,7 @@ constexpr std::array<std::string_view, 2> k_default_update_on_insert_indexes = {
     k_minimizers_per_fragment_index_name,
     k_symbol_counts_index_name,
 };
-/**
- * @brief Checks whether an index defaults to insert-time maintenance.
- * @param name Index name to inspect
- * @return `true` when fresh tables update the index on insert
- */
+/** @brief Checks whether fresh tables build this index during sequence insertion. */
 [[nodiscard]] constexpr bool is_default_update_on_insert_index(
         std::string_view name) noexcept {
     for (std::string_view candidate : k_default_update_on_insert_indexes) {
@@ -200,26 +169,26 @@ constexpr std::array<std::string_view, 2> k_default_update_on_insert_indexes = {
 }
 
 /**
- * @brief Identifies a persisted fragment-chunk row within one index.
+ * @brief Groups related index chunks under a signed 64-bit key.
  *
- * The signed representation matches the SQL BIGINT column and reserves the
- * highest values for metadata rows.
+ * The type matches SQL BIGINT. High values are  reserved for temporary runs
+ * and metadata, with chunk_no identifying rows within each sub-key.
  */
 using index_sub_key_t = std::int64_t;
-/// @brief Starts the reserved namespace for temporary external-sort runs.
+/// @brief First, reserved key for temporary sorted runs.
 constexpr index_sub_key_t k_temporary_run_sub_key_base = index_sub_key_t{1} << 62;
-/// @brief Starts the reserved namespace for position-extent rows.
+/// @brief First reserved key for stored position groups.
 constexpr index_sub_key_t k_position_extent_sub_key_base = index_sub_key_t{1} << 61;
 /// @brief Identifies the hash-major generation-head row.
 constexpr index_sub_key_t k_hash_major_generation_head_sub_key =
     std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{3};
-/// @brief Identifies the optional authenticated hash-major dense-heap seal.
+/// @brief Reserved key for the optional hash-major dense-heap verification record.
 constexpr index_sub_key_t k_hash_major_dense_seal_sub_key =
     std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{2};
 /// @brief Identifies the grouped-SoA generation-head row.
 constexpr index_sub_key_t k_generation_head_sub_key =
     std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{1};
-/// @brief Identifies the persisted directory or completeness manifest row.
+/// @brief Reserved key for the index directory or generation manifest.
 constexpr index_sub_key_t k_directory_sub_key = std::numeric_limits<index_sub_key_t>::max();
 static_assert(k_position_extent_sub_key_base > 0);
 static_assert(k_position_extent_sub_key_base + k_position_extent_sub_key_base ==
@@ -233,19 +202,18 @@ static_assert(k_generation_head_sub_key < k_directory_sub_key);
 static_assert(k_directory_sub_key > k_temporary_run_sub_key_base);
 
 /**
- * @brief Largest payload persisted in one index tuple.
+ * @brief Maximum payload size of one index row.
  *
- * The limit leaves space for the varlena header and heap-tuple overhead below
- * PostgreSQL's allocation and BYTEA limits.
+ * This leaves room for PostgreSQL headers below its allocation and BYTEA
+ * size limits.
  */
 constexpr std::size_t k_max_index_chunk_size_bytes =
     (std::size_t{1} << 30) - (std::size_t{64} << 20);
 static_assert(k_max_index_chunk_size_bytes % sizeof(std::int64_t) == 0,
               "index chunk must be int64-block sized");
-// The binding limit includes the varlena header. This PostgreSQL-free module
-// uses a local mirror because `VARHDRSZ` is unavailable here. The PostgreSQL
-// storage boundary separately asserts that both widths match.
-/// @brief Mirrors the PostgreSQL varlena header width for allocation checks.
+// Include the variable-length header  when checking PostgreSQL allocation limits.
+// PostgreSQL storage verifies that this local header size matches VARHDRSZ.
+/// @brief Size of a PostgreSQL variable-length vaue header
 constexpr std::size_t k_varlena_header_bytes = 4;
 /// @brief Mirrors PostgreSQL's maximum allocation size.
 constexpr std::size_t k_postgres_max_allocation_bytes = 0x3FFFFFFF;
@@ -253,11 +221,7 @@ static_assert(k_max_index_chunk_size_bytes + k_varlena_header_bytes <
                   k_postgres_max_allocation_bytes,
               "index chunk + bytea varlena header must stay under Postgres MaxAllocSize");
 
-/**
- * @brief Checks whether a layout admits insert-time maintenance.
- * @param layout Persisted index layout
- * @return `true` for per-sequence layouts
- */
+/** @brief Allows insertion-time builds for the two per-sequence layouts. */
 [[nodiscard]] constexpr bool index_layout_allows_update_on_insert(
         sequence_index_layout layout) noexcept {
     return layout != sequence_index_layout::table_chunks;

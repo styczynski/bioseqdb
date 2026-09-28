@@ -1832,10 +1832,10 @@ inline int invoke() {
         "canonical source and signature donor must be distinct",
         "vector dependency-only donor classification");
 
-    // This canonical module is syntactically valid but cannot pass Sema. A
-    // successful dependency-only cold/warm PREPARE therefore proves that the
-    // canonical body never entered a compiler frontend. The authenticated
-    // action trace then makes that evidence independent of fixture filenames.
+    // This module has valid syntax but fails Clang semantic analysis.
+    // Dependency preparation must succeed both with an empty cache and with
+    // cached modules, showing that it never compiles this source. The action
+    // trace checks the source identity as well.
     std::error_code guard_root_error;
     const std::filesystem::path canonical_temporary_root =
         std::filesystem::weakly_canonical(root, guard_root_error);
@@ -2223,8 +2223,8 @@ inline int invoke() {
         "dependency scan and PCM compilation disagree",
         "distinct compiler depfile identity immediate retry");
 
-    // Mirror the current repository-root layout so absolute fixture sources
-    // retain the same canonical identity contract as production sources.
+    // Put fixture sources under codegen so their absolute paths normalize
+    // the same way as repository sources.
     const std::filesystem::path source_root = root / "codegen";
     const std::filesystem::path conditional_root =
         source_root / "conditional_root.cppm";

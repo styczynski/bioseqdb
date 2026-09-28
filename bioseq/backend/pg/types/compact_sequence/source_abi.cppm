@@ -1,6 +1,6 @@
 /**
  * @file source_abi.cppm
- * @brief Opaque source-domain ABI and callback-scoped sequence read sessions.
+ * Callbacks for reading stored sequences and sessions that own their temporary read state.
  */
 module;
 
@@ -19,7 +19,7 @@ import :flat_abi;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 
-/// Backend-thread identity captured by a callback-scoped read session.
+/// Thread idenity used to keep a read session on the thread that opened it.
 export struct pg_sequence_backend_thread_token {
     std::thread::id owner;
 
@@ -40,13 +40,12 @@ export enum class pg_sequence_source_read_status : std::uint8_t {
     wrong_thread,
 };
 
-/* Source callbacks mention the session before its entry and owner records are
- * declared. The pointer/reference-only declaration keeps the callback table
- * ahead of the concrete session layout without duplicating that layout. */
-/// Callback-scoped owner of source read state.
+/* Source callbacks take a session reference. Declare the session here so
+ * the callback table can precede its full definition. */
+/// Own temporary source-read state during one PostgreSQL call.
 export struct pg_sequence_read_session;
 
-/// Stable identity for one generation of opaque source state.
+/// Source address and generation, distinguishing new state at a reused address
 export struct pg_sequence_source_identity {
     std::uintptr_t control_address{};
     std::uint64_t generation{};
@@ -54,7 +53,7 @@ export struct pg_sequence_source_identity {
                            pg_sequence_source_identity const&) = default;
 };
 
-/// No-throw lifetime plus logical-rank and optional native-packed reads.
+/// Callbacks for  source lifetime, thread access, and reading ranks or packed units.
 export struct pg_sequence_source_backend_ops {
     void (*retain)(void*) noexcept;
     void (*release)(void*) noexcept;
@@ -69,12 +68,9 @@ export struct pg_sequence_source_backend_ops {
         std::uint64_t,
         std::span<std::uint8_t>);
     /**
-     * Copy identity-oriented native storage units without decoding ranks.
-     *
-     * This optional capability is intentionally expressed in physical units:
-     * callers that need complementing, reversing, repacking, or a composed
-     * logical view must use another route rather than disguising biological
-     * work as source I/O.
+     * Copy packed storage units in their stored order without decoding letters.
+     * This callback is optional. Reversal, complementation, and packing-width
+     * changes require the rank-reading path or another conversion.
      */
     pg_sequence_source_read_status (*read_packed_units)(
         void const*,
@@ -85,7 +81,7 @@ export struct pg_sequence_source_backend_ops {
         std::span<std::uint8_t>);
 };
 
-/// Trivially copyable state-and-operations handle for a sequence source.
+/// Source state, and callbacks. Copying this handle does not add a source reference.
 export struct pg_sequence_source_handle {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};
@@ -123,14 +119,14 @@ export inline void release_pg_sequence_source(
     }
 }
 
-/// Exact source, locator, and physical type key for one session entry.
+/// Identify a session reader by source generation, locator, and stored sequence type.
 export struct pg_sequence_read_entry_key {
     pg_sequence_source_identity source;
     bioseq::storage::sequence_locator locator;
     compact_sequence_stdc_type_params stored_type_params;
 };
 
-/// Session-owned concrete read state and its terminal callbacks.
+/// Reader state cached in  a session, with callbacks for normal and failed cleanup.
 export struct pg_sequence_read_entry {
     pg_sequence_read_entry_key key;
     void* concrete_state{};
@@ -139,20 +135,18 @@ export struct pg_sequence_read_entry {
     pg_sequence_read_entry* next{};
 };
 
-/// Session-owned call-level resource released before read entries.
+/// Call-owned resource that must be released before the session closes its readers.
 export struct pg_sequence_session_owner_entry {
     void* owner{};
     void (*release_noexcept)(void*) noexcept{};
     pg_sequence_session_owner_entry* next{};
 };
 
-/// PG-reset-safe control shell and payload lists for one callback scope.
+/// Read-sessitn control state kept alive until normal or error cleanup finishes.
 export struct pg_sequence_read_session {
-    /* The control shell must survive a reset of the caller-owned payload
-     * parent long enough for the surrounding PG_CATCH to perform its
-     * idempotent abort.  It is therefore one small TopMemoryContext
-     * allocation; every potentially large/session-specific allocation stays
-     * below payload_context. */
+    /* Keep this small control object in TopMemoryContext so PG_CATCH can still
+     * release it after the caller's context resets. Larger read buffers and
+     * entry records live under payload_context and are freed with that context. */
     MemoryContext control_context{};
     MemoryContext payload_context{};
     MemoryContextCallback reset_callback{};
@@ -163,7 +157,7 @@ export struct pg_sequence_read_session {
     bool callback_armed{};
 };
 
-/// Factory for concrete state allocated beneath a session payload context.
+/// Factory that creates reader state in the session's payload context.
 export using create_pg_sequence_read_entry_fn = void* (*)(
     void* factory_argument, MemoryContext payload_context);
 
@@ -221,10 +215,9 @@ inline void pg_sequence_read_session_reset(void* argument) noexcept
     auto* session = static_cast<pg_sequence_read_session*>(argument);
     if (session != nullptr) {
         close_pg_sequence_read_session_noexcept(*session);
-        /* This callback runs while payload_context is being reset/deleted.
-         * The independently allocated control shell remains addressable by
-         * the enclosing PG_CATCH, but the payload pointer must never be used
-         * again after the callback returns. */
+        /* The payload context is being reset  or deleted. Keep the control object
+         * available for PG_CATCH, but clear the payload pointer before that
+         * context becomes unusable. */
         session->payload_context = nullptr;
     }
 }
@@ -288,7 +281,7 @@ inline void release_session_control(
 
 } // namespace
 
-/// Begin a read session whose payload is owned by the supplied parent context.
+/// Open a read session with temporary storage under the supplied parent context
 export [[nodiscard]] inline pg_sequence_read_session*
 begin_pg_sequence_read_session(MemoryContext parent)
 {
@@ -337,7 +330,7 @@ begin_pg_sequence_read_session(MemoryContext parent)
     return const_cast<pg_sequence_read_session*>(pending);
 }
 
-/// Register a call-level owner for no-throw release before session entries.
+/// Register a resource for no-throw release before the session closes its readers.
 export inline void register_pg_sequence_call_owner(
     pg_sequence_read_session& session,
     void* owner,
@@ -368,7 +361,8 @@ export inline void register_pg_sequence_call_owner(
     session.owners = entry;
 }
 
-/// Find cached concrete state or create and publish one error-atomically.
+/// Reuse the reader for this key, or create and register a new one.
+/// If registration fails after creation, abort the new reader before rethrowing.
 export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     pg_sequence_read_session& session,
     pg_sequence_read_entry_key const& key,
@@ -411,8 +405,8 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     PG_CATCH();
     {
         MemoryContextSwitchTo(saved_context);
-        /* The concrete creator owns cleanup until it returns.  Once returned,
-         * abort it here if publication/allocation failed. */
+        /* The factory cleans up until  it returns. After that, this function must
+         * abort the new reader if allocating or registering its entry fails. */
         if (concrete != nullptr) {
             abort_noexcept(const_cast<void*>(concrete));
         }
@@ -422,7 +416,7 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     return const_cast<void*>(concrete);
 }
 
-/// Finish every session entry and release the control shell.
+/// Release call-owned resources, finish each reader, and free the session.
 export inline void finish_pg_sequence_read_session(
     pg_sequence_read_session* session,
     bool is_commit)
@@ -430,9 +424,8 @@ export inline void finish_pg_sequence_read_session(
     if (session == nullptr) {
         return;
     }
-    /* A caller-parent reset may have already run the owner-first abort
-     * callback.  The TopMemory control shell deliberately survives that
-     * reset, so normal/catch cleanup still owns exactly one final release. */
+    /* A parent-context reset may already have released owners and readers.
+     * The control object survives mhat reset and still needs its final release. */
     if (!session->callback_armed) {
         release_session_control(session);
         return;
@@ -454,8 +447,8 @@ export inline void finish_pg_sequence_read_session(
         if (entry->concrete_state != nullptr && entry->finish != nullptr) {
             entry->finish(entry->concrete_state, is_commit);
         }
-        /* Detach only after a successful finish.  If finish ereports, the
-         * caller's PG_CATCH can still abort this entry and every remainder. */
+        /* Keep this, entry linked until finish succeeds. If it raises an error,
+         * PG_CATCH must still be able to abort it and the remaining readers. */
         session->entries = next;
     }
 
@@ -464,7 +457,7 @@ export inline void finish_pg_sequence_read_session(
     release_session_control(session);
 }
 
-/// Abort every live entry without allowing cleanup errors to escape.
+/// Abort live readers and free the session while suppressing cleanup errors.
 export inline void abort_pg_sequence_read_session_noexcept(
     pg_sequence_read_session* session) noexcept
 {
@@ -520,10 +513,9 @@ inline void read_session_reset_abort_entry(void* opaque) noexcept
 } // namespace
 
 /**
- * Exercise the exact tuplesort/error frontier: the caller-owned parent resets
- * while one read session is live.  The payload callback must close owner first
- * and entry second, while the independent control shell remains valid for the
- * enclosing catch/abort to release exactly once.
+ * Test a caller-context reset while a read  session is still open, as can happen
+ * during tuplesort error cleanup. Release the call owner before its reader,
+ * then let the surrounding cleanup free the surviving control object once
  */
 export [[nodiscard]] inline bool
 pg_sequence_read_session_parent_reset_self_test()

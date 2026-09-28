@@ -1,6 +1,6 @@
 /**
  * @file exact_k15_w10.cppm
- * @brief Exact K15/W10 packed-rank SIMD minimizer kernel.
+ * @brief SIMD minimizers for 15-base k-mers and 10-k-mer windows.
  */
 module;
 
@@ -35,9 +35,9 @@ struct exact_fast_minimum_vectors {
 };
 
 /**
- * Reduce four overlapping K15/W10 hash windows.  The sequential <= scan
- * deliberately preserves the exact rightmost-minimum rule used by the
- * scalar oracle. Metadata follows the same mask at every chronological slot.
+ * Finds the minima of four overlapping 10-k-mer windows. Scanning candidates
+ * from left to right with <= chooses the rightmost equal hash. The encoded
+ * record and sequence-order index follow the same selection mask.
  */
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 [[nodiscard]] HWY_INLINE exact_fast_minimum_vectors<p_uint32_simd_tag, p_uint64_simd_tag>
@@ -88,8 +88,10 @@ reduce_exact_k15_w10_minimum_metadata(
 }
 
 /**
- * Four chronological K15/W10 windows in parallel. Hash decisions stay in
- * u32 lanes. Raw minimizers and ordinals stay in u64 lanes throughout.
+ * Processes four consecutive minimizer windows, including tied hashes and
+ * expired minima. Hash comparisons use u32 lanes. Encoded records and
+ * sequence-order indices use u64 lanes. Selected records are emitted in
+ * sequence order, and state keeps the last window for the next group
  */
 template<
     class p_minimizer_type,
@@ -487,7 +489,7 @@ process_exact_k15_w10_u32_group(
     return two_stack_continuation_status::ok;
 }
 
-/** Pack eight byte-staged dna4 ranks into one chronological 16-bit word. */
+/** Packs eight DNA4 byte codes into 16 bits, with the first code in the low bits. */
 [[nodiscard, gnu::always_inline]] inline std::uint16_t
 pack_eight_dna4_codes_swar(
     const std::uint8_t* HWY_RESTRICT codes) noexcept
@@ -504,7 +506,10 @@ pack_eight_dna4_codes_swar(
     return static_cast<std::uint16_t>(word);
 }
 
-/** Pack the zero-padded 22-base K15/B8 source block into 44 bits. */
+/**
+ * Packs 22 DNA4 codes into the low 44 bits. The input must have 24 readable
+ * bytes because  the last eight-byte load includes two padding bytes.
+ */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t
 pack_k15_b8_dna4_codes_swar(
     const std::uint8_t* HWY_RESTRICT codes) noexcept
@@ -515,7 +520,7 @@ pack_k15_b8_dna4_codes_swar(
     return lower | (middle << 16u) | ((upper & 0x0fffull) << 32u);
 }
 
-/** Reverse the order of sixteen two-bit dna4 groups in every u32 lane. */
+/** Reverses the fifteen two-bit DNA4 codes in the low 30 bits of each u32 lane. */
 template<class p_simd_tag>
 [[nodiscard, gnu::always_inline]] HWY_INLINE hn::Vec<p_simd_tag>
 reverse_two_bit_groups(p_simd_tag d, hn::Vec<p_simd_tag> value) noexcept
@@ -544,12 +549,9 @@ struct exact_k15_b8_windows {
 };
 
 /**
- * Extract eight consecutive K15 words from one packed 22-base block.
- *
- * p_input_type assembly is scalar SWAR staging, but all eight biological p_kmer_size-mer
- * extractions are variable-shift SIMD work in four u64x2 pairs.  Demoting and
- * combining those pairs yields the two chronological u32x4 candidate groups
- * consumed by the existing canonical/hash/window/event pipeline.
+ * Extracts eight consecutive 15-base k-mers from a packed 22-base block.
+ * SIMD shifts select overlapping windows in pairs, then combine them into
+ * two u32 vectors in input order.
  */
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 [[nodiscard, gnu::always_inline]] HWY_INLINE exact_k15_b8_windows<p_uint32_simd_tag>
@@ -592,7 +594,12 @@ extract_exact_k15_b8_windows(
     };
 }
 
-/** Fixed, exact K15/W10 block: two u32x4 hash groups, u64 raw state. */
+/**
+ * Builds up to eight K15 candidates and updates their W10 minimizer windows.
+ * The, savej 14-base tail joins the new bases into one packed block. Two
+ * groups of four compute canonical hashes and encoded output records, then
+ * pass them to the window  and tie-handling code.
+ */
 template<class p_minimizer_type, class p_continuation_state, class p_collector_type>
 [[nodiscard]] inline two_stack_continuation_status
 process_exact_k15_w10_b8_candidate_block(

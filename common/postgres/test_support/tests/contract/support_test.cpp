@@ -1,4 +1,4 @@
-/** @file Compile-time contracts for the PostgreSQL support module surface. */
+/** @file Checks PostgreSQL wrapper sizes, layouts and ownership rules at compile time. */
 #include <cstdint>
 #include <type_traits>
 

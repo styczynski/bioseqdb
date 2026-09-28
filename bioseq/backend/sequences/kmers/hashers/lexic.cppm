@@ -1,9 +1,8 @@
 /**
  * @file lexic.cppm
- * @brief Target-neutral scalar lexicographic minimizer hasher.
- *
- * @details Rolls forward and reverse-complement packed codes in constant time and preserves the
- * exact canonical ordering and palindrome strand classification.
+ * @brief Updates packed k-mer codes for the forward and reverse-complement strands.
+ * Each new symbol updates the codes in constant time. The smaller code
+ * supplies the hash, with equal codes reported as a strand tie.
  */
 module;
 
@@ -19,10 +18,7 @@ import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-/**
- * @brief Defines the scalar rolling lexicographic hash policy for one sequence alphabet.
- * @tparam p_alphabet Sequence alphabet whose rank and complement rules define each k-mer.
- */
+/** @brief Builds scalar rollin k-mer codes using an alphabet's rank order. */
 template <sequence_alphabet p_alphabet> struct lexic_hasher {
     /**
      * @brief Maintains forward and reverse-complement packed k-mer states.
@@ -49,16 +45,16 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
               forward_state_(0), reverse_complement_state_(0) {}
 
         /**
-         * @brief Advances both rolling states by one symbol.
-         * @param[in] incoming Alphabet rank entering the right edge of the forward k-mer.
-         * @param[in] outgoing Alphabet rank leaving the left edge of the forward k-mer.
-         * @return The smaller packed code and its strand, preserving `equal` for palindromes.
+         * @brief Updates both strand codes and returns the smaller code with its strand.
+         * @param incoming Rank appended to the forward code.
+         * @param outgoing Rank whose complement is prepended to the reverse code.
+         * Equal codes return sequence_strand_mode::equal.
          */
         constexpr typename traits::hasher_return_type next(typename traits::input_type incoming,
                                                            typename traits::input_type outgoing) {
             forward_state_ = (forward_state_ << traits::bits_per_char | incoming) & mask_;
-            // Promote before shifting so wide dna5 k-mers do not shift a
-            // uint8_t-promoted int by 32 or more bits.
+            // Convert  to the full word type before shifting. A DNA5 k-mer can
+            // need a shift larger than the promoted int type permits.
             reverse_complement_state_ =
                 (reverse_complement_state_ >> traits::bits_per_char) |
                 (static_cast<p_input_type>(traits::letter_complement(outgoing)) << reverse_shift_);
@@ -74,11 +70,8 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
     };
 
     /**
-     * @brief Preserves the lexicographic canonical code without post-mixing.
-     * @tparam p_input_type Scalar word containing the packed canonical k-mer.
-     * @param[in] lex_kmer Canonical packed k-mer code.
-     * @param[in] kmer_mask Unused width mask accepted for hasher-policy uniformity.
-     * @return `lex_kmer` unchanged.
+     * @brief Returns the selected k-mer code unchanged.
+     * kmer_mask is accepted to match the integer hasher's interface
      */
     template <typename p_input_type>
     [[nodiscard]] static constexpr p_input_type

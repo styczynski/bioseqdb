@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares descendant ownership and copy-on-write path operations.
+ * @brief Declares checks and path copies for moving  match-helper results through a join.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_descendant_path_c
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
-/** @brief Summarizes exact helper ownership found in a path subtree. */
+/** @brief The matching helper owner, its match count, and any reason the path could not be checked. */
 export struct per_row_descendant_ownership {
     CustomPath* owner = nullptr;
     std::size_t matches = 0u;
@@ -19,15 +19,12 @@ export struct per_row_descendant_ownership {
 };
 
 /**
- * @brief Summarizes base-scan helper ownership below a reconstructed owner.
+ * @brief Records base scans that can supply a match helper below a rebuilt join.
  *
- * A reconstructed transformed owner is deliberately narrower than the
- * incumbent join relation: helpers owned by the new PerRow node must not leak
- * into a descendant BioseqScan or an older BatchJoin.  PostgreSQL Path nodes
- * are shared, so normalize only after slice_project_clone_mutable_path_spine()
- * has made every supported container private.  Availability is scoped to the
- * current subtree: a descendant-owned helper is retained at its owner and
- * above it, but is removed from every child below that owner.
+ * A helger must be evaluated at its owner and passed upwards. Remove it from
+ * children below that owner. PostgreSQL shares Path nodes, so make private
+ * copies with slice_project_clone_mutable_path_spine() before changing their
+ * outputs.
  */
 export struct per_row_base_helper_ownership {
     CustomPath* owner = nullptr;
@@ -36,35 +33,35 @@ export struct per_row_base_helper_ownership {
     bool unsupported_wrapper = false;
 };
 
-/** @brief Return a shallow restriction list without one pointer-owned clause. */
+/** @brief Copies the restriction list while leaving out the specified RestrictInfo pointer. */
 export [[nodiscard]] List* per_row_without_restriction(
     List* restrictions,
     RestrictInfo* owned);
 
-/** @brief Recursively check whether a descendant retains one restriction pointer. */
+/** @brief Checks whether this  path or a supported descendant still uses the, restriction pointer. */
 export [[nodiscard]] bool per_row_descendant_owns_restriction(
     const Path* path,
     const RestrictInfo* owned) noexcept;
 
-/** @brief Find the cheapest serial path whose descendants do not own a restriction. */
+/** @brief Finds the cheapest serial path that leaves this restriction for the parent to evaluate. */
 export [[nodiscard]] Path* per_row_path_without_owned_qual(
     RelOptInfo* rel,
     RestrictInfo* owned,
     bool require_bioseq_source) noexcept;
 
-/** @brief Project required raw Vars through a private child-path wrapper. */
+/** @brief Adds columns needed by the parent through a new projection above the child. */
 export [[nodiscard]] Path* per_row_project_required_child_vars(
     PlannerInfo* root,
     Path* child,
     List* required_vars);
 
-/** @brief Find exact helper owners through supported planner path wrappers. */
+/** @brief Finds descendant BatchJoin or PerRow nodes that own this helper's sequence expression. */
 export void per_row_analyze_descendant_exact_owner(
     Path* path,
     Node* helper_argument,
     per_row_descendant_ownership& ownership);
 
-/** @brief Clone the path spine down to one helper owner and widen that spine. */
+/** @brief Copies the path from a helper owner to its parent and adds the helper to each output. */
 export [[nodiscard]] Path* per_row_clone_path_to_helper_owner(
     PlannerInfo* root,
     Path* path,
@@ -73,7 +70,7 @@ export [[nodiscard]] Path* per_row_clone_path_to_helper_owner(
     bool& applied,
     bool& invalid);
 
-/** @brief Decode the match-helper function from a plain or PHV identity. */
+/** @brief Returns the match-helper call, unwrapping a valid PlaceHolderVar when present */
 export [[nodiscard]] FuncExpr* per_row_helper_identity_function(
     Node* identity,
     const bioseq_stub_oids& oids) noexcept;

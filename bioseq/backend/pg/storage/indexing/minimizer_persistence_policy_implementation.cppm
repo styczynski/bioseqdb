@@ -1,6 +1,6 @@
 /**
  * @file minimizer_persistence_policy_implementation.cppm
- * @brief Connects the narrow policy API to PostgreSQL catalog handles.
+ * @brief Read minimizer settings through the PostgreSQL index catalog code.
  */
 module;
 

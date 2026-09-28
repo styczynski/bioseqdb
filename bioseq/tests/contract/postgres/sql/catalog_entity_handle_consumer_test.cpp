@@ -65,7 +65,7 @@ static_assert(
        "revision=1\n");
 
 /**
- * Instantiate every runtime name/OID body from the imported producer BMI.
+ * Checks that  an importing source file can compile every runtime name and OID method.
  */
 [[maybe_unused]] void instantiate_runtime_handle_methods() {
     constexpr auto policy =

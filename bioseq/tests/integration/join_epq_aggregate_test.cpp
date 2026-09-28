@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises EvalPlanQual, aggregate, and fail-closed Bioseq joins.
+ * @brief Checks join rechecks after concurrent updates, aggregates, and rejected mmsearch forms.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -240,9 +240,7 @@ TEST_CASE("Many-to-many mmsearch join owns the predicate and projections",
 
 TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // The bioseq.symbol_count and bioseq.cigar projection placeholders share
-    // the same rewriter and must route through
-    // bioseq_symbol_count_support's simplify branch for LEFT JOIN.
+    // Symbol counts must remain available when the sequence comes through a LEFT JOIN.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -259,20 +257,16 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
         REQUIRE(row.size() == 3);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
-        // Every seeded sequence has a deterministic A-count from the stored
-        // inline symbol_counts index, populated by the columnar AM at INSERT
-        // time when bioseq.index.insert_maintenance.enabled is on (which
-        // seed_hoe_fixture sets).
+        // Insert maintenance populates the fixture's symbol-count index.
+        // Every sequence should  therefore, have an A count.
         REQUIRE(row[2].has_value());
         const auto count = std::stoll(row[2].value());
         REQUIRE(count >= 0);
     }
     REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-    // A row inserted without the stored inline index and read with
-    // bioseq.index.sequence_read.enabled disabled must surface a non-NULL tally
-    // through the unconditional recompute fallback. Its sequence contains
-    // eight A symbols.
+    // Insert without a symbol-count index, then disable stored index reads.
+    // Computing the count from the sequence must still return its eight A bases.
     {
         guc_scope no_insert(ctx, "bioseq.index.insert_maintenance.enabled", "off");
         exec_sqlf(ctx,
@@ -288,17 +282,16 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
             ctx,
             fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 6;", k_hoe_join));
         REQUIRE(guard_row.size() == 1);
-        REQUIRE(guard_row[0].has_value()); // recompute fallback is never NULL
+        REQUIRE(guard_row[0].has_value()); // this non-null sequence has a computed count
         REQUIRE(std::stoll(guard_row[0].value()) == 8);
-        // The recompute opens seq_sub plus a registered random-read snapshot.
-        // Both must be released before PQexec returns.
+        // Computing the count musl release the relation and snapshot without warnings.
         REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
     }
 }
 
 TEST_CASE("EXPLAIN ANALYZE survives CROSS JOIN of bioseq tables",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // EXPLAIN ANALYZE executes both scans and must retain valid row counts.
+    // EXPLAIN ANALYZE executes both scans and must report valid row counts.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -310,10 +303,7 @@ TEST_CASE("EXPLAIN ANALYZE survives CROSS JOIN of bioseq tables",
                                                k_hoe_join));
     REQUIRE_FALSE(plan.empty());
     REQUIRE(plan_contains(plan, "BioseqScan"));
-    // Both relations should produce a Custom Scan node — the planner
-    // self-join optimisation that could collapse them away does not
-    // apply when the table uses our access method. A single BioseqScan would
-    // mean the second scan was incorrectly rewritten to a heap path.
+    // This cross join needs a separate BioseqScan for each table reference
     int bioseq_scan_count = 0;
     for (const auto& line : plan) {
         if (line.find("Custom Scan (BioseqScan)") != std::string::npos) {
@@ -321,8 +311,7 @@ TEST_CASE("EXPLAIN ANALYZE survives CROSS JOIN of bioseq tables",
         }
     }
     REQUIRE(bioseq_scan_count == 2);
-    // Assert the outer-side actual count by inspecting the raw plan strings.
-    // Accept any ordering of "(actual ... rows=N..." after BioseqScan.
+    // Require a BioseqScan line reporting five rows.
     const std::string actual_marker = "rows=5";
     bool outer_returned_five = false;
     for (const auto& line : plan) {
@@ -338,10 +327,8 @@ TEST_CASE("EXPLAIN ANALYZE survives CROSS JOIN of bioseq tables",
 TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
           "where the aligner produced a real match",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // `WHERE mmsearch(t1.seq, t2.seq2)` executes inside the Nested Loop as a
-    // fuzzy substring predicate. Pushdown extraction creates a parameterised
-    // inner path, column-scan path construction claims its RestrictInfo, and
-    // cursor construction removes alignments with empty CIGAR output.
+    // Use a  sequence from the other table as the mmsearch query.
+    // Returned pairs must include a real alignment with a valid CIGAR string.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -353,20 +340,16 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
                                              k_hoe_join,
                                              k_hoe_join));
 
-    // The row count is below the full 5x5 cartesian product because not every
-    // pair aligns, and each emitted row has a non-empty valid CIGAR.
+    // Require at least one matching pair.
     REQUIRE_FALSE(rows.empty());
-    // Strict upper bound: at most full cartesian (25) — no row
-    // explosion from match multiplicity should exceed that under
-    // these probes, but we leave headroom for the multi-match-per-
-    // row case.
+    // Allow multiple alignments per row pair while bounding the total for this fixture.
     REQUIRE(rows.size() <= 100);
 
     for (const auto& row : rows) {
         REQUIRE(row.size() == 3);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
-        // Every surfaced row must have a non-empty, valid CIGAR.
+        // Every returned row must have a non-empty, valid CIGAR.
         REQUIRE(row[2].has_value());
         REQUIRE_FALSE(row[2].value().empty());
         REQUIRE(is_valid_cigar(row[2].value()));
@@ -392,9 +375,7 @@ TEST_CASE("Multiple Const mmsearch quals fail closed",
 TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
           "lexicographic max CIGAR",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // Exercises the has_aggs branch of bioseq_placeholder_support. The planner
-    // uses the standard Aggregate node when an input depends on a bioseq
-    // projection, so placeholder Consts are evaluated by the correct slot.
+    // MAX must receive the CIGAR strings produced by mmsearch.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -411,15 +392,9 @@ TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
 
 TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // COUNT(*) doesn't take a bioseq projection as an argument,
-    // so the SUPPORT-function PHV machinery doesn't fire for it
-    // — but the WHERE mmsearch(...) does filter rows through our
-    // batch processor. The hit count must reflect the number of
-    // matching rows the aligner returned, NOT the raw 5 rows in
-    // the fixture.
-    //
-    // This count has no bioseq projection. Integer aggregate projections use
-    // a separate planner path.
+    // COUNT(*) must count the rows returned by mmsearch. Check that the plan
+    // uses Aggregate above BioseqScan and gives the  same count with vectorization
+    // enabled or disabled.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -441,7 +416,7 @@ TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
     REQUIRE(count_row[0].has_value());
     const long long hits = std::stoll(count_row[0].value());
     REQUIRE(hits > 0);
-    // Five seeded rows; not all need to align under the probe.
+    // Bound the result count while allowing multiple alignments per input row.
     REQUIRE(hits <= 100);
 }
 
@@ -486,9 +461,7 @@ TEST_CASE("Param-driven primary plus Const mmsearch fails closed",
 
 TEST_CASE("Cross-table mmsearch via INNER JOIN with bioseq.cigar projection",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // INNER JOIN syntax has the same semantics as the CROSS JOIN predicate:
-    // every emitted row has a valid non-empty CIGAR and the planner uses the
-    // parameterised inner-side path.
+    // INNER JOIN with mmsearch must return valid CIGAR strings, as the cross-join form does.
     auto ctx = fresh_context({k_hoe_join_left, k_hoe_join_right});
     seed_hoe_fixture(ctx, k_hoe_join_left);
     seed_hoe_fixture(ctx, k_hoe_join_right);

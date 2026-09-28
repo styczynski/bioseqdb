@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipeline_stats_parts/provider_telemetry.cppm
- * @brief Hash-major and grouped-SoA provider telemetry contracts.
+ * @brief Storage reader, mapped-file and provider statistics.
  */
 export module bioseq.pipeline.stats:provider_telemetry;
 
@@ -9,9 +9,8 @@ import :identities;
 
 export namespace bioseq::pipeline_stats {
 
-/// Hash-major cold-reader identities and counters for operational aggregation.
-/// Identity fields are merged only when identical. Counters use the same
-/// saturating arithmetic as the rest of the operational snapshot.
+/// Statistics, from reading a hash-major index. Repeated reader and memory
+/// ownership records must agree Work counters are added with overflow checks.
 struct hash_major_index_reader_stats {
     std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;
@@ -54,10 +53,8 @@ struct hash_major_index_reader_stats {
     [[nodiscard]] constexpr bool
     operator==(const hash_major_index_reader_stats&) const noexcept = default;
 
-    /// @brief Merge one cold-reader delta while preserving singular reader and owner identities.
-    /// @param[in] rhs Cold-reader statistics to merge.
-    /// @param[in,out] has_identity_conflict Retained fail-closed identity-conflict flag.
-    /// @return `true` when at least one SQL-bound counter saturated.
+    /// Add reader work and keep the largest memory peaks. Conflicting source
+    /// or ownership records set has_identity_conflict. Return true on counter overflow.
     [[nodiscard]] bool merge(const hash_major_index_reader_stats& rhs,
                              bool& has_identity_conflict) noexcept {
         bool overflow = is_saturated || rhs.is_saturated;
@@ -146,22 +143,22 @@ struct hash_major_index_reader_stats {
     }
 };
 
-/// Stable result code shared by grouped-SoA mapped-sink preallocation and
-/// mapping-advice receipts. These values are report ABI, not raw errno values.
+/// Report codes for mapped-file preallocation and mapping advice.
+/// These  fixed values describe success or failure separately from OS error codes.
 enum class grouped_soa_operation_result : std::uint64_t {
     not_attempted = 0u,
     succeeded = 1u,
     failed = 2u,
 };
 
-/// Stable identity of the selected lazy extent-validation state layout.
+/// Memory layout used to track validation of mapped extents.
 enum class grouped_soa_state_layout : std::uint64_t {
     unselected = 0u,
     compact_aligned_planes = 1u,
     cache_line_padded_entries = 2u,
 };
 
-/// Stable identity of the selected read-only mapping advice policy.
+/// Access adfice selected for a read-only mapping.
 enum class grouped_soa_mapping_advice : std::uint64_t {
     none = 0u,
     random = 1u,
@@ -177,11 +174,9 @@ static_assert(static_cast<std::uint64_t>(grouped_soa_state_layout::cache_line_pa
 static_assert(static_cast<std::uint64_t>(grouped_soa_mapping_advice::none) == 0u);
 static_assert(static_cast<std::uint64_t>(grouped_soa_mapping_advice::random) == 1u);
 
-/// Provider, mapped-image and lifecycle statistics appended by the exact
-/// Grouped-SoA provider stats. Counter producers build operation-local
-/// deltas through record_counter(). Aggregation remains checked and clamps at
-/// SQL bigint max. Stable codes use explicit presence bits because provider
-/// Code zero identifies the validated relation-backed storage provider.
+/// Grouped-SoA storage activity, including provider selection, mapped-file
+/// writes and lazy checksum checks. Counters clamp at the SQL bigint limit.
+/// Presence flags distinguish an absent provider from provider code zero.
 struct grouped_soa_provider_stats {
     std::uint64_t provider_configured = 0u;
     std::uint64_t provider_captured = 0u;
@@ -239,8 +234,8 @@ struct grouped_soa_provider_stats {
     std::uint64_t madvise_choice = 0u;
     std::uint64_t madvise_result = 0u;
 
-    // Presence/conflict state is intentionally not serialized. It makes
-    // report-once code zero distinguishable from an unrecorded field.
+    // Presence flags distinguish an unrecorded value from a recorded zero.
+    // These flags and conflict state are kept out  of serialized reports.
     bool provider_configured_available = false;
     bool provider_captured_available = false;
     bool provider_persisted_available = false;
@@ -255,15 +250,12 @@ struct grouped_soa_provider_stats {
     [[nodiscard]] constexpr bool
     operator==(const grouped_soa_provider_stats&) const noexcept = default;
 
-    /// @brief Add one SQL-bound count/byte receipt and retain a local saturation bit.
-    /// @param[in,out] destination Counter to update.
-    /// @param[in] increment Value to add before SQL-bound clamping.
+    /// Add to a counter and keep track of any SQL bigint overflow.
     void record_counter(std::uint64_t& destination, std::uint64_t increment) noexcept {
         is_saturated = merge_counter(destination, increment) || is_saturated;
     }
 
-    /// @brief Record file-action occupancy as a high-water mark rather than a count.
-    /// @param[in] value Observed occupancy.
+    /// Record the largest file-action occupancy seen, capped at SQL bigint max.
     void record_file_action_high_water(std::uint64_t value) noexcept {
         if (value > k_sql_bigint_value_max) {
             value = k_sql_bigint_value_max;
@@ -272,8 +264,7 @@ struct grouped_soa_provider_stats {
         file_action_high_water = std::max(file_action_high_water, value);
     }
 
-    /// @brief Record the provider selected when the operation was configured.
-    /// @param[in] provider Stable provider identity.
+    /// Record the provider selected when configuring the operation.
     void record_provider_configured(std::uint64_t provider) noexcept {
         record_stable_value(provider_configured,
                             provider_configured_available,
@@ -281,29 +272,25 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// @brief Record the provider captured by the operation-local execution state.
-    /// @param[in] provider Stable provider identity.
+    /// Record the provider captured by this operation's execution state.
     void record_provider_captured(std::uint64_t provider) noexcept {
         record_stable_value(
             provider_captured, provider_captured_available, provider, has_stable_value_conflict);
     }
 
-    /// @brief Record the provider encoded in the persisted grouped-SoA image.
-    /// @param[in] provider Stable provider identity.
+    /// Record the provider stored in the grouped-SoA image.
     void record_provider_persisted(std::uint64_t provider) noexcept {
         record_stable_value(
             provider_persisted, provider_persisted_available, provider, has_stable_value_conflict);
     }
 
-    /// @brief Record the provider observed while opening the grouped-SoA image.
-    /// @param[in] provider Stable provider identity.
+    /// Record the provider found when opening the grouped-SoA image.
     void record_provider_opened(std::uint64_t provider) noexcept {
         record_stable_value(
             provider_opened, provider_opened_available, provider, has_stable_value_conflict);
     }
 
-    /// @brief Record the stable mapped-sink preallocation result.
-    /// @param[in] result Stable result code to retain exactly once.
+    /// Record whether mapped-file preallocation was attempted and succeeded.
     void record_mapped_sink_preallocation_result(grouped_soa_operation_result result) noexcept {
         record_stable_value(mapped_sink_preallocation_result,
                             mapped_sink_preallocation_result_available,
@@ -311,8 +298,7 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// @brief Record the stable lazy extent-validation state layout.
-    /// @param[in] layout Stable layout identity to retain exactly once.
+    /// Record the layout  used for lazy extent-validation state
     void record_lazy_state_layout(grouped_soa_state_layout layout) noexcept {
         record_stable_value(lazy_state_layout,
                             lazy_state_layout_available,
@@ -320,9 +306,7 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// @brief Record the stable mapping-advice choice and its result as one receipt.
-    /// @param[in] choice Stable mapping-advice identity.
-    /// @param[in] result Stable result code paired with `choice`.
+    /// Record the mapping-advice choice and whether the request succeeded.
     void record_madvise(grouped_soa_mapping_advice choice,
                         grouped_soa_operation_result result) noexcept {
         record_stable_value(madvise_choice,
@@ -335,8 +319,7 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// @brief Return whether all provider lifecycle observations name one provider.
-    /// @return `true` for four present, conflict-free, equal provider identities.
+    /// Require all four providjr observations to be present, equal and conflict-free.
     [[nodiscard]] constexpr bool provider_identity_complete_and_consistent() const noexcept {
         return provider_configured_available && provider_captured_available &&
                provider_persisted_available && provider_opened_available &&
@@ -344,10 +327,9 @@ struct grouped_soa_provider_stats {
                provider_configured == provider_persisted && provider_configured == provider_opened;
     }
 
-    /// @brief Merge one operation-local provider/lifecycle delta.
-    /// @param[in] rhs Provider and lifecycle statistics to merge.
-    /// @param[in,out] has_identity_conflict Retained fail-closed identity-conflict flag.
-    /// @return `true` when at least one SQL-bound counter saturated.
+    /// Combine provider statistics, checking that, repeated codes agree.
+    /// Counts are added and file-action occupancy keeps its maximum.
+    /// Return true on counter overflow and report identity conflicts separately.
     [[nodiscard]] bool merge(const grouped_soa_provider_stats& rhs,
                              bool& has_identity_conflict) noexcept {
         bool overflow = is_saturated || rhs.is_saturated;
@@ -449,11 +431,7 @@ struct grouped_soa_provider_stats {
     }
 
   private:
-    /// @brief Record a report-once value or expose a conflicting repeated observation.
-    /// @param[in,out] destination Retained stable value.
-    /// @param[in,out] destination_available Presence bit for `destination`.
-    /// @param[in] incoming Incoming stable value.
-    /// @param[in,out] conflict Retained fail-closed conflict flag.
+    /// Store the first value and mark a conflict if a  later value differs.
     static void record_stable_value(std::uint64_t& destination,
                                     bool& destination_available,
                                     std::uint64_t incoming,
@@ -467,12 +445,8 @@ struct grouped_soa_provider_stats {
             conflict = true;
     }
 
-    /// @brief Merge one optional report-once value while rejecting payload without presence.
-    /// @param[in,out] destination Retained stable value.
-    /// @param[in,out] destination_available Presence bit for `destination`.
-    /// @param[in] incoming Incoming stable value.
-    /// @param[in] incoming_available Presence bit for `incoming`.
-    /// @param[in,out] conflict Retained fail-closed conflict flag.
+    /// Merge an optional value and detect disagreement. Nonzero data with its
+    /// presence flag unset also marks a conflict.
     static void merge_stable_value(std::uint64_t& destination,
                                    bool& destination_available,
                                    std::uint64_t incoming,

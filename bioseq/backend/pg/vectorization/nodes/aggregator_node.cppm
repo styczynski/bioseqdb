@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exposes the stable vector aggregate custom-scan callbacks.
+ * @brief Register, the PostgreSQL custom scan for vector aggregation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -20,7 +20,7 @@ import :initialization;
 using bioseq::postgres::support::allocate_zeroed_object;
 
 extern "C" {
-/** Initializes the copied AggState and connects it to the custom scan. */
+/** Initialize the aggregate executor and connect its input and result slots to the custom scan. */
 static void begin_vector_aggregate(CustomScanState* custom_scan_state,
                                    EState* executor_state,
                                    int executor_flags) {
@@ -29,7 +29,7 @@ static void begin_vector_aggregate(CustomScanState* custom_scan_state,
     CustomScan* custom_scan = reinterpret_cast<CustomScan*>(custom_scan_state->ss.ps.plan);
     Agg* aggregate_node = reinterpret_cast<Agg*>(linitial(custom_scan->custom_plans));
 
-    /* Clean out the tuple table */
+    /* Clear the custom scan's result and scan slots before initialization. */
     ExecClearTuple(custom_scan_state->ss.ps.ps_ResultTupleSlot);
     ExecClearTuple(custom_scan_state->ss.ss_ScanTupleSlot);
 
@@ -37,7 +37,7 @@ static void begin_vector_aggregate(CustomScanState* custom_scan_state,
         initialize_vector_aggregate_executor(aggregate_node, executor_state, executor_flags);
     outerPlanState(vector_state) = outerPlanState(vector_state->aggregate_state);
 
-    /* Initialize result type and projection. */
+    /* Set the result type and reuse the aggregate executor's output slot */
     ExecInitResultTypeTL(&vector_state->custom_scan_state.ss.ps);
 
     vector_state->custom_scan_state.ss.ps.ps_ResultTupleSlot =
@@ -49,12 +49,12 @@ static TupleTableSlot* execute_vector_aggregate(CustomScanState* custom_scan_sta
     return execute_aggregate_plan(reinterpret_cast<PlanState*>(custom_scan_state));
 }
 
-/** Releases the copied aggregate executor. */
+/** Release the aggregate executor and  its resources. */
 static void end_vector_aggregate(CustomScanState* custom_scan_state) {
     ExecEndAgg(reinterpret_cast<vector_aggregate_state*>(custom_scan_state)->aggregate_state);
 }
 
-/** Returns the stable executor callback table for vector aggregation. */
+/** Return the callbacks used to run the vector aggregate custom scan. */
 static const CustomExecMethods* vector_aggregate_exec_methods() noexcept {
     static const CustomExecMethods methods{
         .CustomName = "VectorAggNode",
@@ -82,7 +82,7 @@ static Node* create_vector_aggregate_state(CustomScan* custom_plan) {
     return reinterpret_cast<Node*>(custom_scan_state);
 }
 
-/** Returns the stable planner callback table for vector aggregation. */
+/** Return the callback that creates executor state for a vector aggregate plan. */
 static const CustomScanMethods* vector_aggregate_scan_methods() noexcept {
     static const CustomScanMethods methods{
         .CustomName = "VectorAggNode",
@@ -93,7 +93,7 @@ static const CustomScanMethods* vector_aggregate_scan_methods() noexcept {
 
 } /* close outer extern "C" */
 
-/** Creates an unregistered vector aggregate custom-scan plan node. */
+/** Create an empty vector aggregate plan node with its custm-scan methods. */
 export CustomScan* create_vector_aggregate_scan(void) {
     CustomScan* custom_scan = makeNode(CustomScan);
     custom_scan->methods = vector_aggregate_scan_methods();

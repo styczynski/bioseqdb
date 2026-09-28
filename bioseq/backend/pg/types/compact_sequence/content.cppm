@@ -1,6 +1,10 @@
 /**
  * @file content.cppm
- * @brief Logical comparison and hashing for every valid compact-sequence state.
+ * Compare and hash sequence contents for SQL operators and indexes.
+ *
+ * Alphabet binding and alphabet code come before  the letters in the ordering.
+ * Values with the same alphabet compare by letter rank, regardless of storage
+ * width or piece-tree shape. Unbound values compare their text bytes.
  */
 module;
 
@@ -176,7 +180,7 @@ inline void read_unbound_chunk(
         state ^= alphabet;
         state *= prime;
     }
-    /* hash_logical_ranks begins at offset^seed. */
+    /* Cancel the next hash function's initial XOR so it starts with this prefix. */
     return offset ^ state;
 }
 

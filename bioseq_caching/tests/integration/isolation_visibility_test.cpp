@@ -584,10 +584,9 @@ TEST_CASE("overlapping relation transitions advance epochs independently",
         "SET bioseq_cache.query_cache.mode = 'exact_query'");
     CHECK(bioseq::cache_test::scalar(
               admin,
-              // Keep the cacheable expression identical to the current contract.
-              // Libpq already exposes the text[] value as wire text; an
-              // explicit ::text adds stable array_out() and fails the exact
-              // cache's immutable-expression admission gate.
+              // Keep the result as text[]. Libpq already supplies its text form.
+              // PostgreSQL marks array_out() as STABLE, so adding ::text makes this
+              // expression fail the cache check that requires IMMUTABLE functions.
               "SELECT array_agg(value ORDER BY id) "
               "FROM cache_overlapping_transition_rows")
           == "{one,two}");

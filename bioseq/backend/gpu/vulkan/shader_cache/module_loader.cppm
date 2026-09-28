@@ -1,6 +1,6 @@
 /**
  * @file module_loader.cppm
- * @brief Owns MoltenVK shader-module encoding and Vulkan module loading.
+ * @brief Creates Vulkan shader modules from cached Metal libraries.
  */
 module;
 
@@ -34,42 +34,43 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Loaded Vulkan shader module and its dispatch geometry.
+/// @brief Loaded shader module, entry-point name, and workgroup dimensions.
 struct shader_module_load {
-    VkShaderModule module = VK_NULL_HANDLE; ///< Created module owned by the caller device.
+    VkShaderModule module = VK_NULL_HANDLE; ///< Created module. The caller must destroy it through the owning device
     std::string entry_name; ///< Entry point recorded in cache metadata.
-    std::uint32_t wg_x = 1; ///< Local workgroup size X in threads.
-    std::uint32_t wg_y = 1; ///< Local workgroup size Y in threads.
-    std::uint32_t wg_z = 1; ///< Local workgroup size Z in threads.
+    std::uint32_t wg_x = 1; ///< Threads along the workgroup X dimension.
+    std::uint32_t wg_y = 1; ///< Threads along the workgroup Y dimension.
+    std::uint32_t wg_z = 1; ///< Threads along the workgroup Z dimension.
 };
 static_assert(std::is_nothrow_move_constructible_v<shader_module_load>);
 
-/// @brief MoltenVK shader-module bytes retained under memory admission.
+/// @brief Metal library bytes wrapped for Vulkan, with their memory  reservation.
 struct moltenvk_shader_module_code {
-    // Declared first so words release before the transient permit.
-    bioseq::parallelism::memory_permit permit; ///< Peak reservation held while words live.
-    std::vector<std::uint32_t> words; ///< Header plus metallib payload in MoltenVK module layout.
+    // Free the words before releasing nheir memory reservation.
+    bioseq::parallelism::memory_permit permit; ///< Reservation covering the module words.
+    std::vector<std::uint32_t> words; ///< MoltenVK header followed by the Metal library bytes.
     std::size_t code_size_bytes = 0; ///< Byte length passed to VkShaderModuleCreateInfo::codeSize.
-    std::size_t header_size_bytes = sizeof(MVKMSLSPIRVHeader); ///< Leading MVKMSLSPIRVHeader size.
-    std::uint64_t admission_count = 0u; ///< Number of admission reservations taken.
-    std::uint64_t peak_admitted_bytes = 0u; ///< Largest admitted byte budget for this object.
-    std::uint64_t retained_capacity_bytes = 0u; ///< Vector capacity currently charged to the permit.
-    bool admission_saturated = false; ///< Set when allocation would exceed the admitted peak.
+    std::size_t header_size_bytes = sizeof(MVKMSLSPIRVHeader); ///< Number of bytes in the MoltenVK header.
+    std::uint64_t admission_count = 0u; ///< Number of memory reservations made.
+    std::uint64_t peak_admitted_bytes = 0u; ///< Largest byte reservation held during construction.
+    std::uint64_t retained_capacity_bytes = 0u; ///< Allocated vector capacity in bytes.
+    bool admission_saturated = false; ///< The allocated capacity exceeded its reservation.
 };
 
-/// @brief Returns the MoltenVK compiled-MSL shader module header size.
+/// @brief Returns the header size used for a compiled Metal library module.
 [[nodiscard]] inline constexpr std::size_t moltenvk_msl_spirv_header_size() noexcept {
     return sizeof(MVKMSLSPIRVHeader);
 }
 
-/// @brief Returns the MoltenVK compiled-MSL shader module magic value.
+/// @brief Returns the marker that tells MoltenVK these bytes contain a compiled Metal library.
 [[nodiscard]] inline constexpr std::uint32_t moltenvk_msl_compiled_code_magic() noexcept {
     return static_cast<std::uint32_t>(kMVKMagicNumberMSLCompiledCode);
 }
 
-/// @brief Wraps admitted metallib bytes in the MoltenVK compiled-MSL module format.
-/// @param[in] metallib_bytes Validated Metal library bytes.
-/// @return Admitted module words or an admission or size diagnostic.
+/// @brief Adds the MoltenVK header  to validated Metal library bytes.
+/// Reserves memory before allocating aligned module words. The result owns
+/// both those words and their reservation. Returns an error for empty input,
+/// size overflow, or a denied reservation.
 [[nodiscard]] inline std::expected<moltenvk_shader_module_code, std::string>
 make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes) {
     if (metallib_bytes.empty()) {
@@ -123,9 +124,8 @@ make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes) {
     return std::move(code);
 }
 
-/// @brief Reads a Metal library and wraps it in the MoltenVK module format.
-/// @param[in] metallib_path Metal library path.
-/// @return Admitted module words or an I/O, admission, or size diagnostic.
+/// @brief Reads a Metal library file and wraps its bytes for Vulkan module creation.
+/// The returned module storage has its own memory reservation.
 [[nodiscard]] inline std::expected<moltenvk_shader_module_code, std::string>
 make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path) {
     auto bytes = sealed_shader_cache_detail::read_regular_file(metallib_path, "metallib");
@@ -134,12 +134,9 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path) {
     return make_moltenvk_metallib_module_code(*bytes);
 }
 
-/// @brief Creates a Vulkan shader module from an on-disk complete cache entry.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @return Loaded shader module and geometry or a cache or Vulkan diagnostic.
+/// @brief Loads a cached Metal library and creates a Vulkan shader module.
+/// Rechecks metadata against `key` before creation. Returns the module and its
+/// entry point/workgroup size, or an  error. The caller owns the returned module.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_cached_module(VkDevice device,
                    const std::filesystem::path& cache_dir,
@@ -153,11 +150,9 @@ load_cached_module(VkDevice device,
         return std::unexpected(code.error());
     }
 
-    // Re-read and validate metadata after the metallib bytes are resident and
-    // immediately before module creation.  The earlier completeness probe is
-    // only an optimization; it cannot be the trust boundary because a compile
-    // service may report success without publishing a contract-valid record, and
-    // cache files may be replaced between the probe and this loader.
+    // Check metadata agin after reading the library A compiler service can
+    // report success without writing valid metadata, and cache files can change
+    // after the earlier completeness, check.
     std::string entry;
     auto meta = read_validated_cache_meta(cache_dir, key, &entry);
     if (!meta) {
@@ -183,11 +178,9 @@ load_cached_module(VkDevice device,
     return std::expected<shader_module_load, std::string>{std::in_place, std::move(result)};
 }
 
-/// @brief Creates a Vulkan shader module from one owned sealed key image.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] image Sealed cache key image with metallib bytes and metadata.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @return Loaded shader module and geometry or an image or Vulkan diagnostic.
+/// @brief Creates a Vulkan shader module from a validated, owned seed entry.
+/// Uses its in-memory library bytes and metadata. The caller owns the returned
+/// module and must supply the device's `vkCreateShaderModule` function.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_image(VkDevice device,
                                            const sealed_shader_cache_key_image& image,
@@ -222,11 +215,9 @@ create_shader_module_from_sealed_key_image(VkDevice device,
     return std::expected<shader_module_load, std::string>{std::in_place, std::move(result)};
 }
 
-/// @brief Creates a Vulkan shader module from one borrowed sealed key view.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] view Borrowed sealed cache key view with metallib bytes and metadata.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @return Loaded shader module and geometry or a view or Vulkan diagnostic.
+/// @brief Creates a Vulkan shader module from a borrowed seed entry.
+/// Keep the seed  alive until creation returns. The caller owns the new module
+/// and supplies the device's `vkCreateShaderModule` function.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_view(VkDevice device,
                                           const sealed_shader_cache_key_view& view,
@@ -260,12 +251,9 @@ create_shader_module_from_sealed_key_view(VkDevice device,
     return std::expected<shader_module_load, std::string>{std::in_place, std::move(result)};
 }
 
-/// @brief Loads one shader module from a retained process seed.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] seed Retained sealed shader-cache seed image.
-/// @param[in] key Shader variant identity to resolve inside the seed.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @return Loaded shader module and geometry or a membership or Vulkan diagnostic.
+/// @brief Finds a shader in the loaded seed and creates its Vulkan module.
+/// Uses the bytes already checked by the seed loader. Returns an error if
+/// the key is missing or module creation fails.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(VkDevice device,
                           const sealed_shader_cache_seed_image& seed,
@@ -281,14 +269,9 @@ load_sealed_cached_module(VkDevice device,
     return create_shader_module_from_sealed_key_view(device, *view, create_shader_module);
 }
 
-/// @brief Loads one shader module from a validated on-disk sealed seed.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] cache_digest Cache identity digest for the sealed seed.
-/// @param[in] exact_aot_keys Exact AOT variant keys recorded in the seed.
-/// @param[in] key Shader variant identity to load.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @return Loaded shader module and geometry or a seed or Vulkan diagnostic.
+/// @brief Validates the on-disk seed and creates the requested shader module.
+/// The manifest must match `cache_digest` and `exact_aot_keys`. Module creation
+/// uses the library bytes saved during validation.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(VkDevice device,
                           const std::filesystem::path& cache_dir,
@@ -304,14 +287,9 @@ load_sealed_cached_module(VkDevice device,
     return create_shader_module_from_sealed_key_image(device, *image, create_shader_module);
 }
 
-/// @brief Loads one module after asking a compile service to fill an absent entry.
-/// @tparam p_service Runtime compile service type satisfying `is_runtime_compile_service`.
-/// @param[in] device Vulkan device that will own the module.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @param[in] create_shader_module Device dispatch entry for module creation.
-/// @param[in] service Compile service invoked when the cache entry is incomplete.
-/// @return Loaded shader module and geometry or a compile, cache, or Vulkan diagnostic.
+/// @brief Loads a shader, asking the compile  service to repair an incomplete cache entry.
+/// Checks the published files after compilation, then creates the module.
+/// Returns an error if compilation, fache validation, or module creation fails.
 template <is_runtime_compile_service p_service>
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_module(VkDevice device,

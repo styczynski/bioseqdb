@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns SliceProject EXPLAIN, shutdown, and stable executor methods.
+ * @brief Prints SliceProject EXPLAIN details and defines its  executor callback table.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -34,8 +34,7 @@ import :custom_scan_slice_path_runtime_contract;
 using namespace bioseq::postgres::support;
 
 export {
-    /** Deparses the custom scan expression at @p expression_index into EXPLAIN text. Returns a
-     *  pstrdup'd string or `<omitted>` when the index is out of range. */
+    /** @brief Formats a saved expression for EXPLAIN, or returns "<omitted>" for an invalid index. */
     [[nodiscard]] char*
     slice_project_deparse_expression(CustomScan* scan, int expression_index, ExplainState* es) {
         if (expression_index < 0 || expression_index >= list_length(scan->custom_exprs)) {
@@ -45,8 +44,7 @@ export {
         return deparse_expression(expression, es->deparse_cxt, true, false);
     }
 
-    /** Maps @p opcode to the human-readable label used in EXPLAIN output. Returns `"invalid"` for
-     *  unknown values. */
+    /** @brief Returns the EXPLAIN label for a sequence operation, or "invalid" for an unknown opcode. */
     [[nodiscard]] const char* slice_project_opcode_name(slice_project_opcode opcode) noexcept {
         switch (opcode) {
         case slice_project_opcode::source_expr:
@@ -75,8 +73,7 @@ export {
         return "invalid";
     }
 
-    /** Builds a Postgres list of `value_{id}` names from the dependency field of a serialized
-     *  recipe @p node. Returns NIL when the node has no dependencies. */
+    /** @brief Names an operation's dependencies as value_{id}, returning NIL when there are none. */
     [[nodiscard]] List* slice_project_node_dependency_names(List* node) {
         List* names = NIL;
         Node* dependency_node = reinterpret_cast<Node*>(list_nth(node, k_slice_node_dependencies));
@@ -89,8 +86,7 @@ export {
         return names;
     }
 
-    /** Builds a Postgres list of `var_{id}` names from the dependency field of a serialized
-     *  materialization @p record. Returns NIL when the record has no dependencies. */
+    /** @brief Names a materialization record's dependencies as var_{id}, returning NIL when there are none. */
     [[nodiscard]] List* slice_project_dependency_names(List* record) {
         List* names = NIL;
         Node* dependency_node =
@@ -106,8 +102,7 @@ export {
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
-    /** Maps a DSM test fixture mode code to its EXPLAIN label. Returns `"none"` for unrecognized
-     *  modes. */
+    /** @brief Returns a shared-memory test's label, or "none" for an unknown mode. */
     [[nodiscard]] const char* slice_project_dsm_test_fixture_name(int mode) noexcept {
         switch (mode) {
         case k_slice_dsm_test_incomplete:
@@ -119,8 +114,7 @@ export {
         }
     }
 
-    /** Appends DSM test fixture diagnostics to @p es when @p state applied a fixture during
-     *  ANALYZE. No-op when @p state or @p es is null or no fixture ran. */
+    /** @brief Adds diagnostics for a shared-memory test that ran during EXPLAIN ANALYZE. */
     void slice_project_explain_dsm_test_fixture(slice_project_state const* state,
                                                 ExplainState* es) {
         if (state == nullptr || es == nullptr || !state->runtime.dsm_test_fixture_applied)
@@ -163,8 +157,7 @@ export {
     }
 #endif
 
-    /** Returns the ANALYZE-time DSM counter for materialization boundary @p index. Returns a static
-     *  zero counter when @p state is null, tracing is off, or @p index is out of range. */
+    /** @brief Returns a materialization, counter, or a shared zero valuc when no counter is available. */
     [[nodiscard]] slice_dsm_counter const&
     slice_project_explain_counter(slice_project_state const* state, std::uint32_t index) noexcept {
         static const slice_dsm_counter zero{};
@@ -174,8 +167,13 @@ export {
         return state->runtime.counters[index];
     }
 
-    /** Renders the slice recipe and materialization plan as indented text EXPLAIN output in @p es.
-     *  Uses @p scan for expression deparsing and @p state for ANALYZE counters when enabled. */
+    /**
+     * @brief Prints sequence operations and materialization details in text EXPLAIN.
+     *
+     * Shows dependencies and slice bounds from the plan. COSTS adds size estimates,
+     * and ANALYZE adds recorded calls, bytes and reuse. Timing appears only when
+     * requested and collected
+     */
     void slice_project_explain_text(slice_project_state* state,
                                     CustomScan* scan,
                                     List* header,
@@ -333,8 +331,12 @@ export {
         }
     }
 
-    /** Renders the slice recipe and materialization plan as structured EXPLAIN groups in @p es.
-     *  Uses @p scan for expression deparsing and @p state for ANALYZE counters when enabled. */
+    /**
+     * @brief Prints sequence operations and materialization details in  structured EXPLAIN.
+     *
+     * Uses saved expressions and dependency IDs for the plan, with size estimates
+     * when COSTS is enabled and recorded counters during ANALYZE.
+     */
     void slice_project_explain_structured(slice_project_state* state,
                                           CustomScan* scan,
                                           List* nodes,
@@ -438,8 +440,7 @@ export {
         ExplainCloseGroup("Slice Materialization", "Slice Materialization", false, es);
     }
 
-    /** CustomScan EXPLAIN callback for SliceProject. Initializes trace state for ANALYZE, then
-     *  emits text or structured output from the serialized plan in @p custom. */
+    /** @brief Prints the saved SliceProject plan and, for ANALYZE, its runtime counters. */
     void slice_project_explain(CustomScanState* custom, List*, ExplainState* es) {
         if (es->analyze)
             slice_project_ensure_trace_initialized(custom);
@@ -476,8 +477,7 @@ export {
         slice_project_explain_structured(state, scan, nodes, records, es);
     }
 
-    /** CustomScan shutdown hook that quiesces the slice async owner when parallel runtime
-     *  initialization completed. */
+    /** @brief Stops the SliceProject asynchronous owner when it has been initialized. */
     void slice_project_shutdown(CustomScanState* custom) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
         if (state->runtime.owner_initialized) {
@@ -486,7 +486,7 @@ export {
         }
     }
 
-    /** Returns the static CustomExecMethods vtable wired for BioseqSliceProject scans. */
+    /** @brief Returns the shared PostgreSQL callback table for BioseqSliceProject execution. */
     [[nodiscard]] CustomExecMethods const& bioseq_slice_project_exec_methods() noexcept {
         static_assert(std::is_same_v<decltype(&slice_project_estimate_dsm),
                                      Size (*)(CustomScanState*, ParallelContext*)>);

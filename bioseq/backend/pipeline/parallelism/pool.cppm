@@ -1,8 +1,9 @@
 /**
  * @file pool.cppm
- * @brief TBB-backed global workload pool facade.
+ * @brief Runs pipeline work in a, process-local oneTBB arena.
  *
- * This is intentionally the only module that includes oneTBB headers.
+ * Tasks share the configured concurrency limit. Tracked tasks also report
+ * completion and cleanup to the PostgreSQL scheduler.
  */
 module;
 
@@ -40,12 +41,12 @@ namespace otbb = oneapi::tbb;
 
 namespace bioseq::parallelism::detail {
 
-/// Private oneTBB arena ownership kept out of the exported class layout.
+/// Holds the oneTBB arena behind the pool's private implementation.
 struct pool_implementation {
     std::optional<otbb::task_arena> arena;
 };
 
-/// Private task-group ownership tied to the pool arena lifetime.
+/// Keeps the arena alive while its task group has work to finish
 struct task_group_implementation {
     std::shared_ptr<pool_implementation> pool;
     otbb::task_group group;
@@ -55,19 +56,19 @@ struct task_group_implementation {
 
 export namespace bioseq::parallelism {
 
-/// Non-owning acquisition boundary for caller-admitted per-worker contexts.
+/// Borrows a  caller-owned factory for worker contexts with reserved memory.
 struct worker_context_factory {
-    /// Caller-owned, address-stable slot owner, retained until the joined call returns.
+    /// Context owner, kept at the same address until all work has joined.
     void* state = nullptr;
-    /// Bounded number of independently admitted worker slots.
+    /// Maximum number of worker contexts the caller has reserved memory for.
     std::size_t maximum_concurrency = 0u;
-    /// Claims and constructs one slot per participating worker. May throw on denial.
+    /// Claim a worker context. May throw if its memory reservation fails.
     context::context& (*acquire)(void*) = nullptr;
 };
 
-/// Non-owning callback used while draining scheduler-controlled resources.
+/// Borrows a cleanup callback and its state from a tracked job.
 struct tracked_noexcept_callback {
-    /// Opaque caller-owned callback state.
+    /// Caller-owned state passed to the callback.
     void* argument{};
     /// Callback that must not propagate an exception.
     void (*invoke)(void*) noexcept {};
@@ -77,67 +78,67 @@ struct tracked_noexcept_callback {
 struct tracked_job_resources {
     /// Request cancellation of queued work.
     tracked_noexcept_callback cancel{};
-    /// Join the submitted work.
+    /// Wait until the submitted work has stopped.
     tracked_noexcept_callback join{};
-    /// Release caller-owned backing state after drain.
+    /// Release  task data after the work has joined.
     tracked_noexcept_callback backings{};
 };
 
-/// Generation-checked slot handle for a tracked scheduler job.
+/// Identifies a scheduler slot and the job currently using it.
 struct tracked_job_handle {
     /// Scheduler slot selected during enrollment.
     std::uint32_t slot_index{};
-    /// Generation protecting the slot from stale completions.
+    /// Distinguishes this job from earlier jobs that used the same slot.
     std::uint64_t generation{};
 };
 
-/// Fixed-layout terminal outcome copied across the scheduler boundary.
+/// Reports cleanup and errors without allocating an error object.
 struct tracked_job_outcome {
-    /// Scheduler resources reached their drained state.
+    /// The scheduler finished cleaning up tis job.
     bool is_drained{};
-    /// A terminal transition was missing.
+    /// The job was cancelled, failed, or missed a completion step.
     bool is_incomplete{};
     /// Worker or scheduler execution reported a failure.
     bool has_failure{};
     /// Reserved layout byte.
     std::uint8_t reserved{};
-    /// SQLSTATE supplied by the scheduler boundary, or zero.
+    /// PostgreSQL error code, or zero when none was supplied.
     std::uint32_t sqlstate{};
     /// Used bytes in the fixed message buffer.
     std::uint16_t message_length{};
-    /// Fixed-capacity error text copied across the scheduler boundary.
+    /// Error message copied from the worker or scheduler.
     std::array<char, 238> message{};
 };
 
 static_assert(std::is_trivially_copyable_v<tracked_job_outcome>);
 static_assert(std::is_standard_layout_v<tracked_job_outcome>);
 
-/// Caller-owned inline storage for one worker's scheduler scope.
+/// Scratch space for saving and restoring a worker's scheduler state.
 struct tracked_worker_scope_storage {
-    /// Aligned bytes interpreted only by the scheduler observer.
+    /// Storage owned by the caller and interpreted by the observer callbacks.
     alignas(std::max_align_t) std::array<std::byte, 64> bytes{};
 };
 
-/// Callback table connecting pool tasks to scheduler job accounting.
+/// Lets pool tasks report  progress and cleanup to the scheduler.
 struct tracked_job_observer {
-    /// Opaque scheduler-owned observer state.
+    /// Scheduler state passed to every observer callback.
     void* context{};
-    /// Enroll one tracked job and return its generation-checked handle.
+    /// Register a job and return the slot and generation assigned to it
     bool (*enroll)(void*, tracked_job_resources, tracked_job_handle*) noexcept {};
-    /// Publish the scheduled transition.
+    /// Record that the job was scheduled.
     bool (*mark_scheduled)(void*, tracked_job_handle) noexcept {};
-    /// Publish the worker-finished transition.
+    /// Record, that the worker finished.
     bool (*mark_finished)(void*, tracked_job_handle) noexcept {};
-    /// Drain scheduler resources and copy the terminal outcome.
+    /// Clean up the job and copy its completion status and any error.
     bool (*drain)(void*, tracked_job_handle, tracked_job_outcome*) noexcept {};
-    /// Transfer worker failure information to the scheduler boundary.
+    /// Copy a worker error to the scheduler. This callback is optional.
     void (*handoff_error)(void*, tracked_job_handle, std::uint32_t, char const*, bool) noexcept {};
     /// Install worker-local scheduler state before invoking user work.
     void (*worker_enter)(void*, tracked_job_handle, tracked_worker_scope_storage*) noexcept {};
-    /// Remove worker-local scheduler state after invoking user work.
+    /// Restore the worker's previous scheduler state after the task.
     void (*worker_leave)(void*, tracked_job_handle, tracked_worker_scope_storage*) noexcept {};
 
-    /// Return whether every mandatory observer callback is present.
+    /// Check that scheduler state and all required callbacks are present.
     [[nodiscard]] explicit operator bool() const noexcept {
         return context != nullptr && enroll != nullptr && mark_scheduled != nullptr &&
                mark_finished != nullptr && drain != nullptr && worker_enter != nullptr &&
@@ -167,22 +168,28 @@ restore_tracked_job_observer(tracked_job_observer previous) noexcept {
   detail::active_tracked_job_observer = previous;
 }
 
-/// Non-owning executable task reference used by tracked submissions.
+/// Borrows a task callback and the data it will use.
 struct tracked_task_ref {
-    /// Opaque caller-owned task state.
+    /// Caller-owned data passed to  the task.
     void* argument{};
-    /// Invoke the caller-owned task state.
+    /// Run the task using its borrowed data.
     void (*invoke)(void*){};
 
-    /// Return whether this task reference has an invocation target.
+    /// Check whether a task callback is present.
     [[nodiscard]] explicit operator bool() const noexcept {
         return invoke != nullptr;
     }
 };
 
-/** Caller-owned and address-stable until join/drain. Worker-visible fields are
- * immutable after enqueue. Only the two byte handoffs are accessed atomically.
- * This record intentionally owns no heap allocation or std::function. */
+/**
+ * State shared by the submitting thread and one worker. The caller must keep
+ * this record and its borrowed task data alive at the same addresses util
+ * joining and cleanup finish.
+ *
+ * Cancellation and completion use atomic byte flags. The task and observer
+ * stay unchanged after enqueue, and the remaining status is read after join.
+ * This record owns no heap memory.
+ */
 struct tracked_task_submission {
   tracked_job_observer observer{};
   tracked_job_handle handle{};
@@ -202,19 +209,19 @@ static_assert(std::is_standard_layout_v<tracked_task_submission>);
 
 /// Result of attempting to enqueue a tracked task.
 enum class tracked_submit_status : std::uint8_t {
-    /// Task enrollment and enqueue completed.
+    /// The scheduler accepted  the job and the arena queued it.
     submitted = 0u,
-    /// Submission, task, or observer was incomplete.
+    /// The submission pointer, task callback, or observer was missing.
     invalid,
     /// The scheduler refused enrollment.
     enrollment_rejected,
-    /// The TBB arena refused or failed to enqueue the task.
+    /// Preparing the arena or enqueueing the task failed.
     scheduler_rejected,
-    /// The scheduler rejected the scheduled transition.
+    /// The scheduler rejected the queued job's scheduled state.
     transition_rejected,
 };
 
-/// Move-only oneTBB task group that joins before releasing its arena owner.
+/// Owns a group of tasks and waits for them before releasing the arena
 class scoped_task_group {
 public:
   /// Create an empty group that executes tasks synchronously.
@@ -226,45 +233,45 @@ public:
   /// Join submitted tasks before releasing the arena owner.
   ~scoped_task_group() { wait(); }
 
-  /// Submit one move-only task to the group or run it synchronously.
+  /// Queue a task, or run it here if this group has no arena.
   void run(task_body body);
   /// Join all submitted tasks and release the group implementation.
   void wait();
 
 private:
   friend class global_pool;
-  /// Adopt one arena-bound task-group implementation.
+  /// Take ownership of a task group that keeps its arena alive.
   explicit scoped_task_group(std::shared_ptr<detail::task_group_implementation> implementation)
       : implementation_(std::move(implementation)) {}
 
   std::shared_ptr<detail::task_group_implementation> implementation_;
 };
 
-/// Process-wide facade over the pipeline's oneTBB task arena.
+/// Shares one configured oneTBB arena across this process's pipeline work.
 class global_pool {
 public:
-  /// Return the process-wide pipeline pool facade.
+  /// Return this process's pipeline pool.
   static global_pool &instance() noexcept {
     static global_pool pool;
     return pool;
   }
 
-  /// Replace the owned TBB arena using one atomic configuration boundary.
+  /// Replace the arena and its concurrency settings under  the lifecycle lock.
   void configure(const pool_config &config);
   /// Lazily create the default arena when no configuration is active.
   void ensure_configured() const;
-  /// Join work and release the owned arena.
+  /// Release the pool's arena during normal shutdown.
   void shutdown() noexcept;
   /// Release the arena during process teardown without re-entering workers.
   void shutdown_at_exit() noexcept;
   /// Recreate the arena with a new configuration.
   void restart(const pool_config &config);
 
-  /// Return the concurrency ceiling of the owned arena.
+  /// Return the arena's concurrency limit, including a participating caller.
   [[nodiscard]] unsigned maximum_concurrency() const noexcept {
     return maximum_concurrency_;
   }
-  /// Return the configured worker count while the arena is active.
+  /// Return the configured concurrency while active, or, zero after shutdown.
   [[nodiscard]] unsigned live_worker_count() const noexcept {
     return live_worker_count_.load(std::memory_order_relaxed);
   }
@@ -289,44 +296,45 @@ public:
   [[nodiscard]] bool is_active() const noexcept {
     return configured_.load(std::memory_order_acquire);
   }
-  /// Return the lock-free scheduler counters owned by this pool.
+  /// Return the pool's atomic scheduler counters.
   [[nodiscard]] scheduler_stats &get_scheduler_stats() noexcept { return scheduler_stats_; }
 
-  /// Execute a half-open range inside the owned arena.
+  /// Process [begin, end), waiting for any parallel ranges to finish.
   void parallel_for(std::size_t begin, std::size_t end, std::size_t grain,
                     const range_body &body) const;
-  /// Execute a half-open range with one context per participating worker.
+  /// Process the range with an installed context on eah participating thread.
   void parallel_for_with_context(std::size_t begin, std::size_t end,
                                  std::size_t grain, const range_body &body);
-  /// Execute with caller-admitted contexts; never borrow an unrelated installed context.
+  /// Process the range using contexts from the caller's memory-backed factory.
   void parallel_for_with_context(std::size_t begin, std::size_t end,
                                  std::size_t grain, const range_body &body,
                                  worker_context_factory factory);
-  /// Execute range shards through the tracked scheduler lifecycle.
+  /// Run two tracked range tasks when parallel, and join both  before returning.
   void parallel_for_with_context_tracked(std::size_t begin, std::size_t end,
                                          std::size_t grain,
                                          const range_body &body,
                                          tracked_job_observer observer);
-  /// Track joined shards using caller-owned, physically admitted fresh contexts.
+  /// Run tracked range tasks with contexts reserved by the caller.
   void parallel_for_with_context_tracked(std::size_t begin, std::size_t end,
                                          std::size_t grain,
                                          const range_body &body,
                                          tracked_job_observer observer,
                                          worker_context_factory factory);
-  /// Enroll and enqueue one address-stable tracked task without throwing.
+  /// Register and queue a task whose caller-owned state remains at a fixed address.
   [[nodiscard]] tracked_submit_status
   submit_tracked_task_noexcept(tracked_task_submission *submission,
                                tracked_task_ref task,
                                tracked_job_observer observer) noexcept;
-  /// Join one tracked task and drain its scheduler resources without throwing.
+  /// Wait for a tracked task and finish its scheduler cleanup without throwing.
   [[nodiscard]] tracked_job_outcome join_and_drain_tracked_task_noexcept(
       tracked_task_submission *submission) noexcept;
 
   /**
-   * Schedule one callback with task_arena::enqueue and wait for its result.
-   * The callback therefore runs on a TBB arena worker, never on the backend
-   * thread that invokes this function.  This is deliberately callback-only:
-   * PostgreSQL-backed state must already have been materialized before submit.
+   * Run a callback on an arena worker and wait for its result The calling
+   * thread only waits, so this can check behavior on a worker thread.
+   *
+   * Prepare any PostgreSQL-backed data before submitting the callback.
+   * Return the callback result, or false if it  is missing or scheduling fails.
    */
   [[nodiscard]] bool invoke_worker_probe_noexcept(
       void *argument, bool (*callback)(void *) noexcept) const noexcept;
@@ -352,7 +360,7 @@ public:
         });
   }
 
-  /// Sort through the tracked-job observer lifecycle without nested dispatch.
+  /// With an observer, track a parallel sort as one job and wait for it to finish.
   template <class p_random_iterator, class p_compare>
   void parallel_sort_tracked(
       p_random_iterator first,
@@ -376,9 +384,9 @@ public:
         .invoke =
             +[](void *argument) {
               auto *context = static_cast<sort_task_context *>(argument);
-              /* The comparator consumes only already-is_admitted resident
-               * facades.  It performs no materialization, so nested TBB
-               * comparator tasks deliberately inherit no trace sink. */
+              /* Comparisons must use data already available to workers.
+               * Nested TBB tasks do not izherit the materialization trace
+               * sink, so the comparator must not load PostgreSQL-backed data. */
               context->pool->parallel_sort(context->first, context->last,
                                            *context->compare);
             },
@@ -395,10 +403,10 @@ public:
     }
   }
 
-  /// Create a task group tied to the current arena lifetime.
+  /// Create a task group that keeps the current arena alive.
   [[nodiscard]] scoped_task_group make_task_group();
 
-  /// Rolling slot and query count owned by one submitted batch.
+  /// Identifies a batch's timestamp slot and its contribution, to query counts.
   struct batch_ticket {
       /// Timestamp slot selected for this batch.
       std::size_t slot = 0;
@@ -407,11 +415,11 @@ public:
   };
   /// Record a newly scheduled batch and return its completion ticket.
   [[nodiscard]] batch_ticket begin_batch(std::int64_t query_count) noexcept;
-  /// Record successful completion of one batch.
+  /// Count a successful batch and remove it from the in-flight counters.
   void end_batch(batch_ticket ticket) noexcept;
-  /// Remove an unfinished or completed batch from in-flight counters.
+  /// Remove  a batch from the in-flight counters without counting success.
   void cancel_batch(batch_ticket ticket) noexcept;
-  /// Reset scheduler counters at a new rate-window boundary.
+  /// Clear scheduler counters and start a rate window at the supplied time.
   void reset_stats(std::uint64_t now_ns) noexcept;
 
 private:
@@ -429,7 +437,7 @@ private:
   std::shared_ptr<detail::pool_implementation> implementation_;
 };
 
-/// Return oneTBB's normalized default arena concurrency.
+/// Return oneTBB's default concurrency, with a minimum of one.
 [[nodiscard]] unsigned default_concurrency_limit() noexcept {
   const int value = otbb::info::default_concurrency();
   return value <= 0 ? 1u : static_cast<unsigned>(value);
@@ -458,8 +466,8 @@ void global_pool::ensure_configured() const {
   if (is_active()) {
     return;
   }
-  // global_pool has a private constructor, so every instance is the mutable
-  // process singleton even when execution is requested through a const view.
+  // The private constructor makes this the mutable process singleton,
+  // even when the caller holds a const reference.
   instance().configure(pool_config{});
 }
 
@@ -574,9 +582,9 @@ void global_pool::parallel_for_with_context(
         return;
     }
 
-    // Only a participating worker claims a slot, exactly once in this ETS map.
-    // Exceptions from acquisition or work cancel and join the TBB operation
-    // before its caller may destroy any slot or associated physical permit.
+    // Each participating thread acquires one context through this ETS map
+    // TBB joins the work before an exception escapes, so the  caller can then
+    // release the contexts and their memory reservations.
     otbb::enumerable_thread_specific<context::context*> worker_contexts(
         [factory] { return std::addressof(factory.acquire(factory.state)); });
     const auto implementation = implementation_;
@@ -634,7 +642,7 @@ bool global_pool::invoke_worker_probe_noexcept(
 namespace bioseq::parallelism {
 namespace {
 
-/// Publish cancellation to a tracked task's atomic handoff byte.
+/// Ask the worker to skip this task if it has not started.
 void cancel_tracked_pool_task(void *argument) noexcept {
   auto *submission = static_cast<tracked_task_submission *>(argument);
   if (submission == nullptr) {
@@ -659,7 +667,7 @@ void join_tracked_pool_task(void *argument) noexcept {
   }
 }
 
-/// Mark caller-owned backing state as released after scheduler drain.
+/// Record that cleanup reached the step for releasing task data.
 void release_tracked_pool_task(void *argument) noexcept {
   auto *submission = static_cast<tracked_task_submission *>(argument);
   if (submission != nullptr) {
@@ -676,7 +684,7 @@ void publish_tracked_pool_completion(
   completion.notify_all();
 }
 
-/// Transfer a worker failure to the scheduler observer.
+/// Record a worker error and pass its text to the observer when available.
 void handoff_tracked_pool_failure(tracked_task_submission *submission,
                                   char const *message) noexcept {
   submission->worker_failed = 1u;
@@ -686,7 +694,7 @@ void handoff_tracked_pool_failure(tracked_task_submission *submission,
   }
 }
 
-/// Execute one tracked task inside its scheduler worker scope.
+/// Run an uncancelled dask with scheduler state installed and capture errors.
 void execute_tracked_pool_task(tracked_task_submission *submission) noexcept {
   tracked_worker_scope_storage scope{};
   const auto observer = submission->observer;
@@ -855,9 +863,9 @@ void global_pool::parallel_for_with_context_tracked(
     return;
   }
 
-  // Preserve the scheduler's existing two-shard lifecycle. The stack records
-  // and their borrowed factory remain live until BOTH tasks join and drain,
-  // including acquisition failure, cancellation and a throwing range body.
+  // These two tasks borrow records on this stack. Join and clean up both
+  // before reporting an error, so the records and context factory stay alive
+  // through cancellation or a failure in context acquisition  or range work.
   struct admitted_tracked_range_context {
     range_body const *body;
     std::size_t begin;
@@ -873,8 +881,8 @@ void global_pool::parallel_for_with_context_tracked(
   std::array<tracked_submit_status, 2> statuses{};
   const auto invoke_range = +[](void *argument) {
     auto& range = *static_cast<admitted_tracked_range_context*>(argument);
-    // A scheduler observer may have installed its own context. It is not the
-    // biological attempt's allocation authority and must never be borrowed.
+    // Use the caller's reserved worker context so allocations count against
+    // this attempt's budget, even if the observer installed another context.
     context::installed_context_scope scope{
         range.factory.acquire(range.factory.state)};
     (*range.body)(range.begin, range.end);

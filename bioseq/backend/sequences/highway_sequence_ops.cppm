@@ -1,6 +1,6 @@
 /**
  * @file highway_sequence_ops.cppm
- * @brief Highway kernels for bounded-memory iteration over packed sequences.
+ * @brief Decode packed sequence symbols in parallel SIMD lanes.
  */
 module;
 
@@ -21,33 +21,34 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** @brief Selects the mask discipline for one matrix row. */
+/** @brief Choose between full-lane processing and the masked final chunk. */
 enum class sequence_iteration_part : std::uint8_t {
     full_matrix,
 	partial_matrix,
 };
 
 /**
- * @brief Iterate one packed sequence through target-native SIMD rows.
+ * @brief Read packed symbols from several sequence positions in parallel
  *
- * The iterator keeps a bounded circular buffer for delayed streams, invokes
- * the handler once per decoded logical symbol, and masks the padded tail.
+ * Each SIMD lane starts at a calculated offset with enough overlap for the
+ * caller's context. A circular buffer keeps earlier symbols for delayed
+ * streams. Mask padding at the end and call finish after all streams end.
+ * Sequences shorter than context_bps produce no callbacks.
  *
- * @tparam p_descriptor_tag Optional decoded-symbol descriptor. `void` keeps
- * the packed storage unit descriptor used by existing callers.
- * @tparam p_delay_types Integral delay argument types.
- * @tparam p_sequence_range Packed sequence range type.
- * @tparam p_handler_type Callable receiving the live mask and current symbols.
- * @tparam p_finish_type Callable invoked after the masked tail is consumed.
- * @tparam p_iterator_type Iterator into the packed range.
- * @tparam p_maximum_delay Maximum admitted delay in logical symbols.
- * @param sequence Packed sequence range. Storage remains borrowed.
- * @param begin First packed unit to inspect.
- * @param end One-past-last packed unit.
- * @param context_bps Logical-symbol context required by the caller.
- * @param handler Callback for each decoded SIMD symbol row.
- * @param finish Callback receiving final offsets and the left-tail mask.
- * @param delays Logical-symbol delays for additional lock-step streams.
+ * @tparam p_descriptor_tag Highway descriptor, or void to  use packed-word lanes.
+ * @tparam p_delay_types Integer types used for delays.
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @tparam p_handler_type Callback for the live masks and decoded symbols.
+ * @tparam p_finish_type Callback after the final masked chunk.
+ * @tparam p_iterator_type Iterator over packed storage.
+ * @tparam p_maximum_delay Largest supported delay in symbols.
+ * @param sequence Sequence whose storage is read during the, call.
+ * @param begin First packed word to read.
+ * @param end Position just past the last packed word.
+ * @param context_bps Overlap needed by the caller, measured in symbols.
+ * @param handler Receives offsets, lane type, masks, and one symbol per lane.
+ * @param finish Receives offsets, lane type, and the final partial mask.
+ * @param delays Symbol offsets of additional streams following  the main stream.
  */
 template<
 	typename p_descriptor_tag = void,
@@ -70,8 +71,7 @@ inline void iterate_sequence_bp_simd_offsets(
 ) {
     using sequence_traits = compact_sequence_range<p_sequence_range>::traits;
 
-    // Hot-path tracing remains compile-time gated because formatting offsets
-    // and sequence state dominates short minimizer traversals.
+
     const auto [context_units, context_padding] = ::bioseq::simd::iteration_geometry::int_div_ceil(
         context_bps, sequence_traits::letters_per_unit);
     (void)context_padding;
@@ -79,7 +79,7 @@ inline void iterate_sequence_bp_simd_offsets(
 
     const std::size_t sequence_length = sequence.size();
 	if (sequence.bp_size() < context_bps) {
-		// Sequence shorter than required context
+		// No complete context fits in this sequence.
 		return;
 	}
 
@@ -133,9 +133,8 @@ inline void iterate_sequence_bp_simd_offsets(
 		hn::Lanes(d) * sequence_traits::letters_per_unit;
 	const std::size_t full_chunks_count_raw = bps_per_lane / bps_per_matrix;
 	const std::size_t bps_last_chunk_raw = bps_per_lane % bps_per_matrix;
-    // An exact matrix multiple moves its final chunk through the partial path.
-    // This guarantees tail masking and one finish callback without changing the
-    // full-matrix treatment of preceding chunks.
+    // Process the final chunk with tail masks even when it fills a matrix.
+    // That pats also calls finish after the delayed streams have ended.
     size_t full_chunks_count = full_chunks_count_raw;
     size_t bps_last_chunk = bps_last_chunk_raw;
     if (bps_last_chunk == 0 && full_chunks_count > 0) {
@@ -190,7 +189,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	HWY_ALIGN std::array<vector_type, delay_count> all_bp_vecs{
 		((void)delays, hn::Undefined(d))...};
 
-	// Advances one transposed symbol row through delayed lane states and callbacks.
+	// Decode one packed row and advance the main and delayed symbol streams.
 	auto handle_row_bp = [&delays_state,
                           &buffer,
                           &delays_counters,
@@ -213,7 +212,7 @@ inline void iterate_sequence_bp_simd_offsets(
         for (std::size_t bp_index = 0; bp_index < sequence_traits::letters_per_unit; ++bp_index) {
             vector_type base_bp_vec = hn::And(row, symbol_mask);
 			row = hn::ShiftRightSame(row, sequence_traits::bits_per_char);
-			// Check delayed
+			// Load each delayed stream when it reaches its next packed word.
 			if constexpr (delay_count > 0) {
 				for(std::size_t delay_no = 0; delay_no < delay_count; ++delay_no) {
 					auto& [ read_pos, counter, delay, delayed_buffer ] = delays_state[delay_no];
@@ -228,7 +227,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					} else {
 						--counter;
 					}
-					// The same
+					// Decode the next symbol from this delayed stream
 					all_bp_vecs[delay_no] = hn::And(delayed_buffer, symbol_mask);
 					delayed_buffer = hn::ShiftRightSame(
 						delayed_buffer, sequence_traits::bits_per_char);
@@ -280,7 +279,7 @@ inline void iterate_sequence_bp_simd_offsets(
     for (std::size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
         matrix mat(buffer.get_pointer_at(buffer_write_pos));
 
-        // We read only full matrices
+        // This load needs room for a complete matrix in the circular buffer.
         DEBUG_ASSERT(buffer.get_contiguous_capacity() >= matrix_size,
 			"bounded buffer lacks space for a full matrix load");
 		iter += mat.load_rows_at_offsets(
@@ -297,7 +296,7 @@ inline void iterate_sequence_bp_simd_offsets(
 			}
 			buffer.advance_position(buffer_write_pos);
 		}
-		// context change
+
     }
 
     DEBUG_ASSERT(static_cast<std::size_t>(end - iter) * sequence_traits::letters_per_unit -
@@ -323,13 +322,10 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
-	// `main_counter_none` is how many partial-matrix iterations we will run; that
-	// upper bound is the per-lane reach (bps_per_lane), NOT the total sequence
-	// length. After the `bps_last_chunk == 0` fix we may pull a full chunk into
-	// partial mode, and then bps_per_lane can be larger than seq.bp_size() (e.g.
-	// dna4 × uint64_t: 64 iterations over a 62-bp sequence — the last 2 are
-	// masked out via left_mask/none_mask transitions). Use bps_per_lane as the
-	// sanity bound instead of seq.bp_size().
+	// Tail iteration counts include padding. A  lane can therefore take more
+	// steps than the sequence has symbols, such as 64 steps for 62 DNA4 bases
+	// packed in uint64_t words. Masks discard the padded symbols, so check
+	// the per-lane span here.
 	DEBUG_ASSERT(static_cast<std::size_t>(main_counter_none) <= bps_per_lane,
 		"partial iteration count exceeds per-lane reach");
 
@@ -345,29 +341,28 @@ inline void iterate_sequence_bp_simd_offsets(
 }
 
 /**
- * @brief Iterate interleaved SIMD streams over one packed sequence view.
+ * @brief Decode a packed sequence through up to four groups of SIMD lanes.
  *
- * Each stream receives a disjoint offset slice. Rows are loaded and
- * transposed into a fixed-size `vector_stream`, so the handler receives the
- * stream bundle by value without allocating or materializing sequence data.
- * The tail transitions from a full mask to the left mask before completion.
+ * Lane offsets divide the work while keeping the context needed by the caller.
+ * Load and transpose one fixed-size matrix per stream, then pass decoded
+ * symbols to the handler. Tail masks exclude padding. A sequence shorter than
+ * context_bps returns without calling either callback.
  *
- * @tparam p_stream_count Number of interleaved streams, in the range `[1, 4]`.
- * @tparam p_descriptor_tag Optional Highway descriptor override. `void` selects
- * the scalable descriptor for the view's storage unit.
- * @tparam p_delay_types Reserved delay argument types. The pack must be empty.
- * @tparam p_sequence_view Packed sequence view satisfying the bit-cast contract.
- * @tparam p_handler_type Callable receiving full/partial state, offsets,
- * descriptor, live mask, and the vector stream.
- * @tparam p_finish_type Callable receiving offsets, descriptor, and final mask.
- * @tparam p_iterator_type Iterator exposed by the sequence view.
- * @param sequence Borrowed sequence view. No sequence materialization occurs.
- * @param begin First packed view unit.
- * @param end One-past-last packed view unit.
- * @param context_bps Logical-symbol context required by the caller.
- * @param handler Callback invoked for each decoded SIMD symbol row.
- * @param finish Callback invoked once the masked tail is consumed.
- * @param delays Reserved delay pack, required to be empty.
+ * @tparam p_stream_count Number of streams, from one to four.
+ * @tparam p_descriptor_tag Highway descriptor, or void to  use packed-word lanes.
+ * @tparam p_delay_types Must be empty. Use iterate_sequence_bp_simd_offsets()
+ * for delayed streams.
+ * @tparam p_sequence_view Packed sequence view with bit-cast access.
+ * @tparam p_handler_type Callback receiving offsets, descriptor, mazk, and symbols.
+ * @tparam p_finish_type Callback receiving offsets, descriptor, and final mask.
+ * @tparam p_iterator_type Iterator supplied by the view.
+ * @param sequence Sequence view whose storage is read during the call.
+ * @param begin First packed word to read.
+ * @param end Position just past the last packed word.
+ * @param context_bps Overlap needed by the caller, measured in symbols.
+ * @param handler Receives one symbol per lane at each iteration.
+ * @param finish Called after processing the final masked chunk.
+ * @param delays Empty argument pack kept for, the shared calling interface
  */
 template<
 	std::size_t p_stream_count,
@@ -397,8 +392,7 @@ iterate_sequence_bp_simd(
 	static_assert(p_stream_count >= 1, "p_stream_count must be at least one");
 	static_assert(p_stream_count <= 4, "p_stream_count must not exceed four");
 
-	// Suppress unused-parameter warnings for the parameter-pack args we are
-	// retaining for the shared iterator call shape.
+	// Keep the common iterator signature without unused-argument warnings.
 	((void)delays, ...);
 
 	const auto [context_units, context_padding] =
@@ -408,12 +402,12 @@ iterate_sequence_bp_simd(
 
 	const std::size_t sequence_length = sequence.size();
 	if (sequence.bp_size() < context_bps) {
-		// Sequence shorter than required context.
+		// No  complete context fits in this sequence.
 		return;
 	}
 
-	// The non-cv-qualified descriptor matches the type returned by lifted
-	// vector-stream operations and binds directly to matrix transpose helpers.
+	// Remove const and reference qualifiers so the descriptor matches the
+	// vector-stream and matrix helper types.
 	using default_descriptor =
 		hn::ScalableTag<typename sequence_traits::storage_unit>;
 	using resolved_descriptor = std::conditional_t<
@@ -487,8 +481,8 @@ iterate_sequence_bp_simd(
 	const std::int32_t main_counter_none =
 		static_cast<std::int32_t>(bps_last_chunk);
 
-	// Aggregate initialization avoids targetless construction of fixed-target
-	// vectors on descriptor families such as NEON_BF16.
+	// Keep aggregate initialization here for Highway targets with
+ // target-specific vector types.
 	HWY_ALIGN std::array<
 		std::array<vector_type, max_lanes_per_stream>, p_stream_count>
 		raw_matrix_storage{};
@@ -505,7 +499,7 @@ iterate_sequence_bp_simd(
                         descriptor, offsets_per_stream[stream], sequence.read_cptr(iter));
             });
         p_sequence_view::advance_iter(iter, lanes_per_stream);
-        // Transposes each stream matrix into biological row order.
+        // Transpose so each output vector has the next packed word from every lane.
         for_each_stream<p_stream_count>([&raw_matrix_storage, &descriptor](
                                             auto p_stream_index_constant) [[gnu::always_inline]] {
             constexpr std::size_t stream = decltype(p_stream_index_constant)::value;
@@ -583,23 +577,9 @@ iterate_sequence_bp_simd(
 	finish(offsets, descriptor, left_mask);
 }
 
-// ============================================================================
-// SIMD primitives — char→rank lookup, dna4 pack, dna5 pack, decode spreads.
-// ============================================================================
 
-/// SIMD 32-byte LUT lookup. `lut_lo` / `lut_hi` are 128-bit-broadcast
-/// vectors holding the two halves of a 32-byte table indexed by
-/// `chunk[i] & 0x1F`. Result: `lut[chunk & 0x1F]` per lane. Used by
-/// the dna4/dna5 SIMD encoders for both `DROP` (with 0xFF sentinels)
-/// and `map_to_default` (with default-rank fill) lookups.
-///
-/// Non-ASCII bytes (bit 7 set) are routed to slot 0 of the LUT
-/// (which holds the default rank under map_to_default, and the
-/// `0xFF` skip-sentinel under DROP). Without this clamp, an input
-/// byte like `0xD4` (whose `& 0x1F == 20`) would land in the same
-/// slot as `'T'` and be silently miscategorised as T — diverging
-/// from the 256-entry scalar LUT, which would map `0xD4` to the
-/// alphabet's default rank.
+
+
 
 } // namespace target
 } // namespace bioseq::simd

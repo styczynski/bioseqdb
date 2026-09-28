@@ -1,8 +1,8 @@
 /**
  * @file replay_test.cpp
- * @brief Tests fragment replay, retry, boundary drift, and spill equivalence.
+ * @brief Checks repeated minimizer scans, fragment boundaries, and spill results.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` for fixed-target coverage.
+ * Highway compiles these tests for the selected SIMD target.
  */
 
 #include <hwy/highway.h>
@@ -38,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -180,9 +180,9 @@ TEST_CASE("bounded ntHash fragment canonicalizes tied periodic events identicall
     using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
     using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
 
-    // This is the periodic shape that exposed duplicate_event in the live fragment
-    // coordinator. Tied adjacent windows can report the same canonical bounded ntHash
-    // minimizer more than once, including after intervening raw records.
+    // Repeating ACGT produces tied windows that can emit the same minimizer
+    // several times, with other records between repeats. Replay must remove
+    // these duplicates before encoding the index.
     std::vector<seq::dna4> data(65565);
     for (std::size_t index = 0; index < data.size(); ++index) {
         data[index].assign_rank(static_cast<std::uint8_t>(index & 3u));
@@ -413,9 +413,9 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
     using spill_run_index_type = direct_minimizer_bucket_index<fake_fragment_storage<>>;
 
     auto data = make_dna4(static_cast<std::size_t>(span + 8192u + 7u), 0x8B1B0A4DULL);
-    // A mirror-symmetric boundary fixture with a homopolymer centre exercises
-    // palindrome strand ties and rightmost equal-minimum selection on both
-    // sides of the immutable persisted-core edge.
+    // Mirror the sequence around the segment boundary and fill its centre
+    // with A. Equal minima near the boungary must follow the same tie rule
+    // as  the whole-sequence sketch.
     for (std::size_t offset = 0; offset < 192; ++offset) {
         seq::dna4 value{};
         value.assign_rank(static_cast<std::uint8_t>((offset * 3u) & 3u));
@@ -530,10 +530,10 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
         state = state * 6364136223846793005ULL + 1442695040888963407ULL;
         std::uint8_t rank = static_cast<std::uint8_t>((state >> 33u) % 4u);
         if (index % 211u == 97u) {
-            rank = 3u; // dna5 N: rolling hash/window reset sentinel
+            rank = 3u; // N resets the rolling hash and minimizer window.
             n_positions.push_back(index);
         } else if (rank == 3u) {
-            rank = 4u; // T is the fifth dna5 rank, but normal nt4 base 3
+            rank = 4u; // DNA5 stores T at rank 4.
         }
         data[index].assign_rank(rank);
     }
@@ -988,8 +988,8 @@ TEST_CASE("registered transient fragment build binds K20 DNA5 reference request 
     for (std::size_t index = 0u; index < data.size(); ++index) {
         data[index].assign_char(unambiguous[index].to_char());
     }
-    // Keep long nonempty sketchable regions on both sides of sparse ambiguity.
-    // A repeated A/C/G/N/T fixture only exercises the empty-index success path.
+    // Leave long runs of bases between the two Ns so this test builds
+    // a nonempty index.
     data[127u].assign_char('N');
     data[769u].assign_char('N');
     dna5_range_t range(data);

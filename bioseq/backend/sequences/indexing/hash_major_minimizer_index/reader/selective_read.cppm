@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/reader/selective_read.cppm
- * @brief Expected-generation validation, admitted selective reads, and reader assembly.
+ * @brief Open a stored generation and load the positions needed by prepared quezy hashes.
  */
 module;
 
@@ -32,10 +32,11 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 
-/// Assemble a selective reader after authenticating generation identity and selected streams.
+/// Check the expected generation and prepare counts and positions for query lookup.
 ///
-/// Directory bytes are checked completely. Only control blocks intersecting the canonical query
-/// image and postings below `max_occ` are retained, with every allocation charged to `admission`.
+/// Read and verify the whole directory, then visit only control blocks that
+/// intersect the query hashes. Keep positions whose counts are at most max_occ.
+/// Memory reservations cover the saved arrays and temporary read buffers.
 [[nodiscard]] inline std::expected<hash_major_minimizer_selective_reader,
                                    hash_major_minimizer_error>
 hash_major_minimizer_selective_reader::open(
@@ -132,7 +133,7 @@ hash_major_minimizer_selective_reader::open(
         return std::unexpected(hash_major_minimizer_error::arithmetic_overflow);
     }
     std::uint64_t initial_logical_bytes = 0u;
-    // Accumulate the first-stage logical owners without allowing byte-count overflow.
+    // Sum the arrays needed for directory reading, rejecting size overflow.
     const auto add_initial = [&initial_logical_bytes](std::uint64_t bytes) {
         return checked_add(initial_logical_bytes, bytes, initial_logical_bytes);
     };
@@ -356,7 +357,7 @@ hash_major_minimizer_selective_reader::open(
             .control_stream_crc = &control_stream_crc,
             .max_occ = max_occ,
         };
-        // Deliver and authenticate one bounded batch of selected control blocks.
+        // Read and  check one batch of selected control blocks.
         auto deliver_control_wave = [&control_ranges, &delivery, &source, &reader, &scratch]()
             -> std::expected<void, hash_major_minimizer_error> {
             if (control_ranges.empty())
@@ -552,7 +553,7 @@ hash_major_minimizer_selective_reader::open(
     std::size_t authority_cursor = 0u;
     std::size_t accepted_delivered = 0u;
     std::uint64_t output_cursor = 0u;
-    // Skip prepared hashes whose posting count exceeded the retention threshold.
+    // Skip hashes absent from the index or occurring more than max_occ times.
     const auto next_accepted_query = [&reader, query_count](std::size_t ordinal) noexcept {
         while (ordinal < query_count &&
                reader.query_offsets_[ordinal] >= k_unavailable_query_offset) {

@@ -1,6 +1,6 @@
 /**
  * @file admin/grouped_soa.cppm
- * @brief Grouped-SoA minimizer generation encoding and publication.
+ * @brief Build grouped-SoA minimizer indexes and publish their validated generations.
  */
 module;
 
@@ -51,9 +51,9 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 namespace bioseq::storage::indexing::detail {
 
-/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
-/// A pending query-cancel ERROR crosses the bridge and unwinds statement-owned C++
-/// state; backend-termination/FATAL retains PostgreSQL's native terminal semantics.
+/// Check cancellation only when PostgreSQL has a pending interrupt. The error
+/// bridge lets query cancellation unwind C++ objects. FATAL errors keep
+/// PostgreSQL's normal process-termination behavior.
 void check_generation_interrupts_as_cpp(void*) {
     if (!INTERRUPTS_PENDING_CONDITION()) {
         return;
@@ -68,8 +68,8 @@ void check_generation_interrupts_as_cpp(void*) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 namespace bioseq::storage::indexing::detail {
 
-// Preserve existing producer counters before the ordinary update_index wrapper
-// discards its validated publication. This is not a transaction-commit receipt.
+// Log the completed producer counters before update_index discards the
+// publication result. The surrounding  transaction can still roll back.
 void log_e2e_minimizer_publication_execution(
     const ready_minimizer_generation_publication& publication,
     Oid user_relid,
@@ -156,22 +156,25 @@ void log_e2e_minimizer_publication_execution(
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Build, completely reread, and atomically publish one grouped-SoA generation.
- * @tparam p_sequence_range Compact source sequence range.
- * @param user_relid Source Bioseq relation.
- * @param column_attno Source sequence attribute.
- * @param index_name Registered fragment or sequence minimizer index.
- * @param sequence_rowno Source-row ordinal and query key.
- * @param storage PostgreSQL generation storage authority.
- * @param sequence Snapshot-bound lazy sequence view.
- * @param source_binding Locator and source-snapshot binding.
- * @param algorithm_identity Generated identity frozen before publication starts.
- * @param backend Exact producer backend.
- * @param kernels Required backend kernel table.
- * @return Published generation identity and execution receipt.
+ * Build a grouped-SoA index from the sequence under the caller's snapbhot.
+ * Check the written generation before publishing its head, then reopen, that
+ * head to verify the published bytes. Sequence indexes release their temporary
+ * sorted runs before publication.
  *
- * The caller retains snapshot and metadata-age ownership. A canonical sidecar is created or
- * reused, and head publication remains impossible before the private complete-reread token.
+ * The caller keeps the source snapshot alive and updates metadata_age_log.
+ * The selected backend and algorithm identity must match throughout the build
+ * @tparam p_sequence_range Configuration of the packed source sequence.
+ * @param user_relid Source Bioseq table.
+ * @param column_attno One-based sequence column  number.
+ * @param index_name Registered fragment or sequence minimizer index.
+ * @param sequence_rowno Source row number used as the index query key.
+ * @param storage Storage for this source and index.
+ * @param sequence Lazy sequence view using the source snapshot.
+ * @param source_binding Source locator and registered snapshot.
+ * @param algorithm_identity Algorithm and settings selected before the build.
+ * @param backend Selected minimizer producer.
+ * @param kernels Kernel table required by the selected SIMD backend.
+ * @return Published generation details and measured producer work.
  */
 template <class p_sequence_range>
 [[nodiscard]] inline ready_minimizer_generation_publication
@@ -368,9 +371,9 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         }
         state->source_authorization.reset();
 
-        // Source identity is the immutable source epoch. The storage
-        // contract is derived from the encoder's final manifest because the
-        // planner may legitimately retry with a smaller fixed-width span.
+        // The source epoch identifies the sequence  version. Derive the storage
+        // checksum from the final manifest, since encoding may retr with
+        // smaller position segments.
         result.source_identity =
             minimizer_generation_source_identity(relation_identity.relfilenode, state->source);
         result.source_content_checksum = state->source_content_checksum;
@@ -460,9 +463,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 bioseq::indexing::make_minimizer_generation_publication_binding(*state->generation);
         }
 
-        // PostgreSQL owns every sequence-index spill run. Destroy those BufFile/run
-        // resources after the encoder has copied out its immutable validation state,
-        // and before any READY token can be validated or published.
+        // Release the sequence index's temporary runs after encoding has saved
+        // its validation results. Verify cleanup before publishing the generation.
         if (is_sequence_index) {
             const auto before_release = storage.segment_spill_storage_binding();
             if (!state->encode_error &&
@@ -706,11 +708,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         result.minimizer_sequence_spill_resources_released};
 }
 
-/// Seal the update_index result at the caller boundary. The
-/// coordinator already validates the producer-originated execution receipt before
-/// publication. This function also validates that the returned alternative,
-/// backend, and immutable publication binding still match the requested normal
-/// rebuild route. There is no scalar/Exact fallback on any selected backend.
+/// Build and publish the index, then check that the returned result matches
+/// the requested index kind and backend. Report a mismatch as a rebuild error.
 template <class p_sequence_range>
 inline void build_and_verify_grouped_soa_minimizer_generation_pg(
     Oid user_relid,
@@ -766,8 +765,8 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
 #endif
 }
 
-// Keep one explicit production facade/binding instantiation as a narrow
-// compile-time contract in addition to the ordinary update_index call sites.
+// Instantiate a production sequence type here so this module also checks
+// the lazy-view and source-binding types at  compile time.
 namespace ready_minimizer_generation_compile_contract_detail {
 using sequence_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using source_binding = bioseq::storage::postgres_lazy_sequence_binding<sequence_config>;

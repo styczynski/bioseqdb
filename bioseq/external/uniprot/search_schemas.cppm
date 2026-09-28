@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/search_schemas.cppm
- * @brief UniProt search result schema fragments.
+ * @brief UniProt search response schemas for client generation.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:search_schemas;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Search stream, result, and term schemas. */
+/** @brief Schemas for search results and suggested terms. */
 inline constexpr std::string_view search_schemas = R"bioseq_openapi(    StreamResult:
       type: object
       properties:

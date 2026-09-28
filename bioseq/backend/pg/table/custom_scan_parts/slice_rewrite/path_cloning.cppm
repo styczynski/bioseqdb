@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Clones and tags the mutable path spine and source routes.
+ * @brief Copies planner paths and marks the BioseqScan columns used by lazy sequences.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -38,7 +38,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** Returns true when @p path is a CustomPath using slice-project owner methods. */
+    /** @brief Check whether a path uses the SliceProject planner callbacks. */
     [[nodiscard]] bool slice_project_is_owner_path(Path* path) {
         if (path == nullptr || !IsA(path, CustomPath))
             return false;
@@ -46,7 +46,7 @@ export {
         return custom->methods == &bioseq_slice_project_path_methods();
     }
 
-    /** Returns true when @p actual and @p expected share the same expression list and sortgrouprefs. */
+    /** @brief Compare target expressions and the sortgroupref of every output position. */
     [[nodiscard]] bool slice_project_targets_match(PathTarget* actual, PathTarget* expected) {
         const int expression_count = actual == nullptr ? 0 : list_length(actual->exprs);
         if (actual == nullptr || expected == nullptr ||
@@ -63,10 +63,10 @@ export {
         return true;
     }
 
-    /* An ordered upper target may omit resjunk entries retained by its child's
-     * full target.  Validate every requested top-level lazy expression, including
-     * its sortgroupref and duplicate multiplicity, is already published by that
-     * full target.  Non-lazy outputs remain core's ordinary projection concern. */
+    /* An upper target can omit hidden ORDER BY columns. Check that the child
+     * already supplies each requested lazy expression with the same sortgroupref
+     * and enough copies for duplicate outputs. PostgreSQL handles the remaining
+     * projection expressions. */
     [[nodiscard]] bool slice_project_requested_lazy_target_is_subset(PathTarget* full_target,
                                                                      PathTarget* requested_target) {
         if (full_target == nullptr || requested_target == nullptr)
@@ -111,10 +111,9 @@ export {
         return saw_lazy_expression;
     }
 
-    /* Recognition only: after the subset validation, pin the child's complete target
-     * and cross exactly the ordering/parallel containers which preserve every
-     * expression and sortgroupref.  Never cross projection, materialization,
-     * joins, or any other evaluation frontier. */
+    /* Look for an existing SliceProject below Sort, IncrementalSort, Gather, or
+     * GatherMerge. Every intervening target  must preserve the complete child
+     * output, including sortgrouprefs. This check leaves the paths unchanged. */
     [[nodiscard]] bool
     slice_project_is_owner_below_target_preserving_ordering(Path* path,
                                                             PathTarget* requested_target) {
@@ -146,7 +145,7 @@ export {
         return false;
     }
 
-    /** Copies a BioseqScan @p path, rebuilds BSS3 source tags from @p target, and returns the tagged leaf. */
+    /** @brief Copy a BioseqScan and rebuild its lazy sequence source bindings from the target */
     [[nodiscard]] Path* slice_project_tag_source_child(Path* path,
                                                        PathTarget* target,
                                                        slice_project_ir_builder const& builder) {
@@ -169,9 +168,9 @@ export {
         List* bindings = NIL;
         Bitmapset* seen_column_attnos = nullptr;
         int resno = 1;
-        /* BSS3 bindings are [child resno, producer id, physical varattno].  The
-         * child resno validates plan/setrefs identity; promotion indexes the raw
-         * relation scan slot by physical varattno. */
+        /* Each BSS3 binding holds [hild resno, producer id, physical varattno].
+         * resno checks the projected column after setrefs. varattno locates the
+         * sequence in the table scan slot when it is opened for lazy access. */
         for (Node* expression : postgres_list<Node>(target->exprs)) {
             if (exprType(expression) == builder.oids->bioseq_seq_type_oid) {
                 Var* var = try_cast_pg_node<Var>(expression);
@@ -211,9 +210,9 @@ export {
         return reinterpret_cast<Path*>(copy);
     }
 
-    /* `path` is already a private copy.  Descend only core path shapes whose
-     * child ownership is part of PostgreSQL's public Path ABI; unknown custom and
-     * foreign providers remain unmodified unless they expose their own contract. */
+    /* The caller has copied this path tree. Follow supported child links,
+     * including CustomPath.custom_paths, and replace BioseqScan leaves with
+     * tagged copies. Other leaf providers remain  unchanged. */
     [[nodiscard]] Path* slice_project_tag_owned_path_tree(Path* path,
                                                           slice_project_ir_builder const& builder,
                                                           bool& tagged_source) {
@@ -325,7 +324,7 @@ export {
                 slice_project_tag_owned_path_tree(gather->subpath, builder, tagged_source);
             return path;
         }
-        /** Recursively tags every path stored in @p subpaths. */
+        /** @brief Tag the BioseqScan sources below, each path in this list. */
         auto tag_path_list = [&builder, &tagged_source](List* subpaths) {
             for (ListCell* cell = list_head(subpaths); cell != nullptr;
                  cell = lnext(subpaths, cell)) {
@@ -341,9 +340,8 @@ export {
         return path;
     }
 
-    /* BatchSort is an upper owner rather than a SliceProject node, but it needs
-     * the same exact base-scan source contract: copy the owned input tree, attach
-     * BSS3 only to BioseqScan leaves, and leave unknown providers untouched. */
+    /* Give BatchSort lazy access to its sequence source. Copy the supported
+     * path containers and tag BioseqScan leaves for the sort expression. */
     [[nodiscard]] Path*
     batch_sort_tag_source_path(Path* path, Node* sort_expression, bool* tagged_out) {
         if (tagged_out == nullptr)
@@ -359,8 +357,7 @@ export {
             .command_type = CMD_SELECT,
             .source_bindings_only = true,
         };
-        /* BatchSort has no SliceProject producer graph.  Producer zero therefore
-         * truthfully means source ownership without boundary attribution. */
+        /* Producer zero records the source without assigning SliceProject counters. */
         builder.source_bindings.emplace_back(reinterpret_cast<Node*>(copyObject(sort_expression)),
                                              0u);
         Path* private_path = slice_project_clone_mutable_path_spine(path);
@@ -370,4 +367,4 @@ export {
         return tagged ? private_path : path;
     }
 
-} // export custom-scan partition declarations
+} // export

@@ -35,7 +35,7 @@ inline void require(bool condition, std::string_view message) {
     }
 }
 
-/// Require a negative generator-contract fixture to fail closed.
+/// Requires an invalid generator input to throw std::runtime_error.
 template <class p_function_type>
 inline void require_rejected(
     p_function_type&& function,
@@ -346,7 +346,7 @@ inline void verify_template_flatten_separation() {
         });
 }
 
-/// Cover owner-scoped slot lookup, overload/template names, and misspellings.
+/// Tests slot lookup within the registered owner, including template names and typos.
 inline void verify_slot_callable_ownership() {
     generation_plan plan = two_target_plan();
     validate_slot_callable_ownership(
@@ -1437,8 +1437,8 @@ inline void verify_typed_minimizer_binder() {
         append("minimizer_bounded_nthash", "bounded_nthash");
     };
 
-    // Deliberately reverse both axes: renderer output must still be ordered by
-    // source-owned alphabet code and storage byte width.
+    // Insert alphabets and storage widths in reverse order to check that the
+    // renderer sorts by alphabet code and then storage size.
     for (const auto& [bytes, storage] : std::array{
              std::pair<std::uint8_t, std::string_view>{
                  8U, "::std::uint64_t"},

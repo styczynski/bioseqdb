@@ -1,6 +1,6 @@
 /**
  * @file sequence_source_contract.cppm
- * @brief Implements sequence-source and catalog runtime contract probes.
+ * @brief SQL tests for sequence-reader ownership, cleanup and catalog access.
  */
 module;
 
@@ -963,8 +963,10 @@ inline void validate_bpchar_lifetime_statistics() {
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Arms or immediately executes a named sequence-source contract probe.
- * @param failure_point Stable diagnostic selector exposed to SQL tests.
+ * @brief Select a fault or run a named runtime test.
+ * Selectors cover sequence readers, catalog handles and SQL value lifetimes.
+ * Some arm a later failure or barrier, while others run their checks immediately.
+ * @param failure_point Test  name, with any required colon-separated arguments.
  */
 void arm_sequence_source_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1144,7 +1146,7 @@ void arm_sequence_source_failure(std::string failure_point) {
 #endif
 }
 
-/** @brief Clears the backend-local sequence-source fault injection. */
+/** @brief Clear this backend's armed sequence-reader failure. Requires a test build */
 void disarm_sequence_source_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
@@ -1154,7 +1156,7 @@ void disarm_sequence_source_failure() {
 #endif
 }
 
-/** @brief Resets sequence-source lifecycle counters and any armed fault. */
+/** @brief Clear the sequence-reader failure selector and reset reader counters. */
 void reset_sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
@@ -1165,7 +1167,7 @@ void reset_sequence_source_counters() {
 #endif
 }
 
-/** @return Current sequence-source lifecycle counters as one JSON object. */
+/** @return JSON counts for sequence-reader creation, reuse and cleanup, including live resources. */
 bioseq::postgres::support::jsonb_value sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	const auto counters =
@@ -1256,14 +1258,14 @@ bioseq::postgres::support::jsonb_value sequence_source_counters() {
 }
 
 /**
- * @brief Arms one SliceProject DSM payload as incomplete, malformed, or
- * absent for worker-state validation.
+ * @brief Make the next SliceProject shared-memory payload incomplete or malformed.
+ * Use none to cloar the pending test. Requires a test build.
  */
 void arm_slice_dsm_fixture(std::string mode) {
 	bioseq_arm_slice_dsm_fixture_for_test(mode);
 }
 
-/** @return Whether cross-thread use is rejected without corrupting state. */
+/** @return true if a worker thread is refused access to a backend-owned sequence reader. */
 bool sequence_source_wrong_thread_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_wrong_thread();
@@ -1273,7 +1275,8 @@ bool sequence_source_wrong_thread_probe() {
 #endif
 }
 
-/** @return Whether every injected sequence-source cleanup point is safe. */
+/** @return true if reference-count overflow, route-merge rollback  and transaction cleanup
+ * leave the tested reader resources and counters in the expected state. */
 bool sequence_source_fault_contract_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_fault_contract();
@@ -1283,7 +1286,8 @@ bool sequence_source_fault_contract_probe() {
 #endif
 }
 
-/** @return Whether route aliases resolve to the same provider identity. */
+/** @return true if two providers for one relation require, their generation ids
+ * to be distinguished. A lookup by relation alone must reject the ambiguity. */
 bool sequence_source_route_alias_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_route_aliases();
@@ -1293,7 +1297,10 @@ bool sequence_source_route_alias_probe() {
 #endif
 }
 
-/** @return The decoded facade orientation, or no value for SQL NULL. */
+/** @brief Compare all four sequence orientations through flat and lazy readers.
+ * @return true if every comparison matches, or SQL NULL for a null input.
+ * Require a lazy source-backed value. Mismatches raise an error.
+ */
 std::optional<bool> sequence_facade_orientation_probe(
 	std::optional<Datum> sequence) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1308,7 +1315,10 @@ std::optional<bool> sequence_facade_orientation_probe(
 #endif
 }
 
-/** @brief Verifies that PREPARE TRANSACTION rejects live source domains. */
+/** @brief Exercise PREPARE TRANSACTION rejection with a live  sequence-reader domain.
+ * This test raises an error when the expected rejection occurs, and a
+ * different error if the transaction callback unexpectedly accepts it.
+ */
 void sequence_source_pre_prepare_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::validate_pg_sequence_source_pre_prepare();

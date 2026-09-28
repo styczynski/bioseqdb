@@ -1,10 +1,8 @@
 /**
  * @file ksw2_batched.cppm
- * @brief Provides the public batched KSW2 alignment facade.
+ * @brief Export alignment types through bioseq.alignment.ksw2_batched.
  *
- * @details Re-exports `bioseq.alignment.contracts` through the public
- * `bioseq.alignment.ksw2_batched` module. Target selection and algorithm implementation
- * remain outside this facade.
+ * The declarations come from bioseq.alignment.contracts.
  */
 export module bioseq.alignment.ksw2_batched;
 

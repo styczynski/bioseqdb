@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Shares direct hash32 fixtures and independent wire oracles.
+ * @brief Builds direct-index fixtures and checks their bytes and  query results independently.
  */
 module;
 
@@ -16,7 +16,7 @@ export namespace bioseq::tests::unit::indexing::compact_hash32_direct_index_test
 
 namespace idx = bioseq::indexing;
 
-/// Construct the persisted identity shared by direct-index fixtures.
+/// Builds a test index identity, with fixed generation and source IDs.
 [[nodiscard]] constexpr idx::direct_index_identity identity(std::uint64_t target_length) noexcept {
     return idx::direct_index_identity{
         .generation_id = 0x1112131415161718ULL,
@@ -26,7 +26,7 @@ namespace idx = bioseq::indexing;
     };
 }
 
-/// Construct direct-index build options for one target geometry.
+/// Builds direct-index settings for a target length, fragment size and optional bucket count.
 [[nodiscard]] idx::direct_index_build_options options(std::uint64_t target_length,
                                                       std::uint64_t fragment_span = 0u,
                                                       std::uint64_t bucket_override = 0u) noexcept {
@@ -37,7 +37,7 @@ namespace idx = bioseq::indexing;
     };
 }
 
-/// Decode one unsigned integer with the independent little-endian reader.
+/// Reads an unsigned little-endian value without using the production decoder.
 template <class p_unsigned_integer>
     requires std::is_unsigned_v<p_unsigned_integer>
 [[nodiscard]] constexpr p_unsigned_integer reference_read_le(std::span<const std::byte> input,
@@ -51,7 +51,7 @@ template <class p_unsigned_integer>
     return value;
 }
 
-/// Encode one unsigned integer with the independent little-endian writer.
+/// Writes an unsigned little-endian value without using the production encoder.
 template <class p_unsigned_integer>
     requires std::is_unsigned_v<p_unsigned_integer>
 constexpr void reference_write_le(std::span<std::byte> output,
@@ -63,8 +63,7 @@ constexpr void reference_write_le(std::span<std::byte> output,
     }
 }
 
-/// Independent bit-at-a-time CRC-64/ECMA-182 oracle.  The implementation
-/// deliberately does not call the production lookup-table codec.
+/// Computes CRC-64/ECMA-182 one bit at a time as a reference for the table-based codec.
 [[nodiscard]] constexpr std::uint64_t reference_crc64(std::span<const std::byte> bytes) noexcept {
     constexpr std::uint64_t polynomial = 0x42F0E1EBA9EA3693ULL;
     std::uint64_t checksum = 0u;
@@ -78,7 +77,7 @@ constexpr void reference_write_le(std::span<std::byte> output,
     return checksum;
 }
 
-/// Rewrite the direct-index header checksum after fixture mutation.
+/// Recomputes the direct-index header checksum after a test changes its bytes.
 void reference_reseal_header(std::vector<std::byte>& image) {
     std::vector<std::byte> header(image.begin(),
                                   image.begin() + idx::k_direct_inverted_index_header_bytes);
@@ -90,7 +89,7 @@ void reference_reseal_header(std::vector<std::byte>& image) {
         image, idx::k_direct_inverted_index_header_crc_offset, reference_crc64(header));
 }
 
-/// Rewrite the compact-hash32 header checksum after fixture mutation.
+/// Recomputes the compact-index  header checksum after a test changes its bytes.
 void reference_reseal_compact_hash32_header(std::vector<std::byte>& image) {
     REQUIRE(image.size() >= idx::k_compact_hash32_direct_index_header_bytes);
     std::array<std::byte, idx::k_compact_hash32_direct_index_header_bytes> header{};
@@ -103,7 +102,7 @@ void reference_reseal_compact_hash32_header(std::vector<std::byte>& image) {
         image, idx::k_compact_hash32_header_crc_offset, reference_crc64(header));
 }
 
-/// Rewrite the controls checksum and enclosing direct-index header checksum.
+/// Recomputes the control-section checksum, then the header checksum that contains it.
 void reference_reseal_controls(std::vector<std::byte>& image) {
     const std::uint64_t offset = reference_read_le<std::uint64_t>(image, 112u);
     const std::uint64_t bytes = reference_read_le<std::uint64_t>(image, 120u);
@@ -115,10 +114,10 @@ void reference_reseal_controls(std::vector<std::byte>& image) {
     reference_reseal_header(image);
 }
 
-/// Hash-to-occurrence map used as a direct-query oracle.
+/// Reference occurrences grouped by hash for query comparisons.
 using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurrence>>;
 
-/// Group fixture occurrences by hash without changing multiplicity.
+/// Groups occurrences by hash, keeping duplicates.
 [[nodiscard]] oracle_type make_oracle(std::span<const idx::direct_index_occurrence> input) {
     oracle_type oracle;
     for (const auto& occurrence : input) {
@@ -127,7 +126,7 @@ using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurr
     return oracle;
 }
 
-/// Count strand-zero occurrences in one oracle bucket.
+/// Counts occurrences on target strand zero
 [[nodiscard]] std::uint64_t
 oracle_strand_zero_count(const std::vector<idx::direct_index_occurrence>& occurrences) noexcept {
     return static_cast<std::uint64_t>(
@@ -136,13 +135,13 @@ oracle_strand_zero_count(const std::vector<idx::direct_index_occurrence>& occurr
         }));
 }
 
-/// Own postings collected for each selected query ordinal.
+/// Stores positions received for each selected target hash and counts callbacks.
 struct collected_postings {
     std::vector<std::vector<std::uint64_t>> by_selection{};
     std::uint64_t callback_count = 0u;
 };
 
-/// Append one posting through the erased direct-query callback.
+/// Saves one position and checks that its strand bit matches the decoded strand.
 bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
     auto& collected = *static_cast<collected_postings*>(opaque);
     if (posting.selection_ordinal >= collected.by_selection.size()) {
@@ -176,7 +175,7 @@ expected_postings(std::vector<idx::direct_index_occurrence> occurrences,
     return result;
 }
 
-/// Build a direct-index image and require success.
+/// Builds a direct-indx byte image, failing the test if construction fails.
 [[nodiscard]] std::vector<std::byte>
 build_or_fail(std::span<const idx::direct_index_occurrence> input,
               const idx::direct_index_build_options& build_options) {
@@ -185,7 +184,7 @@ build_or_fail(std::span<const idx::direct_index_occurrence> input,
     return std::move(*image);
 }
 
-/// Validate a direct-index image and require success.
+/// Validates a direct-index image and returns a view borrowing its bytes.
 [[nodiscard]] idx::direct_inverted_index_view
 validate_or_fail(const std::vector<std::byte>& image,
                  const idx::direct_index_identity& expected_identity) {
@@ -194,7 +193,7 @@ validate_or_fail(const std::vector<std::byte>& image,
     return *view;
 }
 
-/// Compare every planned query result with the hash-to-occurrence oracle.
+/// Checks planned counts, strand totals and occurrence-limit decisions against the reference  map.
 void require_matches_oracle(const idx::direct_index_query_plan& plan,
                             std::span<const idx::direct_index_query_occurrence> queries,
                             const oracle_type& oracle,
@@ -225,13 +224,13 @@ void require_matches_oracle(const idx::direct_index_query_plan& plan,
     }
 }
 
-/// Own one sorted compact-hash32 run.
+/// One hash run with its header and encoded target positions.
 struct compact_test_run {
     idx::compact_hash32_sorted_run_header header{};
     std::vector<std::uint64_t> encoded_positions{};
 };
 
-/// Own initial and optional replay runs for a compact source callback.
+/// Holds the first scan's runs and optional changed runs for replay tests.
 struct compact_test_source {
     std::vector<compact_test_run> runs{};
     std::vector<compact_test_run> replay_runs{};
@@ -239,7 +238,7 @@ struct compact_test_source {
     std::uint64_t scans = 0u;
 };
 
-/// Replay compact fixture runs through the erased source callback.
+/// Sends each fixture run to the receiver in two batches, using changed data on replay if requested.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 scan_compact_test_runs(void* opaque, const idx::compact_hash32_sorted_run_receiver& receiver) {
     auto& source = *static_cast<compact_test_source*>(opaque);
@@ -266,7 +265,7 @@ scan_compact_test_runs(void* opaque, const idx::compact_hash32_sorted_run_receiv
     return {};
 }
 
-/// Return the erased source bound to one compact fixture.
+/// Connects a test source object to the compact-index scan callback.
 [[nodiscard]] idx::compact_hash32_sorted_run_source
 compact_source_ref(compact_test_source& source) noexcept {
     return idx::compact_hash32_sorted_run_source{
@@ -275,7 +274,7 @@ compact_source_ref(compact_test_source& source) noexcept {
     };
 }
 
-/// Derive a compact hash domain from its bit width.
+/// Defines the hash range represented by the requested number of bits.
 [[nodiscard]] constexpr idx::compact_hash32_geometry compact_geometry(std::uint8_t bits) noexcept {
     return idx::compact_hash32_geometry{
         .hash_domain_bits = bits,
@@ -284,7 +283,7 @@ compact_source_ref(compact_test_source& source) noexcept {
     };
 }
 
-/// Construct compact-hash32 build options for one target and cap.
+/// Builds compact-index settings with a target length, occurrence cap and hash width.
 [[nodiscard]] idx::compact_hash32_build_options compact_options(
     std::uint64_t target_length, std::uint32_t max_occ_cap, std::uint8_t hash_bits = 9u) noexcept {
     return idx::compact_hash32_build_options{
@@ -294,7 +293,7 @@ compact_source_ref(compact_test_source& source) noexcept {
     };
 }
 
-/// Construct bounded-open expectations from compact build options.
+/// Copies expected identity, occurrence cap and hash width into the header-open settings.
 [[nodiscard]] idx::compact_hash32_bounded_open_options compact_bounded_options(
     const idx::compact_hash32_build_options& build_options,
     std::optional<std::uint64_t> expected_direct_header_crc64 = std::nullopt) noexcept {
@@ -306,12 +305,12 @@ compact_source_ref(compact_test_source& source) noexcept {
     };
 }
 
-/// Pack a target position and strand into the persisted word.
+/// Packs the target position with the strand in the  low bit.
 [[nodiscard]] constexpr std::uint64_t encoded_position(std::uint64_t bp, bool strand_one) noexcept {
     return (bp << 1u) | static_cast<std::uint64_t>(strand_one);
 }
 
-/// Build a compact-hash32 image and require success.
+/// Builds a compact-index byte image, failing the test on an error.
 [[nodiscard]] std::vector<std::byte>
 build_compact_or_fail(compact_test_source& source,
                       const idx::compact_hash32_build_options& build_options) {
@@ -320,7 +319,7 @@ build_compact_or_fail(compact_test_source& source,
     return std::move(*image);
 }
 
-/// Validate a compact-hash32 image and require success.
+/// Validates a compact-index image and returns a view borrowing, its bytes.
 [[nodiscard]] idx::compact_hash32_direct_index_view
 validate_compact_or_fail(const std::vector<std::byte>& image,
                          const idx::compact_hash32_build_options& build_options) {
@@ -330,7 +329,7 @@ validate_compact_or_fail(const std::vector<std::byte>& image,
     return *view;
 }
 
-/// Rewrite compact payload-section checksums and the enclosing header checksum.
+/// Recomputes all compact payload checksums and then the header checksum.
 void reference_reseal_compact_hash32_payload_and_header(std::vector<std::byte>& image) {
     const auto reseal_section = [&image](std::size_t crc_offset,
                                          std::size_t section_offset_field,
@@ -352,7 +351,7 @@ void reference_reseal_compact_hash32_payload_and_header(std::vector<std::byte>& 
     reference_reseal_compact_hash32_header(image);
 }
 
-/// Open a bounded compact image while retaining its shared byte owner.
+/// Opens the compact header and keeps its backing byte vector alive through shared ownership
 [[nodiscard]] std::expected<idx::compact_hash32_bounded_open_view, idx::direct_inverted_index_error>
 open_compact_bounded_owned(std::vector<std::byte> image,
                            const idx::compact_hash32_bounded_open_options& open_options) {

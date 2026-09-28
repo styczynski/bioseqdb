@@ -1,6 +1,6 @@
 /**
  * @file block_aligner_kernel.cppm
- * @brief Exposes adaptive-block alignment statistics, facade, and dispatch slots.
+ * @brief Run BlockAligner for one CPU instruction set and collect its execution statistics.
  */
 module;
 
@@ -44,12 +44,11 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Records an admitted call before zero-work or SIMD path selection.
- * @param[in,out] stats Aggregate execution counters.
- * @param[in] parameters Alignment contract for the call.
- * @param[in] query_length Admitted query extent.
- * @param[in] target_length Admitted target extent.
- * @param[in] configuration_identity Stable scoring and parameter identity.
+ * Count a validated alignment request before choosing how to execute it.
+ *
+ * Record the extension  stage, alignment mode, input order and scoring identity.
+ * For reversed nonempty inputs, also count the symbols expected to be encoded.
+ * These totals can be compared with the execution counters.
  */
 inline void record_block_aligner_eligibility(
         block_aligner_execution_stats& stats,
@@ -80,13 +79,11 @@ inline void record_block_aligner_eligibility(
 }
 
 /**
- * @brief Records the executed path and exact SIMD work for one admitted call.
- * @param[in,out] stats Aggregate execution counters.
- * @param[in] parameters Alignment contract for the call.
- * @param[in] lane_count Active signed-16-bit Highway lanes.
- * @param[in] is_zero_work Whether an empty input bypassed biological work.
- * @param[in] core_stats Exact recurrence or certificate counters.
- * @param[in] configuration_identity Stable scoring and parameter identity.
+ * Add the completed call to the execution statistics.
+ *
+ * Count empty inputs, SIMD alignment work and successful diagonal shortcuts
+ * separately. Copy the block growth, shrink and X-drop counters, and mark the
+ * aggregate as saturated when the core counters or lane count are invalid
  */
 inline void record_block_aligner_execution(
         block_aligner_execution_stats& stats,
@@ -149,8 +146,8 @@ inline void record_block_aligner_execution(
 }
 
 /**
- * @brief Aborts a forbidden attempt to execute biological work with scalar DP.
- * @param[in,out] stats Aggregate execution counters.
+ * Count and abort an  attempt to run BlockAligner with an unswpported SIMD lane count.
+ * @param[in,out] stats Execution counters for the alignment batch.
  */
 [[noreturn]] inline void abort_forbidden_scalar_biological_fallback(
         block_aligner_execution_stats& stats) {
@@ -160,20 +157,22 @@ inline void record_block_aligner_execution(
     std::abort();
 }
 
-// =============================================================================
-// Fixed-target implementation
-// =============================================================================
+// BlockAligner for the selected CPU instruction set.
 
-/** Fixed-target adaptive-block implementation used by generated callables. */
+/** BlockAligner entry points compiled for one CPU instruction set. */
 class highway_block_aligner {
 public:
     /**
-     * @brief Precomputes invariant contract and matrix checks for packed gaps.
-     * @tparam p_alphabet Logical sequence alphabet.
-     * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
-     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
-     * @param[in] parameters Alignment contract retained by the plan.
-     * @return Prepared contract, scoring identity, and target lane count.
+     * Check the scoring matrix and BlockAligner settings once for repeated gap checks.
+     *
+     * The returned plan stores the scoring identity, SIMD lane count and match and
+     * mismatch scores needed to test whether a gap can be aligned without insertions
+     * or deletions. Unsupported settings are recorded in the  plan.
+     *
+     * @tparam p_alphabet Sequence alphabet.
+     * @tparam p_alphabet_dimension Matrix size, including the wildcard rank.
+     * @param scoring_matrix Scores for symbol pairs.
+     * @param parameters Alignment settings to save in the plan.
      */
     template<
         sequence_alphabet p_alphabet,
@@ -207,17 +206,14 @@ public:
     }
 
     /**
-     * @brief Attempts packed resident certification for one oriented gap.
-     * @tparam p_is_reversed Whether query ranks use reverse orientation.
-     * @tparam p_alphabet Logical sequence alphabet.
-     * @param[in] query_seq Query sequence facade.
-     * @param[in] target_seq Target sequence facade.
-     * @param[in] query_start Inclusive query coordinate.
-     * @param[in] query_end Exclusive query coordinate.
-     * @param[in] target_start Inclusive target coordinate.
-     * @param[in] target_end Exclusive target coordinate.
-     * @param[in] plan Prepared matrix and alignment contract.
-     * @return Three-way packed certificate attempt.
+     * Try to prove that this gap needs no insertions or deletions.
+     *
+     * Read resident packed DNA4 directly. The result says whether the check could
+     * run, ran without proving the diagonal best, or proved it and supplies the
+     * score and edit count. The caller can use dynamic programming when it fails.
+     *
+     * The, query and target intervals are half-open. p_is_reversed selects the
+     * query orientation, and  plan contains the checked scoring settings.
      */
     template<
         bool p_is_reversed,
@@ -237,25 +233,19 @@ public:
     }
 
     /**
-     * @brief Aligns one admitted pair of sequence subregions.
-     * @tparam p_is_reversed Whether query ranks use reverse orientation.
-     * @tparam p_is_diagonal_certificate_enabled Whether the byte certificate may run.
-     * @tparam p_alphabet Logical sequence alphabet.
-     * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
-     * @param[in] query_seq Query sequence facade.
-     * @param[in] target_seq Target sequence facade.
-     * @param[in] query_start Inclusive query coordinate.
-     * @param[in] query_end Exclusive query coordinate.
-     * @param[in] target_start Inclusive target coordinate.
-     * @param[in] target_end Exclusive target coordinate.
-     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
-     * @param[in] parameters Alignment contract.
-     * @param[in,out] execution_stats Optional aggregate execution counters.
-     * @param[in,out] construction_stats Optional scratch-allocation counters.
-     * @return Pipeline alignment result with score, endpoints, and optional CIGAR.
+     * Align the requested query and taret intervals with BlockAligner.
      *
-     * Gap open and extension use positive minimap q/e encoding. The adaptive
-     * recurrence receives `-(gap_open + gap_extend)` and `-gap_extend`.
+     * Global mode joins both ends of the intervals, while X-drop mode extends
+     * from the start until the score falls too far below the best score
+     * An optional ungapped check can skip DP.
+     *
+     * Intervals are half-open. p_is_reversed selects the query orientation, while
+     * parameters.input_order controls the direction in which both inputs are read.
+     * Gap penalties are positive. A gap of length n costs gap_open + n * gap_extend.
+     *
+     * The result owns its CIGAR, and parameters select trace and edit-count output
+     * while the optional counters record execution work and scratch  allocation counts.
+     * Invalid coordinates, scoring layouts and BlockAligner settings abort execution.
      */
     template<
         bool p_is_reversed,
@@ -285,8 +275,7 @@ public:
         const size_t lane_count = hn::Lanes(simd_tag);
         if (execution_stats != nullptr
             && !is_block_aligner_lane_shape_supported(lane_count)) {
-            // The native path has no scalar biological implementation. Make
-            // the forbidden boundary operational and fail before any work.
+            // This BlockAligner requires SIMD. Stop before allocating or aligning.
             abort_forbidden_scalar_biological_fallback(
                 *execution_stats);
         }
@@ -430,7 +419,7 @@ public:
         const auto storage_plan = require_block_storage_plan(
             query_length, target_length, maximum_block_size, parameters.is_trace_enabled);
 
-        // Convert positive q/e into the reference's negative gap costs.
+        // The block recurrence uses negative costs for opening and extending gaps.
         const int8_t negative_gap_open = static_cast<int8_t>(
             -(static_cast<int>(parameters.gap_open) + parameters.gap_extend));
         const int8_t negative_gap_extension = static_cast<int8_t>(-parameters.gap_extend);
@@ -440,8 +429,7 @@ public:
             construction_stats->padded_sequence_allocations += 2u;
         }
         if (parameters.input_order == block_input_order::reversed) {
-            // Emit reversed alignment orientation directly from compact
-            // storage without a scalar whole-buffer reverse pass.
+            // Decode both inputs in reverse order directly into the DP buffers.
             query_padded.template encode_region<p_is_reversed, true, p_alphabet_dimension>(
                 query_seq, query_start, query_end, maximum_block_size);
             target_padded.template encode_region<false, true, p_alphabet_dimension>(
@@ -561,8 +549,8 @@ public:
         if (output_query_position >= query_length) {
             result.mqe = score;
             result.mqe_t = static_cast<int32_t>(output_reference_position) - 1;
-            // Query completion uses the exclusive coordinate returned by the
-            // adaptive-block recurrence; the reference may stop earlier.
+            // Reaching the query end is enough to set has_reached_end.
+            // The target may still have unread symbols.
             result.has_reached_end = true;
         }
         if (output_reference_position >= target_length) {
@@ -581,11 +569,10 @@ public:
 };
 
 /**
- * @brief Prepares invariant packed-gap certificate state for the active target.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] parameters Alignment contract retained by the plan.
- * @return Prepared contract, scoring identity, and target lane count.
+ * Prepare the scoring checks reused by packed gap shortcuts on this CPU target.
+ *
+ * The plan stores the  alignment settings, scoring identity, and SIMD lane count,
+ * and records whethr the matrix supports the ungapped-alignment check.
  */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_global_gap_certificate_plan prepare_block_global_gap_certificate(
@@ -597,17 +584,11 @@ template<sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Attempts packed certification for one gap in the requested orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] is_reversed Whether query ranks use reverse orientation.
- * @param[in] query_sequence Query sequence facade.
- * @param[in] target_sequence Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] plan Prepared matrix and alignment contract.
- * @return Three-way packed certificate attempt.
+ * Check whether an ungapped alignment is best for the requested gap.
+ *
+ * Select the query orientation, then try the packed DNA4 check with the prepared
+ * plan. Both intervals are half-open. The result distinguishes an unavailable
+ * check, an inconclusive check and a proven alignment with its score and edit count
  */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_packed_certificate_attempt try_block_certified_gap(
@@ -630,21 +611,12 @@ template<sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Aligns one sequence region with the active fixed-target block kernel.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] is_reversed Whether query ranks use reverse orientation.
- * @param[in] is_diagonal_certificate_enabled Whether the byte certificate may run.
- * @param[in] query_sequence Query sequence facade.
- * @param[in] target_sequence Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] parameters Alignment contract.
- * @param[in,out] execution_stats Optional aggregate execution counters.
- * @param[in,out] construction_stats Optional scratch-allocation counters.
- * @return Pipeline alignment result with score, endpoints, and optional CIGAR.
+ * Run BlockAligner with the requested query orientation and shortcut setting.
+ *
+ * Both intervals are half-open. The  scoring matrix and parameters control gap
+ * penalties, global or X-drop alignment, and optional trace output. The result
+ * contains the score, endpoints and an owning CIGAR when tracing is enabled.
+ * Optional counters record execution work and scratch allocation.
  */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_block(

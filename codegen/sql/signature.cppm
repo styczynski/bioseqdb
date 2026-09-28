@@ -506,10 +506,8 @@ parse_routine_argument_declarations(
     return result;
 }
 
-/// Derives a catalog routine identity from a normalized routine name and its
-/// authored argument declarations. PostgreSQL routine identity includes only
-/// input-bearing SQL types: argument names, OUT-only arguments, modes, and
-/// default expressions do not participate.
+/// Builds a PostgreSQL routine identity  from its name and input argument types.
+/// Argument names, OUT-only arguments, mode keywords, and defaults are left out
 [[nodiscard]] inline std::string
 routine_identity_from_argument_declarations(
         std::string_view routine_name,

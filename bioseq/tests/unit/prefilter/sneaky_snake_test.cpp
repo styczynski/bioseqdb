@@ -1,11 +1,10 @@
 /**
  * @file sneaky_snake_test.cpp
- * @brief Verifies SneakySnake soundness and scalar, fixed-target, and Vulkan parity.
+ * @brief Check SneakySnake lower bounds and agreement between scalar, Highway, and Vulkan results.
  *
- * The suite compares lower bounds with an independent exact-distance oracle, exercises submaze
- * and active-lane boundaries, validates the generated Highway callable table, and checks Vulkan
- * replay with fresh mapped rank bytes. Arbitrary byte alphabets and malformed slices retain their
- * conservative contracts across every backend.
+ * Independent edit-distance tests check that  valid matches survive. Other
+ * cases cover chunk boundaries, inactive SIMD lanes, invalid slices, and
+ * Vulkan command replay after input bytes change.
  */
 #include <hwy/highway.h>
 #include <catch2/catch_test_macros.hpp>
@@ -26,9 +25,9 @@ using namespace bioseq::prefilter;
 namespace {
 
 /**
- * @brief Resolves the generated fixed-target SneakySnake callable used by this test translation.
- * @return The non-null callable installed in the fixed-target Highway test table.
- * @throws std::logic_error If the generated table omitted the callable.
+ * @brief Get the SneakySnake kernel for this test's Highway target.
+ * @return The generated table's callable.
+ * @throws std::logic_error If the table has no SneakySnake kernel.
  */
 [[nodiscard]] ::bioseq::simd_dispatch::sneaky_snake_simd_batch_kernel
 fixed_sneaky_snake_kernel()
@@ -43,10 +42,13 @@ fixed_sneaky_snake_kernel()
 }
 
 /**
- * @brief Computes an independent full-matrix global Levenshtein distance.
- * @param[in] query Query ranks in logical order.
- * @param[in] target Target ranks in logical order.
- * @return Exact insertion, deletion, and substitution distance.
+ * @brief Compute exact edit distance independently for the filter tests.
+ *
+ * Insertions, deletions, and substitutions cost one The calculation keeps
+ * the current and previous rows of the dynamic-programming matrix.
+ * @param[in] query Query ranks in sequence order.
+ * @param[in] target Target ranks in sequence  order.
+ * @return Global Levenshtein distance.
  */
 [[nodiscard]] std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
@@ -75,10 +77,8 @@ fixed_sneaky_snake_kernel()
 }
 
 /**
- * @brief Compares every field in the prefilter result ABI.
- * @param[in] lhs First result.
- * @param[in] rhs Second result.
- * @return `true` only when all four result fields are equal.
+ * @brief Compare the lower bound, status, acceptance flag, and diagnostics.
+ * @return True when all four fields match.
  */
 [[nodiscard]] bool same_result(
     const prefilter_result& lhs,
@@ -91,9 +91,8 @@ fixed_sneaky_snake_kernel()
 }
 
 /**
- * @brief Enumerates every binary rank string up to one inclusive length.
- * @param[in] max_length Greatest generated string length.
- * @return Strings ordered first by length and then by increasing source bits.
+ * @brief Generate every binary sequence up to max_length, including the empty sequence.
+ * @return Sequences ordered by length, then by integer bit pattern aith the lowest bit first.
  */
 [[nodiscard]] std::vector<std::vector<std::uint8_t>> binary_sequences(
     std::uint32_t max_length)
@@ -113,17 +112,10 @@ fixed_sneaky_snake_kernel()
     return sequences;
 }
 
-/**
- * @brief Owns deterministic linear-congruential state for reproducible rank fixtures.
- *
- * Instances are test-local, single-threaded, and have no external lifetime or ownership.
- */
+/** Reproducible rank generator for test inputs. */
 class deterministic_ranks {
 public:
-    /**
-     * @brief Advances the fixture generator.
-     * @return The next deterministic 32-bit value.
-     */
+    /** Advance the, generator and return the next 32-bit value. */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ = state_ * 1664525u + 1013904223u;
@@ -135,28 +127,31 @@ private:
 };
 
 /**
- * @brief Owns flat rank buffers, jobs, and per-job rank vectors for backend comparisons.
+ * @brief Keep both  batch buffers and separate sequence copies for comparisons.
  *
- * Job offsets address `query_ranks` and `target_ranks`. The `queries` and `targets` vectors retain
- * the same logical slices independently for exact-distance checks.
+ * Jobs address slices in query_ranks and target_ranks. The separate queries
+ * and targets let the exact-distance reference check each pair.
  */
 struct batch_fixture {
-    /** Flat query storage including poison ranks around logical slices. */
+    /** Query bytes with extra ranks around each slice to expose incorrect offsets. */
     std::vector<std::uint8_t> query_ranks;
-    /** Flat target storage including poison ranks around logical slices. */
+    /** Target bytes with extra ranks around each slice to expose incorrect offsets. */
     std::vector<std::uint8_t> target_ranks;
-    /** Ordered slices addressing the flat query and target storage. */
+    /** Slice offsets, lengths, and edit limits for each query-target pair. */
     std::vector<prefilter_job> jobs;
-    /** Logical query ranks retained independently for exact-distance checks. */
+    /** Separate query sequences for exact-distance checks. */
     std::vector<std::vector<std::uint8_t>> queries;
-    /** Logical target ranks retained independently for exact-distance checks. */
+    /** Separate target sequences for exact-distance checks. */
     std::vector<std::vector<std::uint8_t>> targets;
 };
 
 /**
- * @brief Builds a deterministic mixed-geometry batch with guarded rank slices.
- * @param[in] job_count Number of jobs and logical sequence pairs to generate.
- * @return An owning fixture containing ordered jobs and their flat and logical rank storage.
+ * @brief Build a reproducible batch  with varied lengths, alphabets, and edit limits.
+ *
+ * The first cases cross the 512-base chunk boundary. Extra bytes surround each
+ * slice to catch reads outside it
+ * @param[in] job_count Number of query-target pairs.
+ * @return Buffers, jobs, and separate copies of each sequence pair.
  */
 [[nodiscard]] batch_fixture random_batch(std::size_t job_count)
 {
@@ -189,8 +184,7 @@ struct batch_fixture {
             rank = static_cast<std::uint8_t>(random.next() % alphabet_size);
         }
 
-        // Noise around every slice verifies that offsets, rather than buffer
-        // beginnings, drive both implementations.
+        // Extra ranks around each slice make incorrect offsets visible in the result.
         fixture.query_ranks.push_back(255u);
         const std::uint32_t query_offset = static_cast<std::uint32_t>(
             fixture.query_ranks.size());
@@ -253,10 +247,8 @@ TEST_CASE(
     REQUIRE(accepted.lower_bound == 1u);
     REQUIRE(is_prefilter_accepted(accepted));
 
-    // Source-row parity fixtures: the original C maze compares target[n]
-    // against query[n-e] and query[n+e] at global coordinates.  A one-rank
-    // displacement therefore crosses one boundary obstacle and then escapes
-    // along the corresponding off-diagonal row.
+    // A one-rank shift reaches a matching off-diagonal after one obstcle.
+    // These cases check both shift directions and expect a lower bound of one.
     const std::array<std::uint8_t, 6u> source_row{0u, 1u, 2u, 3u, 4u, 5u};
     const std::array<std::uint8_t, 6u> shifted_right{9u, 0u, 1u, 2u, 3u, 4u};
     const std::array<std::uint8_t, 6u> shifted_left{1u, 2u, 3u, 4u, 5u, 9u};
@@ -488,9 +480,9 @@ TEST_CASE(
     target[winning_start] = 0u;
     target[winning_start + 1u] = 2u;
 
-    // Keep the first submaze identical while making the winning candidate in
-    // the second submaze begin beyond three complete maximum-size fixed-target
-    // candidate-mask blocks.
+    // Keep the first chunk equal. In the second  chunk, place the longest
+    // matching diagonal past three 64-position candidate blocks to check that
+    // the SIMD search reaches it.
     std::copy_n(
         target.begin() + winning_start,
         candidate_block,
@@ -554,10 +546,9 @@ TEST_CASE(
         const auto gpu = vp::run_sneaky_snake_vulkan_batch(
             fixture.query_ranks, fixture.target_ranks, fixture.jobs);
 
-        // Keep the recorded-command key identical while changing mapped input
-        // bytes. Equal supported jobs become exact matches, validating that
-        // replay executes and observes fresh host writes rather than returning
-        // the first submission's result buffer.
+        // Reuse the command shape with new target bytes. Supported equal-length
+        // pairs become exact matches, so changed results confirm that replay reads
+        // the latest host writes.
         std::vector<std::uint8_t> replay_targets = fixture.target_ranks;
         for (const prefilter_job& job : fixture.jobs) {
             if (job.query_length == job.target_length
@@ -617,8 +608,8 @@ TEST_CASE(
         CHECK(observed_changed_result);
     };
 
-    // Force the independent-invocation path while retaining offsets, arbitrary
-    // uint8 ranks, partial workgroups, and all submaze boundary lengths.
+    // Small edit limits select one GPU invocation per job. Check slice
+    // offsets and chunk boundaries with a partially filled workgroup.
     batch_fixture low_edit_fixture = random_batch(12u);
     for (prefilter_job& job : low_edit_fixture.jobs) {
         job.max_edits = std::min(job.max_edits, 8u);

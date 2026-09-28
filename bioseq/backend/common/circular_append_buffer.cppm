@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Fixed-storage circular buffer for delayed streaming algorithm values.
+ * @brief Circular buffer for values kept by streaming algorithms.
  */
 module;
 
@@ -19,39 +19,32 @@ import bioseq.common.seqan_adapter;
 
 export namespace bioseq::common {
 
-/// @brief Strongly typed slot position within a @ref circular_append_buffer.
+/// @brief Slot index for a @ref circular_append_buffer.
 BOOST_STRONG_TYPEDEF(std::size_t, circular_append_buffer_position);
 
 /**
- * @brief Placeholder allocator for buffers whose storage is an inline array.
+ * @brief Default allocator type for buffers that  store an inline array.
  *
- * @tparam p_value_type Element type carried by the owning buffer.
- * @tparam p_storage_type Storage type carried by the owning buffer.
+ * It has no allocate function because inline storage needs no allocation.
  */
 template <typename p_value_type, typename p_storage_type>
 struct unavailable_circular_append_buffer_allocator {};
 
 /**
- * @brief Circular write buffer backed by inline or allocator-provided storage.
+ * @brief Stores a window of values and overwrites old slots when it wraps.
  *
- * The buffer owns its storage and is not synchronized. Dynamic-capacity
- * instances wrap at the constructor-supplied capacity. Fixed-capacity
- * instances use the next power-of-two storage bound and a mask. Accessors do
- * not validate positions because this type serves latency-sensitive streaming
- * loops whose bounds are established by the owning algorithm.
+ * The buffer owns its storage. Callers track how many values have been
+ * written and keep slot indices in range, since accessors do no bounds
+ * checking and the buffer has no synchronization Runtime capacity sets
+ * the wrap point. Fixed capacity rounds the requested size up to a power
+ * of two, which allows wrapping with a mask.
  *
  * @tparam p_value_type Stored element type.
- * @tparam p_requested_capacity Compile-time upper bound for allocated slots.
- * @tparam p_alignment Alignment of the storage field. Zero requests no additional alignment.
- * @tparam p_is_fixed_capacity Whether wrapping uses the compile-time power-of-two capacity.
- * @tparam p_storage_type Inline storage when `void`, otherwise an indexable owning storage type.
- * @tparam p_allocator_template Allocator used only for non-void storage types.
- *
- * @code{.cpp}
- * bioseq::common::circular_append_buffer<int, 8> values{8};
- * values.push_back(3);
- * const int latest = values.get_last_value();
- * @endcode
+ * @tparam p_requested_capacity Requested storage size before rounding.
+ * @tparam p_alignment Storage  alignment. Zero adds no alignment requirement.
+ * @tparam p_is_fixed_capacity Use the rounded size as the wrap point.
+ * @tparam p_storage_type Inline array when void, otherwise an owning indexable type.
+ * @tparam p_allocator_template Allocates storage when p_storage_type is non-void.
  */
 template <
     typename p_value_type,
@@ -65,22 +58,19 @@ class circular_append_buffer {
 public:
     static_assert(p_requested_capacity > 0u);
 
-    /// @brief Strong slot-position type used by traversal methods.
+    /// @brief Slot index used by buffer access and traversal.
     using position_type = circular_append_buffer_position;
 
-    /// @brief Number of physically available slots, rounded up to a power of two.
+    /// @brief Requested cmpile-time capacity rounded up to a power of two.
     static constexpr std::size_t k_storage_size =
         std::size_t{1} << seqan3::detail::ceil_log2(p_requested_capacity);
 
-    /// @brief Bit mask used by fixed-capacity position advancement.
+    /// @brief Mask used to wrap fixed-capacity slot positions.
     static constexpr std::size_t k_size_mask = k_storage_size - 1u;
 
 private:
     /**
-     * @brief Concrete inline-array or allocator-owned storage representation.
-     *
-     * `std::array` preserves contiguous inline storage without allocation while
-     * making the fixed extent part of the storage type.
+     * @brief Inline array by, default, or the caller's owning storage type.
      */
     using storage_type = std::conditional_t<
         std::is_same_v<p_storage_type, void>,
@@ -133,9 +123,9 @@ public:
           capacity_(capacity) {}
 
     /**
-     * @brief Returns the active number of slots.
+     * @brief Returns the number of slots used before wrapping.
      *
-     * @return Runtime capacity or the fixed power-of-two storage capacity.
+     * This is  the requested runtime capacity or the rounded fixed capacity.
      */
     [[nodiscard, gnu::always_inline]] constexpr std::size_t get_capacity() const {
         if constexpr (p_is_fixed_capacity) {
@@ -146,9 +136,7 @@ public:
     }
 
     /**
-     * @brief Returns the first slot position.
-     *
-     * @return Position representing slot zero.
+     * @brief Returns the index of slot zero.
      */
     [[nodiscard, gnu::always_inline]] static constexpr position_type
     get_begin_position() {
@@ -156,10 +144,8 @@ public:
     }
 
     /**
-     * @brief Returns a read-only value at a trusted slot position.
-     *
-     * @param[in] position Position known to be below @ref get_capacity.
-     * @return Reference to the stored value.
+     * @brief Reads a slot without checking its index.
+     * @pre position is below get_capacity() and the slot contains a value.
      */
     [[nodiscard, gnu::always_inline]] constexpr const p_value_type& get_value_at(
         const position_type& position) const {
@@ -167,10 +153,8 @@ public:
     }
 
     /**
-     * @brief Returns a mutable value at a trusted slot position.
-     *
-     * @param[in] position Position known to be below @ref get_capacity.
-     * @return Mutable reference to the stored value.
+     * @brief Returns a mutable reference to a slot.
+     * @pre position is below get_capacity(). No bounds check is performed.
      */
     [[nodiscard, gnu::always_inline]] constexpr p_value_type& get_value_at(
         const position_type& position) {
@@ -178,10 +162,8 @@ public:
     }
 
     /**
-     * @brief Returns a read-only pointer at a trusted slot position.
-     *
-     * @param[in] position Position known to be below @ref get_capacity.
-     * @return Pointer into this buffer's storage.
+     * @brief Returns a read-only pointer to a slot.
+     * @pre position is below get_capacity(). No bounds check is performed.
      */
     [[nodiscard, gnu::always_inline]] constexpr const p_value_type* get_pointer_at(
         const position_type& position) const {
@@ -189,10 +171,8 @@ public:
     }
 
     /**
-     * @brief Returns a mutable pointer at a trusted slot position.
-     *
-     * @param[in] position Position known to be below @ref get_capacity.
-     * @return Mutable pointer into this buffer's storage.
+     * @brief Returns a mutable pointer to a slot.
+     * @pre position is below get_capacity(). No bounds check is performed.
      */
     [[nodiscard, gnu::always_inline]] constexpr p_value_type* get_pointer_at(
         const position_type& position) {
@@ -200,9 +180,7 @@ public:
     }
 
     /**
-     * @brief Returns the slots between the write position and the physical end.
-     *
-     * @return Contiguous slot count available before wrapping.
+     * @brief Returns how many writes fit before the next wrap.
      */
     [[nodiscard, gnu::always_inline]] constexpr std::size_t
     get_contiguous_capacity() const {
@@ -210,10 +188,9 @@ public:
     }
 
     /**
-     * @brief Advances and wraps a position for a runtime-capacity buffer.
-     *
-     * @param[in,out] position Position to advance.
-     * @param[in] increment Number of slots to advance.
+     * @brief Advances a slot index, wrapping at the runtime capacity.
+     * @param[in,out] position Slot index to advance.
+     * @param[in] increment Number of slots to advance
      */
     [[gnu::always_inline]] constexpr void advance_position(
         position_type& position,
@@ -227,9 +204,8 @@ public:
     }
 
     /**
-     * @brief Advances and masks a position for a fixed-capacity buffer.
-     *
-     * @param[in,out] position Position to advance.
+     * @brief Advances a slot index, wrapping at the fixed capacity.
+     * @param[in,out] position Slot index to advance.
      * @param[in] increment Number of slots to advance.
      */
     [[gnu::always_inline]] constexpr void advance_position(
@@ -240,8 +216,9 @@ public:
     }
 
     /**
-     * @brief Appends a trivially copyable value and advances the write position.
+     * @brief Writes a value and moves to  the next slot.
      *
+     * Overwrites the old value when the buffer wraps.
      * @param[in] value Value copied into the current slot.
      */
     [[gnu::always_inline]] inline void push_back(p_value_type value)
@@ -252,10 +229,8 @@ public:
     }
 
     /**
-     * @brief Appends a convertible nontrivial value and advances the write position.
-     *
-     * @tparam p_input_type Source value type.
-     * @param[in] value Value forwarded into the current slot.
+     * @brief Forwards a value into the next slot, overwriting its old value.
+     * @param[in] value Value assigned to the slot.
      */
     template <typename p_input_type>
         requires(!std::is_trivially_copyable_v<p_value_type>) &&

@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/04_matcher_test.cpp
- * @brief Bucket-direct and scalar matcher differential behavior.
+ * @brief Compares bucket-based hash matching with the baseline matcher.
  */
 
 #include <hwy/highway.h>
@@ -36,7 +36,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -58,8 +58,8 @@ TEST_CASE("bucket-direct Bloom matcher is byte-identical to its test oracle",
         {7u, 20u},
         {511u, 40u},
         {512u, 60u},
-        // Low-9 mask 63 is covered by the union of query masks 0 and 28.
-        // This absent hash therefore exercises Bloom-positive exact fallback.
+        // This hash passes the query Bloom filter even though the query does not
+        // contain it. Exact lookup must reject it.
         {8'192u + 63u, 70u},
         {1'048'575u, 80u},
         {1'048'576u, 100u},

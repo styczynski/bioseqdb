@@ -12,9 +12,9 @@ import bioseq.codegen.sql.graph;
 export namespace bioseq::codegen::sql {
 
 /**
- * Enforce compiler-owned main-extension FMgr registration when complete code
- * generation is requested. The separately linked external-relation DSO keeps
- * one exact reviewed PostgreSQL ABI boundary.
+ * Requires generated PostgreSQL function wrappers when complete code
+ * generation is requested. The only allowed handwritten wrapper is
+ * `bioseq_external_handler` in the external-data extension.
  */
 inline void validate_codegen_completion_policy(
         const sql_graph& graph,

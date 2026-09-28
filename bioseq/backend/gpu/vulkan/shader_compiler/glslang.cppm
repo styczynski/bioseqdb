@@ -1,6 +1,6 @@
 /**
  * @file glslang.cppm
- * @brief Selects embedded shader bodies and compiles them with glslang.
+ * @brief Compile the embedded Vulkan compute shaders with glslang.
  */
 module;
 
@@ -23,8 +23,8 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
-/// @brief Resolve a shader kind to its embedded GLSL body (everything after the
-/// `#version`/`#extension`/`#define` prelude the compiler injects).
+/// @brief Return the GLSL body for a  shader kind. The compiler adds the version,
+/// required extensions and parameter definitions before this body.
 [[nodiscard]] std::string shader_body_for(shader_kind kind) {
     switch (kind) {
     case shader_kind::chain_tiled_dp_u64:
@@ -33,8 +33,8 @@ namespace {
         return std::string{k_seed_lookup_anchors_body};
     case shader_kind::sort_anchors_bitonic:
         return std::string{k_sort_anchors_bitonic_body};
-    // The ordered-sketch family shares one tile-replay body (the
-    // packed-sequence reader helpers are inlined inside it).
+    // These sketch stages use the same shader. It reads packed sequences
+    // and selects its work through the emit_mode parameter.
     case shader_kind::ordered_sketch_tile:
     case shader_kind::sketch_emit_flags:
     case shader_kind::sketch_emit_carry:
@@ -118,20 +118,16 @@ namespace {
     throw shader_compile_error("compile_shader_spirv: unknown shader_kind");
 }
 
-/// @brief glslang's process-wide initialiser is reference-counted but not safe to
-/// race. Call it exactly once for the process lifetime. We intentionally do not
-/// `FinalizeProcess()` — the cost is a small one-time leak at exit, and it
-/// avoids a teardown race if any thread is mid-compile.
+/// @brief Initialize glslang once, even when several threads request shaders.
+/// Keep it initialized until, process exit so cleanup cannot rac with compilation.
 void ensure_glslang_initialized() {
     static std::once_flag init_flag;
     std::call_once(init_flag, []() { glslang::InitializeProcess(); });
 }
 
-/// @brief Default per-stage resource limits for a Vulkan compute shader. glslang's
-/// `Vulkan::glslang` aggregate target does NOT ship `GetDefaultResources()`
-/// (that lives in the separate default-resource-limits library), so this module
-/// carries a conservative limit table. The values mirror glslang's
-/// canonical `DefaultTBuiltInResource`.
+/// @brief Supply the resource limits glslang uses when checking shader source.
+/// Keeping the table here avoids a dependency on glslang's separate
+/// default-resource-limits library. Device limits are  checked by the runtime.
 [[nodiscard]] TBuiltInResource make_default_resource() {
     TBuiltInResource resource{};
     resource.maxLights = 32;
@@ -241,25 +237,20 @@ void ensure_glslang_initialized() {
 } // namespace
 
 /**
- * @brief Compiles a registered compute shader to SPIR-V words.
+ * @brief Compile an embedded compute shader for Vulkan 1.2 and SPIR-V 1.5.
  *
- * Builds the full GLSL source by prepending the Vulkan language version,
- * required integer extension, and compile-time geometry definitions before
- * driving glslang for Vulkan 1.2 and SPIR-V 1.5.
+ * Add the GLSL version, required integer extension and compile-time parameters,
+ * then parse and link the shader with glslang.
  *
- * @param[in] request Shader family and compile-time geometry selectors.
- * @return Compiled SPIR-V module as 32-bit words.
- * @throws shader_compile_error When geometry is invalid or glslang cannot
- * parse, link, or emit the module.
+ * @param[in] request Shader kind and compile-time parameters.
+ * @return Compiled SPIR-V as 32-bit words.
+ * @throws shader_compile_error If the parameters are unsupported, parsing or
+ * linking fails, or glslang produces an empty module
  */
 [[nodiscard]] std::vector<std::uint32_t>
 compile_shader_spirv(const shader_compile_request& request) {
-    // Reject geometry the shared-array layout cannot represent BEFORE compiling.
-    // 1024 is the largest tile the chaining pipeline selector requests
-    // (choose_vulkan_chaining_pipeline), and a zero local size has no invocation
-    // to run the tile loop. The device's maxComputeWorkGroupInvocations bound on
-    // local_size is enforced by the runtime, which is the only place that knows
-    // the limit.
+    // Check the dimensions supported by these shaders before compilation.
+    // The Vulkan runtime separately checks local_size against the device limit.
     if (request.tile_size == 0 || request.tile_size > 1024) {
         throw shader_compile_error(fmt::format(
             "compile_shader_spirv: tile_size {} out of range (1..1024)", request.tile_size));
@@ -351,9 +342,9 @@ compile_shader_spirv(const shader_compile_request& request) {
 }
 
 /**
- * @brief Returns the embedded GLSL body used by cache identity computation.
- * @param[in] kind Registered shader family.
- * @return Exact embedded GLSL body without the compiler prelude.
+ * @brief Return a shader's GLSL body so source changes invalidate  its cache.
+ * @param[in] kind Shader to look up.
+ * @return Embedded GLSL without the version, extension or parameter definitions.
  */
 [[nodiscard]] std::string shader_body_for_digest(shader_kind kind) {
     return shader_body_for(kind);

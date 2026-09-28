@@ -1,6 +1,6 @@
 /**
  * @file core.cppm
- * @brief Packed alphabet, dispatch, and storage-width contracts.
+ * @brief Alphabet types, packed storage settings, and runtime type selection.
  */
 module;
 
@@ -55,7 +55,7 @@ template<
 inline constexpr bool
     is_instance_of_v<p_template_type<p_arguments...>, p_template_type> = true;
 
-/** @brief Alphabet type exposing rank conversion and a static cardinality. */
+/** Alphabet with integer ranks and a compile-time symbol count. */
 template<typename p_alphabet_type>
 concept sequence_alphabet =
     requires (const p_alphabet_type symbol) {
@@ -64,10 +64,10 @@ concept sequence_alphabet =
     };
 
 /**
- * @brief Compile-time configuration for one packed sequence representation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_storage_type Unsigned word used for packed ranks.
- * @tparam p_bits_per_character Rank bits stored for each logical symbol.
+ * @brief Selects the alphabet, storage  word, and bits per packed symbol.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_storage_type Word type used to hold ranks.
+ * @tparam p_bits_per_character Bits reserved for each rank.
  */
 template<
     sequence_alphabet p_alphabet,
@@ -96,18 +96,10 @@ template <typename p_candidate_type>
 concept is_sequence_custom_alphabet =
     p_candidate_type::is_valid_sequence_custom_alphabet == true;
 
-// This concept checks if we can do clever trick
-// Can we interpret sequence over A as sequence over B?
-// This requires:
-//   - alphabet to be the same
-//   - letter width to be the same
-//   - storage unit of A needs to be of size B or larger
-//   - there cannot be any leftover bits in either A or B
-//   - size of A in bits must be divisible by size of B in bits
-// Last two conditions means that each storage unit in A can be split into N units in B
-// where N is integer, so this means we can interpret sequence A as sequence over B
-// (this needs some tweaking as size and padding adjustment, but this concept just check if we can do it)
-/** @brief Packed configurations that can share storage through a bit-cast view. */
+// Width changes keef the alphabet and bits per symbol unchanged. One, word
+// width must divide the other, and both configurations must report zero
+// leftover_bits. The view adjusts unit counts and final padding.
+/** Checks the configuration requirements for a view with a different word width. */
 template <typename p_source_type, typename p_destination_type>
 concept is_sequence_custom_alphabet_bit_castable_to = (
     is_sequence_custom_alphabet<p_source_type>
@@ -124,10 +116,7 @@ concept is_sequence_custom_alphabet_bit_castable_to = (
 );
 
 /** @brief Random-access sized range whose elements are alphabet symbols. */
-/**
- * @brief Adapts an unpacked random-access alphabet range to packed-range APIs.
- * @tparam p_range_type Borrowed alphabet-symbol container.
- */
+
 template<typename p_range_type>
 concept sequence_proper_container =
     sequence_alphabet<std::remove_reference_t<
@@ -135,13 +124,13 @@ concept sequence_proper_container =
     && std::ranges::sized_range<p_range_type>
     && std::ranges::random_access_range<p_range_type>;
 
-/** @brief Detects a branded `compact_sequence_stdc_instance` type. */
+/** Recognizes the marker on a compact_sequence_stdc_instance type. */
 template<typename p_candidate_type>
 concept is_compact_sequence_stdc_instance =
     requires { p_candidate_type::is_valid_compact_sequence_stdc_instance; }
     && p_candidate_type::is_valid_compact_sequence_stdc_instance == true;
 
-/** @brief Types admitted by `compact_sequence_range` specializations. */
+/** Configuration types accepted by compact_sequence_range. */
 template<typename p_range_type>
 concept supports_compact_sequence_range =
     is_sequence_custom_alphabet<p_range_type>
@@ -150,15 +139,15 @@ concept supports_compact_sequence_range =
     || is_compact_sequence_stdc_instance<p_range_type>;
 
 /**
- * @brief Decode one LSB-first packed sequence unit to alphabet characters.
- * @tparam p_storage_unit Unsigned packed-word type.
- * @tparam p_alphabet_type Sequence alphabet represented by the packed ranks.
- * @param value Packed source word.
- * @param complement_symbols Complement each decoded symbol when supported.
- * @param reverse_symbols Reverse the decoded character order.
- * @return One character per complete rank slot in the packed word.
- * @throws std::invalid_argument If complementation is requested for an
- * alphabet without a complement operation.
+ * @brief Decodes every complete symbol slot  in a packed word.
+ *
+ * The first symbol occupies the low bits. All slots are decoded, including any
+ * sequence padding that the caller has left in the word.
+ * @param value Packed word.
+ * @param complement_symbols Complement each symbol if the alphabet supports it.
+ * @param reverse_symbols Reverse the resulting character order.
+ * @return Decoded characters.
+ * @throws std::invalid_argument If the alphabet cannot supply a requested complement
  */
 template <
     std::unsigned_integral p_storage_unit,
@@ -202,10 +191,9 @@ template <
 }
 
 /**
- * @brief Convert alphabet symbols to their character representation.
- * @tparam p_alphabet_type Sequence alphabet type.
+ * @brief Converts alphabet symbols to a string in their existing order.
  * @param symbols Symbols to convert.
- * @return Contiguous character string in input order.
+ * @return One character per symbol.
  */
 template<sequence_alphabet p_alphabet_type>
 [[nodiscard]] constexpr std::string symbols_vector_to_string(
@@ -226,7 +214,7 @@ template<sequence_alphabet p_alphabet_type>
 template<typename p_range_type>
 struct compact_sequence_range {};
 
-/** @brief Logical view exposed by a packed-sequence iterator. */
+/** Chooses whether an iterator returns ranks or alphabet objects. */
 enum iterator_mode : std::uint8_t {
     /** Yield integer ranks without constructing alphabet objects. */
     logical_rank,
@@ -238,9 +226,9 @@ static_assert(__cplusplus >= 202302L,
               "packed sequence dispatch requires C++23 or later");
 
 /**
- * @brief Type-level pairing of a sequence alphabet and its display name.
- * @tparam p_alphabet Sequence alphabet type.
- * @tparam p_name Compile-time display name used by runtime dispatch.
+ * @brief Associates an alphabet type with the name used to select it at runtime.
+ * @tparam p_alphabet Sequence  alphabet.
+ * @tparam p_name Compile-time name.
  */
 template <sequence_alphabet p_alphabet,
           ::bioseq::common::templating::compile_time_string p_name>
@@ -252,7 +240,7 @@ struct alphabet_entry {
     static constexpr bool is_valid_alphabet_entry = true;
 };
 
-/** @brief Requires a valid alphabet and runtime display-name entry. */
+/** Recognizes an alphabet entry with a valid alphabet typb. */
 template <class p_candidate_type>
 concept is_alphabet_entry = requires {
     requires p_candidate_type::is_valid_alphabet_entry == true;
@@ -279,10 +267,10 @@ template <class p_left_entry, class p_right_entry>
 }
 
 /**
- * @brief Tests one entry name against every following pack entry.
- * @tparam p_entry_index Index of the selected entry.
- * @tparam p_entry_types Complete alphabet-entry pack.
- * @return `true` when no following name matches the selected entry.
+ * @brief Checks that an entry name differs from the following names.
+ * @tparam p_entry_index Entry being checked.
+ * @tparam p_entry_types All alphabet entries.
+ * @return True if no following entry has the same name.
  */
 template <std::size_t p_entry_index,
           class... p_entry_types,
@@ -300,9 +288,8 @@ template <std::size_t p_entry_index,
 }
 
 /**
- * @brief Tests whether every alphabet-entry display name is unique.
- * @tparam p_entry_types Alphabet-entry pack.
- * @return `true` when all display names are distinct.
+ * @brief Checks for repeated names in a list of alphabet entries.
+ * @return True when all names differ.
  */
 template <class... p_entry_types>
 [[nodiscard]] consteval bool unique_names_in_pack() noexcept {
@@ -325,9 +312,8 @@ template <class... p_entry_types>
 namespace detail_supported_alphabets {
 
 /**
- * @brief Computes live bytes in the formatted alphabet-name list.
- * @tparam p_entry_types Alphabet-entry pack.
- * @return Character count excluding a null terminator.
+ * @brief Counts characters in the quoted alphabet-name list.
+ * @return Length without a null terminator.
  */
 template <class... p_entry_types>
 consteval std::size_t valid_names_live_length() noexcept {
@@ -341,9 +327,8 @@ consteval std::size_t valid_names_live_length() noexcept {
 }
 
 /**
- * @brief Builds the quoted comma-separated alphabet-name buffer.
- * @tparam p_entry_types Alphabet-entry pack.
- * @return Fixed character array containing every display name.
+ * @brief Formats alphabet names as a quoted, comma-separated list.
+ * @return Fixed character array without a null terminator.
  */
 template <class... p_entry_types>
 consteval auto build_valid_names_buffer() noexcept {
@@ -376,7 +361,7 @@ template <class... p_entry_types>
 inline constexpr auto valid_names_buffer_v =
     build_valid_names_buffer<p_entry_types...>();
 
-/** @brief Number of live characters in the formatted name buffer. */
+/** Character  count of the formatted alphabet-name list. */
 template <class... p_entry_types>
 inline constexpr std::size_t valid_names_live_length_v =
     valid_names_live_length<p_entry_types...>();
@@ -384,8 +369,10 @@ inline constexpr std::size_t valid_names_live_length_v =
 }  // namespace detail_supported_alphabets
 
 /**
- * @brief Closed compile-time set of alphabets supported by one stored type.
- * @tparam p_entries Alphabet and name entries with unique types and display names.
+ * @brief Lists the alphabet types and names supported by, a stored sequence type.
+ *
+ * Provides numeric codes and dispatches runtime selections to typed handlers.
+ * @tparam p_entries Entries with distinct alphabet types and names.
  */
 template <is_alphabet_entry... p_entries>
 requires (sizeof...(p_entries) > 0)
@@ -410,16 +397,16 @@ struct supported_alphabets {
         dispatch_detail::unique_names_in_pack<p_entries...>(),
         "supported_alphabets: alphabet display names must be unique within the pack");
 
-    /** @brief Matches one runtime alphabet code during type-pack dispatch. */
+    /** Matches a runtime alphabet code while visiting the supported entries. */
     struct code_match_probe {
         alphabet_code_t runtime_code;
-        /** @brief Tests whether the current pack cursor equals the runtime code. */
+        /** Checks the current entry index against the requested code. */
         template <class p_entry_type>
         [[gnu::always_inline]]
         constexpr bool matches(alphabet_code_t cursor) const noexcept {
             return cursor == runtime_code;
         }
-        /** @brief Rejects a runtime code beyond the final pack cursor. */
+        /** Fails an assertion when no supported entry has the requested code. */
         [[noreturn]] void on_no_match(alphabet_code_t cursor) const {
             ASSERT(false,
                 fmt::format("dispatch_alphabet_by_code: code {} > pack max {}",
@@ -428,7 +415,7 @@ struct supported_alphabets {
         }
     };
 
-    /** @brief Matches one runtime display name during type-pack dispatch. */
+    /** Matches a runtime alphabet name while visiting the supported entries. */
     struct name_match_probe {
         const char* runtime_name;
         bool& matched;
@@ -442,16 +429,16 @@ struct supported_alphabets {
             }
             return false;
         }
-        /** @brief Leaves the external match flag unchanged after exhaustion. */
+        /** Leaves the match flag unchanged when no name matched. */
         constexpr void on_no_match(alphabet_code_t /*cursor*/) const noexcept {
-            // matched stays false; caller checks the return value.
+            // dispatch_alphabet_by_name returns the unchanged false match flag
         }
     };
 
     /** @brief Extracts a display name for one runtime alphabet code. */
     struct code_to_name_probe {
         alphabet_code_t runtime_code;
-        /** @brief Returns the current entry name when its cursor matches. */
+        /** Returns this entry's name when its index matches the requested code. */
         template <class p_entry_type>
         [[gnu::always_inline]]
         constexpr std::optional<std::string_view> extract(
@@ -464,10 +451,10 @@ struct supported_alphabets {
         }
     };
 
-    /** @brief Extracts a pack code for one runtime display name. */
+    /** Finds the numeric alphabet code for a runtime nhme. */
     struct name_to_code_probe {
         const char* runtime_name;
-        /** @brief Returns the current cursor when its entry name matches. */
+        /** Returns this entry's index  when its name matches. */
         template <class p_entry_type>
         [[gnu::always_inline]]
         constexpr std::optional<alphabet_code_t> extract(
@@ -481,8 +468,8 @@ struct supported_alphabets {
     };
 
     /**
-     * @brief Adapts alphabet-entry dispatch to an alphabet-typed handler.
-     * @tparam p_handler_type Handler invoked with an alphabet template argument.
+     * @brief Passes a selected entry's alphabet type to a handler.
+     * @tparam p_handler_type Callable with an alphabet template argument.
      */
     template <class p_handler_type>
     struct entry_to_alphabet_adapter {
@@ -497,10 +484,11 @@ struct supported_alphabets {
     };
 
     /**
-     * @brief Dispatch a runtime alphabet code to a compile-time alphabet.
-     * @tparam p_handler_type Callable with `operator()<alphabet>()`.
-     * @param code Runtime alphabet code.
-     * @param handler Callable invoked for the selected alphabet.
+     * @brief Calls a typed handler for the alphabet selected by a runtime code.
+     * @param code Index in this alphabet set.
+     * @param handler Callable with operator()<alphabet>().
+     *
+     * An invalid code fails an assertion.
      */
     template <class p_handler_type>
     [[gnu::always_inline]]
@@ -518,11 +506,10 @@ struct supported_alphabets {
     }
 
     /**
-     * @brief Dispatch a runtime display name to a compile-time entry.
-     * @tparam p_handler_type Callable with `operator()<alphabet_entry>()`.
-     * @param name Null-terminated display name.
-     * @param handler Callable invoked for the first matching entry.
-     * @return `true` when the name belongs to this alphabet set.
+     * @brief Calls a typed handler for the entry selected by a runtime name.
+     * @param name Null-terminated alphabet name.
+     * @param handler Callable with operator()<alphabet_entry>().
+     * @return True if the name matched an entry.
      */
     template <class p_handler_type>
     static constexpr bool dispatch_alphabet_by_name(
@@ -539,8 +526,8 @@ struct supported_alphabets {
     }
 
     /**
-     * @brief Returns the compile-time pack index of an alphabet.
-     * @tparam p_alphabet Alphabet that must belong to the pack.
+     * @brief Returns an alphabet's index in this set.
+     * @tparam p_alphabet Alphabet belonging to this set.
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static constexpr alphabet_code_t index_of() {
@@ -551,8 +538,8 @@ struct supported_alphabets {
     }
 
     /**
-     * @brief Returns the compile-time display name of an alphabet.
-     * @tparam p_alphabet Alphabet that must belong to the pack.
+     * @brief Returns the compile-time name of an alphabet in this set.
+     * @tparam p_alphabet Alphabet belonging  to this set.
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static constexpr auto name_of() {
@@ -571,9 +558,9 @@ struct supported_alphabets {
         alphabet_entries_tuple>;
 
     /**
-     * @brief Maps a runtime alphabet code to its display name.
-     * @param code Runtime pack index.
-     * @return Entry display name, or `"?"` for an invalid code.
+     * @brief Looks up the display name for a numeric alphabet code.
+     * @param code Index in this set.
+     * @return Name, or "?" when the code is invalid.
      */
     [[nodiscard]] static std::string_view name_of_alphabet_code(
         alphabet_code_t code) noexcept
@@ -594,9 +581,9 @@ struct supported_alphabets {
     }
 
     /**
-     * @brief Maps a runtime display name to its alphabet code.
+     * @brief Looks up an alphabet code by name.
      * @param name Null-terminated display name.
-     * @return Pack index, or no value when the name is absent.
+     * @return Index in this set, or no value when the name is absent.
      */
     [[nodiscard]] static std::optional<alphabet_code_t> try_index_of_name(
         const char* name) noexcept
@@ -617,7 +604,7 @@ struct supported_alphabets {
     }
 };
 
-/** @brief Type carrying a valid closed set of supported alphabets. */
+/** Recognizes a type that lists supported alphabets and their numeric codes. */
 template<class p_candidate_type>
 concept supported_alphabet_set = requires {
     requires p_candidate_type::is_valid_supported_alphabets == true;
@@ -626,7 +613,7 @@ concept supported_alphabet_set = requires {
     { p_candidate_type::alphabet_count } -> std::convertible_to<std::size_t>;
 };
 
-/** @brief Alphabet present in a closed supported-alphabet set. */
+/** Checks whether an alphabet belongs to a supported alphabet set. */
 template<class p_alphabet_set, class p_alphabet>
 concept alphabet_in_supported_set =
     supported_alphabet_set<p_alphabet_set>
@@ -634,8 +621,8 @@ concept alphabet_in_supported_set =
            p_alphabet, typename p_alphabet_set::alphabets_tuple>;
 
 /**
- * @brief Closed compile-time set of supported packed storage byte widths.
- * @tparam p_byte_widths Unique widths selected from 1, 2, 4, and 8 bytes.
+ * @brief Lists allowed packed-word sizes for a sequence type
+ * @tparam p_byte_widths Distinct widths chosen from 1, 2, 4, and 8 bytes.
  */
 template<std::size_t... p_byte_widths>
 requires (sizeof...(p_byte_widths) > 0)
@@ -664,7 +651,7 @@ struct supported_storage_unit_byte_widths {
     }
 
 private:
-    /** @brief Dispatches the first matching compile-time width. */
+    /** Calls the handler for a matching width, or fails an assertion if none matches. */
     template<std::size_t p_first_width, std::size_t... p_remaining_widths,
              class p_handler_type>
     [[gnu::always_inline]]
@@ -688,10 +675,11 @@ private:
 
 public:
     /**
-     * @brief Dispatches a runtime width as a compile-time size value.
-     * @tparam p_handler_type Handler invoked with the matching byte width.
-     * @param byte_width Runtime storage width.
-     * @param handler Handler invoked for the selected width.
+     * @brief Calls a handler with  the selected byte width as a template argument.
+     * @param byte_width Width enabled by vhis set.
+     * @param handler Callable with operator()<byte_width>().
+     *
+     * An unsupported width fails an assertion.
      */
     template<class p_handler_type>
     [[gnu::always_inline]]
@@ -702,7 +690,7 @@ public:
     }
 };
 
-/** @brief Type carrying a valid closed set of packed storage widths. */
+/** Recognizes a type describing allowed packed-word sizes. */
 template<class p_candidate_type>
 concept supported_storage_width_set = requires {
     requires p_candidate_type::is_valid_supported_storage_unit_byte_widths
@@ -717,10 +705,11 @@ using all_storage_unit_byte_widths =
     supported_storage_unit_byte_widths<1u, 2u, 4u, 8u>;
 
 /**
- * @brief Dispatches a runtime width across all supported packed unit sizes.
- * @tparam p_handler_type Handler invoked with the matching byte width.
- * @param byte_width Runtime storage width.
- * @param handler Handler invoked for the selected width.
+ * @brief Calls a typed handler for a 1-, 2-, 4-, or 8-byte storage word.
+ * @param byte_width Requested word size.
+ * @param handler Callable with operator()<byte_width>().
+ *
+ * Other widths fail an, assertion.
  */
 template<class p_handler_type>
 [[gnu::always_inline]]
@@ -732,8 +721,8 @@ inline constexpr void dispatch_storage_unit_byte_width(
 }
 
 /**
- * @brief Aligns a byte count to the next 64-bit storage boundary.
- * @param bytes Unaligned byte count.
+ * @brief Rounds a byte count up to a multiple of sizeof(uint64_t).
+ * @param bytes Count with room for the rounding addition in size_t.
  * @return Aligned byte count.
  */
 [[gnu::always_inline]]

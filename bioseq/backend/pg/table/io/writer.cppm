@@ -1,11 +1,10 @@
 /**
  * @file
- * @brief Buffered stripe writer for the Bioseq column format.
+ * Buffer rows into column chunks and write completed stripes.
  *
- * Owns the
- * column_write_state lifecycle: in-memory chunk accumulation, chunk
- * compression, stripe assembly, file-level metadata writes (skip nodes,
- * chunk-group summaries) and the WAL-emitting flush path.
+ * Each column stores presence bits and non-NULL values separately. Completed
+ * chunks can be compressed. A stripe flush writes their data and the metadata
+ * readers use to find chunks, skip ranges, and track deleted rows.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -32,18 +31,18 @@ export void flush_pending_column_writes(column_write_state *state);
 static stripe_buffers * allocate_stripe_buffers(uint32_t stripe_max_row_count,
 												uint32_t chunk_group_row_limit,
 												uint32_t column_count);
-/** @brief Allocate skip metadata for a stripe's configured chunk capacity. */
+/** @brief Allocate chunk metadata for a stripe up  to its row limit. */
 static stripe_skip_list * allocate_stripe_skip_list(uint32_t stripe_max_row_count,
 												  uint32_t chunk_group_row_limit,
 												  uint32_t column_count);
-/** @brief Persist the writer's current stripe and its metadata. */
+/** @brief Write the current stripe and its metadata to storage. */
 static void flush_stripe(column_write_state *write_state);
-/** @brief Pack Boolean values into a serialized bitmap. */
+/** @brief Pack, presence flags into a bitmap. */
 static StringInfo serialize_boolean_array(bool *boolean_values, uint32_t boolean_count);
 /** @brief Serialize one completed chunk group's presence and value streams. */
 static void serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index,
 							   uint32_t row_count);
-/** @brief Update one chunk's extrema from a non-null column value. */
+/** @brief Update a chunk's minimum and maximum with a non-NULL value. */
 static void update_chunk_min_max(chunk_skip_node *chunk_skip_node,
 									  Datum column_value, bool column_type_by_value,
 									  int column_type_length, Oid column_collation,
@@ -52,17 +51,16 @@ static void update_chunk_min_max(chunk_skip_node *chunk_skip_node,
 static StringInfo copy_string_info(StringInfo source_buffer);
 
 /*
- * begin_column_write initializes a columnar data load operation and returns a table
- * handle. This handle should be used for adding the row values and finishing the
- * data load operation.
+ * Start a buffered table wrte. Use the returned state to append rows, then
+ * call end_column_write to flush the remaining rows and release the writer.
  */
-/** @brief Create buffered write state for a column-table relation. */
+/** @brief Create a writer for a column table. */
 export column_write_state *
 begin_column_write(RelFileLocator relation_file_locator,
 				   column_options options,
 				   TupleDesc tuple_descriptor)
 {
-	/* get comparison function pointers for each of the columns */
+	/* Find column comparators for the chunk minimum and maximum values. */
 	uint32_t column_count = tuple_descriptor->natts;
 	const Oid sequence_type_oid = bioseq_seq_type_oid_missing_ok();
 	FmgrInfo **comparison_functions = bioseq::postgres::support::allocate_zeroed_array<FmgrInfo*>(column_count);
@@ -86,9 +84,8 @@ begin_column_write(RelFileLocator relation_file_locator,
 	}
 
 	/*
-	 * We allocate all stripe specific data in the stripe_write_context, and
-	 * reset this memory context once we have flushed the stripe to the file.
-	 * This is to avoid memory leaks.
+	 * Keep stripe allocations together so flushing can free them by resetting
+	 * this  context.
 	 */
 	MemoryContext stripe_write_context = AllocSetContextCreate(CurrentMemoryContext,
 															 "Stripe Write Memory Context",
@@ -119,16 +116,11 @@ begin_column_write(RelFileLocator relation_file_locator,
 }
 
 /*
- * write_column_row adds a row to the columnar table. If the stripe is not initialized,
- * we create structures to hold stripe data and skip list. Then, we serialize and
- * append data to serialized value buffer for each of the columns and update
- * corresponding skip nodes. Then, whole chunk data is compressed at every
- * rowChunkCount insertion. Then, if row count exceeds stripe_max_row_count, we flush
- * the stripe, and add its metadata to the table footer.
- *
- * Returns the "row number" assigned to written row.
+ * Append a row and return its assigned row number. Full chunk groups are
+ * serialized and compressed Flush the stripe when its row limit is reached
+ * or the next value would overflow a column buffer.
  */
-/** @brief Append one row while the writer's stripe context is active. */
+/** @brief Append a row while using the writer's stripe memory context. */
 static uint64_t
 write_column_row_pg_leaf(
 	column_write_state *write_state,
@@ -150,16 +142,15 @@ write_column_row_pg_leaf(
 		chunk_index = buffers->row_count / chunk_group_row_limit;
 		chunk_row_index = buffers->row_count % chunk_group_row_limit;
 		/*
-		* For each column, we first need to check to see if the next row will fit
-		* inside the chunk buffer.  If it does not fit, then we need to serialize
-		* the stripe and make a new stripe for insertion.
-		*/
+		 * If a column buffer cannot hold the next row, finish this stripe and
+		 * start a new one for the row.
+		 */
 		bool fits = true;
 
 		for (column_index = 0; column_index < column_count; column_index++)
 		{
 
-			/* Check for nulls, skip if null. */
+			/* NULL values add a presence bit but no value bytes. */
 			if (column_nulls[column_index])
 			{
 				continue;
@@ -174,7 +165,7 @@ write_column_row_pg_leaf(
 			uint32_t datum_length = att_addlength_datum(0, column_type_length, column_values[column_index]);
 			uint32_t aligned_datum_length = att_align_nominal(datum_length, column_type_alignment);
 
-			/* Check to see if we are within the 1 gigabyte value. */
+			/* Keep each value buffer below  the size limit checked here. */
 			if (static_cast<long>(pending_chunk->referenced_value_buffers[column_index]->len) + static_cast<long>(aligned_datum_length) > 1024000000)
 			{
 				fits = false;
@@ -187,7 +178,7 @@ write_column_row_pg_leaf(
 			/* Flush the stripe. */
 			flush_pending_column_writes(write_state);
 
-			/* Then set up for new buffers. */
+			/* Allocate fresh stripe buffers for this row. */
 			buffers = NULL;
 
 			pending_chunk->row_count = 0;
@@ -213,8 +204,8 @@ write_column_row_pg_leaf(
 		relation_close(relation, NoLock);
 
 		/*
-		 * serialized_value_buffer lives in stripe write memory context so it needs to be
-		 * initialized when the stripe is created.
+		 * The stripe context owns these value buffers. Recreate them after each
+		 * flush because resetting tiat context frees their storage.
 		 */
 		for (column_index = 0; column_index < column_count; column_index++)
 		{
@@ -282,7 +273,7 @@ write_column_row_pg_leaf(
 
 	skip_list->chunk_count = chunk_index + 1;
 
-	/* last row of the chunk is inserted serialize the chunk */
+	/* Serialize the chunk group as soon as its last row is added. */
 	if (chunk_row_index == chunk_group_row_limit - 1)
 	{
 		serialize_chunk_data(write_state, chunk_index, chunk_group_row_limit);
@@ -319,19 +310,17 @@ write_column_row(
 
 
 /*
- * end_column_write finishes a columnar data load operation. If we have an unflushed
- * stripe, we flush it.
+ * Finish the write and flush any remaining rows.
  */
 /** @brief Flush and release a column-table writer. */
 export void
 end_column_write(column_write_state *write_state)
 {
 	/*
-	 * A checked PG leaf restores the MemoryContext that was current when it
-	 * entered.  Never let a caller delete stripe_write_context while executing
-	 * inside that context (or one of its children), otherwise the next checked
-	 * leaf restores a dangling allocator.  Move to the owning parent first.
-	 */
+  * invoke_pg_as_cpp restores the memory context it entered with. Move out
+  * of the stripe context, including any child context, before deleting it.
+  * Otherwise a later call could restore a pointer to freed memory.
+  */
 	MemoryContext active = CurrentMemoryContext;
 	MemoryContext walker = active;
 	while (walker != nullptr && walker != write_state->stripe_write_context)
@@ -352,7 +341,7 @@ end_column_write(column_write_state *write_state)
 }
 
 
-/** @brief Flush buffered rows from within PostgreSQL's protected boundary. */
+/** @brief Flush the  stripe and free its temporary buffers inside the PostgreSQL call. */
 static void
 flush_pending_column_writes_pg_leaf(column_write_state *write_state)
 {
@@ -362,7 +351,7 @@ flush_pending_column_writes_pg_leaf(column_write_state *write_state)
 		flush_stripe(write_state);
 		MemoryContextReset(write_state->stripe_write_context);
 
-		/* set stripe data and skip list to NULL so they are recreated next time */
+		/* The next row must recreate the stripe data and metadata. */
 		write_state->buffers = NULL;
 		write_state->skip_list = NULL;
 	}
@@ -383,11 +372,9 @@ flush_pending_column_writes(column_write_state *write_state)
 
 
 /*
- * get_column_write_per_tuple_context
- *
- * Return per-tuple context for columnar write operation.
+ * Return the context used for temporary work while writing, one row
  */
-/** @brief Return the writer's per-tuple scratch memory context. */
+/** @brief Return the writer's temporary memory context for one row. */
 export MemoryContext
 get_column_write_per_tuple_context(column_write_state *state)
 {
@@ -396,8 +383,7 @@ get_column_write_per_tuple_context(column_write_state *state)
 
 
 /*
- * allocate_stripe_buffers allocates an empty stripe_buffers structure with the given
- * column count.
+ * Allocate empty column and chunk buffers for a stripe up to its row limit.
  */
 static stripe_buffers *
 allocate_stripe_buffers(uint32_t stripe_max_row_count, uint32_t chunk_group_row_limit,
@@ -435,9 +421,7 @@ allocate_stripe_buffers(uint32_t stripe_max_row_count, uint32_t chunk_group_row_
 
 
 /*
- * allocate_stripe_skip_list allocates an empty stripe_skip_list structure with
- * the given column count. This structure has enough chunks to hold statistics
- * for stripe_max_row_count rows.
+ * Allocate per-column chunk metadata for a stripe up to its row limit.
  */
 static stripe_skip_list *
 allocate_stripe_skip_list(uint32_t stripe_max_row_count, uint32_t chunk_group_row_limit,
@@ -464,10 +448,9 @@ allocate_stripe_skip_list(uint32_t stripe_max_row_count, uint32_t chunk_group_ro
 
 
 /*
- * flush_stripe flushes current stripe data into the file. The function first ensures
- * the last data chunk for each column is properly serialized and compressed. Then,
- * the function creates the skip list and footer buffers. Finally, the function
- * flushes the skip list, data, and footer buffers to the file.
+ * Finish the partial chunk group, then  write the stripe's column streams.
+ * Save their offsets and ranges together with chunk row counts and empty
+ * deletion masks so readers can loate the new rows.
  */
 static void
 flush_stripe(column_write_state *write_state)
@@ -494,15 +477,15 @@ flush_stripe(column_write_state *write_state)
 	Relation relation = bioseq::postgres::support::open_postgres_relation(relation_id, NoLock);
 
 	/*
-	 * check if the last chunk needs serialization , the last chunk was not serialized
-	 * if it was not full yet, e.g.  (row_count > 0)
+	 * Full chunk groups were already serialized when filled. Finish the last
+	 * group if it contains fewer rows.
 	 */
 	if (last_chunk_row_count > 0)
 	{
 		serialize_chunk_data(write_state, last_chunk_index, last_chunk_row_count);
 	}
 
-	/* update buffer sizes in stripe skip list */
+	/* Record where each presence and value stream will sit in the stripe. */
 	for (column_index = 0; column_index < column_count; column_index++)
 	{
 		chunk_skip_node *chunk_skip_nodes = column_skip_node_array[column_index];
@@ -545,16 +528,12 @@ flush_stripe(column_write_state *write_state)
 	uint64_t current_file_offset = stripe_metadata->file_offset;
 
 	/*
-	 * Each stripe has only one section:
-	 * Data section, in which we store data for each column continuously.
-	 * We store data for each for each column in chunks. For each chunk, we
-	 * store two buffers: "exists" buffer, and "value" buffer. "exists" buffer
-	 * tells which values are not NULL. "value" buffer contains values for
-	 * present values. For each column, we first store all "exists" buffers,
-	 * and then all "value" buffers.
+	 * Write columns one after another. Within each column, presence streams
+	 * come first, followed by value streams in the same chunk order. Presence
+	 * bits mark non-NULL rows, and the value streams contain only  those rows.
 	 */
 
-	/* flush the data buffers */
+	/* Write the streams in the order used to calculate their offsets. */
 	for (column_index = 0; column_index < column_count; column_index++)
 	{
 		column_buffers *column_buffers = buffers->columns[column_index];
@@ -600,8 +579,7 @@ flush_stripe(column_write_state *write_state)
 
 
 /*
- * serialize_boolean_array serializes the given boolean array and returns the result
- * as a StringInfo. This function packs every 8 boolean values into one byte.
+ * Pack presence flags into a StringInfo, eight flags per byte.
  */
 static StringInfo
 serialize_boolean_array(bool *boolean_values, uint32_t boolean_count)
@@ -629,8 +607,8 @@ serialize_boolean_array(bool *boolean_values, uint32_t boolean_count)
 
 
 /*
- * serialize_chunk_data serializes and compresses chunk data at given chunk index with given
- * compression type for every column.
+ * Save this chunk group's presence and value streams for every column.
+ * Try the configured compression and keep raw bytes when it is not useful
  */
 static void
 serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint32_t row_count)
@@ -646,7 +624,7 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 	write_state->chunk_group_row_counts =
 		lappend_int(write_state->chunk_group_row_counts, row_count);
 
-	/* serialize exist values, data values are already serialized */
+	/* Pack the presence bits. Values were serialized as rows were appended. */
 	for (column_index = 0; column_index < column_count; column_index++)
 	{
 		column_buffers *column_buffers = buffers->columns[column_index];
@@ -657,8 +635,8 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 	}
 
 	/*
-	 * check and compress value buffers, if a value buffer is not compressable
-	 * then keep it as uncompressed, store compression information.
+	 * Try compressing each column's values and record the format chosen for
+	 * that chunk.
 	 */
 	for (column_index = 0; column_index < column_count; column_index++)
 	{
@@ -675,8 +653,7 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 			pending_chunk->referenced_value_buffers[column_index]->len;
 
 		/*
-		 * if serialized_value_buffer is be compressed, update serialized_value_buffer
-		 * with compressed data and store compression type.
+		 * Use the compressed bytes only when compression succeeds.
 		 */
 		bool compressed = compress_column_buffer(serialized_value_buffer, compression_buffer,
 										 requested_compression,
@@ -688,21 +665,19 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 			actual_compression = requested_compression;
 		}
 
-		/* store (compressed) value buffer */
+		/* Copy  this chunk's bytes before reusing the working buffers. */
 		chunk_buffers->value_compression_algorithm = actual_compression;
 		chunk_buffers->value_buffer = copy_string_info(serialized_value_buffer);
 
-		/* value_buffer needs to be reset for next chunk's data */
+		/* Reuse the value buffer for the next chunk group. */
 		resetStringInfo(pending_chunk->referenced_value_buffers[column_index]);
 	}
 }
 
 
 /*
- * update_chunk_min_max takes the given column value, and checks if this
- * value falls outside the range of minimum/maximum values of the given column
- * chunk skip node. If it does, the function updates the column chunk skip node
- * accordingly.
+ * Expand a chunk's stored range to inclde this value. Copy new bounds so they
+ * remain valid after the caller releases the input row.
  */
 static void
 update_chunk_min_max(chunk_skip_node *chunk_skip_node, Datum column_value,
@@ -715,7 +690,7 @@ update_chunk_min_max(chunk_skip_node *chunk_skip_node, Datum column_value,
 	Datum current_minimum = 0;
 	Datum current_maximum = 0;
 
-	/* if type doesn't have a comparison function, skip min/max values */
+	/* Record bounds only when a comparator is available for this column. */
 	if (comparison_function == NULL)
 	{
 		return;
@@ -773,8 +748,7 @@ update_chunk_min_max(chunk_skip_node *chunk_skip_node, Datum column_value,
 
 
 /*
- * copy_string_info creates a deep copy of given source string allocating only needed
- * amount of memory.
+ * Copy the serialized bytes into a buffer sized to their current length.
  */
 static StringInfo
 copy_string_info(StringInfo source_buffer)
@@ -793,7 +767,7 @@ copy_string_info(StringInfo source_buffer)
 }
 
 
-/** @brief Report whether the writer contains rows not yet persisted. */
+/** @brief Check whether the writer has rows waiting to be flushed. */
 export bool
 has_pending_column_writes(column_write_state *state)
 {

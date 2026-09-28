@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Builds and resets PostgreSQL vector aggregate executor state.
+ * @brief Prepare aggregate execution state and clean it up or reset it for another scan.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -40,9 +40,7 @@ static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transitio
     return initial_value;
 }
 
-/**
- * Initializes one reusable transition descriptor from resolved aggregate metadata.
- */
+/** Prepare the functions, initial value, and optional input sorting for one aggregate, transition. */
 static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                              AggState* aggregate_state,
                                              EState* executor_state,
@@ -66,7 +64,7 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
     int sort_column_count;
     int distinct_column_count;
 
-    /* Begin filling in the transition_state data */
+    /* Store the aggregate definition and initial transition value. */
     transition_state->aggref = aggregate_reference;
     transition_state->aggshared = false;
     transition_state->aggCollation = aggregate_reference->inputcollid;
@@ -76,21 +74,19 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
     transition_state->initValue = initial_value;
     transition_state->initValueIsNull = initial_value_is_null;
 
-    /* Count the "direct" arguments, if any */
+    /* Direct arguments are evaluated once per group. */
     direct_argument_count = list_length(aggregate_reference->aggdirectargs);
 
-    /* Count the number of aggregated input columns */
+    /* Count the expressions evaluated for aggregate input rows. */
     transition_state->numInputs = input_count = list_length(aggregate_reference->args);
 
     transition_state->aggtranstype = aggregate_transition_type;
 
-    /* account for the current transition state */
+    /* The transition function also receives its current state. */
     transition_argument_count = transition_state->numTransInputs + 1;
 
-    /**
-     * Set up infrastructure for calling the transfn.  Note that invtrans is
-     * not needed here.
-     */
+    /* Prepare calls to the transition  function This executor does not
+     * use an inverse transition function. */
     build_aggregate_transfn_expr(input_types,
                                  argument_count,
                                  direct_argument_count,
@@ -115,7 +111,7 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                              reinterpret_cast<Node*>(aggregate_state),
                              nullptr);
 
-    /* get info about the state value's datatype */
+    /* Record how transition values must be stored and copied. */
     get_typlenbyval(aggregate_transition_type,
                     &transition_state->transtypeLen,
                     &transition_state->transtypeByVal);
@@ -154,11 +150,8 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                  nullptr);
     }
 
-    /**
-     * Resolves sort columns for plain DISTINCT and ORDER BY aggregates.
-     *
-     * Ordered-set aggregates retain responsibility for their own ordering.
-     */
+    /* Prepare input sorting for DISTINCT or ORDER BY. Ordered-set aggregates
+     * perform their own ordering inside their support functions. */
     if (AGGKIND_IS_ORDERED_SET(aggregate_reference->aggkind)) {
         sort_list = NIL;
         sort_column_count = distinct_column_count = 0;
@@ -175,9 +168,7 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
     transition_state->numSortCols = sort_column_count;
     transition_state->numDistinctCols = distinct_column_count;
 
-    /**
-     * Creates the aggregate-input slot required by sorting or filtering.
-     */
+    /* Allocate an input slot when sorting or FILTER needs evaluated arguments. */
     if (sort_column_count > 0 || aggregate_reference->aggfilter) {
         transition_state->sortdesc = ExecTypeFromTL(aggregate_reference->args);
         transition_state->sortslot =
@@ -185,28 +176,25 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
     }
 
     if (sort_column_count > 0) {
-        /**
-         * We don't implement DISTINCT or ORDER BY aggs in the HASHED case
-         * (yet)
-         */
+        /* Hash aggregation does not support DISTINCT or ORDER BY inputs here. */
         Assert(aggregate_state->aggstrategy != AGG_HASHED &&
                aggregate_state->aggstrategy != AGG_MIXED);
 
-        /* ORDER BY aggregates are not supported with partial aggregation */
+        /* Sorted aggregave inputs cannot be used while combining partial states. */
         Assert(!DO_AGGSPLIT_COMBINE(aggregate_state->aggsplit));
 
-        /* If we have only one input, we need its len/byval info. */
+        /* A single sorted value  needs its type's copy and storage rules. */
         if (input_count == 1) {
             get_typlenbyval(input_types[direct_argument_count],
                             &transition_state->inputtypeLen,
                             &transition_state->inputtypeByVal);
         } else if (distinct_column_count > 0) {
-            /* we will need an extra slot to store prior values */
+            /* Keep the previous row when DISTINCT compares several columns. */
             transition_state->uniqslot = ExecInitExtraTupleSlot(
                 executor_state, transition_state->sortdesc, &TTSOpsMinimalTuple);
         }
 
-        /* Extract the sort information for use later */
+        /* Save the columns, operators, and null ordering used by the sort. */
         transition_state->sortColIdx = allocate_zeroed_array<AttrNumber>(sort_column_count);
         transition_state->sortOperators = allocate_zeroed_array<Oid>(sort_column_count);
         transition_state->sortCollations = allocate_zeroed_array<Oid>(sort_column_count);
@@ -217,7 +205,7 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
             TargetEntry* target_entry =
                 get_sortgroupclause_tle(sort_clause, aggregate_reference->args);
 
-            /* the parser should have made sure of this */
+            /* The parser must have supplied a sort operator. */
             Assert(OidIsValid(sort_clause->sortop));
 
             transition_state->sortColIdx[sort_column_index] = target_entry->resno;
@@ -242,7 +230,7 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
             equality_operators[distinct_column_index++] = group_clause->eqop;
         }
 
-        /* lookup / build the necessary comparators */
+        /* Prepare equality checks used to remove duplicate aggregate inputs. */
         if (distinct_column_count == 1)
             fmgr_info(get_opcode(equality_operators[0]), &transition_state->equalfnOne);
         else
@@ -283,12 +271,10 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     int hash_table_count;
     const bool use_hashing = node->aggstrategy == AGG_HASHED || node->aggstrategy == AGG_MIXED;
 
-    /* check for unsupported flags */
+    /* Backward scans and mark/restore are unsupported. */
     Assert(!(executor_flags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
 
-    /**
-     * create state structure
-     */
+    /* Create the executor state and start with no active groups. */
     aggregate_state = makeNode(AggState);
     aggregate_state->ss.ps.plan = reinterpret_cast<Plan*>(node);
     aggregate_state->ss.ps.state = executor_state;
@@ -313,15 +299,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     aggregate_state->sort_in = nullptr;
     aggregate_state->sort_out = nullptr;
 
-    /**
-     * phases[0] always exists, but is dummy in sorted/plain mode
-     */
+    /* Reserve phase zero for hashing. Plain and sorted plans start at phase one. */
     phase_count = (use_hashing ? 1 : 2);
     hash_table_count = (use_hashing ? 1 : 0);
 
-    /**
-     * Sizes phase and grouping-set storage from the largest rollup.
-     */
+    /* Size shared grouping-set storage for the largest phase and  count execution phases. */
     if (node->groupingSets) {
         grouping_set_count = list_length(node->groupingSets);
 
@@ -329,10 +311,8 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             grouping_set_count =
                 std::max(grouping_set_count, list_length(chained_aggregate->groupingSets));
 
-            /**
-             * additional AGG_HASHED aggs become part of phase 0, but all
-             * others add an extra phase.
-             */
+            /* Hash aggregates share phase zero. Each other chained aggregate
+             * needs another input phase. */
             if (chained_aggregate->aggstrategy != AGG_HASHED)
                 ++phase_count;
             else
@@ -346,12 +326,9 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     aggregate_state->aggcontexts =
         reinterpret_cast<ExprContext**>(allocate_zeroed_array<ExprContext*>(grouping_set_count));
 
-    /**
-     * Creates separate input, output, hash, and per-group transition contexts.
-     *
-     * Per-group contexts are rescanned at boundaries to release state and invoke
-     * shutdown callbacks.
-     */
+    /* Keep temporary input work separate from group state and output expressions.
+     * Each group context runs its cleanup callbacks when that zroup finishes.
+     * Hash aggregation has its own context for groups kept in memory */
     ExecAssignExprContext(executor_state, &aggregate_state->ss.ps);
     aggregate_state->tmpcontext = aggregate_state->ss.ps.ps_ExprContext;
 
@@ -367,17 +344,13 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
 
     ExecAssignExprContext(executor_state, &aggregate_state->ss.ps);
 
-    /**
-     * Initializes the child without rewind support when hashing does not need it.
-     */
+    /* A hash-only scan can reuse its groups, so the child needs no rewind support. */
     if (node->aggstrategy == AGG_HASHED)
         executor_flags &= ~EXEC_FLAG_REWIND;
     child_plan = outerPlan(node);
     outerPlanState(aggregate_state) = ExecInitNode(child_plan, executor_state, executor_flags);
 
-    /**
-     * initialize source tuple type.
-     */
+    /* Match the  scan slot, to the child plan's tuple representation. */
     aggregate_state->ss.ps.outerops = ExecGetResultSlotOps(outerPlanState(&aggregate_state->ss),
                                                            &aggregate_state->ss.ps.outeropsfixed);
     aggregate_state->ss.ps.outeropsset = true;
@@ -386,18 +359,12 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         executor_state, &aggregate_state->ss, aggregate_state->ss.ps.outerops);
     scan_descriptor = aggregate_state->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
-    /**
-     * If there are more than two phases (including a potential dummy phase
-     * 0), input will be resorted using tuplesort. Need a slot for that.
-     */
+    /* Extra input phases read rows from tuplesort and need a MinimalTuple slot. */
     if (phase_count > 2) {
         aggregate_state->sort_slot =
             ExecInitExtraTupleSlot(executor_state, scan_descriptor, &TTSOpsMinimalTuple);
 
-        /**
-         * Uses a dedicated sort-output slot because the child slot may have a
-         * different tuple representation.
-         */
+        /* Input may switch from the child's slot type to MinimalTuple after sorting. */
         if (aggregate_state->ss.ps.outeropsfixed &&
             aggregate_state->ss.ps.outerops != &TTSOpsMinimalTuple)
             aggregate_state->ss.ps.outeropsfixed = false;
@@ -409,15 +376,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     ExecInitResultTupleSlotTL(&aggregate_state->ss.ps, &TTSOpsVirtual);
     ExecAssignProjectionInfo(&aggregate_state->ss.ps, nullptr);
 
-    /**
-     * Initializes aggregate expressions and rejects nested aggregate calls.
-     */
+    /* Compile HAVING expressions and collect their aggregate references. */
     aggregate_state->ss.ps.qual =
         ExecInitQual(node->plan.qual, reinterpret_cast<PlanState*>(aggregate_state));
 
-    /**
-     * We should now have found all Aggrefs in the targetlist and quals.
-     */
+    /* Projection and HAVING initialization have now collected the aggregate calls. */
     aggregate_reference_count = list_length(aggregate_state->aggs);
     max_aggno = -1;
     max_transno = -1;
@@ -428,10 +391,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     aggregate_count = max_aggno + 1;
     transition_state_count = max_transno + 1;
 
-    /**
-     * For each phase, prepare grouping set data and fmgr lookup data for
-     * compare functions.  Accumulate all_grouped_cols in passing.
-     */
+    /* Prepare each phase's grouping columns and equality checks. */
     aggregate_state->phases = allocate_zeroed_array<AggStatePerPhaseData>(phase_count);
 
     aggregate_state->num_hashes = hash_table_count;
@@ -467,11 +427,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             const int hash_set_index = phase_data->numsets++;
             hash_state = &aggregate_state->perhash[hash_set_index];
 
-            /* phase 0 always points to the "real" Agg in the hash case */
+            /* Hash phase zero uses the top-level aggregate plan. */
             phase_data->aggnode = node;
             phase_data->aggstrategy = node->aggstrategy;
 
-            /* but the actual Agg node representing this hash is saved here */
+            /* Keep this grouping set's aggregate plan with its hash  table. */
             hash_state->aggnode = aggregate_node;
 
             phase_data->gset_lengths[hash_set_index] = hash_state->numCols =
@@ -502,7 +462,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                     const int grouping_column_count = list_length(grouping_set);
                     Bitmapset* grouped_columns = nullptr;
 
-                    /* planner forces this to be correct */
+                    /* The planner orders each grouping set as a prefix of grpColIdx. */
                     for (int group_column_index = 0; group_column_index < grouping_column_count;
                          ++group_column_index)
                         grouped_columns = bms_add_member(
@@ -522,16 +482,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                 phase_data->grouped_cols = nullptr;
             }
 
-            /**
-             * If we are grouping, precompute fmgr lookup data for inner loop.
-             */
+            /* Prepare the equality checks used to find sorted group boundaries. */
             if (aggregate_node->aggstrategy == AGG_SORTED) {
                 Assert(aggregate_node->numCols > 0);
 
-                /**
-                 * Build a separate function for each subset of columns that
-                 * need to be compared.
-                 */
+                /* Each grouping prefix may need a different row comparison. */
                 phase_data->eqfunctions =
                     allocate_zeroed_array<ExprState*>(aggregate_node->numCols);
 
@@ -540,11 +495,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                      ++grouping_set_index) {
                     const int grouping_column_count = phase_data->gset_lengths[grouping_set_index];
 
-                    /* nothing to do for empty grouping set */
+                    /* An empty grouping set has no columns to compare. */
                     if (grouping_column_count == 0)
                         continue;
 
-                    /* if we already had one of this length, it'll do */
+                    /* Grouping sets with the same prefix lengh can share this comparison. */
                     if (phase_data->eqfunctions[grouping_column_count - 1] != nullptr)
                         continue;
 
@@ -557,7 +512,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                                                reinterpret_cast<PlanState*>(aggregate_state));
                 }
 
-                /* and for all grouped columns, unless already computed */
+                /* Also prepare the comparison across all grouping columns. */
                 if (phase_data->eqfunctions[aggregate_node->numCols - 1] == nullptr) {
                     phase_data->eqfunctions[aggregate_node->numCols - 1] =
                         execTuplesMatchPrepare(scan_descriptor,
@@ -575,18 +530,13 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         }
     }
 
-    /**
-     * Convert all_grouped_cols to a descending-order list.
-     */
+    /* Put the largest grouping column first so projection can fetch  all needed attributes at once. */
     int grouped_column_number = -1;
     while ((grouped_column_number = bms_next_member(all_grouped_cols, grouped_column_number)) >= 0)
         aggregate_state->all_grouped_cols =
             lcons_int(grouped_column_number, aggregate_state->all_grouped_cols);
 
-    /**
-     * Set up aggregate-result storage in the output expr context, and also
-     * allocate my private per-agg working storage
-     */
+    /* Allocate result values and the reusable descriptors for aggregates and transitions. */
     expression_context = aggregate_state->ss.ps.ps_ExprContext;
     expression_context->ecxt_aggvalues = allocate_zeroed_array<Datum>(aggregate_count);
     expression_context->ecxt_aggnulls = allocate_zeroed_array<bool>(aggregate_count);
@@ -612,9 +562,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         group_state_sets += grouping_set_count;
     }
 
-    /**
-     * Hashing can only appear in the initial phase.
-     */
+    /* Set up hash tables and spill state for the hashing phase */
     if (use_hashing) {
         uint64_t total_groups = 0;
 
@@ -627,15 +575,13 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         aggregate_state->hash_spill_wslot =
             ExecInitExtraTupleSlot(executor_state, scan_descriptor, &TTSOpsVirtual);
 
-        /* this is an array of pointers, not structures */
+        /* Store one pointer to the current transition states for, each hash grouping set. */
         aggregate_state->hash_pergroup = group_state_sets;
 
         aggregate_state->hashentrysize = hash_agg_entry_size(
             aggregate_state->numtrans, child_plan->plan_width, node->transitionSpace);
 
-        /**
-         * Derives shared spill limits from the combined grouping-set estimate.
-         */
+        /* Share one spill budget across the estimated groups in all hash tables. */
         for (int hash_table_index = 0; hash_table_index < aggregate_state->num_hashes;
              ++hash_table_index)
             total_groups += aggregate_state->perhash[hash_table_index].aggnode->numGroups;
@@ -648,19 +594,17 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                             &aggregate_state->hash_planned_partitions);
         find_hash_columns(aggregate_state);
 
-        /* Skip massive memory allocation if we are just doing EXPLAIN */
+        /* EXPLAIN without execution needs metadata, so defer hash-table allocation. */
         if (!(executor_flags & EXEC_FLAG_EXPLAIN_ONLY))
             build_hash_tables(aggregate_state);
 
         aggregate_state->table_filled = false;
 
-        /* Initialize this to 1, meaning nothing spilled, yet */
+        /* Count the initial in-memory batch before any spill batches exist. */
         aggregate_state->hash_batches_used = 1;
     }
 
-    /**
-     * Starts sorted strategies in phase one and hash-only strategies in phase zero.
-     */
+    /* Start hash-only plans in phase zero and other strategies in phase one. */
     if (node->aggstrategy == AGG_HASHED) {
         aggregate_state->current_phase = 0;
         initialize_phase(aggregate_state, 0);
@@ -671,10 +615,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         select_current_set(aggregate_state, 0, false);
     }
 
-    /**
-     * Perform lookups of aggregate function info, and initialize the
-     * unchanging fields of the per-agg and per-trans data.
-     */
+    /* Resolve aggregate functions and fill  the descriptors shared by all groups. */
     for (Aggref* aggregate_reference : postgres_list<Aggref>{aggregate_state->aggs}) {
         AggStatePerAgg aggregate_descriptor;
         AggStatePerTrans transition_state;
@@ -692,7 +633,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
 
         /* Planner should have assigned aggregate to correct level */
         Assert(aggregate_reference->agglevelsup == 0);
-        /* ... and the split mode should match */
+        /* The aggregate call must use the plan's partial-aggregation mode. */
         Assert(aggregate_reference->aggsplit == aggregate_state->aggsplit);
 
         aggregate_descriptor = &aggregate_descriptors[aggregate_reference->aggno];
@@ -720,7 +661,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                 access_result, OBJECT_AGGREGATE, get_func_name(aggregate_reference->aggfnoid));
         InvokeFunctionExecuteHook(aggregate_reference->aggfnoid);
 
-        /* planner recorded transition state type in the Aggref itself */
+        /* Use the transition-state type resolved by the planner. */
         aggregate_transition_type = aggregate_reference->aggtranstype;
         Assert(OidIsValid(aggregate_transition_type));
 
@@ -733,16 +674,12 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         serialfn_oid = InvalidOid;
         deserialfn_oid = InvalidOid;
 
-        /**
-         * Check if serialization/deserialization is required.  We only do it
-         * for aggregates that have transition_type INTERNAL.
-         */
+        /* INTERNAL states need support functions when partial aggregation
+         * requests serialization or deserialization. */
         if (aggregate_transition_type == INTERNALOID) {
-            /**
-             * Requires every INTERNAL transition state to provide serialization.
-             */
+            /* Find the serializer whn this plan returns a serialized partial state. */
             if (DO_AGGSPLIT_SERIALIZE(aggregate_state->aggsplit)) {
-                /* serialization only valid when not running finalfn */
+                /* Serialization returns transition state, so no final function runs. */
                 Assert(DO_AGGSPLIT_SKIPFINAL(aggregate_state->aggsplit));
 
                 if (!OidIsValid(aggregate_form->aggserialfn))
@@ -751,7 +688,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                 serialfn_oid = aggregate_form->aggserialfn;
             }
 
-            /* Likewise for deserialization functions */
+            /* Find the deserializer when incoming partial states need decoding. */
             if (DO_AGGSPLIT_DESERIALIZE(aggregate_state->aggsplit)) {
                 /* deserialization only valid when combining states */
                 Assert(DO_AGGSPLIT_COMBINE(aggregate_state->aggsplit));
@@ -763,7 +700,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             }
         }
 
-        /* Check that aggregate owner has permission to call component fns */
+        /* Check the aggregate owner's permission to call its support functions. */
         {
             HeapTuple procedure_tuple;
 
@@ -799,16 +736,14 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             }
         }
 
-        /**
-         * Resolves polymorphic aggregate inputs to their concrete call types.
-         */
+        /* Read the actual SQL argument types, including resolved  polymorphic types. */
         aggregate_transition_argument_count =
             get_aggregate_argtypes(aggregate_reference, aggregate_transition_input_types.data());
 
-        /* Count the "direct" arguments, if any */
+        /* Count the arguments evaluated once per group. */
         direct_argument_count = list_length(aggregate_reference->aggdirectargs);
 
-        /* Detect how many arguments to pass to the finalfn */
+        /* Include the transition state and any extra arguments required by the final function. */
         if (aggregate_form->aggfinalextra)
             aggregate_descriptor->numFinalArgs = aggregate_transition_argument_count + 1;
         else
@@ -818,10 +753,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         aggregate_descriptor->aggdirectargs = ExecInitExprList(
             aggregate_reference->aggdirectargs, reinterpret_cast<PlanState*>(aggregate_state));
 
-        /**
-         * build expression trees using actual argument & result types for the
-         * finalfn, if it exists and is required.
-         */
+        /* Prepare the final-function call, with its resolved argument and result types. */
         if (OidIsValid(finalfn_oid)) {
             build_aggregate_finalfn_expr(aggregate_transition_input_types.data(),
                                          aggregate_descriptor->numFinalArgs,
@@ -835,15 +767,12 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                                &aggregate_descriptor->finalfn);
         }
 
-        /* get info about the output value's datatype */
+        /* Record how final results must be stored and copied */
         get_typlenbyval(aggregate_reference->aggtype,
                         &aggregate_descriptor->resulttypeLen,
                         &aggregate_descriptor->resulttypeByVal);
 
-        /**
-         * Build working state for invoking the transition function, if we
-         * haven't done it already.
-         */
+        /* Several aggregates can share a transition. Initialize it once. */
         transition_state = &transition_state_storage[aggregate_reference->aggtransno];
         if (transition_state->aggref == nullptr) {
             Datum text_initial_value;
@@ -851,14 +780,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             bool initial_value_is_null;
             Oid transfn_oid;
 
-            /**
-             * If this aggregation is performing state combines, then instead
-             * of using the transition function, we'll use the combine function.
-             */
+            /* Partial-state aggregation calls the combine function to merge states. */
             if (DO_AGGSPLIT_COMBINE(aggregate_state->aggsplit)) {
                 transfn_oid = aggregate_form->aggcombinefn;
 
-                /* If not set then the planner messed up */
+                /* A combine plan requires a combine  function in the aggregate definition. */
                 if (!OidIsValid(transfn_oid))
                     bioseq_log<logging_level::error, logging_target::postgres>(
                         "combinefn not set for aggregate function");
@@ -871,10 +797,8 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                 aclcheck_error(access_result, OBJECT_FUNCTION, get_func_name(transfn_oid));
             InvokeFunctionExecuteHook(transfn_oid);
 
-            /**
-             * initval is potentially null, so don't try to access it as a
-             * struct field. Must do it the hard way with SysCacheGetAttr.
-             */
+            /* Read the initial value through SysCacheGetAttr because the catalog
+             * column can be NULL. */
             text_initial_value = SysCacheGetAttr(
                 AGGFNOID, aggregate_tuple, Anum_pg_aggregate_agginitval, &initial_value_is_null);
             if (initial_value_is_null)
@@ -887,12 +811,10 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                 std::array<Oid, 2u> combine_input_types{aggregate_transition_type,
                                                         aggregate_transition_type};
 
-                /**
-                 * A combine call has one input in addition to its transition state.
-                 */
+                /* Combining adds one incoming state to the current state. */
                 transition_state->numTransInputs = 1;
 
-                /* aggcombinefn always has two arguments of aggregate_transition_type */
+                /* Both combine-function arguments have the transition-state type. */
                 build_aggregate_transition_state(transition_state,
                                                  aggregate_state,
                                                  executor_state,
@@ -906,9 +828,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                                                  combine_input_types.data(),
                                                  2);
 
-                /**
-                 * Rejects strict combine functions for nullable INTERNAL states.
-                 */
+                /* An INTERNAL combine function must accept NULL states and cannot be trict. */
                 if (transition_state->transfn.fn_strict && aggregate_transition_type == INTERNALOID)
                     bioseq_report<logging_level::error, logging_target::postgres>()
                         .with_sql_error_code(ERRCODE_INVALID_FUNCTION_DEFINITION)
@@ -916,7 +836,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                             "combine function with transition type {} must not be declared STRICT",
                             format_type_be(aggregate_transition_type));
             } else {
-                /* Detect how many arguments to pass to the transfn */
+                /* Count row inputs passed to the transition function. */
                 if (AGGKIND_IS_ORDERED_SET(aggregate_reference->aggkind))
                     transition_state->numTransInputs = list_length(aggregate_reference->args);
                 else
@@ -935,9 +855,8 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                                                  aggregate_transition_input_types.data(),
                                                  aggregate_transition_argument_count);
 
-                /**
-                 * Verifies that the first input can initialize a strict transition.
-                 */
+                /* With a strict function and NULL initial state, the first non-NULL
+                 * input  must be usable directly as the transition value. */
                 if (transition_state->transfn.fn_strict && transition_state->initValueIsNull) {
                     if (aggregate_transition_argument_count <= direct_argument_count ||
                         !IsBinaryCoercible(aggregate_transition_input_types[direct_argument_count],
@@ -954,10 +873,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         ReleaseSysCache(aggregate_tuple);
     }
 
-    /**
-     * Update aggregate_state->numaggs to be the number of unique aggregates found.
-     * Also set numstates to the number of unique transition states found.
-     */
+    /* Store the counts after repeated aggregate and transition references have been merged. */
     aggregate_state->numaggs = aggregate_count;
     aggregate_state->numtrans = transition_state_count;
 
@@ -969,23 +885,18 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             .with_sql_error_code(ERRCODE_GROUPING_ERROR)
             .with_message("aggregate function calls cannot be nested");
 
-    /**
-     * Compiles one transition expression per phase for transition or combine mode.
-     */
+    /* Compile the transition or combine expressions needed by each input phase. */
     for (int phase_index = 0; phase_index < aggregate_state->numphases; ++phase_index) {
         AggStatePerPhase phase_state = &aggregate_state->phases[phase_index];
         bool process_hash = false;
         bool process_sorted = false;
 
-        /* phase 0 doesn't necessarily exist */
+        /* Phase zero has no aggregate plan in plain or sorted execution. */
         if (!phase_state->aggnode)
             continue;
 
         if (aggregate_state->aggstrategy == AGG_MIXED && phase_index == 1) {
-            /**
-             * Phase one, and only phase one, in a mixed agg performs both
-             * sorting and aggregation.
-             */
+            /* The first mixed input phase updates both sorted and hash groups. */
             process_hash = true;
             process_sorted = true;
         } else if (aggregate_state->aggstrategy == AGG_MIXED && phase_index == 0) {
@@ -1006,7 +917,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         phase_state->evaltrans =
             ExecBuildAggTrans(aggregate_state, phase_state, process_sorted, process_hash, false);
 
-        /* cache compiled expression for outer slot without nullptr check */
+        /* Cache the child-slot version with every grouping set active. */
         phase_state->evaltrans_cache[0][0] = phase_state->evaltrans;
     }
 
@@ -1018,9 +929,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
 extern "C" void ExecEndAgg(AggState* node) {
     const int grouping_set_count = std::max(node->maxsets, 1);
 
-    /**
-     * Publishes worker aggregate statistics for EXPLAIN ANALYZE.
-     */
+    /* Copy worker statistics  into shared storage, for EXPLAIN ANALYZE. */
     if (node->shared_info && IsParallelWorker()) {
         AggregateInstrumentation* worker_instrumentation;
 
@@ -1031,7 +940,7 @@ extern "C" void ExecEndAgg(AggState* node) {
         worker_instrumentation->hash_mem_peak = node->hash_mem_peak;
     }
 
-    /* Make sure we have closed any open tuplesorts */
+    /* Close sorting work still owned by this aggregate. */
 
     if (node->sort_in)
         tuplesort_end(node->sort_in);
@@ -1054,20 +963,20 @@ extern "C" void ExecEndAgg(AggState* node) {
         }
     }
 
-    /* And ensure any agg shutdown callbacks have been called */
+    /* Run pending aggregate cleanup callbacks before ending the child plan */
     for (int set_index = 0; set_index < grouping_set_count; ++set_index)
         ReScanExprContext(node->aggcontexts[set_index]);
     if (node->hashcontext)
         ReScanExprContext(node->hashcontext);
 
-    /* clean up tuple table */
+    /* Clear the representative input slot. */
     ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
     PlanState* child_plan_state = outerPlanState(node);
     ExecEndNode(child_plan_state);
 }
 
-/** Restores a vector aggregate state to its PostgreSQL rescan boundary. */
+/** Prepare aggregation for a rescan, reusing an unchanged hash table when possible. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL executor ABI name
 extern "C" void ExecReScanAgg(AggState* node) {
     ExprContext* expression_context = node->ss.ps.ps_ExprContext;
@@ -1078,9 +987,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
     node->agg_done = false;
 
     if (node->aggstrategy == AGG_HASHED) {
-        /**
-         * Skips hashed rescan work before the hash table has been built.
-         */
+        /* Input has not filled the hash table yet, so there is nothing to restrt. */
         if (!node->table_filled)
             return;
 
@@ -1096,7 +1003,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
         }
     }
 
-    /* Make sure we have closed any open tuplesorts */
+    /* Close each aggregate's pending input sort. */
     for (int transition_index = 0; transition_index < node->numtrans; ++transition_index) {
         for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
             AggStatePerTrans transition_state = &node->pertrans[transition_index];
@@ -1108,9 +1015,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
         }
     }
 
-    /**
-     * Rescans grouping contexts so transition callbacks run before rebuilding.
-     */
+    /* Run grouping-state cleanup callbacks before rebuilding the groups. */
 
     for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
         ReScanExprContext(node->aggcontexts[set_index]);
@@ -1123,14 +1028,12 @@ extern "C" void ExecReScanAgg(AggState* node) {
     }
     ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
-    /* Forget current agg values */
+    /* Clear the previous aggregate results. */
     MemSet(expression_context->ecxt_aggvalues, 0, sizeof(Datum) * node->numaggs);
     MemSet(expression_context->ecxt_aggnulls, 0, sizeof(bool) * node->numaggs);
 
-    /**
-     * With AGG_HASHED/MIXED, the hash table is allocated in a sub-context of
-     * the hashcontext. Resetting the hashcontext also deletes its sub-contexts.
-     */
+    /* Hash groups live  below hashcontext. Reset it before rebuilding the
+     * empty tables and restarting spill tracking. */
     if (node->aggstrategy == AGG_HASHED || node->aggstrategy == AGG_MIXED) {
         reset_hash_aggregate_spill_state(node);
 
@@ -1148,9 +1051,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
     }
 
     if (node->aggstrategy != AGG_HASHED) {
-        /**
-         * Reset the per-group state (in particular, mark transvalues null)
-         */
+        /* Clear the per-group records. Group initialization will restore the initial transition values. */
         for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
             MemSet(node->pergroups[set_index], 0, sizeof(AggStatePerGroupData) * node->numaggs);
         }
@@ -1166,15 +1067,10 @@ extern "C" void ExecReScanAgg(AggState* node) {
         ExecReScan(child_plan_state);
 }
 
-/***********************************************************************
- * API exposed to aggregate functions
- ***********************************************************************/
+/* Helpers called by aggregate support functions. */
 
-/**
- * Reports whether an fmgr call runs in an aggregate context.
- *
- * When requested, returns the memory context that owns transition values.
- */
+/** Identify an aggregate or window-aggregate call and optionally return its state memory context.
+ * Return zero and a null context for other calls. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL fmgr ABI name
 extern "C" int AggCheckCallContext(FunctionCallInfo call_info, MemoryContext* aggregate_context) {
     if (AggState* aggregate_state = pg_node_view{call_info->context}.try_cast<AggState>()) {
@@ -1192,30 +1088,27 @@ extern "C" int AggCheckCallContext(FunctionCallInfo call_info, MemoryContext* ag
         return AGG_CONTEXT_WINDOW;
     }
 
-    /* this is just to prevent "uninitialized variable" warnings */
+    /* Always initialize the output when the call has no aggregate context. */
     if (aggregate_context)
         *aggregate_context = nullptr;
     return 0;
 }
 
-/**
- * Returns the active aggregate reference for an aggregate support call.
- *
- * Shared transition calls may expose any compatible Aggref.
- */
+/** Return the active aggregate call, or nullptr outside  aggregate support.
+ * A shared transition returns the aggregate reference stored with that transition. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL fmgr ABI name
 extern "C" Aggref* AggGetAggref(FunctionCallInfo call_info) {
     if (AggState* aggregate_state = pg_node_view{call_info->context}.try_cast<AggState>()) {
         AggStatePerAgg current_aggregate;
         AggStatePerTrans current_transition;
 
-        /* check current_aggregate (valid when in a final function) */
+        /* Final functions identify the aggregate beig finalized. */
         current_aggregate = aggregate_state->curperagg;
 
         if (current_aggregate)
             return current_aggregate->aggref;
 
-        /* check current_transition (valid when in a transition function) */
+        /* Transition functions identify their current transition descriptor. */
         current_transition = aggregate_state->curpertrans;
 
         if (current_transition)
@@ -1224,24 +1117,21 @@ extern "C" Aggref* AggGetAggref(FunctionCallInfo call_info) {
     return nullptr;
 }
 
-/**
- * Reports whether the active transition state may be shared.
- *
- * Calls outside aggregate support conservatively return true.
- */
+/** Return whether another aggregate may share the current transition state.
+ * Unknown call contexts return true so callers avoid modifying possibly shared data. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL fmgr ABI name
 extern "C" bool AggStateIsShared(FunctionCallInfo call_info) {
     if (AggState* aggregate_state = pg_node_view{call_info->context}.try_cast<AggState>()) {
         AggStatePerAgg current_aggregate;
         AggStatePerTrans current_transition;
 
-        /* check current_aggregate (valid when in a final function) */
+        /* A final function uses the sharing flag of its aggregate's transition */
         current_aggregate = aggregate_state->curperagg;
 
         if (current_aggregate)
             return aggregate_state->pertrans[current_aggregate->transno].aggshared;
 
-        /* check current_transition (valid when in a transition function) */
+        /* A transition function can read  its own sharing flag. */
         current_transition = aggregate_state->curpertrans;
 
         if (current_transition)

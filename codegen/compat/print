@@ -7,10 +7,9 @@
 #  include <format>
 #  include <utility>
 
-// libstdc++ 13 predates C++23 <print>, while the official LLVM Linux
-// LibTooling binaries use the libstdc++ ABI.  Keep this host-codegen-only
-// compatibility surface equivalent to the two std::println overloads used by
-// the generator; production bioseq targets do not include this directory.
+// libstdc++ 13 lacks C++23 <print>. LLVM Linux LibTooling binaries use
+// the libstdc++ ABI, so the host generator supplies the two std::println
+// overloads it needs here. Production bioseq targets do not include this directory
 namespace std {
 
 template <typename... arguments_t>

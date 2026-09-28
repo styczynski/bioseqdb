@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/virus_report_paths.cppm
- * @brief NCBI virus report and availability endpoint fragments.
+ * @brief NCBI virus reports and accession checks.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:virus_report_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Virus dataset, annotation, and availability path entries. */
+/** @brief Virus data and annotation reports, plus accession-validity checks. */
 inline constexpr std::string_view virus_report_paths =
     R"bioseq_openapi(  /virus/taxon/{taxon}/dataset_report:
     get:

@@ -60,10 +60,9 @@ import bioseq.codegen.support;
 import bioseq.codegen.sql.signature;
 import bioseq.common.hashing;
 
-// Website build orchestration. Owns the closed command dispatch, deterministic
-// source/reference pipeline, SQL execution boundary, staging renderer, and
-// atomic publisher. Cross-partition contract checks exercise every integrated
-// dependency without changing the command or generated-artifact schemas.
+// Builds the website from tutorials, C++ documentation, and PostgreSQL results.
+// Commands split parsing, execution, rendering, and publication into stages.
+// Integration self-tests check the parsers and renderers used by those stages.
 namespace bioseq::codegen::website {
 
 namespace {
@@ -215,7 +214,7 @@ void bind_public_manifest_identity(
 
 }  // namespace
 
-// Defined after the reference index it exercises; driven by verify_website_pipeline.
+// Called by verify_website_pipeline aftrr the reference helpers are defined
 void verify_reference_pipeline();
 namespace {
 void rewrite_entity_link_routes(
@@ -225,11 +224,10 @@ void rewrite_entity_link_routes(
     const std::string& tooltip_url);
 }  // namespace
 
-/// @brief Exercises every integrated parser/renderer/serializer once.
+/// @brief Checks parser, renderer, and serializer integration.
 ///
-/// This is the functional half of the website self-test: it links and runs
-/// MD4C, pugixml, Boost.JSON, Jinja2Cpp, yaml-cpp, and the entity/search merge
-/// so a regression in any dependency integration fails the build's self-test.
+/// Exercises Markdown and Doxygen parsing, entity matching, JSON output, and
+/// templates with, small examples. PostgreSQL execution is tested  separately.
 void verify_website_pipeline() {
     // MD4C.
     const content_node document =
@@ -237,15 +235,14 @@ void verify_website_pipeline() {
     expect(count_kind(document, content_node_kind::heading) == 1, "markdown heading");
     expect(count_kind(document, content_node_kind::code_span) == 1, "markdown code span");
 
-    // markdown extensions.
+    // Markdown extensions.
     expect(admonition_class("WARNING") == "warning", "admonition class");
-    // MD4C reports the tag already lowercased (MD_ADMONITION_TAGS), so the
-    // mapping must accept that spelling too or every severity falls back to note.
+    // MD4C lowercases admonition tags. Accept that spelling so warning
+    // callouts keep their severity.
     expect(admonition_class("warning") == "warning", "admonition class (md4c tag)");
     expect(admonition_class("nonsense").empty(), "admonition class (unknown)");
-    // Classifying in isolation is not enough: the driver must actually read
-    // MD_BLOCK_ADMONITION_DETAIL::type, so assert the severity survives the whole
-    // MD4C -> content_node -> HTML path for a non-default severity.
+    // Check the full Markdown-to-HTML path so the parser must pass the
+    // admonition kind to the renderer.
     for (const auto& [markup, expected] : {
              std::pair{"> [!NOTE]\n> Body.\n", "admonition-note"},
              std::pair{"> [!TIP]\n> Body.\n", "admonition-tip"},
@@ -256,9 +253,8 @@ void verify_website_pipeline() {
         expect(render_content_html(parsed.children).contains(expected),
                "admonition severity survives render");
     }
-    // Doxygen represents lists inside <para> nodes. The HTML renderer must split
-    // those block children out of <p>, including a mixed text + list + text shape,
-    // or the HTML5 parser implicitly closes the paragraph and rejects our </p>.
+    // Doxygen can put lists inside a paragraph. Check that HTML places the
+    // list outside p, including when text appears before and after the list.
     content_node list_text{
         .kind = content_node_kind::paragraph,
         .children = {{.kind = content_node_kind::text, .text = "Zero copy."}}};
@@ -292,7 +288,7 @@ void verify_website_pipeline() {
     expect(reference.has_value() && reference->domain == entity_query_domain::sql,
            "entity reference domain");
 
-    // yaml-cpp frontmatter.
+    // Front matter parsed with yaml-cpp.
     const front_matter_sections split = separate_front_matter(
         "---\ntitle: T\ndescription: d\norder: 1\nkeywords: [k]\n---\nbody\n");
     const tutorial_metadata metadata =
@@ -307,15 +303,14 @@ void verify_website_pipeline() {
         "SELECT 1;\n-- bioseq:teardown\nDROP TABLE t;\n");
     expect(sections.visible == "SELECT 1;", "SQL section split");
 
-    // pugixml.
+    // Doxygen XML parsed with pugixml.
     const auto compounds = parse_doxygen_compound_index(
         "<doxygenindex><compound refid=\"ns\" kind=\"namespace\">"
         "<name>bioseq</name></compound></doxygenindex>");
     expect(compounds.size() == 1 && compounds.front().name == "bioseq", "doxygen index");
 
-    // Doxygen mixed-content mapping: s->strikethrough, computeroutput->
-    // code span, safe ulink kept, unsafe ulink dropped to text + diagnostic,
-    // unknown tag diagnosed but text preserved, ndash -> exact Unicode.
+    // Check Doxygen formatting and links. Unsafe links lose their target,
+    // and  unknown tags produce diagnostics while keeping their text.
     const auto description = parse_doxygen_content(
         "<detaileddescription><para>A <s>gone</s> "
         "<computeroutput>bioseq.seq</computeroutput> "
@@ -341,8 +336,7 @@ void verify_website_pipeline() {
                && description_html.find("Returns") != std::string::npos,
            "doxygen return section keeps its semantic callout label");
 
-    // Entity merge: a Clang page owner is enriched with its unique
-    // Doxygen documentation match (rule 1: exact normalized signature).
+    // Attach Doxygen text to a Clang declaration with the same signature.
     reference_entity clang_seq;
     clang_seq.domain = entity_domain::cpp;
     clang_seq.kind = entity_kind::struct_;
@@ -361,9 +355,8 @@ void verify_website_pipeline() {
                && merged.front().summary_text == "sequence",
            "entity merge attaches docs by normalized signature");
 
-    // Canonical IDs are domain- and kind-tagged, `::`-preserving, and
-    // signature-keyed for functions so overloads (e.g. two constructors) stay
-    // distinct. Golden-locked here alongside the merge above.
+    // Entity IDs include the language and kind. Function IDs also include
+    // the signature so constructor overloads keep different IDs.
     reference_entity ctor_default;
     ctor_default.domain = entity_domain::cpp;
     ctor_default.kind = entity_kind::function;
@@ -380,7 +373,7 @@ void verify_website_pipeline() {
                && make_reference_entity_id(ctor_default) != make_reference_entity_id(ctor_args),
            "canonical id keys function overloads by normalized signature");
 
-    // Coverage: a required-but-undocumented entity is fatal-listed.
+    // Missing documentation for a required entity must fail coverage.
     reference_entity undocumented;
     undocumented.domain = entity_domain::cpp;
     undocumented.kind = entity_kind::struct_;
@@ -392,9 +385,9 @@ void verify_website_pipeline() {
                && coverage.fatal_missing.size() == 1,
            "coverage flags required undocumented entity");
 
-    // The generated SQL manifest is the sole SQL-public visibility authority.
-    // Stable identities remain relocation-independent while installed identities
-    // are matched to the live catalog.
+    // The SQL manifest selects puilic documentation. $extension identities
+    // stay the same  across installations, while installed identities name
+    // the schema used in the live catalog.
     const sql_manifest_public_projection sql_manifest =
         parse_sql_manifest_public_projection(
             R"json({
@@ -580,12 +573,10 @@ void verify_website_pipeline() {
                })json"),
            "SQL manifest rejects revision drift, legacy keys, malformed visibility, and duplicate identities");
 
-    // Overload-group routing/rendering is checked in verify_reference_pipeline,
-    // defined after the reference index it exercises.
+    // Check overload-group links and page data.
     verify_reference_pipeline();
 
-    // Clang 22 structural/export scan: exported module members are
-    // recorded with kind/signature; a non-exported namespace is excluded.
+    // Clang 22 must include exported declarations and exclude the hidden namespace.
     const cpp_reference_index clang_index = scan_cpp_reference_source(
         "export module bioseq.demo;\n"
         "export namespace demo {\n"
@@ -605,9 +596,7 @@ void verify_website_pipeline() {
     expect(!has_entity("hidden::Internal"), "clang excludes non-exported namespace");
     expect(clang_index.clang_release.starts_with("22"), "clang version is 22");
 
-    // Clang 22 module-graph scan: the provided module name is recovered and
-    // a unit with no imports yields no public edge (plain imports are validated
-    // against the real module graph in the source_graph command / integration).
+    // Check the module name and empty import list of a leaf module
     const module_graph_unit demo_unit = scan_module_graph_from_code(
         "export module bioseq.demo.leaf;\n"
         "export namespace demo { struct Node { int value; }; }\n",
@@ -617,8 +606,7 @@ void verify_website_pipeline() {
     expect(demo_unit.exported_imports.empty(),
            "a unit with no import has no public edge");
 
-    // Boost.JSON canonical + HTML-safe (reached through the json partition, not
-    // by naming boost types here).
+    // Check search JSON fields, the final newline, and HTML-safe JSON escapes.
     search_index_entry probe_entry = build_entity_search_entry(merged.front());
     probe_entry.route = "/v0.1/reference/cpp/struct/seq/";
     const std::string search_json = serialize_search_index({probe_entry});
@@ -628,10 +616,9 @@ void verify_website_pipeline() {
     const std::string escaped = apply_html_safe_escapes("a<b>&c");
     expect(escaped.find("\\u003c") != std::string::npos, "json html-safe escape");
 
-    // The execute -> render boundary must retain Doxygen's rich entity docs,
-    // parameter docs, and the SQL-to-C++ implementation relationship. These
-    // fields feed the supplied API-page and hover-card designs after the private
-    // site model is reloaded.
+    // Saving and reloading entities must keep detailed Doxygen text,
+    // parameter descriptions, and links to C++ implementations. Rendering
+    // uses these fields for reference pages and tooltips.
     reference_entity persisted;
     persisted.canonical_id = "cpp:function:bioseq::demo(int)";
     persisted.domain = entity_domain::cpp;
@@ -715,10 +702,9 @@ void verify_website_pipeline() {
                       != std::string::npos,
            "persisted Doxygen refid resolves to a live routed entity tooltip");
 
-    // Shared normalizer golden corpus (mirrors
-    // website/tests/fixtures/search_tokens_golden.json, also driven against the
-    // JS normalizer in website/tests/integration/test_browser.py).
-    // Byte-preserving, ASCII-only casing.
+    // These search-normalization examples also appear in
+    // website/tests/fixtures/search_tokens_golden.json for  the JavaScript tests.
+    // Lowercase ASCII while preserving non-ASCII bytes.
     expect(normalize_search_text("Hello, World!") == "hello world",
            "ascii lowercasing + punctuation split");
     expect(normalize_search_text("bioseq.symbol_count") == "bioseq symbol count",
@@ -734,7 +720,7 @@ void verify_website_pipeline() {
            "composed accent differs from decomposed");
     expect(!is_valid_utf8("\xFF"), "invalid utf-8 rejected");
 
-    // Sort-by-route + duplicate-id rejection in the index builder.
+    // Sort search records by route and reject duplicate IDs.
     const std::string ordered = serialize_search_index(
         {search_index_entry{.id = "b", .route = "/z/"}, search_index_entry{.id = "a", .route = "/a/"}});
     expect(ordered.find("\"/a/\"") < ordered.find("\"/z/\""),
@@ -749,7 +735,7 @@ void verify_website_pipeline() {
     }
     expect(duplicate_rejected, "duplicate search id is fatal");
 
-    // version ordering.
+    // Parse numeric version components.
     expect((parse_release_components("v0.1") == std::vector<std::uint32_t>{0, 1}),
            "version parts");
 
@@ -761,9 +747,8 @@ void verify_website_pipeline() {
            == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
            "sha256 empty vector");
 
-    // Manifest/catalog result parity uses the authoritative SQL signature
-    // grammar. TABLE results remain structural while exact PostgreSQL aliases
-    // canonicalize only their type components.
+    // Compare result types using the SQL signature parser. PostgreSQL type
+    // aliases may match, but TABLE column names, order, and, count must agree.
     const std::string canonical_table_result = canonical_result_type_key(
         "table (created_at timestamptz, n int8)");
     expect(canonical_table_result == canonical_result_type_key(
@@ -792,21 +777,21 @@ void verify_website_pipeline() {
                        "timestamp with time zone"),
            "SQL scalar result parity retains exact PostgreSQL aliases");
 
-    // Jinja2Cpp (through the C++20 shim).
+    // Jinja2Cpp through the separately compiled renderer.
     const std::string rendered = render_inline_template(
         "Hello {{ project }}",
         std::map<std::string, std::string, std::less<>>{{"project", "bioseq"}});
     expect(rendered == "Hello bioseq", "template render");
 
-    // Structured JSON-context rendering: loop over a list of objects,
-    // reflected from Boost.JSON — the surface entity/tutorial pages render with.
+    // Render a JSON array of objects through a template loop, as page
+    // templates do for entities and tutorials.
     const std::string page = render_inline_json_template(
         "{% for e in items %}{{ e.name }}={{ e.n }};{% endfor %}",
         R"({"items":[{"name":"a","n":1},{"name":"b","n":2}]})");
     expect(page == "a=1;b=2;", "template json loop render");
 
-    // PostgreSQL policy-layer constructs are link-validated by the executor.
-    // This self-test does not attempt a live catalog connection or SQL execution.
+    // Construct the PostgreSQL xecutor to check that it links. The constructor
+    // stores the connection string without connecting to PostgreSQL.
     postgres_tutorial_executor executor("host='/nonexistent-bioseq-socket'");
     (void)executor;
 }
@@ -825,11 +810,12 @@ namespace fs = std::filesystem;
     return out;
 }
 
-/// @brief Converts a source path to its canonical path below an explicit source root.
-/// @param source_path Absolute or source-root-relative path to a production source.
-/// @param source_root Absolute root represented by the `{path}` URL placeholder.
-/// @return A normalized forward-slash path with no parent traversal.
-/// @throws std::runtime_error When either input is ambiguous or escapes the root.
+/// @brief Makes a source path  relative to an explicit source root.
+/// @param source_path Absolute path or path relative to source_root.
+/// @param source_root Absolute root used for source links.
+/// @return A normalized path using forward slashes. Symlinks are not resolved.
+/// @throws std::runtime_error If the root is not absolute or the normalized path
+/// leaves it, names the root itself, or contains backslashes.
 [[nodiscard]] std::string canonical_source_path(
     const fs::path& source_path, const fs::path& source_root) {
     const fs::path normalized_root = source_root.lexically_normal();
@@ -864,10 +850,10 @@ namespace fs = std::filesystem;
     return result;
 }
 
-/// @brief Percent-encodes one source-link placeholder value.
+/// @brief Percent-encodes a value inserted into a source URL.
 /// @param value Raw UTF-8 bytes to encode.
-/// @param preserve_slashes Whether path separators remain structural.
-/// @return RFC 3986 unreserved bytes plus optional slashes, with all others encoded.
+/// @param preserve_slashes Whether to keep path separators unescaped
+/// @return RFC 3986 unreserved characters and optional slashes, with other bytes encoded.
 [[nodiscard]] std::string encode_source_url_value(
     std::string_view value, bool preserve_slashes) {
     static constexpr std::string_view hexadecimal = "0123456789ABCDEF";
@@ -916,9 +902,8 @@ namespace fs = std::filesystem;
     return source_url_template;
 }
 
-// A CLI misuse (unknown/repeated/positional/missing-value option). Distinct from
-// std::runtime_error so the dispatcher can return exit 2 for usage errors and
-// exit 3 for parse or validation failures.
+// Marks invalid command-line options so commands return exit  code 2.
+// Other parsing and validation errors return 3.
 struct cli_usage_error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
@@ -933,11 +918,11 @@ struct cli_usage_error : std::runtime_error {
     return false;
 }
 
-/// @brief Parses options against a closed set of value-taking keys and flags.
+/// @brief Parses the allowed value options and flags.
 ///
-/// Unknown, positional, and value-less usages are fatal usage errors. Repeated
-/// values are accepted only for explicitly repeatable keys and retain argv order.
-/// Flags map to `"true"`; value keys consume the following token.
+/// Rejects unknown options, positional arguments, and missing values.
+/// Repeatable options keep their values in argument order, joined by newlines.
+/// Flags store "true", and value options consume the next argument.
 [[nodiscard]] std::map<std::string, std::string, std::less<>> parse_options(
     std::span<std::string_view const> args,
     std::span<std::string_view const> value_keys,
@@ -1016,12 +1001,11 @@ struct cli_usage_error : std::runtime_error {
     return values;
 }
 
-/// @brief Writes a private artifact atomically with mode 0600.
+/// @brief Writes an artifact through a temporary file and requests mode 0600.
 ///
-/// The temp file is created under a 0077 umask so the private permissions hold
-/// from creation — there is never a window where the file is world-readable.
-/// The content is only rewritten when it differs, keeping mtimes stable for
-/// incremental builds while still asserting the permission bits every run.
+/// New temporary files use umask 0077. Rename replaces the destination aftnr
+/// writing. If the content is unchanged, keep its modification time and
+/// request  the private permissions again.
 void write_private_artifact(const fs::path& path, std::string_view content) {
     std::error_code exists_error;
     if (fs::exists(path, exists_error) && !exists_error) {
@@ -1094,8 +1078,7 @@ void collect_examples_and_queries(
         }
     }
     if (node.kind == content_node_kind::entity_link) {
-        // Carry the node's own source span when the Markdown stage recorded one;
-        // span population is refined as MD4C offsets are threaded through.
+        // Keep the source location when Markdown parsing supplied one.
         const source_span span = node.source ? *node.source : source_span{};
         if (auto query = parse_entity_query(node.target, span)) {
             queries.push_back(std::move(*query));
@@ -1106,10 +1089,9 @@ void collect_examples_and_queries(
     }
 }
 
-// Rewrites each runnable SQL code block so only its visible section is rendered.
-// A runnable fence's body carries the hidden setup/teardown SQL that the executor
-// needs but that must never reach the published page; this runs after the
-// example has been collected, on the render-only copy of the document.
+// Keep only visible SQL in runnable code blocks after collecting the full
+// examples for execution. This prevents setup and teardown from appearing
+// in rendered tutorial content.
 void strip_runnable_fence_hidden_sql(std::vector<content_node>& nodes) {
     for (content_node& node : nodes) {
         if (node.kind == content_node_kind::code_block) {
@@ -1125,20 +1107,17 @@ void strip_runnable_fence_hidden_sql(std::vector<content_node>& nodes) {
     }
 }
 
-// Processes annotation directives over a tutorial's top-level blocks (fences
-// are top-level only). Each `annotation target=... match=... title=...`
-// directive is matched against a PRIOR displayed block's decoded source and folded
-// into that block as a numbered code_annotation child (source range + parsed
-// commentary); the directive node is then removed from the render tree. A block
-// flagged `annotated` must gain at least one annotation, and a target's ranges may
-// not overlap - all fatal.
+// Attach each annotation to an earlier code block in this top-level list.
+// Match against the displayed source, then store the range and commentary
+// on that, block. Remove the directive from the document. Missing or overlapping
+// matches fail the build, as  does an annotated block with no annotations.
 void process_annotations(std::vector<content_node>& nodes, const std::string& where) {
     struct block_ref {
         std::string id;
         std::size_t node_index;
         std::string text;   // decoded, displayed source (visible section for runnable)
         bool annotated;
-        std::vector<std::pair<std::size_t, std::size_t>> ranges;  // start,len
+        std::vector<std::pair<std::size_t, std::size_t>> ranges;  // byte offset and length
         std::size_t count;  // annotations attached so far
     };
     std::vector<block_ref> blocks;
@@ -1150,7 +1129,7 @@ void process_annotations(std::vector<content_node>& nodes, const std::string& wh
         }
         return nullptr;
     };
-    // Pass 1: index every displayed block (ordinary/runnable) in document order.
+    // Index ordinary and runnable code blocks in document order
     for (std::size_t index = 0; index < nodes.size(); ++index) {
         const content_node& node = nodes[index];
         if (node.kind != content_node_kind::code_block) {
@@ -1170,7 +1149,7 @@ void process_annotations(std::vector<content_node>& nodes, const std::string& wh
                                    .text = std::move(text), .annotated = fence.annotated,
                                    .ranges = {}, .count = 0});
     }
-    // Pass 2: fold each annotation directive into its (prior) target block.
+    // Attach each annotation to its earlier target blok.
     std::vector<std::size_t> directive_nodes;
     for (std::size_t index = 0; index < nodes.size(); ++index) {
         const content_node& node = nodes[index];
@@ -1262,10 +1241,9 @@ void process_annotations(std::vector<content_node>& nodes, const std::string& wh
     }
 }
 
-// Parses the landing frontmatter `slots:` mapping: each entry maps a
-// template slot name to the landing-page-local id of a runnable block. Returns the
-// mapping in declared order. The YAML here is a flat two-space-indented block of
-// `slot_name: block_id` lines directly under a `slots:` key.
+// Read the landing front matter slots mapping in its written order.
+// Each indented slot_name: block_id line binds a template slot to a runnable
+// block on the landing page. A new unindented line ends the mapping.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> parse_landing_slots(
     std::string_view yaml) {
     std::vector<std::pair<std::string, std::string>> slots;
@@ -1310,11 +1288,9 @@ void process_annotations(std::vector<content_node>& nodes, const std::string& wh
     return slots;
 }
 
-// Per-example build-report statistics are populated at each execution point and
-// read once by execute_site_model_command. They are never serialized into the
-// site model, its signature, or a published input hash; those flow through
-// serialize_site_model, which never touches this accumulator. Each command runs
-// in its own single-threaded process.
+// Execution statistics for the build report. They stay outside the site
+// model and its hashes so elapsed times do not  change published files.
+// Commands use this process-local accumulator without concurrent updates.
 struct example_run_stats {
     std::vector<sql_example_measurement> measurements;
     std::uint64_t peak_rows = 0;
@@ -1328,8 +1304,8 @@ struct example_run_stats {
     return instance;
 }
 
-// Records one executed example's wall time and updates the running peak
-// rows/cells/payload observed across every result set it produced.
+// Record elapsed time and the largest row count, cell count, and text
+// payload seen in any result set from this example.
 void record_example_run(std::string_view example_id, std::chrono::milliseconds elapsed,
                         const sql_example_result& outcome) {
     example_run_stats& stats = example_stats();
@@ -1350,8 +1326,8 @@ void record_example_run(std::string_view example_id, std::chrono::milliseconds e
     }
 }
 
-// Minimal JSON string escape for the diagnostic build report; the report
-// is not routed through the model serializer, so it carries its own escaping.
+// Escape a string for build-report JSON, which is written separately
+// from the website model.
 [[nodiscard]] std::string report_json_string(std::string_view value) {
     std::string out = "\"";
     for (const char raw : value) {
@@ -1377,10 +1353,8 @@ void record_example_run(std::string_view example_id, std::chrono::milliseconds e
     return out;
 }
 
-// Writes one stage's build-report fragment when --report-dir is configured.
-// The report tree lives in the build directory, outside the published <site-root>,
-// and is never a site-manifest entry; a no-op when the option is absent so the stage
-// is unaffected in contexts that do not request a report.
+// Write this stage's report under --report-dir when it is configured.
+// These report files are separate from the site manifest.
 void write_stage_report(
     const std::map<std::string, std::string, std::less<>>& options,
     std::string_view stage, const std::string& json_body) {
@@ -1483,13 +1457,10 @@ void configure_manifest_acl_targets(
     }
 }
 
-// Executes the landing page's runnable slots into database-independent
-// views. The template slot name comes from the authoritative frontmatter `slots:`
-// mapping, and every binding error is fatal: a slot referencing an unknown
-// block id, a block referenced by no slot, or a duplicate slot/block. When no
-// connection is configured, each slot renders its visible SQL with no result table;
-// when a connection is given, a failing example fails the build. Hidden
-// setup/teardown never leaves the returned model.
+// Bind landing-page slots to runnable examples and capture  their results.
+// Every block must belong to exactly one slot. Unknown IDs and duplicate
+// slots fail the build. With a database connection, run each exampl and keep
+// its last table result. Otherwise, return visible SQL with no result table
 [[nodiscard]] std::vector<landing_example_view> collect_landing_views(
     const fs::path& source, const std::string& version_string,
     const std::map<std::string, std::string, std::less<>>& options) {
@@ -1504,7 +1475,7 @@ void configure_manifest_acl_targets(
     std::vector<unresolved_entity_query> queries;
     collect_examples_and_queries(document, "landing", version_string, examples, queries);
 
-    // Map block id -> example, rejecting duplicate block ids.
+    // Index examples by, block ID and reject duplicates.
     std::map<std::string, const sql_example*, std::less<>> by_block;
     for (const sql_example& example : examples) {
         if (!by_block.emplace(example.local_id, &example).second) {
@@ -1577,10 +1548,9 @@ void configure_manifest_acl_targets(
                     + outcome.error().code + "] " + outcome.error().message);
             }
             record_example_run("landing:" + example.canonical_id, elapsed, *outcome);
-            // Landing examples may visibly demonstrate setup commands before
-            // their final SELECT (for example CREATE/SET/load/INSERT). Publish
-            // the last tuple-bearing result, never an earlier command tag or
-            // an intermediate scalar returned by bioseq.load().
+            // A landing example can load data before its final SELECT. Show the
+            // last table result so an intermediate bioseq.load() result does not
+            // take the place of the  final query output.
             for (auto result = outcome->visible_results.rbegin();
                  result != outcome->visible_results.rend(); ++result) {
                 if (result->shape == result_shape::rows) {
@@ -1595,13 +1565,12 @@ void configure_manifest_acl_targets(
     return views;
 }
 
-/// @brief Builds the deterministic website plan from validated source.
+/// @brief Parses tutorials and builds the website plan.
 ///
-/// Parses every tutorial's frontmatter/Markdown under <source>/<version>/tutorials,
-/// extracts runnable SQL and typed entity queries, resolves order and prev/next
-/// links, and folds the site config plus every input's content hash into the plan
-/// signature. Shared by `plan` (which serializes it) and `publish` (which renders
-/// from it), so both stages observe an identical model.
+/// Reads Markdown files under <source>/<version>/tutorials, collects runnable
+/// SQL and entity references, and assigns tutorial order and navigation.
+/// The signature includes the base path, version, and input content hashes.
+/// Execution and the plan command use this same parser.
 [[nodiscard]] site_plan create_site_plan(
     const fs::path& source,
     const std::string& version_string,
@@ -1644,8 +1613,8 @@ void configure_manifest_acl_targets(
         collect_examples_and_queries(document, item.metadata.slug,
                                      version.path_component, item.sql_examples,
                                      item.entity_queries);
-        // Fold annotation directives into their target blocks before the render
-        // copy is finalized; this also validates every fence's info string.
+        // Attach annotations and check top-level fence attributes before saving
+        // the content used for rendering.
         process_annotations(item.content, item.source_path);
         // The render copy must not leak hidden setup/teardown SQL.
         strip_runnable_fence_hidden_sql(item.content);
@@ -1710,7 +1679,7 @@ void configure_manifest_acl_targets(
     return plan;
 }
 
-// Small owned-node constructors for the executed-result document subtree.
+// Helpers for building document nodes from SQL results.
 [[nodiscard]] content_node make_text_node(std::string value) {
     content_node node;
     node.kind = content_node_kind::text;
@@ -1749,8 +1718,8 @@ void configure_manifest_acl_targets(
     return node;
 }
 
-// Public EXPLAIN excerpts omit implementation-only diagnostics, never timings,
-// selected/executed algorithms, fallback counters, or result cardinalities.
+// Hide these internal EXPLAIN fields in public examples. Keep timing,
+// algorithm choices, fallback counts, and  result row counts.
 constexpr std::array<std::string_view, 8> private_explain_fields{
     "Test-build-only", "DSM Test Fixture", "Fully Attested Alignment Jobs",
     "Bioseq Batch ABI Version", "Bioseq Owned RestrictInfo Path Copies",
@@ -1785,11 +1754,9 @@ constexpr std::array<std::string_view, 8> private_explain_fields{
     return false;
 }
 
-// Renders one executed example's visible result model to owned document
-// nodes so the render stage emits result tables/notices/error admonitions without a
-// database. Multiple row result sets are labelled Result 1..N in order, a
-// provenance caption names the extension/server versions when known, and hidden
-// SQL never enters this subtree; only the visible-result model does.
+// Turn visible SQL results into document nodes for later rendering.
+// Multiple tables get numbered labels. Notices and errors become callouts,
+// and a caption records PostgreSQL and extension versions when available.
 [[nodiscard]] std::vector<content_node> make_result_nodes(
     const sql_example_result& result, const std::string& extension_version,
     const std::string& server_version) {
@@ -1896,10 +1863,9 @@ constexpr std::array<std::string_view, 8> private_explain_fields{
     return nodes;
 }
 
-// Walks the resolved tutorial content and inserts each runnable block's executed
-// result nodes immediately after it. Recurses so runnable blocks nested in
-// admonitions/lists are covered; a block with no captured result (no cluster) is
-// left as its visible SQL only.
+// Insert results after their runnable code blocks, including blocks nested
+// in lists or callouts. A block without a captured result keeps only its
+// visibl SQL.
 void inject_tutorial_results(
     std::vector<content_node>& nodes,
     const std::map<std::string, sql_example_result, std::less<>>& results,
@@ -1933,14 +1899,13 @@ void inject_tutorial_results(
     nodes = std::move(rebuilt);
 }
 
-// Resolves the private-cluster execution target from the shared CLI options: either
-// a per-example isolated clone or a direct conninfo, or neither (no cluster,
-// examples render visible SQL only).
+// Database settings shared by SQL examples. They describe a separate
+// database per example, a direct connection, or a build without SQL execution
 struct execution_target {
     bool have_connection{};
     std::optional<postgres_isolation_settings> isolation;
     std::string conninfo;
-    std::string probe_conninfo;  // a plain connection usable for catalog provenance
+    std::string probe_conninfo;  // connection used to read PostgreSQL and extension versions
 };
 
 [[nodiscard]] execution_target resolve_execution_target(
@@ -1978,10 +1943,9 @@ struct execution_target {
     return executor.execute(example);
 }
 
-// Domain-scoped index from an entity reference spelling to its canonical id.
-// Each entity is indexed by qualified name, canonical id, and display name; a key
-// that maps to two different entities is marked ambiguous (empty) so resolution
-// rejects it. The `id:` domain matches any entity by canonical id.
+// Maps an entity spelling and language  to an entity ID. Empty values mark
+// names shared by different entities, which the resolver rejects as ambiguous.
+// The id domain accepts exact IDs across both C++ and SQL.
 struct entity_reference_index {
     std::map<std::string, std::string, std::less<>> by_key;
 
@@ -2011,9 +1975,8 @@ struct entity_reference_index {
     const std::vector<reference_entity>& cpp_entities,
     const std::vector<reference_entity>& sql_entities) {
     entity_reference_index index;
-    // A name an overload_group owns must resolve to the GROUP page, not to any one
-    // For member overloads, collect grouped names so each member skips indexing
-    // its shared qualified/display name and only the group claims the bare name.
+    // Give a SQL overload group the shared function name. Individual overloads
+    // keep their signature IDs so a name-only link opens the group page.
     std::set<std::string, std::less<>> grouped_names;
     std::set<std::string, std::less<>> real_spellings;
     for (const reference_entity& entity : sql_entities) {
@@ -2048,8 +2011,8 @@ struct entity_reference_index {
         if (!name_owned_by_group) {
             index.add(domain, entity.qualified_name, entity.canonical_id);
             index.add(domain, entity.display_name, entity.canonical_id);
-            // The `any` domain backs the `#name` prose shorthand: a name that
-            // exists in both C++ and SQL collides here and is reported as ambiguous.
+            // The any, domain resolves #name in prose. Matching C++ and SQL names
+            // become ambiguous here.
             index.add(entity_query_domain::any, entity.qualified_name,
                       entity.canonical_id);
             index.add(entity_query_domain::any, entity.display_name,
@@ -2062,9 +2025,9 @@ struct entity_reference_index {
     for (const reference_entity& entity : sql_entities) {
         add_entity(entity);
     }
-    // Extension-qualified authoring alias `bioseq.<name>` for public-schema SQL
-    // entities owned by the extension when no real entity has that spelling:
-    // `#bioseq.mmsearch` resolves to the public.mmsearch overload group.
+    // Accept bioseq.<name> as an alias for an extension SQL entity in another
+    // schema when that name is free. For example, #bioseq.mmsearch can resolve
+    // to the public.mmsearch overload  group.
     for (const reference_entity& entity : sql_entities) {
         const std::size_t dot = entity.qualified_name.find('.');
         const std::string schema =
@@ -2086,9 +2049,9 @@ struct entity_reference_index {
     return index;
 }
 
-// Splits one prose text run into text + shorthand entity_link nodes. A
-// shorthand is `#` at a text-start/whitespace boundary, followed by an ASCII
-// identifier whose components join with `.` or `::`; anything else stays literal.
+// Recognize #name at the start of text or after whitespace. Names use
+// ASCII identifiers joined by . or ::. Convert them to entity links and
+// keep the remaining text unchanged.
 void split_shorthand_text(const std::string& text,
                           std::vector<content_node>& out) {
     const auto is_start = [](char character) {
@@ -2151,8 +2114,8 @@ void split_shorthand_text(const std::string& text,
     flush();
 }
 
-// Rewrites `#name` prose shorthands into entity_link nodes, only inside
-// prose: headings, code, links, and existing entity links are left untouched.
+// Convert #name in prose to entity links. Leave headings, code, and
+// existing links unchanged.
 void apply_entity_shorthand(std::vector<content_node>& nodes, bool in_prose) {
     std::vector<content_node> rebuilt;
     for (content_node& node : nodes) {
@@ -2172,17 +2135,16 @@ void apply_entity_shorthand(std::vector<content_node>& nodes, bool in_prose) {
     nodes = std::move(rebuilt);
 }
 
-// Resolves every entity_link in a tutorial's content against the entity graph and
-// records the target entity's canonical id on the node. An
-// unresolved or ambiguous reference is fatal so a typo can never ship as inert
-// text. Routes stay base-independent: render binds the base-aware URL later.
+// Find each tutorial link's entity ID before rendering. Missing and
+// ambiguous targets fail the build. Page URLs are filled in later so the
+// saved content can be rendered under another base path.
 void resolve_entity_links(std::vector<content_node>& nodes,
                           const entity_reference_index& index,
                           const std::string& where) {
     for (content_node& node : nodes) {
         if (node.kind == content_node_kind::entity_link) {
-            // A `#name` prose shorthand resolves name-only against every
-            // domain; the explicit `[[domain:...]]` wiki form names its own domain.
+            // #name searches bsth languages. The explicit wiki-link form selects
+            // the domain supplied by  the author
             const bool shorthand = node.attributes.contains("shorthand");
             const std::string display = shorthand ? "#" + node.target
                                                   : "[[" + node.target + "]]";
@@ -2211,17 +2173,17 @@ void resolve_entity_links(std::vector<content_node>& nodes,
                     + " (use an explicit sql:/cpp: form)");
             }
             node.attributes["entity_id"] = found->second;
-            // A `spelling|label` reference names its own display text; otherwise the
-            // node's Markdown link text is the label. Only when neither exists does the
-            // spelling become the label (so a resolved route never shows as raw text).
+            // Use an explicit label when supplied. For wiki links, hide the domain
+            // prefix from the label. Other links keep their Markdown text, with the
+            // entity spelling as a fallback for an empty label.
             if (query.label) {
                 node.attributes["entity_label"] = *query.label;
             } else if (!shorthand
                        && (node.target.starts_with("sql:")
                            || node.target.starts_with("cpp:")
                            || node.target.starts_with("id:"))) {
-                // MD4C exposes the raw wikilink target as display text. Domain
-                // qualifiers are resolver syntax, not user-facing labels.
+                // MD4C uses the wiki-link target as its text. Remove the domain prefix
+                // from the displayed label.
                 node.attributes["entity_label"] = query.spelling;
             } else if (node.text.empty() && node.children.empty()) {
                 node.attributes["entity_label"] = query.spelling;
@@ -2231,9 +2193,8 @@ void resolve_entity_links(std::vector<content_node>& nodes,
     }
 }
 
-// Collects the canonical IDs that resolved entity links target across a document
-// tree. These "referenced" entities join the required set for coverage:
-// a public entity a tutorial links to must be documented or the build fails.
+// Collect referenced entity IDs for documentation checks. Public entities
+// linked from tutorials must have a summary for the build to pass.
 void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
                                    std::set<std::string>& referenced) {
     for (const content_node& node : nodes) {
@@ -2245,15 +2206,12 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     }
 }
 
-/// @brief Builds the resolved, database-independent site model.
+/// @brief Builds site data that can later  be rendered without PostgreSQL.
 ///
-/// Rebuilds the deterministic plan from source, reads the merged C++/SQL entity
-/// graphs, executes the landing and tutorial runnable examples on the private
-/// cluster (when one is configured), injects each tutorial result inline,
-/// captures server/extension provenance, and computes documentation coverage. The
-/// returned model carries only normalized projections — never hidden setup/teardown
-/// SQL, credentials, OIDs, timings, or machine paths — so `render` can emit staging
-/// without a cluster and at more than one base path.
+/// Reads tutorials and reference entities, checks SQL catalog data against the
+/// manifests, and resolves links. If a connection is configured, execute the
+/// examples and insert their results into tutorial content. Clear hidden SQL
+/// before saving and fail if required documentation is missing.
 [[nodiscard]] site_model create_site_model(
     const fs::path& source, const std::string& version_string,
     const site_configuration& config, const std::string& site_yaml,
@@ -2290,11 +2248,9 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
         model.staged_extension_sha256 = found->second;
     }
 
-    // Apply each generated SQL manifest's Doxygen-derived public projection.
-    // The live catalog remains the identity/property source, while
-    // visibility and prose come from the normalized annotation model. The
-    // install-resolved identity is matched exactly; no schema/name heuristic
-    // may promote an inventory-only extension member.
+    // Match public manifest entries to their exact installed catalog IDs.
+    // Check names, comments, and, result types against the catalog, then use the
+    // manifes documentation for each public page. Keep other entries as inventory.
     if (!options.contains("sql-manifest")) {
         throw std::runtime_error(
             "website SQL projection requires the generated --sql-manifest");
@@ -2455,10 +2411,9 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     model.sql_entities = std::move(kept);
     model.omitted_sql_entities = std::move(omitted);
 
-    // Synthesize an overload-group page for every public SQL function name that
-    // carries more than one signature: the group owns the bare-name
-    // reference and lists each member's identity signature. Grouping runs on the
-    // post-allowlist kept set, so an inventory-only overload never creates a page.
+    // Add a group  page when a public SQL function has several signatures.
+    // It owns the shared function name and links to each overload. Only
+    // functions selected for public documentation take part
     {
         std::map<std::string, std::vector<const reference_entity*>, std::less<>> by_name;
         for (const reference_entity& entity : model.sql_entities) {
@@ -2522,8 +2477,7 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
 
     model.landing_examples = collect_landing_views(source, version_string, options);
 
-    // Resolve every tutorial's typed entity references against the merged graph.
-    // An unresolved reference fails the build here, before render.
+    // Resolve tutorial references now so broken links fail before rendering.
     const entity_reference_index reference_index =
         build_entity_reference_index(model.cpp_entities, model.sql_entities);
 
@@ -2550,9 +2504,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
         }
         inject_tutorial_results(item.content, results, model.extension_version,
                                 model.postgres_server_version);
-        // The site_model is a published-adjacent artifact: it must never carry hidden
-        // setup/teardown SQL. Those sections were consumed by execution above;
-        // strip them so only the visible projection survives into the model.
+        // Remove setup and teardown SQL before saving the model. Pages need only
+        // the visible SQL and its captured results.
         for (sql_example& example : item.sql_examples) {
             example.setup_sql.clear();
             example.teardown_sql.clear();
@@ -2560,17 +2513,15 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     }
     model.tutorials = std::move(plan.tutorials);
 
-    // Coverage spans both the configured public C++ modules and the allowlisted SQL
-    // domain; synthetic overload-group aggregates are routing pages, not
-    // documentable entities, so they are excluded from the totals.
+    // Count documentation for public C++ and SQL entities. Exclude generated
+    // SQL overload-group pages from the totals.
     std::vector<reference_entity> coverage_entities = model.cpp_entities;
     for (const reference_entity& entity : model.sql_entities) {
         if (entity.kind != entity_kind::overload_group) {
             coverage_entities.push_back(entity);
         }
     }
-    // Every entity a tutorial links to must be documented: collect the
-    // resolved references so an undocumented referenced entity is fatal, not a warning.
+    // Require summaries for public entities linked from tutorials.
     std::set<std::string> referenced;
     for (const tutorial& item : model.tutorials) {
         collect_referenced_entity_ids(item.content, referenced);
@@ -2590,9 +2541,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             group.group, static_cast<std::uint32_t>(group.public_total),
             static_cast<std::uint32_t>(group.documented_total)});
     }
-    // The build fails when a required or tutorial-referenced public entity is
-    // undocumented. C++ required coverage is also gated at cpp_index; this is the
-    // single point that enforces the same policy over the live allowlisted SQL domain.
+    // Fail when a required or  tutorial-linked public entity has no summary.
+    // This also applies the SQL coverage checks after catalog validation.
     if (!coverage.fatal_missing.empty()) {
         std::string joined;
         for (const std::string& id : coverage.fatal_missing) {
@@ -2606,13 +2556,11 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
 
 }  // namespace
 
-/// @brief Self-tests overload-group routing and group-page rendering.
+/// @brief Checks reference links and page data with small examples.
 ///
-/// A name carrying several allowlisted signatures gets a synthetic overload_group
-/// that owns the bare-name reference (so a name-only link resolves to the group
-/// page instead of being rejected as ambiguous), while every concrete overload
-/// stays addressable by its canonical id; the group page view lists each member's
-/// identity signature with its route.
+/// Name-only SQL links must open the overload group. Exact IDs must still
+/// select individual overloads, including when the extension schema changes.
+/// Also checks EXPLAIN filterin and annotated code rendering.
 void verify_reference_pipeline() {
     auto explain_probe = boost::json::parse(R"JSON([
         {"Plan":{"Bioseq Batch ABI Version":1,"Plans":[
@@ -2689,8 +2637,7 @@ void verify_reference_pipeline() {
                == public_manifest_a.stable_identity,
            "installed aliases resolve to stable overload/member identities");
 
-    // Shorthand resolves name-only against the `any` domain, and the
-    // extension-qualified `bioseq.<name>` alias resolves to the same target.
+    // #mmsearch and #bioseq.mmsearch must resolve to the same overload group.
     expect(lookup(entity_query_domain::any, "mmsearch")
                == "sql:overload_group:$extension.mmsearch"
            && lookup(entity_query_domain::any, "bioseq.mmsearch")
@@ -2764,8 +2711,7 @@ void verify_reference_pipeline() {
                && group_json.find("bioseq_aligner_options") != std::string::npos,
            "overload-group page view serializes member signatures");
 
-    // Container pages carry a child index; an implementation cross-link resolves
-    // to the implementing entity's route.
+    // Container page data must include children and the  implementation link.
     reference_entity container;
     container.domain = entity_domain::cpp;
     container.kind = entity_kind::struct_;
@@ -2779,8 +2725,8 @@ void verify_reference_pipeline() {
                && container_json.find("\"implemented_by\"") != std::string::npos,
            "container page view serializes child index and implemented-by link");
 
-    // Fence info grammar: quoted values carry commas/spaces/parens verbatim;
-    // duplicate scalar and unknown attributes are fatal.
+    // Quoted fence attributes keep spaces, commas, and parentheses. Reject
+    // repeated scalar attributes and unknown names.
     const fence_descriptor ordinary_fence = parse_fence_info("sql id=demo annotated");
     expect(ordinary_fence.kind == fence_kind::ordinary && ordinary_fence.id == "demo"
                && ordinary_fence.annotated,
@@ -2809,8 +2755,8 @@ void verify_reference_pipeline() {
     expect(is_fatal("sql bogus=1"), "unknown attribute is fatal");
     expect(is_fatal("text runnable"), "runnable is only valid on sql");
 
-    // Annotation folding: the directive attaches to a prior target as a numbered
-    // code_annotation child pointing at the matched source range, and is removed.
+    // Attach the annotation to its earlier target, preserving the matched
+    // source range and removing the directive block.
     std::vector<content_node> annotated_doc;
     content_node display_block;
     display_block.kind = content_node_kind::code_block;
@@ -2900,14 +2846,12 @@ void verify_reference_pipeline() {
            "literal JSON braces remain visible without resembling template delimiters");
 }
 
-/// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
+/// @brief Runs website plan to parse tutorials and save the build plan.
 ///
-/// Strictly parses site.yaml and every tutorial's frontmatter/Markdown, extracts
-/// runnable SQL and typed unresolved entity queries, resolves ordering and
-/// previous/next links, and writes the deterministic private plan artifact
-/// (schema bioseq.website.plan, revision 1) with mode 0600.
-/// @param args Options after the `plan` token.
-/// @return Zero on success; two on CLI usage errors; three on parse/validation.
+/// Validates site configuration, and tutorial metadata, collects runnable SQL,
+/// and assigns tutorial order and navigation before writing the private plan.
+/// @param args Options after plan
+/// @return 0 on  success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_plan_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "templates", "static",
@@ -2989,15 +2933,13 @@ namespace {
 
 }  // namespace
 
-/// @brief Runs `website cpp_index`: Doxygen + Clang → cpp_entities + coverage.
+/// @brief Runs website cpp_index to combine C++ declarations with Doxygen text.
 ///
-/// Parses the Doxygen XML tree for documentation, runs the Clang 22 structural
-/// pass over the reachable interface units against the main compile database,
-/// merges them, computes documentation coverage, and writes the
-/// canonical current C++-entity and documentation-coverage artifacts. Missing
-/// required documentation is fatal.
-/// @param args Options after the `cpp_index` token.
-/// @return Zero on success; two on usage errors; three on parse/validation.
+/// Scans the supplied source units with Clang and the compile database. Writes
+/// the entity index and coverage report, then fails if required documentation
+/// is missing.
+/// @param args Options after cpp_index.
+/// @return 0 on success, 2 for invalid command-line usrge, or 3 for other failures.
 [[nodiscard]] int execute_cpp_index_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "doxygen-xml", "compile-db", "reachable-units", "source-root", "site-config",
@@ -3014,7 +2956,7 @@ namespace {
     const site_configuration config =
         parse_site_configuration(read_artifact_bytes(site_config_path), site_config_path.generic_string());
 
-    // Doxygen XML wall time, byte volume, and page-compound count.
+    // Measure Doxygen parsing time, input bytes, and included compounds.
     const auto doxygen_started = std::chrono::steady_clock::now();
     std::uint64_t doxygen_xml_bytes = 0;
     std::error_code walk_error;
@@ -3048,10 +2990,8 @@ namespace {
     std::vector<fs::path> units;
     for (const std::string& line : read_lines(reachable_units)) {
         const fs::path input{line};
-        // source_graph writes repository-relative identities. Clang's compile
-        // database is rooted in the build directory, so passing those strings
-        // directly silently selects no compile commands and yields an empty
-        // C++ reference. Resolve against the same source root as Doxygen.
+        // Resolve relative source paths against the configured source root.
+        // Clang needs these  absolute paths to find their compile commands.
         units.push_back(fs::absolute(input.is_absolute()
             ? input : source_root / input).lexically_normal());
     }
@@ -3106,14 +3046,12 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website execute-sql`: runs one ad-hoc SQL example on a live cluster.
+/// @brief Runs website execute-sql for one SQL example.
 ///
-/// Connects to the private Unix-socket cluster, runs the setup/visible/teardown
-/// SQL through postgres_tutorial_executor, and renders the visible result model to
-/// stdout. A focused live-execution entrypoint used by the acceptance
-/// harness; the model-producing `execute` and the batch runner sit on top of this.
-/// @param args Options after the `execute-sql` token.
-/// @return Zero on success; two on usage errors; three on execution failure.
+/// Runs setup and visible SQL, attempts teardown, and prints the captured
+/// results. It can use a direct connection or a separate database and role.
+/// @param args Options after execute-sql.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_sql_example_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
@@ -3144,9 +3082,8 @@ namespace {
         example.expected_sqlstate = found->second;
     }
 
-    // In --isolated mode the example runs as a fresh restricted role inside a
-    // per-example database cloned from the extension-bearing template;
-    // otherwise it runs directly against the supplied conninfo.
+    // --isolated gives the example its own database and restricted role.
+    // Direct execution uses the supplied connection string.
     std::expected<sql_example_result, diagnostic> outcome =
         std::unexpected(diagnostic{});
     if (options.contains("isolated")) {
@@ -3210,14 +3147,13 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website catalog`: captures live SQL entities to an artifact.
+/// @brief Runs website catalog to save extension types and functions.
 ///
-/// Connects to the private cluster, derives each exact extension/schema scope
-/// from the generated manifests, and captures type/function identities,
-/// properties, and catalog comments for parity validation. Page visibility
-/// and documentation remain manifest-owned.
-/// @param args Options after the `catalog` token.
-/// @return Zero on success; two on usage errors; three on capture failure.
+/// Generated manifests choose the extensions and schemas to inspect. Capture
+/// live identities, properties, and comments for later checks against those
+/// manifests, which  determine the public documentation.
+/// @param args Options after catalog.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_catalog_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "conninfo", "sql-manifest", "output"});
@@ -3267,13 +3203,9 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website render-fragment`: renders a template against a JSON context.
-///
-/// Reads a Jinja template and a JSON page-data context and writes the rendered
-/// document. The low-level render primitive; the full model-driven `render`
-/// stage is separate.
-/// @param args Options after the `render-fragment` token.
-/// @return Zero on success; two on usage errors; three on render failure.
+/// @brief Runs website render-fragment for one template and JSON context.
+/// @param args Options after render-fragment
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_template_render_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({"template", "context", "output"});
     const auto options = parse_options(args, value_keys, {});
@@ -3294,17 +3226,16 @@ namespace {
 
 namespace {
 
-// One static file discovered under the immutable asset root, with its content
-// and per-file SHA-256, used to derive the content-addressed bundle hash.
+// A static file and its SHA-256, used to name the asset bzndle by its contents.
 struct static_asset {
     std::string relative_path;  // normalized forward-slash path under static/
     std::string content;
     std::string sha256;
 };
 
-// Walks website/static and hashes every regular file. The bundle hash is
-// SHA-256 over sorted `<relpath>\0<file-sha256>\n` records so a byte change in
-// any asset (or a rename) yields a new immutable /assets/<hash>/ directory.
+// Hash static files in path order to choose the /assets/<hash>/ directory.
+// Include each path with its file hash so renaming a file changes the bundle
+// name  too. Reject symlinks.
 [[nodiscard]] std::vector<static_asset> collect_static_assets(
     const fs::path& static_root, std::string& bundle_sha256) {
     std::vector<static_asset> assets;
@@ -3337,9 +3268,8 @@ struct static_asset {
     return assets;
 }
 
-// Collects every regular file under root as site-relative "/" routes. Rejects
-// symlinks and special files so publish set-equality can never bless a tree that
-// smuggles a non-regular entry.
+// Collect file routes for comparison with, the site manifest. Reject
+// symlinks and special files so every listed output is a regular file.
 void collect_site_files(const fs::path& root, std::set<std::string>& routes) {
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
         if (entry.is_symlink()) {
@@ -3362,7 +3292,7 @@ void collect_site_files(const fs::path& root, std::set<std::string>& routes) {
     return parent.empty() ? fs::path(".") : parent;
 }
 
-// Flushes a file's bytes to stable storage using durable write-ahead ordering.
+// Attempt to flush a file before the next publication step. Errors are ignored.
 void fsync_file(const fs::path& path) {
     const int descriptor = ::open(path.c_str(), O_RDONLY);
     if (descriptor >= 0) {
@@ -3371,7 +3301,7 @@ void fsync_file(const fs::path& path) {
     }
 }
 
-// Flushes a directory entry (a rename/create) to stable storage.
+// Attempt to flush directory changes after a create or rename. Errors are ignored.
 void fsync_directory(const fs::path& path) {
     const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
     if (descriptor >= 0) {
@@ -3380,10 +3310,9 @@ void fsync_directory(const fs::path& path) {
     }
 }
 
-// Atomically replaces output with staging. When output is absent the
-// staging directory is renamed into place; when it exists the two sibling
-// directories are exchanged with the platform's atomic swap primitive and the
-// now-old tree is removed, so a reader never observes a partially written site.
+// Publish the complete staging tree with a directory rename. If output
+// exists, atomically swap the two directories, then remove the old tree.
+// Platforms without an atomic directory swap  fail instead of copying files.
 void atomic_publish(const fs::path& staging, const fs::path& output) {
     std::error_code error;
     if (!fs::exists(output, error)) {
@@ -3425,10 +3354,9 @@ void atomic_publish(const fs::path& staging, const fs::path& output) {
     return total;
 }
 
-// Fails the build if a generated HTML page violates the required
-// invariants: no unrendered template placeholder, no javascript: URL, no inline
-// event handler or style, no external script/stylesheet resource, exactly one
-// <h1>, the meta CSP present, and frame-ancestors kept out of the meta element.
+// Check generated HTML for leftover template markers, forbidden resource
+// URLs, and selected inline handlers or styles. Also check the h1 count and
+// required CSP text. These are string checks on the generated markup.
 void validate_generated_html(std::string_view route, std::string_view html) {
     const auto fail = [route](std::string_view why) -> void {
         throw std::runtime_error("generated HTML validation failed for "
@@ -3441,7 +3369,7 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     if (html.find("javascript:") != std::string_view::npos) {
         fail("contains a javascript: URL");
     }
-    // Hidden runnable-example sections must never reach a published page.
+    // Reject SQL section markers tht indicate a hidden section reached the page.
     for (const std::string_view marker :
          {"bioseq:setup", "bioseq:visible", "bioseq:teardown"}) {
         if (html.find(marker) != std::string_view::npos) {
@@ -3477,9 +3405,9 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     }
 }
 
-// Writes one rendered artifact into staging at a site-relative "/" route,
-// recording its route and content SHA-256 for the manifest. The manifest itself
-// is written afterward and is never one of these entries.
+// Write files into staging and record their routes and SHA-256 hashes.
+// HTML files pass the markup checks before writing The caller writes the
+// manifest separately after all outputs are recorded.
 struct staging_writer {
     fs::path root;
     std::map<std::string, std::string, std::less<>> manifest;
@@ -3507,18 +3435,15 @@ struct staging_writer {
     }
 };
 
-// Emits a JSON string value, or null when empty, for the site manifest provenance.
+// Quote nonempty manifest metadata, or  emit null. Values must already be JSON-safe.
 [[nodiscard]] std::string manifest_optional(std::string_view value) {
     return value.empty() ? std::string("null")
                          : "\"" + std::string(value) + "\"";
 }
 
-// Binds each resolved entity_link to its base-aware route and tooltip data URL.
-// Tutorial resolution records a canonical id on the node, while
-// Doxygen documentation persists its native refid as the target. The reference
-// alias map normalizes both forms before the render stage applies the route it
-// assigned at this base path, so the same model links correctly at more than one
-// base path.
+// Add page URLs and tooltip links to resolved entity references. Tutorial
+// links already carry entity IDs. Doxygen links use refid aliases, which
+// are looked up here. Resolve URLs during rendering for the chosen base path.
 void rewrite_entity_link_routes(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
@@ -3548,7 +3473,7 @@ void rewrite_entity_link_routes(
     }
 }
 
-// Minimal JSON string-body escaper for the entity-ranges data attribute payload.
+// Escape quotes, backslashes, and whitespace used in entity-range JSON strings.
 [[nodiscard]] std::string json_escape(std::string_view text) {
     std::string out;
     for (const char character : text) {
@@ -3564,12 +3489,10 @@ void rewrite_entity_link_routes(
     return out;
 }
 
-// Resolves each displayed block's `entity="<canonical-id>"` fence attributes into
-// non-overlapping source-text ranges. A listed id must exist and its
-// qualified spelling must occur exactly once in the block source (absent or
-// ambiguous is fatal); overlapping ranges are fatal. The ranges are emitted as a
-// data attribute the client decorator wraps in entity links after Prism, so copied
-// source and textContent are unchanged.
+// Find the source ranges named by entity= fence attributes. Each entity
+// must exist and its qualified name must occur exactly once in the block.
+// Reject overlapping ranges. Save the ranges for the browser to turn into
+// links after syntax highlighting, while  keeping the displayed code text.
 void decorate_code_entity_ranges(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& route_by_id,
@@ -3640,14 +3563,12 @@ void decorate_code_entity_ranges(
     }
 }
 
-/// @brief Renders a resolved site model into an owner-marked staging tree.
+/// @brief Renders a saved site model into, a staging directory.
 ///
-/// Consumes only the database-independent `site_model` plus the site config, the
-/// requested base path, and the template/static roots — never a cluster — so the
-/// same model can be rendered at more than one base path. It content-addresses
-/// the static bundle, renders every route through the shared frame, records
-/// server/extension provenance in the manifest, and enforces exact
-/// manifest/tree set equality. Returns the site-manifest SHA-256; performs no swap.
+/// Uses the model, templates, and static files without a database connection.
+/// Resolves page URLs for the requested pase path and names the asset bundle
+/// by its hash. Writes the manifest and checks that its file list matches
+/// staging. Returns the manifest SHA-256 for publication.
 [[nodiscard]] std::string render_site_model(
     const site_model& model, const site_configuration& config,
     const std::string& base_path, const std::string& revision,
@@ -3671,7 +3592,7 @@ void decorate_code_entity_ranges(
         ? url(version + "/")
         : url(version + "/tutorials/" + model.tutorials.front().metadata.slug + "/");
 
-    // Content-address the immutable static bundle and stage it.
+    // Name the static bundle by its content hash and copy it into staging.
     std::string bundle_sha256;
     const std::vector<static_asset> assets =
         collect_static_assets(static_dir, bundle_sha256);
@@ -3685,7 +3606,7 @@ void decorate_code_entity_ranges(
         writer.emit(route(bundle_prefix + asset.relative_path), asset.content);
     }
 
-    // Resolve the base-aware site view bound into every page's frame.
+    // Prepare shared page fields and URLs for  the chosen base path.
     site_view site;
     site.title = config.title;
     site.base_path = base_path;
@@ -3700,9 +3621,8 @@ void decorate_code_entity_ranges(
     site.favicon_url = url(bundle_prefix + "favicon.svg");
     site.prism_js_url = url(bundle_prefix + "vendor/prism/prism.min.js");
     site.prism_css_url = url(bundle_prefix + "vendor/prism/prism.min.css");
-    // The configured default social image lives in the immutable bundle under
-    // media/; drop the authoring "static/" prefix to get its bundle-relative path
-    // and bind it as an absolute OpenGraph/Twitter image URL.
+    // Build the social-image URL inside the asset bundle The configured path
+    // may start with static/, which is removed before adding the bundle prefix.
     std::string social_relative = config.default_social_image;
     if (social_relative.starts_with("static/")) {
         social_relative.erase(0, std::string_view("static/").size());
@@ -3731,11 +3651,9 @@ void decorate_code_entity_ranges(
         writer.emit(route(rel), html);
     };
 
-    // Assign each entity a readable, collision-checked route. Routes are
-    // recomputed here (not carried in the model) so a base-independent model renders
-    // at any base path; the canonical ID and output path collision checks stay.
-    // SQL route names and hashes use relocation-stable manifest identities.
-    // The live installed qualified name remains the page title/catalog witness.
+    // Rebuild entity routes for this deployment base path and reject duplicate
+    // IDs or paths. SQL routes use stable manifest identities, so moving the
+    // extension to another schema keeps the URL. Page titles use installed names.
     std::vector<reference_entity> cpp_entities = model.cpp_entities;
     std::vector<reference_entity> sql_entities = model.sql_entities;
     std::set<std::string> seen_routes;
@@ -3762,10 +3680,8 @@ void decorate_code_entity_ranges(
     assign_routes(cpp_entities);
     assign_routes(sql_entities);
 
-    // The merged entity graph, its canonical-id -> base-aware route map, and the
-    // content-addressed tooltip dataset URL are computed once here: tutorials
-    // bind their resolved entity links to these routes, and the search index and
-    // tooltip artifact below reuse the same values.
+    // Build shared lookup maps for reference links, search, and tooltips.
+    // Reject a Doxygen refid that points to different entity IDs.
     std::vector<reference_entity> all_entities = cpp_entities;
     all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
     std::map<std::string, std::string, std::less<>> route_by_id;
@@ -3787,8 +3703,7 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Bind each overload-group's members to their identity signature + base-aware
-    // route so the group page can link to every concrete overload.
+    // Add each overload signature and page URL to its  group page.
     for (reference_entity& group : sql_entities) {
         if (group.kind != entity_kind::overload_group) {
             continue;
@@ -3809,10 +3724,9 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Container child index: group every entity under its parent's qualified
-    // name so class/struct pages list their members and module/namespace pages list
-    // their children. The parent is the qualified name minus its last top-level
-    // `::` component (template/parameter `::` are skipped via depth tracking).
+    // Group C++ members under their qualified parent aame for container pages.
+    // Find the last :: outside template arguments and parameter lists so a type
+    // name inside a signature cannot be mistaken for the parent.
     const auto parent_of = [](std::string_view name) -> std::string {
         int depth = 0;
         std::size_t last = std::string::npos;
@@ -3833,7 +3747,7 @@ void decorate_code_entity_ranges(
         children_by_parent;
     for (const reference_entity& entity : all_entities) {
         if (entity.kind == entity_kind::overload_group) {
-            continue;  // routing aggregate, not a structural child
+            continue;  // overload groups have their own member list
         }
         const std::string parent = parent_of(entity.qualified_name);
         if (!parent.empty()) {
@@ -3867,10 +3781,8 @@ void decorate_code_entity_ranges(
     const std::string tooltip_url =
         url(version + "/entities." + bioseq::common::sha256_hex(tooltip_json) + ".json");
 
-    // Root marketing landing page: the executed runnable slots are bound as
-    // the examples.<slot> collection; hidden setup/teardown never reaches the page.
-    // Shared breadcrumb serializer and tutorial-backlink reverse map.
-    // Each crumb is {label, href}; the last crumb is the current page.
+    // Build breadcrumb data and an index of tutorials linking to each entity.
+    // Breadcrumb objects use name and url, with the current page last.
     const auto breadcrumb_json =
         [](const std::vector<std::pair<std::string, std::string>>& crumbs)
             -> std::string {
@@ -3898,8 +3810,8 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Version-global left navigation: every tutorial plus the two reference
-    // indexes. Bound as page.doc_nav on documentation pages so the frame is uniform.
+    // Give documentation pages the same sidebar of tutorials and C++/SQL
+    // reference indexes through page.doc_nav.
     std::string doc_nav = "[{\"label\":\"Tutorials\",\"items\":[";
     {
         bool first_nav = true;
@@ -3918,8 +3830,8 @@ void decorate_code_entity_ranges(
     doc_nav += "{\"label\":" + json_text("SQL") + ",\"url\":"
         + json_text(url(version + "/reference/sql/")) + "}]}]";
 
-    // On-this-page: assign a stable [a-z0-9-] anchor to every body heading and
-    // return its table-of-contents JSON. Dedupes collisions with a numeric suffix.
+    // Give  body headings URL anchors and collect the page contents list.
+    // Add numeric suffixes when headings would otherwise share an, anchor.
     const auto heading_slug = [](std::string_view text) {
         std::string slug;
         bool previous_dash = false;
@@ -4015,9 +3927,7 @@ void decorate_code_entity_ranges(
                + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
            "examples", landing_examples_json);
 
-    // Root benchmark explorer. Its shell and UI logic are mechanically derived
-    // from the supplied benchmark design; the external runtime fetches only the
-    // allowlisted raw/API JSON sources carried by the immutable static manifest.
+    // Render the benchmark explorer page. Its JavaScript loads the report data
     render("benchmarks/index.html", "benchmarks.html.j2",
            "{\"title\":" + json_text(config.title + " Benchmarks")
                + ",\"description\":"
@@ -4027,7 +3937,7 @@ void decorate_code_entity_ranges(
                + ",\"page_type\":" + json_text("benchmarks") + "}",
            "", "");
 
-    // Host-served not-found page. Version-agnostic root artifact.
+    // Render the root-level page used for missing URLs.
     render("error.html", "error.html.j2",
            "{\"title\":" + json_text("Page not found")
                + ",\"description\":" + json_text("The requested page does not exist.")
@@ -4035,7 +3945,7 @@ void decorate_code_entity_ranges(
                + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
-    // Version overview / documentation home, distinct from the landing page.
+    // Render the documentation home for this version.
     render(version + "/index.html", "version_home.html.j2",
            "{\"title\":" + json_text(config.title + " " + version)
                + ",\"description\":" + json_text(config.short_description)
@@ -4047,10 +3957,9 @@ void decorate_code_entity_ranges(
                + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
-    // One page per published tutorial. Tutorials are discovered directly
-    // in the supplied documentation sidebar; there is intentionally no separate
-    // tutorial-listing route. Executed result subtrees were injected by execute, so
-    // rendering here is database-free.
+    // Render each tutorial with the results already saved by execution.
+    // The sidebar provides the tutorial list, and each page gets previous and
+    // next links using the saved orer.
     const auto adjacent_tutorial_title = [&model](
         const std::optional<std::string>& slug)
         -> std::optional<std::string> {
@@ -4109,7 +4018,7 @@ void decorate_code_entity_ranges(
         render(rel, "tutorial.html.j2", page, "", "");
     }
 
-    // Reference landing plus per-domain entity indexes and entity pages.
+    // Render the reference home, C++ and SQL indexes, and  entity pages.
     render(version + "/reference/index.html", "reference_index.html.j2",
            "{\"title\":" + json_text("API Reference")
                + ",\"description\":" + json_text("Bioseq C++ and SQL API reference")
@@ -4170,8 +4079,8 @@ void decorate_code_entity_ranges(
                        url(version + "/reference/" + std::string(domain) + "/")},
                       {entity.qualified_name, url(entity_relative_route)}});
             page += ",\"doc_nav\":" + doc_nav;
-            // Section table of contents: fixed entity sections that are
-            // present, matched to the h2 anchors in entity.html.j2.
+            // Add contents links only for sections present on this entity page.
+            // Anchor names must match entity.html.j2.
             const bool has_backlinks =
                 backlinks_by_id.find(entity.canonical_id) != backlinks_by_id.end();
             std::string entity_toc = "[";
@@ -4208,10 +4117,8 @@ void decorate_code_entity_ranges(
             }
             entity_toc.push_back(']');
             page += ",\"on_this_page\":" + entity_toc;
-            // Detailed documentation body (trusted HTML). Doxygen `<ref>`
-            // nodes carry native refids in the persisted execute model; resolve
-            // them on a render-only copy to the same base-aware routes and tooltip
-            // dataset used by tutorial references.
+            // Resolve Doxygen references on a copy of the documentation before
+            // rendering it. Use the same routes and tooltip data as tutorial links.
             std::vector<content_node> detail_nodes = entity.detail_content;
             rewrite_entity_link_routes(
                 detail_nodes, identity_by_reference, route_by_id, tooltip_url);
@@ -4219,9 +4126,8 @@ void decorate_code_entity_ranges(
             page += detail_nodes.empty()
                 ? std::string("null")
                 : json_quote(render_content_html(detail_nodes));
-            // C++ source link: the stored path is already canonical relative to
-            // the explicit source root. The validated template is the sole URL
-            // authority; no directory-marker search or basename fallback exists.
+            // Build declaration links from the stored source path, revision, and
+            // line using the configured URL template.
             if (entity.declaration) {
                 const std::string source_path =
                     entity.declaration->path.generic_string();
@@ -4235,7 +4141,7 @@ void decorate_code_entity_ranges(
             } else {
                 page += ",\"source_url\":null,\"source_label\":null";
             }
-            // SQL provenance: extension version + actual schema + server version.
+            // Show the extension version, installed schema, and PostgreSQL version.
             if (entity.domain == entity_domain::sql) {
                 const auto dot = entity.qualified_name.find('.');
                 const std::string schema = dot == std::string::npos
@@ -4270,9 +4176,9 @@ void decorate_code_entity_ranges(
     render_domain("cpp", "C++", cpp_entities);
     render_domain("sql", "SQL", sql_entities);
 
-    // Documentation-coverage page and machine-readable report, taken from
-    // the resolved model so execute and render agree exactly. Missing docs are broken
-    // out into summary/parameter/return dimensions and totalled per module/SQL domain.
+    // Render the coverage page and JSON report from the saved counts.
+    // Include missing summaries, parameter and return  documentation, and
+    // totals for each module or SQL group.
     const auto id_array = [](const std::vector<std::string>& ids)
         -> std::string {
         std::string out = "[";
@@ -4317,7 +4223,7 @@ void decorate_code_entity_ranges(
                                    model.coverage_missing_returns, model.coverage_fatal_missing,
                                    model.coverage_groups));
 
-    // Versions manifest, versions page, and per-version search index.
+    // Write the version selector data and versions page.
     const std::vector<std::string> version_labels{version};
     writer.emit(route("versions.json"),
                 serialize_release_catalog(version_labels, base_path));
@@ -4329,8 +4235,7 @@ void decorate_code_entity_ranges(
            "versions",
            "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
                + json_text(version) + "}]");
-    // Project the one canonical graph, the tutorial plan, and the release index
-    // pages into the deterministic per-version search index.
+    // Build search records for entities, tutorials, and index pages.
     std::vector<search_index_entry> search_entries;
     search_entries.reserve(all_entities.size() + model.tutorials.size() + 5);
     for (const reference_entity& entity : all_entities) {
@@ -4381,20 +4286,18 @@ void decorate_code_entity_ranges(
                    version + "/reference/sql/", "Bioseq SQL API reference");
     writer.emit(route(version + "/search-index.json"),
                 serialize_search_index(std::move(search_entries)));
-    // Content-addressed per-version tooltip dataset: the same bytes the
-    // resolved entity links point at, named by their own SHA-256 for long caching.
+    // Save tooltip data under its SHA-256 name, matching the URLs in entity links.
     writer.emit(route(version + "/entities." + bioseq::common::sha256_hex(tooltip_json)
                           + ".json"),
                 tooltip_json);
-    // catalog-inventory.json records the extension-owned candidates that the
-    // generated manifest did not mark public - the inverse of the published SQL
-    // surface - so a reviewer can audit what stays inventory-only.
+    // Save catalog entries omitted from public documentation so reviewers
+    // can see which captured extension objects have no reference page
     if (!model.omitted_sql_entities.empty()) {
         writer.emit(route(version + "/catalog-inventory.json"),
                     serialize_sql_entities(model.omitted_sql_entities));
     }
 
-    // Host-agnostic SEO / security deployment artifacts.
+    // Write the crawler rules, suggested HTTP security headers, and sitemap.
     writer.emit(route("robots.txt"),
                 "User-agent: *\nAllow: /\nSitemap: " + config.canonical_origin
                     + url("sitemap.xml") + "\n");
@@ -4420,8 +4323,8 @@ void decorate_code_entity_ranges(
     sitemap += "</urlset>\n";
     writer.emit(route("sitemap.xml"), sitemap);
 
-    // Serialize the manifest last, then require exact set equality. The live
-    // PostgreSQL server/extension provenance comes from the resolved model.
+    // Write the manifest after all outputs, then check that its routes match
+    // the files in staging. PostgreSQL version data comes from the saved model.
     {
         std::string manifest_json;
         manifest_json += "{\n  \"schema\": \"bioseq.website.site_manifest\",\n";
@@ -4486,16 +4389,13 @@ void decorate_code_entity_ranges(
 
 }  // namespace
 
-/// @brief Runs `website publish`: renders the full content-addressed site tree.
+/// @brief Runs website publish, to reilace the output  with a staged site.
 ///
-/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
-/// addresses website/static into one immutable /assets/<sha256>/ bundle,
-/// renders every route through the shared template frame, writes the site
-/// manifest (SHA-256 of every output but itself), validates exact set equality
-/// between the manifest and the staged tree, and atomically swaps staging over
-/// the output root.
-/// @param args Options after the `publish` token.
-/// @return Zero on success; two on usage errors; three on parse/validation.
+/// With --staging, checks the owner marker, requested validation stamps,
+/// and manifest file list before swapping directories. Otherwise, builds and
+/// renders the model first. Records a success marker after publication.
+/// @param args Options after publish.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_publish_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "cpp-entities", "sql-entities",
@@ -4517,11 +4417,9 @@ void decorate_code_entity_ranges(
         ? fs::path(require_option(options, "staging"))
         : fs::path(output.string() + ".staging");
 
-    // Crash recovery: a prepublish descriptor beside output means a prior
-    // publish was interrupted after the write-ahead stamp. If output already matches
-    // the descriptor's manifest (hash + exact set), complete the publish by writing
-    // the success marker and dropping the descriptor; otherwise clear only the
-    // nonce-owned transient state and fail so the build DAG recreates staging.
+    // Recover an interrupted publish from its prepublish descriptor. If the
+    // output manifest hash and file list match, write the success marker.
+    // Otherwise, remove the descriptor and fail  so the build recreates staging.
     {
         const fs::path prepublish = output.string() + ".prepublish.json";
         std::error_code probe;
@@ -4568,8 +4466,8 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Every validator stamp must confirm before the exchange:
-    // render binds them to staging; publish rechecks their presence (fail-closed).
+    // Collect requested validation stamps. Publishing existing staging checks
+    // that each stamp file is present before the directory swap.
     std::vector<std::string> validation_stamps;
     if (const auto found = options.find("model-validation-stamp"); found != options.end()) {
         validation_stamps.push_back(found->second);
@@ -4580,9 +4478,8 @@ void decorate_code_entity_ranges(
 
     std::string manifest_hash;
     if (swap_only) {
-        // Verify the owner-marked staging, the validator stamps,
-        // and the full staged manifest, then atomically exchange. No rendering, no
-        // cluster, so a validator that rejected staging blocks the swap entirely.
+        // Check the staging owner marker, requested stamp files, and manifest
+        // file list before publication. The site has already been rendered.
         const fs::path staging_manifest = staging / "site-manifest.json";
         if (!fs::exists(staging_manifest)) {
             throw std::runtime_error("publish: staging has no site-manifest.json: "
@@ -4621,9 +4518,9 @@ void decorate_code_entity_ranges(
                 + std::to_string(present.size()) + ")");
         }
     } else {
-        // Convenience all-in-one path (dev / MCP): build the resolved model and render
-        // staging in one process, then swap. The spec CMake pipeline instead uses
-        // execute -> render -> publish --staging so validators gate the exchange.
+        // The combined command builds and renders before publishing. Separate
+        // execute, render, and publish --staging commands allow validation between
+        // reddering and the directory swap
         const std::string site_yaml = read_artifact_bytes(require_option(options, "site-config"));
         const site_configuration config =
             parse_site_configuration(site_yaml, require_option(options, "site-config"));
@@ -4647,10 +4544,9 @@ void decorate_code_entity_ranges(
             fs::path(require_option(options, "static")), staging);
     }
 
-    // Durable write-ahead publish: stamp an fsynced 0600 prepublish descriptor
-    // plus an owner marker adjacent to staging, then swap atomically, then record the
-    // success marker and drop the descriptor/owner. A crash between any two steps is
-    // resolved by the crash-recovery pass on the next run.
+    // Write a prepublish descriptor before swapping directories so  the next
+    // run can check an interrupted publish. After the swap, write the success
+    // marker and remove the descriptor and owner marker.
     const std::string nonce =
         std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
     const fs::path owner_marker = staging.string() + ".owner.json";
@@ -4685,11 +4581,9 @@ void decorate_code_entity_ranges(
     fsync_directory(parent_or_dot(output));
     std::println("published site to {}", output.string());
 
-    // Aggregate the per-stage build-report fragments into a single diagnostic
-    // report beside the report tree, outside the published site and never a
-    // manifest entry. Output/search-index byte volumes are measured from
-    // the just-published tree; every stage fragment is embedded verbatim (or null
-    // when a cached stage produced none this run).
+    // Combine saved stage reports with byte counts from the published tree.
+    // A missing or empty stage report becomes null. Write build-report.json
+    // under the report directory, separate from the site manifest.
     if (const auto found = options.find("report-dir");
         found != options.end() && !found->second.empty()) {
         const fs::path report_dir(found->second);
@@ -4742,16 +4636,13 @@ void decorate_code_entity_ranges(
     return 3;
 }
 
-/// @brief Runs `website execute`: resolves + executes the site into a site model.
+/// @brief Runs website execute to prepare site data and SQL results.
 ///
-/// Rebuilds the plan from source, reads the merged C++/SQL entity artifacts, opens
-/// the private cluster (when configured) to execute the landing and tutorial runnable
-/// examples and capture server/extension provenance, and writes the resolved
-/// database-independent site model (current schema, mode 0600). Setup/teardown
-/// SQL, credentials, OIDs, timings, and machine paths never enter the artifact, so
-/// `render` can consume it without a database and at more than one base path.
-/// @param args Options after the `execute` token.
-/// @return Zero on success; two on usage errors; three on parse/execution failure.
+/// Builds the model from tutorials and reference artifacts, executes examples
+/// when a connection  is configured, and saves the private, model. Hidden SQL
+/// is cleared before saving so rendering can run later without PostgreSQL.
+/// @param args Options after execute.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_site_model_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "cpp-entities", "sql-entities",
@@ -4780,8 +4671,8 @@ void decorate_code_entity_ranges(
     if (const auto found = options.find("source-revision"); found != options.end()) {
         revision = found->second;
     }
-    // Reset the build-report statistics so this process's execution stands alone,
-    // then run the executor-driven model build, which populates them.
+    // Start fresh execution statistics for this command. Model building
+    // records each example as it runs.
     example_stats() = example_run_stats{};
     const auto stage_started = std::chrono::steady_clock::now();
     const site_model model = create_site_model(
@@ -4822,15 +4713,13 @@ void decorate_code_entity_ranges(
     return 3;
 }
 
-/// @brief Runs `website render`: renders a resolved model into staging without a DB.
+/// @brief Runs website render to write pages from a saved model.
 ///
-/// Reads the current site-model artifact, verifies its schema, and renders every route
-/// into an owner-marked staging directory at the requested base path, and writes the
-/// built-in model-validation stamp bound to the staged manifest hash. It never
-/// opens a cluster, so the same executed model can be rendered at
-/// more than one base path; only `publish` may exchange staging with the live site.
-/// @param args Options after the `render` token.
-/// @return Zero on success; two on usage errors; three on parse/render failure.
+/// Checks the model format and renders into staging at the requested base
+/// path. Writes an owner marker  and, when requested, a validation stlmp
+/// containing the manifest hash. Publication is a separate command.
+/// @param args Options after render
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_render_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "model", "site-config", "templates", "static", "output", "base-path",
@@ -4870,8 +4759,8 @@ void decorate_code_entity_ranges(
         "{\"stage\":\"render\",\"render_wall_ms\":" + std::to_string(stage_ms)
             + ",\"page_count\":" + std::to_string(staged_html) + "}\n");
 
-    // Owner-mark staging so only publish may exchange it, and write the
-    // built-in model-validation stamp bound to the staged manifest hash.
+    // Mark staging for publication and write the manifest hash to the
+    // requested model-validation stamp.
     const std::string nonce =
         std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
     write_private_artifact(staging.string() + ".owner.json",
@@ -4892,16 +4781,13 @@ void decorate_code_entity_ranges(
     return 3;
 }
 
-/// @brief Runs `website assemble`: combines verified single-version sites.
+/// @brief Runs website assemble to combine single-version sites.
 ///
-/// Verifies every input site root against its sibling `<root>.success` marker
-/// before copying anything, combines the per-version subtrees and asset bundles
-/// (root-level files come from the newest/primary version), regenerates the
-/// cross-version versions.json, and writes the immutable assembled manifest
-/// (current assembled-manifest schema) with the same exact set-equality rule before an
-/// atomic swap into place.
-/// @param args Options after the `assemble` token.
-/// @return Zero on success; two on usage errors; three on validation failure.
+/// Checks each input manifest against its success marker, then copies version
+/// pages and assets. Shared root files come from the newest version. Rebuilds
+/// versions.json, checks the assembled file  list, and swaps staging into place.
+/// @param args Options after assemble.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_assemble_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({"site-roots", "output"});
     const auto options = parse_options(args, value_keys, {});
@@ -5051,18 +4937,14 @@ void decorate_code_entity_ranges(
     return 3;
 }
 
-/// @brief Runs `website source_graph`: Clang export-import reachable closure.
+/// @brief Runs website source_graph to find publicly imported modules.
 ///
-/// Scans each reachable module interface unit for its provided module and its
-/// `export import` (public) versus plain `import` (internal) edges, then computes
-/// the closure reachable from the configured primary modules by following only
-/// public edges into other Bioseq-owned modules. Plain imports never create a
-/// public edge; an exported edge to a missing Bioseq module is fatal. Emits the
-/// roots, edges, and sorted reachable closure in the current source-graph schema. PG
-/// entrypoint units never enter that graph; they are appended only to the
-/// reachable source inventory consumed by Doxygen and cpp_index.
-/// @param args Options after the `source_graph` token.
-/// @return Zero on success; two on usage errors; three on validation failure.
+/// Starts from configured modules and follows export import edges in the
+/// scanned sources. Missing Bioseq module providers fail the build. Saves
+/// the graph and optionally a source-file list for Doxygen and cpp_index,
+/// adding PostgreSQL entry-point files to that list.
+/// @param args Options after source_graph.
+/// @return 0 on success, 2 for invalid command-line usage, or 3 for other failures.
 [[nodiscard]] int execute_source_graph_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "reachable-units", "entrypoint-units", "compile-db", "source-root",
@@ -5108,7 +4990,7 @@ void decorate_code_entity_ranges(
     const std::vector<module_graph_unit> scanned =
         scan_module_graph(units, compile_db);
 
-    // Map each provided module to its unit; duplicate providers are fatal.
+    // Index module providers and reject duplicates.
     std::map<std::string, module_graph_unit, std::less<>> universe;
     for (const module_graph_unit& unit : scanned) {
         if (unit.provided_module.empty()) {
@@ -5119,7 +5001,7 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Seed the closure with the configured primary modules; each must be present.
+    // Start with configured public modules. Each needs a scanned provider.
     std::vector<std::string> roots;
     std::vector<std::string> worklist;
     std::set<std::string> reached;
@@ -5134,9 +5016,8 @@ void decorate_code_entity_ranges(
         }
     }
 
-    // Follow only public (export import) edges into other Bioseq-owned modules. A
-    // "bioseq."-prefixed exported edge with no provider is fatal; std/third-party
-    // exported edges remain external dependencies and are not part of the closure.
+    // Follow exported imports found  in the scan. A missing bioseq. provider
+    // is an error. Other unscanned imports remain external dependencies.
     while (!worklist.empty()) {
         const std::string current = std::move(worklist.back());
         worklist.pop_back();
@@ -5174,9 +5055,8 @@ void decorate_code_entity_ranges(
         output,
         serialize_source_graph(linked_clang_release(), roots, serialized_closure));
 
-    // Keep the provider graph interface-only. The newline-delimited scan inventory
-    // consumed by Doxygen and cpp_index appends normalized, unique ordinary PG
-    // entrypoint units only after the interface closure.
+    // Add PostgreSQL entrz-point files to, the source list used by Doxygen
+    // and cpp_index. Keep them separate from the module-provider graph
     if (const auto found = options.find("reachable-output"); found != options.end()) {
         std::string reachable_text;
         std::set<std::string> emitted_paths;

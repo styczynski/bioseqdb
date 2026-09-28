@@ -1,13 +1,13 @@
 /**
  * @file
- * @brief Declares path-lineage predicates without importing traversal implementations.
+ * @brief Declares checks for finding a BioseqScan that can supply a BatchJoin target.
  */
 module;
 #include <bioseq/pg_compat.h>
 
 export module bioseq.postgres.table:custom_scan_join_ownership_carrier_lineage_contracts;
 
-/** @brief Couples an eligible base scan with its costing and locator targets. */
+/** @brief A candidate BioseqScan, with its cost path and the output expressions its parent needs. */
 export struct batch_join_bioseq_path_candidate {
     CustomPath* scan = nullptr;
     Path* cost_owner = nullptr;
@@ -15,14 +15,12 @@ export struct batch_join_bioseq_path_candidate {
 };
 
 /**
- * @brief Holds a synthetic base scan and projection wrapper for eligibility tests.
+ * @brief A test BioseqScan with a projection  above it.
  *
- * Integration-only validation seam for the exact production eligibility guard.
- * SQL cannot reliably force an unrelated expression into a base-relation
- * ProjectionPath: PostgreSQL will normally retain it in an upper projection.
- * Construct the dangerous planner shapes directly and pass them through
- * find_unparameterized_bioseq_custom_path(), which is the production entry
- * point used by BioseqBatchJoinSetJoinPathlistHook().
+ * PostgreSQL usually keeps unrelated expressions in an upper projection, so SQL
+ * cannot reliably produce the base projection shapes these tests need. Build
+ * them directly and check them with find_unparameterized_bioseq_custom_path(),
+ * the same function used by BioseqBatchJoinSetJoinPathlistHook().
  */
 export struct batch_join_projection_guard_fixture {
     RelOptInfo* rel = nullptr;
@@ -30,13 +28,13 @@ export struct batch_join_projection_guard_fixture {
     ProjectionPath* projection = nullptr;
 };
 
-/** @brief Builds an exact single-relation helper PHV for projection-guard tests. */
+/** @brief Builds a match helper inside a single-relation PlaceHolderVar for projection tests. */
 export [[nodiscard]] PlaceHolderVar* make_batch_join_projection_guard_phv(Oid helper_oid,
                                                                           Oid result_type,
                                                                           Index relid,
                                                                           Index phid);
 
-/** @brief Builds a synthetic projection-wrapped Bioseq path for guard tests. */
+/** @brief Builds a test BioseqScan with extra expressions in a projection above it. */
 export [[nodiscard]] batch_join_projection_guard_fixture
 make_batch_join_projection_guard_fixture(Index relid,
                                          List* wrapper_delta,
@@ -44,13 +42,13 @@ make_batch_join_projection_guard_fixture(Index relid,
                                          Cost wrapper_total,
                                          Cardinality wrapper_rows);
 
-/** @brief Check whether an expression exposes a locator-backed target sequence. */
+/** @brief Checks whether an expression exposes the target sequence to ordinary SQL evaluation. */
 export [[nodiscard]] bool batch_join_target_expression_is_forbidden(
     Node* expression,
     const Var* target_var,
     bool allow_mmsearch_qualifier);
 
-/** @brief Check restrictions for forbidden locator-backed target evaluation. */
+/** @brief Rejects malformed restrictions and restrictions that  expose the target sequence to ordinary SQL evaluation. */
 export [[nodiscard]] bool batch_join_target_restrictions_are_forbidden(
     List* restrictions,
     const Var* target_var,
@@ -65,12 +63,12 @@ export [[nodiscard]] bool path_target_contains_expression(
     const PathTarget* target,
     const Expr* expression) noexcept;
 
-/** @brief Find the cheapest unparameterized Bioseq scan below safe wrappers. */
+/** @brief Finds the cheapest serial BioseqScan that needs no outer-row parameters, allowing a safe projection above it. */
 export [[nodiscard]] batch_join_bioseq_path_candidate
 find_unparameterized_bioseq_custom_path(RelOptInfo* rel,
                                         AttrNumber target_seq_attno) noexcept;
 
-/** @brief Append safe underlying target Vars required by a wrapper target. */
+/** @brief Adds target columns needed by a parent projection to the child output, rejecting unsafe references. */
 export [[nodiscard]] bool batch_join_append_underlying_target_vars(
     PathTarget* destination,
     const PathTarget* source,

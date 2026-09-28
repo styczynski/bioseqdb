@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution_vulkan.cppm
- * @brief Runs Vulkan stages and validates device route identity.
+ * @brief Collect seed hits, filter alignment gaps and check Vulkan route settings.
  */
 module;
 
@@ -61,27 +61,25 @@ export {
     namespace bioseq::simd::pipe {
 
     /**
-     * @brief Seed-hit collection stage.
+     * @brief Match query minimizers to the target index and pass ordered anchors onward.
      *
-     * Wraps the `collect_seed_hits` kernel, which writes its anchor output
-     * directly into a caller-provided arena_slab. No `std::vector` is materialised
-     * inside the stage, so the kernel's `push_back` traffic lands directly in the
-     * pipeline arena.
+     * CPU lookup fills an arena slab or borrows an already prepared anchor batch.
+     * Vulkan lookup uses the resident target index and returns anchors to the host.
+     * A selected Vulkan lookup must succeed before chaining can start.
      */
     struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
         static constexpr std::string_view stage_name = "seed_hit_stage";
 
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
         }
         sequence_size_t query_len;
-        // Batch- or segment-wave-scoped GPU index cache. The outer
-        // wave creates one cache, passes `&cache` here, and clears it at wave end.
-        // Null on single-shot paths (then the GPU seed path uploads uncached).
+        // The caller keeps this cache  alive through seed lookup. A nonempty
+        // Vulkan lookup requires a cache, even when reuse is disabled.
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr;
         match_result_collection* stats_dst = nullptr;
         post_seed_owned_lifetime* post_seed_lifetime = nullptr;
@@ -89,8 +87,7 @@ export {
         route_attempt_memory* attempt_memory = nullptr;
         std::uint32_t submitted_query_ordinal = 0u;
 
-        // Host/device accessors cover both the std::span CPU shape and
-        // the minimizer_batch_view device shape.
+        // Accept host minimizers directly or a batch that also owns device storage.
         template <class p_minimizer>
         [[nodiscard, gnu::always_inline]] static std::span<const p_minimizer>
         sketch_span_of(const std::span<const p_minimizer>& s) noexcept {
@@ -141,9 +138,8 @@ export {
                 post_seed_lifetime == nullptr ? nullptr
                                               : post_seed_lifetime->owned_cpu_index.direct_ledger;
 
-            // Run the selected GPU seed-hit lookup before the CPU
-            // path. If it declines, the selected Vulkan pipeline fails loudly.
-            // Only the concrete minimizer_hashmap_fragment_index carries the GPU view.
+            // Run the selected Vulkan lookup. Unsupported index types or a declined
+            // lookup raise an error before the CPU lookup below.
             const bool gpu_seed_selected =
                 execution_plan->route == seed_chain_route::vulkan_seed_host_chain ||
                 execution_plan->route == seed_chain_route::vulkan_seed_vulkan_chain;
@@ -158,9 +154,8 @@ export {
                 };
                 if constexpr (std::same_as<std::remove_cvref_t<p_index>,
                                            bioseq::indexing::minimizer_hashmap_fragment_index>) {
-                    // Strict Vulkan selection owns its anchor allocation. A
-                    // prepared fragment view has no resident GPU index and reaches
-                    // the fail-closed decline below without allocating CPU output.
+                    // This branch owns the Vulkan result strrage. Prepared fragment indexes
+                    // are rejected below before allocating an output slab.
                     bioseq::parallelism::memory_permit canonical_job_permit{};
                     canonical_seed_batch seed_batch{};
                     if (attempt_memory != nullptr) {
@@ -203,12 +198,9 @@ export {
                                                                               gpu_index_identity);
                         std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index>
                             resident_index;
-                        // Keep operation-originated materialization statistics
-                        // separate from the seed-decline record. The seed lookup
-                        // entry point intentionally resets its decline output at
-                        // entry, while these statistics must survive a successful
-                        // lookup so the benchmark records the one real upload and
-                        // leaves later cache hits at zero.
+                        // Keep index upload counts separately because seed  lookup resets its
+                        // status record. Count an upload only in the call that creates
+                        // the resident index. Later cache hits leave these counts zero
                         bioseq::indexing::gpu_index_upload_decline index_materialization{};
                         if (gpu_index_cache == nullptr) {
                             seed_decline.reason = bioseq::seeding::
@@ -410,11 +402,8 @@ export {
                                 stats.seed_anchor_digest_lane1 =
                                     seed_decline.canonical_anchor_digest_hi;
                             }
-                            // `index_upload` is populated only by the operation
-                            // that actually materialized a new resident index.
-                            // cache_type hits leave it zeroed, so these counters never
-                            // multiply one upload by the number of queries reusing
-                            // it.
+                            // Cache hits leave this, record empty. Only the call that creates the
+                            // resident index contributes upload and allocation counts.
                             const auto& index_upload = index_materialization;
                             if (index_upload.slot_capacity != 0u) {
                                 stats.gpu_index_materializations = 1u;
@@ -442,12 +431,9 @@ export {
                                 stats.gpu_index_max_load_ppm = index_upload.load_ppm;
                                 stats.gpu_index_max_probe = index_upload.max_probe;
                             }
-                            // `emit_batch` is synchronous: without dropping this
-                            // local handle first, the multi-gigabyte resident index
-                            // survives through chain_stage even if the cache is
-                            // cleared.  Seed lookup has completed its Vulkan fence
-                            // and copied anchors into `anchors_slab`, so neither
-                            // index nor query-device storage is used downstream.
+                            // Drop the local device handles before the synchronous call to chaining.
+                            // Lookup has finished and copied its anchors to host storage,
+                            // so the last seed user can now free the cached index.
                             resident_index.reset();
                             device_span.reset();
                             if (post_seed_lifetime != nullptr) {
@@ -499,8 +485,7 @@ export {
                                                      cpu_seed_owned_lifetime,
                                                      cpu_seed_host_timing_dst,
                                                      host_stage_started] {
-                // A successful strict Vulkan lookup returned above, so this stats
-                // can only describe a real CPU seed operation.
+                // Vulkan lookup returns above. This records the completed CPU lookup.
                 if (cpu_seed_stats_dst == nullptr) {
                     bioseq_log<logging_level::error>("CPU seed stage has no execution-stats sink");
                     std::abort();
@@ -510,9 +495,8 @@ export {
                 cpu_seed_stats_dst->record_scalar_pipeline_execution_stats(stats);
 
                 if (cpu_seed_owned_lifetime != nullptr) {
-                    // CPU-index retirement is a lifetime observation, not Vulkan
-                    // execution statistics. Prepared fragment batches are normally
-                    // externally owned and leave this pointer null.
+                    // Release  an owned CPU index after its last lookup. Prepared fragment
+                    // batches are borrowed and normally have no release owner here.
                     (void)cpu_seed_owned_lifetime->complete_seed_user();
                 }
                 if (cpu_seed_host_timing_dst != nullptr) {
@@ -530,14 +514,12 @@ export {
                         parameters().max_occ,
                         kmer_size);
                 record_cpu_seed_completion();
-                // The owning PreparedFragmentAnchorBatch outlives this synchronous
-                // pipeline call. Emit its already-canonical span directly: no
-                // arena_slab allocation, anchor copy, or global fragment sort.
+                // The prepared batch owns this ordered span throughout the synchronous
+                // pipeline call, so chaining can read it directly.
                 return std::move(token).emit_batch(ordered_anchors);
             } else {
-                // Ordinary per-hash lookup retains the arena-producing kernel.
-                // The metadata permit precedes its physical vector; neither
-                // reserves the logical anchor extent a second time.
+                // CPU lookup writes anchors into the arena. The separate permin covers
+                // job metadata and outlives its vector.
                 bioseq::parallelism::memory_permit canonical_job_permit{};
                 canonical_seed_batch seed_batch{};
                 if (attempt_memory != nullptr) {
@@ -581,11 +563,9 @@ export {
             algo.parameters.push_back({"max_occ", std::to_string(parameters().max_occ)});
             algo.parameters.push_back({"query_len", std::to_string(query_len)});
             desc.algorithm = std::move(algo);
-            // Reserve the estimated anchor count for the stage slab. The actual
-            // sketch count is unknown at
-            // describe time so the reported figure uses query_len/window=10 as
-            // the canonical median; the runtime reserve picks a tighter value
-            // when the real sketches.size() is available.
+            // EXPLAIN has no query sketch yet. Estimate its size from the query
+            // length and use that for the anchor estimate. Runtime reservation
+            // uses the  actual sketch count and target length.
             const std::size_t approx_sketch_count = static_cast<std::size_t>(query_len) / 10u + 64u;
             desc.estimated_batch_size =
                 detail::estimated_anchor_count(approx_sketch_count,
@@ -616,10 +596,10 @@ export {
     }
 
     /**
-     * Query-scoped rank-prefilter lower-bound gate.  Only mandatory global
-     * seed-to-seed fills are evaluated. Local left/right extension windows are
-     * intentionally excluded.  A region is removed only when the sum of proven
-     * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
+     * Reject regions whose required gaps already exceed the edit limit.
+     * Sum edit-distance lower bounds across the seed-to-seed gaps that alignment
+     * must fill. End extensions can stop early, so they are excluded from this
+     * test Surviving regions still need alignment and the exact edit check.
      */
     template <sequence_alphabet p_alphabet>
     struct prefilter_stage : stage_base<prefilter_stage<p_alphabet>, alignment_region> {
@@ -627,7 +607,7 @@ export {
 
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
@@ -696,8 +676,8 @@ export {
                             query_length > max_flat_offset || target_length > max_flat_offset ||
                             query_ranks.size() > max_flat_offset - query_length ||
                             target_ranks.size() > max_flat_offset - target_length) {
-                            /* Unsupported valid geometry is a conservative accept,
-                             * never a hidden fallback or false rejection. */
+                            /* Skip this gap if its coordinates cannot fit the prefilter input.
+                             * Other supported gaps can still supply a rejection  bound. */
                             return true;
                         }
 
@@ -911,14 +891,10 @@ export {
         }
     };
 
-    /// Return whether the resolved statement asks for any full biological Vulkan
-    /// component. `vulkan_enabled` is deliberately absent: it is only the runtime
-    /// capability gate, and enabling that gate must not turn an otherwise CPU/simd
-    /// tuple into a full GPU-selected statement.  The rank prefilter is also absent:
-    /// it is an explicitly requested, self-contained accelerator inside the generic
-    /// pipeline and does not authorize GPU-to-CPU fallback for minimization,
-    /// chaining, or alignment. The cache toggle is likewise only policy for a
-    /// selected seed path.
+    /// Check whether minimization, seeding, chaining or alignment requests Vulkan.
+    /// The runtime enable flag and cache policy alone select no GPU work.
+    /// A Vulkan prefilter is checked, separately because it can run inside a CPU
+    /// pipeline without changing the selected algorithms for those stages.
     [[nodiscard]] inline bool
     vulkan_components_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return params.vulkan_seed_hits_enabled || params.vulkan_fused_frontend_enabled ||
@@ -929,10 +905,8 @@ export {
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming;
     }
 
-    /// Return whether any Vulkan work can execute for this statement.  This is a
-    /// thread-placement/runtime-lifetime predicate, not biological route
-    /// admission: a standalone rank prefilter is allowed inside the generic
-    /// CPU/simd pipeline while `vulkan_components_requested()` remains false.
+    /// Check whetder this statement may use Vulkan, including a standalone prefilter.
+    /// Callers use this to place work on threads with the required runtime lifetime.
     [[nodiscard]] inline bool
     vulkan_accelerator_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return vulkan_components_requested(params) ||
@@ -940,9 +914,8 @@ export {
                 params.prefilter_backend == ::bioseq::prefilter::prefilter_backend::vulkan);
     }
 
-    /// Exact statement shape that the current dedicated resident GPU route can
-    /// execute without entering any generic CPU/simd biological stage. A selected
-    /// tuple outside this shape must fail before generic pipeline construction.
+    /// Check the settings supported by the dedicated resident GPU pipeline.
+    /// Callers reject other selected GPU combinations before building that route.
     [[nodiscard]] inline bool
     complete_all_gpu_tuple_selected(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return params.vulkan_enabled && params.vulkan_seed_hits_enabled &&
@@ -953,19 +926,15 @@ export {
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming &&
                params.base_alignment_algorithm ==
                    ::bioseq::simd::base_alignment_algorithm::block_aligner &&
-               // Dedicated target routes resolve the MAPQ projection internally.
-               // Persisted grouped-SoA executes its physical Vulkan MAPQ stage;
-               // routes without exact evidence remain explicitly unexecuted. The
-               // projection never admits a CPU/SIMD biological stage.
+               // Each dedicated target  route decides whether MAPQ runs and records
+               // its completion.
                !params.compute_divergence && !params.compute_edit_distance &&
                !params.exact_edit_filter_enabled && !params.prefilter_enabled &&
                params.max_occ >= 0 && (!params.do_cigar || params.vulkan_extend_enabled);
     }
 
-    /// Validate the target-format and algorithm tuple admitted by the dedicated
-    /// persisted grouped-SoA GPU preparation route. The caller supplies the live
-    /// supported-alphabet pack size so a legitimate zero-based alphabet code is
-    /// distinguished from an out-of-range code.
+    /// Check the persisted grouped-SoA format and algorithms for GPU preparation.
+    /// Alphabet codes start at zero, so validate against the supplied alphabet count.
     [[nodiscard]] inline bool is_persisted_grouped_soa_gpu_preparation_tuple_valid(
         const std::uint8_t alphabet_code,
         const std::size_t supported_alphabet_count,
@@ -980,10 +949,8 @@ export {
                complete_all_gpu_tuple_selected(params);
     }
 
-    // The Vulkan frontend's GPU target-index build replaces the CPU
-    // `minimizer_hashmap_fragment_index` build for this exact (minimizer, chaining)
-    // leaf. runtime-gated; both flags plus the matching algorithm selectors must be
-    // set. The runtime device check is done at the call site.
+    // Select GPU target-index construction for the fused Vulkan sketch and
+    // chaining route. The caller checks that a hardware device is available.
     [[nodiscard]] inline bool
     is_gpu_target_index_build_active(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return params.vulkan_enabled && params.vulkan_fused_frontend_enabled &&
@@ -1017,8 +984,8 @@ export {
         ordered_sketch_query_gate_storage(ordered_sketch_query_gate_storage&&) = delete;
         ordered_sketch_query_gate_storage& operator=(ordered_sketch_query_gate_storage&&) = delete;
 
-        // The only mutable owner is consumed at freeze.  Afterwards every user has
-        // a shared_ptr<const vector>; no mutable alias can alter a published gate.
+        // Freezing moves the mutable owner into shared const storage. Calls to
+        // add() then fail, keeping the published query gate fixed
         mutable std::shared_ptr<std::vector<std::uint32_t>> mutable_words{};
         mutable std::shared_ptr<const std::vector<std::uint32_t>> frozen_words{};
         mutable bool frozen = false;
@@ -1085,9 +1052,8 @@ export {
         };
         mutable std::optional<identity> cached_identity{};
 
-        /// Canonical 128-bit digest over little-endian u32 gate words. The cache is
-        /// also bound once per wave, so this is identity metadata, not permission
-        /// to share a filtered resident across unrelated waves.
+        /// Hash the frozen gate words in little-endian order  and cache the result.
+        /// Cache binding also checks the gate for the current segment wave.
         [[nodiscard]] identity canonical_identity() const noexcept {
             const auto owner = freeze_words();
             if (cached_identity)
@@ -1159,9 +1125,8 @@ export {
         }
     }
 
-    /// Freeze a query gate behind its immutable canonical owner once per wave.
-    /// Segment loops reuse the returned value, so they neither alias mutable words
-    /// nor re-hash/copy the 8 MiB gate for every target window.
+    /// Keep the query gate in shared const storage for the segment wave.
+    /// Reusing the returned gate avoids copying and hashing its words for each window.
     [[nodiscard]] inline bioseq::gpu::vulkan::vulkan_sketch_query_gate
     freeze_gpu_query_gate(bioseq::gpu::vulkan::vulkan_sketch_query_gate gate) {
         auto identity = gate.canonical_identity();
@@ -1180,9 +1145,8 @@ export {
         return frozen;
     }
 
-    /// Bind a segmented adoption key to the runtime build's authoritative frozen
-    /// gate identity, after proving it is exactly the gate supplied to the build.
-    /// Deriving a default/ungated key for a gated build is an identity mismatch.
+    /// Check that GPU construction used the expected query gate, then put thab
+    /// gate in the cache key. A mismatch or malformed identity raises an error.
     inline void bind_verified_gpu_segment_gate_identity(
         bioseq::indexing::gpu_minimizer_index_cache_key& key,
         const bioseq::gpu::vulkan::gpu_index_gate_identity& expected,

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies edit-distance thresholds and prefilter correctness metrics.
+ * @brief Check edit-distance limits and prefilter benchmark correctness counts.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -12,9 +12,9 @@ import bioseq.bench.prefilter_pipeline_metrics;
 namespace {
 
 /**
- * @brief Views a string as the character span accepted by the distance helper.
- * @param[in] value String whose bytes remain owned by the caller.
- * @return Read-only span with the same lifetime as `value`.
+ * @brief Borrow a string's bytes for the edit-distance  helper
+ * @param[in] value Text whose underlying storage must outlive the returned span.
+ * @return A read-only span over the same bytes.
  */
 [[nodiscard]] std::span<const char> chars(std::string_view value) noexcept {
     return {value.data(), value.size()};

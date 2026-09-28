@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/gauge.cppm
- * @brief Process-wide named gauges with atomic last-value storage.
+ * @brief Named gauges that store a shared current value.
  *
- * Relaxed atomic access preserves tear-free concurrent updates without adding
- * ordering constraints to the instrumentation hot path.
+ * Atomic reads and writes allow concurrent updates. They  do not snchronize
+ * other program data.
  */
 module;
 
@@ -22,7 +22,7 @@ import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Canonical process-wide gauge and its most recent value. */
+/** @brief Shared named gauge with its current value. */
 struct named_gauge {
     const region_descriptor* descriptor = nullptr;
     std::atomic<std::int64_t> value{0};
@@ -39,7 +39,7 @@ struct named_gauge {
 
 namespace bioseq::instrumentation::detail {
 
-/** @brief Owns canonical gauges indexed by metric name. */
+/** @brief Shared gauges indexed by name. */
 struct gauge_registry {
     std::mutex mutex;
     std::unordered_map<std::string, named_gauge*> by_name;
@@ -55,7 +55,7 @@ struct gauge_registry {
 
 export namespace bioseq::instrumentation {
 
-/** @brief Return the canonical gauge for a name, creating it on first use. */
+/** @brief Find the shared gauge by name, creating it on first use. */
 [[nodiscard, gnu::cold]]
 inline named_gauge& get_named_gauge(
     std::string_view name,

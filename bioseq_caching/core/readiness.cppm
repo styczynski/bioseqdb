@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/readiness.cppm
- * @brief Compile-time correctness-readiness admission matrix.
+ * @brief Checks which cache operations the available hrite tracking can support.
  */
 module;
 
@@ -11,7 +11,7 @@ import :wire;
 
 export namespace bioseq::cache {
 
-/** Reject unknown readiness values before ordinal comparisons. */
+/** Checks that the cache-correctness level is a recognized value. */
 [[nodiscard]] constexpr bool known_readiness(
     cache_correctness_readiness readiness) noexcept {
     switch (readiness) {
@@ -25,7 +25,7 @@ export namespace bioseq::cache {
     return false;
 }
 
-/** Reject unknown observability values before readiness comparisons. */
+/** Checks that the write-tracking mode is a recognized value. */
 [[nodiscard]] constexpr bool known_observability(
     write_observability observability) noexcept {
     switch (observability) {
@@ -38,7 +38,12 @@ export namespace bioseq::cache {
     return false;
 }
 
-/** Apply the normative readiness/kind/observability safety matrix. */
+/**
+ * Checks whether the current correctness level and write tracking
+ * allow this cache entry. Reuse and provider-backed results require
+ * complete provider tracking. Queries without relations use a separate
+ * rule for safe built-in expressions.
+ */
 [[nodiscard]] constexpr bool readiness_allows(
     cache_correctness_readiness readiness,
     cache_entry_kind kind,

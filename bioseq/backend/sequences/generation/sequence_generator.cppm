@@ -1,7 +1,10 @@
 /**
  * @file sequence_generator.cppm
- * @brief Generic synthetic sequence generator with optional Vulkan HybridTaus
- *        offload and bit-identical TBB CPU generation.
+ * @brief Generate random references and query fragments with substitutions and gaps.
+ *
+ * CPU and Vulkan reference generation use the same random streams and packing,
+ * so the seed and sequence settings produce the same bytes on either backend.
+ * Query fragments are extracted and edited on the CPU.
  */
 module;
 
@@ -36,40 +39,40 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::sequences::generation {
 
-/// Simulation parameters for substitution and indel models.
+/// Reference sizes, fragment sampling, and mutation settings.
 struct generator_params {
     /// Number of symbols generated for each reference.
     std::size_t reference_length       = 10'000;
-    /// Default number of query fragments.
+    /// Number of query fragments requested by sample-table callers.
     std::size_t fragment_count         = 100;
-    /// Mean query fragment length before edits.
+    /// Mean of the normal distribution used to sample fragment lengths before edits.
     std::size_t fragment_length_mean   = 150;
-    /// Standard deviation of query fragment length.
+    /// Standard deviation used when sampling  fragment lengths before edits.
     double      fragment_length_stddev = 10.0;
 
     /// Independent substitution probability per source symbol.
     double substitution_rate = 0.01;
-    /// Independent insertion-event probability per source symbol.
+    /// Chance of inserting symbols after each source position reached by the indel pass.
     double insertion_rate    = 0.0005;
-    /// Independent deletion-event probability per source symbol.
+    /// Chance of deleting following symbols at each position reached by the indel pass.
     double deletion_rate     = 0.0005;
 
-    /// Mean number of symbols in an insertion event.
+    /// Mean of the insertion-length distribution before rounding and clamping to zero.
     double insertion_length_mean   = 2.0;
     /// Standard deviation of insertion-event length.
     double insertion_length_stddev = 1.0;
-    /// Mean number of symbols in a deletion event.
+    /// Mean of the dletion-length distribution before rounding and clamping to zero.
     double deletion_length_mean    = 2.0;
     /// Standard deviation of deletion-event length.
     double deletion_length_stddev  = 1.0;
 
-    /// Probability that a query uses the reverse-complement orientation.
+    /// Chance of reversing a query window, also complementing nucleotide symbols.
     double        reverse_complement_rate = 0.5;
     /// Seed shared by deterministic CPU and Vulkan streams.
     std::uint64_t seed                    = 42;
 
-    /// Explicit selector for the Vulkan HybridTaus generator. When enabled,
-    /// dispatch failure is fatal. Ordinary callers stay on the CPU path.
+    /// Generate references with Vulkan. Unsupported requests or failed dispatches
+    /// throw an error Query  extraction and mutation still run on the CPU.
     bool use_vulkan = false;
 };
 
@@ -99,7 +102,7 @@ struct alphabet_probability : base_alphabet_probability<p_alphabet> {};
 /// @brief Gives dna5 ambiguity rank N a one-percent probability.
 template <>
 struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
-    /// @brief Returns probabilities for A, C, G, T, and N ranks.
+    /// @brief Give N probability 0.01 and divide the rest equally among, A, C, G, and T.
     static constexpr std::array<double, alphabet_size> probability() noexcept {
         constexpr double unknown_base_rate = 0.01;
         const std::size_t unknown_base_rank =
@@ -113,10 +116,10 @@ struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
     }
 };
 
-/// @brief Checks that a compile-time probability table sums to one.
-/// @tparam p_probability_count Number of rank probabilities.
+/// @brief Check that rank probabilities sum to one within the allowed tolerance.
+/// @tparam p_probability_count Number of alphabet ranks.
 /// @param probabilities Probability assigned to each rank.
-/// @return `true` when the sum is within the compile-time tolerance of one.
+/// @return True when the sum differs from one by less than 1e-9.
 template <std::size_t p_probability_count>
 consteval bool probabilities_sum_to_one(
     const std::array<double, p_probability_count>& probabilities) noexcept {
@@ -142,8 +145,8 @@ consteval bool probabilities_nonnegative(
     return true;
 }
 
-/// @brief Accepts alphabet probability models with a valid normalized table.
-/// @tparam p_probability_model Candidate compile-time probability model.
+/// @brief Require one nonnegative probability per alphabet rank, summing to one.
+/// @tparam p_probability_model Probability model checked at compile time.
 template <typename p_probability_model>
 concept is_valid_alphabet_probability =
     sequence_alphabet<typename p_probability_model::alphabet_type> &&
@@ -176,12 +179,12 @@ concept packed_sequence_config =
             std::same_as<compact_sequence_range<p_sequence_config>>;
     };
 
-/// Number of packed units generated by one independent random stream chunk.
+/// Packed units generated from one independently seeded random stream.
 inline constexpr std::uint32_t k_chunk_units = 8;
-/// Stream-id region reserved for reference-derived query generation.
+/// First stream ID used when sampling  and editing query fragments.
 inline constexpr std::uint64_t k_reference_stream_space = 1ull << 40;
 
-/// @brief Stores the four words of the combined Tausworthe and LCG generator.
+/// @brief State of the HybridTaus generator: three Tausworthe words and one LCG word.
 struct taus_lcg_state {
     /// First Tausworthe state word.
     std::uint32_t first_taus_state = 0;
@@ -220,7 +223,7 @@ struct taus_lcg_state {
            state.third_taus_state ^ state.lcg_state;
 }
 
-/// @brief Mixes a 64-bit seed for independent stream initialization.
+/// @brief Mix seed bits with SplitMix64 before initializing a random stream.
 [[gnu::always_inline]] inline std::uint64_t splitmix64(std::uint64_t state) noexcept {
     state += 0x9e3779b97f4a7c15ULL;
     state = (state ^ (state >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -228,7 +231,7 @@ struct taus_lcg_state {
     return state ^ (state >> 31);
 }
 
-/// @brief Derives a valid random state for one deterministic stream id.
+/// @brief Derive the same valid generator state for a gven seed and stream ID.
 [[gnu::always_inline]] inline taus_lcg_state seed_stream(
     std::uint64_t global_seed, std::uint64_t stream_id) noexcept {
     const std::uint64_t stream_seed = global_seed ^ (stream_id * 0x9e3779b97f4a7c15ULL);
@@ -243,10 +246,11 @@ struct taus_lcg_state {
     return state;
 }
 
-/// @brief Converts rank probabilities to inclusive 32-bit CDF thresholds.
-/// @tparam p_probability_count Number of rank probabilities.
+/// @brief Convert probabilities to integer boundaries for sample_rank().
+/// @tparam p_probability_count Number of alphabet ranks.
 /// @param probabilities Probability assigned to each rank.
-/// @return Inclusive thresholds in rank order.
+/// @return Cumulative boundaries in rank order. A draw at a boundary moves to
+/// the next rank. The final rank accepts all remaining draws.
 template <std::size_t p_probability_count>
 constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     const std::array<double, p_probability_count>& probabilities) noexcept {
@@ -264,7 +268,7 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     return cumulative_distribution;
 }
 
-/// @brief Maps a random draw to its rank through a compact CDF table.
+/// @brief Choose the rank whose  cumulative probability interval contains the draw.
 [[gnu::always_inline]] inline std::uint32_t sample_rank(
     const std::uint32_t* cumulative_distribution,
     std::uint32_t alphabet_size,
@@ -281,7 +285,9 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     return static_cast<double>(next_u32(state)) * 2.3283064365386963e-10;
 }
 
-/// @brief Returns a uniformly distributed integer below the supplied bound.
+/// @brief Scale a random draw to an integer below a positive bound
+/// Multiplication can introduce a small bias. Use next_below64() when unbiased
+/// selection is required. A zero bound returns zero.
 [[gnu::always_inline]] inline std::uint32_t next_below(
     taus_lcg_state& state, std::uint32_t exclusive_upper_bound) noexcept {
     return static_cast<std::uint32_t>(
@@ -295,7 +301,9 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     return (high_bits << 32) | low_bits;
 }
 
-/// @brief Returns an unbiased 64-bit remainder below the supplied bound.
+/// @brief Draw an integer below a positive bound without modulo bias.
+/// Reject the uneven part of the random range before taking the remainder.
+/// A zero bound returns zero.
 [[gnu::always_inline]] inline std::uint64_t next_below64(
     taus_lcg_state& state, std::uint64_t exclusive_upper_bound) noexcept {
     if (exclusive_upper_bound == 0) {
@@ -311,14 +319,15 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     }
 }
 
-/// @brief Samples a rank that differs from the original rank.
+/// @brief Choose  a different rank from an alphabet with at least two ranks.
+/// The original rank, must belong to that alphabet.
 [[gnu::always_inline]] inline std::uint32_t next_other_rank(
     taus_lcg_state& state, std::uint32_t alphabet_size, std::uint32_t original) noexcept {
     const std::uint32_t draw = next_below(state, alphabet_size - 1u);
     return draw >= original ? draw + 1u : draw;
 }
 
-/// @brief Samples a Gaussian value with the requested mean and deviation.
+/// @brief Sample a normal distribution with the requested mean and standard deviation.
 inline double next_gaussian(
     taus_lcg_state& state, double mean, double stddev) noexcept {
     double radial_uniform = next_unit_double(state);
@@ -331,11 +340,11 @@ inline double next_gaussian(
     return mean + stddev * (radius * std::cos(theta));
 }
 
-/// @brief Packs valid logical ranks into one least-significant-bit-first unit.
-/// @tparam p_sequence_traits Packed alphabet and storage traits.
-/// @param ranks First logical rank to pack.
-/// @param valid Number of ranks stored in the returned unit.
-/// @return One packed storage unit with unused high slots cleared.
+/// @brief Pack ranks starting at the low bits of one storage unit.
+/// @tparam p_sequence_traits Alphabet and storage layout.
+/// @param ranks Valid alphnbet ranks to pack.
+/// @param valid Number of ranks, which must fit in one storage unit.
+/// @return Packed ranks with unused high bits set to zero.
 template <typename p_sequence_traits>
 [[gnu::always_inline]] constexpr typename p_sequence_traits::storage_unit pack_unit(
     const typename p_sequence_traits::letter_unit* ranks, std::size_t valid) noexcept {
@@ -349,10 +358,10 @@ template <typename p_sequence_traits>
     return packed_unit;
 }
 
-/// @brief Packs a rank span and reports the trailing padding symbol count.
-/// @tparam p_sequence_traits Packed alphabet and storage traits.
-/// @param ranks Logical ranks in sequence order.
-/// @return Packed units and the number of unused trailing symbol slots.
+/// @brief Pack sequence ranks into  storage words without an extra sentinel word.
+/// @tparam p_sequence_traits Alphabet and storage layout.
+/// @param ranks Valid alphabet ranks in sequence order.
+/// @return Packed words and the number of unused symbol slots in the last word.
 template <typename p_sequence_traits>
 [[nodiscard]] std::pair<std::vector<typename p_sequence_traits::storage_unit>, std::size_t>
 pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> ranks) {
@@ -373,13 +382,14 @@ pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> 
     return {std::move(packed_units), padding};
 }
 
-/// @brief Decodes a forward or reverse-complement reference window to ranks.
-/// @tparam p_sequence_type Compact sequence range type.
+/// @brief Decode a reference window to ranks in the requested orientation.
+/// Nucleotide windows are also complemented when reversed.
+/// @tparam p_sequence_type Packed sequence type.
 /// @param sequence Source sequence.
-/// @param start Inclusive biological start coordinate.
-/// @param end Exclusive biological end coordinate.
-/// @param is_reverse Decode the reverse complement when true.
-/// @param out_ranks Destination with room for `end - start` ranks.
+/// @param start First source position in the window
+/// @param end Position just past the window.
+/// @param is_reverse Read the window backwards when true.
+/// @param out_ranks Destination  with room for end - start ranks.
 template <typename p_sequence_type>
 void extract_window_ranks(
     const p_sequence_type& sequence,
@@ -436,13 +446,14 @@ void extract_window_ranks(
     }
 }
 
-/// @brief Generates packed units for one deterministic CPU sequence stream.
-/// @tparam p_sequence_traits Packed alphabet and storage traits.
-/// @param out_units Destination units for one sequence.
-/// @param symbols_per_seq Logical symbols generated for each sequence.
-/// @param seq_index Sequence stream index.
-/// @param cdf Inclusive rank-selection thresholds.
-/// @param seed Global deterministic seed.
+/// @brief Generate one packed sequence using reproducible CPU random streams.
+/// Each chunk has its own seed, so thread scheduling does not change the output.
+/// @tparam p_sequence_traits Alphabet and storage layout.
+/// @param out_units Destination words for one sequence.
+/// @param symbols_per_seq Number of sequence symbols to generate.
+/// @param seq_index Sequence number used to choose its random streams.
+/// @param cdf Cumulative rank boundaries from make_integer_cdf().
+/// @param seed Global random seed.
 template <typename p_sequence_traits>
 void generate_units_cpu_for_sequence(
     std::span<typename p_sequence_traits::storage_unit> out_units,
@@ -458,7 +469,7 @@ void generate_units_cpu_for_sequence(
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
 
     auto& pool = bioseq::parallelism::global_pool::instance();
-    // Assigns disjoint packed-unit chunks to deterministic random streams.
+    // Give ech chunk its own stream so workers can fill it in any order.
     pool.parallel_for(
         0,
         static_cast<std::size_t>(chunks_per_seq),
@@ -499,7 +510,8 @@ void generate_units_cpu_for_sequence(
     return rounded > 0.0 ? static_cast<std::size_t>(rounded) : std::size_t{0};
 }
 
-/// @brief Samples a nonempty fragment length below the reference bound.
+/// @brief Sample and round a fragment length, keeping it between one and
+/// upper_bound - 1. Return  one when the reference bound is at most one.
 [[nodiscard]] inline std::size_t sample_fragment_length(
     taus_lcg_state& state,
     std::size_t mean,
@@ -519,11 +531,11 @@ void generate_units_cpu_for_sequence(
     return length;
 }
 
-/// @brief Applies independent substitutions while preserving alphabet ranks.
-/// @tparam p_sequence_traits Alphabet and rank traits.
-/// @param ranks Logical ranks modified in place.
-/// @param rate Independent substitution probability per rank.
-/// @param state Deterministic random state advanced by this operation.
+/// @brief Replace randomly selected symbols with different alphabet ranks.
+/// @tparam p_sequence_traits Alphabet and rank types.
+/// @param ranks Sequence ranks to edit in, place.
+/// @param rate Substitution probability for each rank.
+/// @param state Random state advanced by selection and replacement draws.
 template <typename p_sequence_traits>
 void apply_substitutions(
     std::span<typename p_sequence_traits::letter_unit> ranks,
@@ -543,7 +555,7 @@ void apply_substitutions(
     }
 }
 
-/// @brief Records indel events for deterministic generator diagnostics.
+/// @brief Counts observed insertion and deletion events for generator checks.
 struct indel_event_counts {
     /// Source positions examined by the indel pass.
     std::uint64_t visited_positions = 0;
@@ -557,7 +569,8 @@ struct indel_event_counts {
     std::uint64_t deleted_bp = 0;
 };
 
-/// @brief Throws a diagnostic for a required Vulkan generation path.
+/// @brief Throw an error when requested Vulkan generation cannot run.
+/// Include the runtime initialization error or software-device details when available.
 [[noreturn]] inline void throw_vulkan_generation_unavailable(const char* operation) {
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     std::string message = "Vulkan sequence generation selected but ";
@@ -579,15 +592,17 @@ struct indel_event_counts {
     throw bioseq::gpu::vulkan::vulkan_runtime_error(message);
 }
 
-/// @brief Applies insertion and deletion events in source-coordinate order.
-/// @tparam p_sequence_traits Alphabet and rank traits.
-/// @tparam p_output_vector Mutable rank vector type.
-/// @param in_ranks Source ranks before indels.
-/// @param params Indel rates and length distributions.
-/// @param cdf Inclusive thresholds for inserted ranks.
-/// @param state Deterministic random state advanced by this operation.
-/// @param out_ranks Destination ranks after indels.
-/// @param counts Optional event counters.
+/// @brief Copy the source  while inserting symbols and skipping deleted spans.
+/// The current symbol is kept before either event is tried Deletion skips
+/// following source positions, which receive no further event checks.
+/// @tparam p_sequence_traits Alphabet and rank types.
+/// @tparam p_output_vector Mutable vector type for the output ranks.
+/// @param in_ranks Source ranks before insertions and deletions.
+/// @param params Event probabilities and length distributions.
+/// @param cdf Cumulative rank boundaries for inserted symbols.
+/// @param state Random state advanced by this operation.
+/// @param out_ranks Replaced witm the resulting sequence ranks.
+/// @param counts Optional counters to add the observed events to.
 template <typename p_sequence_traits, typename p_output_vector>
 void apply_indels(
     std::span<const typename p_sequence_traits::letter_unit> in_ranks,
@@ -645,9 +660,9 @@ void apply_indels(
     }
 }
 
-/// @brief Generates deterministic packed references and edited query fragments.
-/// @tparam p_sequence_config Packed sequence configuration produced by the generator.
-/// @tparam p_probability_model Compile-time rank probability model.
+/// @brief Generate repeatable references and mutated fragments with  known origins.
+/// @tparam p_sequence_config Packed sequence type settings.
+/// @tparam p_probability_model Rank probabilities chosen at compile time.
 template <
     packed_sequence_config p_sequence_config,
     typename p_probability_model = alphabet_probability<
@@ -663,17 +678,17 @@ public:
   using alphabet_type = typename sequence_traits::alphabet_type;
   /// Packed storage word type.
   using storage_unit_type = typename sequence_traits::storage_unit;
-  /// Logical rank type.
+  /// Integer type used for decoded alphabet ranks.
   using rank_type = typename sequence_traits::letter_unit;
 
   static_assert(std::same_as<typename p_probability_model::alphabet_type, alphabet_type>,
                 "probability model must describe the configured sequence alphabet");
 
-  /// @brief Creates a generator with a copied immutable parameter set.
-  /// @param params Generation lengths, rates, seed, and backend selector.
+  /// @brief Copy the settings used for subsequent generation calls.
+  /// @param params Sequence sizes, mutation rates, seed, and backend choice.
   explicit sequence_generator(const generator_params& params) noexcept : params_(params) {}
 
-  /// @brief Couples an edited query with its source-reference coordinates.
+  /// @brief An edited query and the reference window from which it was sampled.
   struct query_target_pair {
       /// Edited query sequence.
       sequence_type query;
@@ -683,17 +698,18 @@ public:
       std::size_t truth_target_start = 0;
       /// Exclusive end of the source reference window.
       std::size_t truth_target_end = 0;
-      /// Whether the source window was reverse complemented.
+      /// Whether the window was reversed, with complementation for nucleotide alphabets.
       bool is_reverse = false;
-      /// Sum of configured substitution and indel event rates.
+      /// Sum of configured substitution, insertion, and deletion event rates.
+      /// This is a simulation  setting, not a measured error rate for the, query.
       double effective_error_rate = 0.0;
       /// Query length before indels were applied.
       std::size_t original_query_length = 0;
   };
 
-  /// @brief Generates independent packed sequences of reference length.
-  /// @param count Number of sequences to generate.
-  /// @return Packed sequences in stream-index order.
+  /// @brief Generate packed references using the configured seed and alphabet probabilities.
+  /// @param count Number of sequences, each of reference_length symbols.
+  /// @return Sequences in stream-index order. Vulkan is required when use_vulkan is set.
   [[nodiscard]] std::vector<sequence_type> generate_sequences(std::size_t count) {
       constexpr std::uint32_t letters_per_unit = sequence_traits::letters_per_unit;
       const std::uint64_t symbols = params_.reference_length;
@@ -813,11 +829,13 @@ public:
           sequence_type::from_packed(std::move(data), padding));
   }
 
-  /// @brief Generates an indexed range of query fragments from a reference.
-  /// @param reference Shared source reference that remains owned by every result.
-  /// @param first First deterministic fragment stream index.
-  /// @param count Number of fragments to generate.
-  /// @return Query and truth-coordinate records in fragment-index order.
+  /// @brief Sample, orient, and mutate query windows from a shared reference.
+  /// Fragment IDs determine their random streams, so splitting a request into
+  /// batches preserves the generated queries.
+  /// @param reference Source of reference_length symbols, kept alive by each result
+  /// @param first First fragmenj ID to generate.
+  /// @param count Number of consecutive fragment IDs.
+  /// @return Queries and their original reference windows in fragment-ID order.
   [[nodiscard]] std::vector<query_target_pair> generate_fragment_pairs(
       const std::shared_ptr<const sequence_type>& reference, std::size_t first, std::size_t count) {
       DEBUG_ASSERT(reference != nullptr, "generate_fragment_pairs: reference must not be null");
@@ -847,7 +865,7 @@ public:
       static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
       std::vector<query_target_pair> pairs(count);
       auto& pool = bioseq::parallelism::global_pool::instance();
-      // Generates disjoint result indices while sharing immutable reference storage.
+      // Workers fill separate  result slots and read the same unchanged reference.
       pool.parallel_for_with_context(
           0,
           count,
@@ -903,9 +921,9 @@ public:
       return pairs;
   }
 
-  /// @brief Generates sequences through the CPU path for parity diagnostics.
+  /// @brief Generate CPU references for comparison with Vulkan output.
   /// @param count Number of sequences to generate.
-  /// @return Packed sequences in stream-index order.
+  /// @return Sequences in stream-index order, ignoring use_vulkan.
   [[nodiscard]] std::vector<sequence_type> debug_generate_sequences_cpu_only(std::size_t count) {
       constexpr std::uint32_t letters_per_unit = sequence_traits::letters_per_unit;
       const std::uint64_t symbols = params_.reference_length;
@@ -934,10 +952,10 @@ private:
     generator_params params_;
 };
 
-/// @brief Configures a sequence generator directly from an alphabet and word type.
-/// @tparam p_alphabet Logical sequence alphabet.
-/// @tparam p_storage_unit Packed storage word type.
-/// @tparam p_probability_model Compile-time rank probability model.
+/// @brief Choose a generator from an alphabet and packed-word type.
+/// @tparam p_alphabet Sequence alphabet.
+/// @tparam p_storage_unit Type of each packed storage word.
+/// @tparam p_probability_model Rank probabilities chosen at compile time.
 template <
     sequence_alphabet p_alphabet,
     typename p_storage_unit = std::uint32_t,

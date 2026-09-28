@@ -1,6 +1,6 @@
 /**
  * @file core.cppm
- * @brief Declares PostgreSQL settings shared across Bioseq subsystems.
+ * @brief PostgreSQL settings for Bioseq storage, query planning and execution.
  */
 module;
 
@@ -53,16 +53,16 @@ enum class planner_log_level : int {
     warning = 19,
 };
 
-/** Minimum number of rows stored in one stripe. */
+/** Smallest allowed stripe row-limit setting. */
 inline constexpr int k_minimum_stripe_row_count = 1'000;
 
-/** Maximum number of rows stored in one stripe. */
+/** Largest allowed stripe row-limit setting. */
 inline constexpr int k_maximum_stripe_row_count = 100'000'000;
 
-/** Minimum number of rows stored in one chunk group. */
+/** Smallest allowed chunk-group row-limit setting. */
 inline constexpr int k_minimum_chunk_group_row_count = 1'000;
 
-/** Maximum number of rows stored in one chunk group. */
+/** Largest allowed chunk-group row-limit setting */
 inline constexpr int k_maximum_chunk_group_row_count = 100'000'000;
 
 /** Minimum supported column-compression level. */
@@ -71,34 +71,34 @@ inline constexpr int k_minimum_compression_level = 1;
 /** Maximum supported column-compression level. */
 inline constexpr int k_maximum_compression_level = 19;
 
-/** Default number of rows stored in one stripe. */
+/** Default row limit for a stripe. */
 inline constexpr int k_default_stripe_row_count = 150'000;
 
-/** Default number of rows stored in one chunk group. */
+/** Default row  limit for a chunk group. */
 inline constexpr int k_default_chunk_group_row_count = 10'000;
 
 #if defined(HAVE_LIBZSTD) && HAVE_LIBZSTD
-/** Best available column-compression algorithm for this build. */
+/** Use ZSTD by default when this build supports it. */
 inline constexpr compression_algorithm k_default_compression_algorithm =
     compression_algorithm::zstd;
 #elif defined(HAVE_CITUS_LIBLZ4) && HAVE_CITUS_LIBLZ4
-/** Best available column-compression algorithm for this build. */
+/** Use LZ4 by default when ZSTD is unavailable. */
 inline constexpr compression_algorithm k_default_compression_algorithm = compression_algorithm::lz4;
 #else
-/** Best available column-compression algorithm for this build. */
+/** Use PostgreSQL PGLZ when neither optional codec is available. */
 inline constexpr compression_algorithm k_default_compression_algorithm =
     compression_algorithm::pglz;
 #endif
 
-/** Owns PostgreSQL settings shared across Bioseq subsystems. */
+/** PostgreSQL settings shared by Bioseq modules. */
 struct settings final {
     settings() = delete;
 
-    /** Owns diagnostic settings. */
+    /** Extension diagnostics. */
     struct diagnostics final {
         diagnostics() = delete;
 
-        /** Owns diagnostic logging settings. */
+        /** Diagnostic loggng controls. */
         struct logging final {
             logging() = delete;
 
@@ -111,15 +111,17 @@ struct settings final {
     };
 
 #if defined(BIOSEQ_TEST_INDEXES)
-    /** Owns test-support-only fault and route controls. */
+    /** Scanner and failure controls available in test builds. */
     struct testing final {
         testing() = delete;
 
-        /** Owns synthetic chunked-scanner selection. */
+        /** Test setting for the chunked-scanner comparison. */
         struct chunked_scanner final {
             chunked_scanner() = delete;
 
-            /** @brief Routes sequence input through the synthetic chunked scanner. */
+            /** @brief Materialize, sequence payloads for scanner tests.
+             * Recipe-backed batches keep their source readers.
+             */
             [[bioseq_sql::guc({
                 .context = bioseq::sql::guc_context::superuser,
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
@@ -127,11 +129,13 @@ struct settings final {
             static inline bool enabled = false;
         };
 
-        /** Owns in-memory scanner selection. */
+        /** Test setting  for scans with materialized sequence input. */
         struct in_memory_scanner final {
             in_memory_scanner() = delete;
 
-            /** @brief Materializes sequence input before scanner dispatch. */
+            /** @brief Materialize sequence input before dispatch in test scans.
+             * Recipe-backed batches keep their source readers.
+             */
             [[bioseq_sql::guc({
                 .context = bioseq::sql::guc_context::superuser,
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
@@ -139,7 +143,7 @@ struct settings final {
             static inline bool enabled = false;
         };
 
-        /** Owns persisted-index failure injection. */
+        /** Failures injected into stored-index operations for tests. */
         struct persisted_index final {
             persisted_index() = delete;
 
@@ -156,11 +160,11 @@ struct settings final {
     };
 #endif
 
-    /** Owns column-storage settings. */
+    /** Column storage settings. */
     struct storage final {
         storage() = delete;
 
-        /** Owns column-compression settings. */
+        /** Compression applied to column chunks. */
         struct compression final {
             compression() = delete;
 
@@ -170,8 +174,7 @@ struct settings final {
                 algorithm = bioseq::postgres::support::postgres_enum_storage<compression_algorithm>{
                     k_default_compression_algorithm};
 
-            /** @brief Sets the compression level used for compressed column chunks.
-             */
+            /** @brief ZSTD compression level. PGLZ and LZ4 ignore this setting. */
             [[bioseq_sql::guc({
                 .minimum = k_minimum_compression_level,
                 .maximum = k_maximum_compression_level,
@@ -179,7 +182,7 @@ struct settings final {
             static inline int level = 3;
         };
 
-        /** Owns stripe-size settings. */
+        /** Maximum size of a columnar stripe. */
         struct stripe final {
             stripe() = delete;
 
@@ -191,7 +194,7 @@ struct settings final {
             static inline int row_limit = k_default_stripe_row_count;
         };
 
-        /** Owns chunk-group-size settings. */
+        /** Maximum size of a chunk group within a stripe. */
         struct chunk_group final {
             chunk_group() = delete;
 
@@ -203,11 +206,11 @@ struct settings final {
             static inline int row_limit = k_default_chunk_group_row_count;
         };
 
-        /** Owns data-modification settings. */
+        /** Visibility of rows marked as deleted. */
         struct dml final {
             dml() = delete;
 
-            /** @brief Enables data-modification operations on Bioseq tables. */
+            /** @brief Apply deletion masks when scanning Bioseq tables. */
             [[bioseq_sql::guc({
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
             })]]
@@ -215,21 +218,21 @@ struct settings final {
         };
     };
 
-    /** Owns execution settings. */
+    /** Query  execution settings. */
     struct execution final {
         execution() = delete;
 
-        /** Owns parallel-execution settings. */
+        /** PostgreSQL workers used for parallel column scans. */
         struct parallel final {
             parallel() = delete;
 
-            /** @brief Allows execution to use parallel workers. */
+            /** @brief Allow parallel PostgreSQL plans for Bioseq column scans. */
             [[bioseq_sql::guc({
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
             })]]
             static inline bool enabled = true;
 
-            /** @brief Sets the minimum worker count for parallel execution. */
+            /** @brief Number of workers requested for a parallel column scan. */
             [[bioseq_sql::guc({
                 .minimum = 1,
                 .maximum = 32,
@@ -238,26 +241,26 @@ struct settings final {
         };
     };
 
-    /** Owns vectorized-execution settings. */
+    /** Batch processing of column values. */
     struct vectorization final {
         vectorization() = delete;
 
-        /** @brief Enables vectorized execution paths. */
+        /** @brief Allow supported expressions and aggregates to process column batches. */
         [[bioseq_sql::guc({
             .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
         })]]
         static inline bool enabled = true;
     };
 
-    /** Owns column-cache settings. */
+    /** Cache of decompressed column chunks. */
     struct column_cache final {
         column_cache() = delete;
 
-        /** @brief Enables the column page cache. */
+        /** @brief Reuse decompressed column chunks within the backend. */
         [[bioseq_sql::guc]]
         static inline bool enabled = true;
 
-        /** @brief Sets the column page cache capacity in megabytes. */
+        /** @brief Memory limit for cached column chunks, in MiB. */
         [[bioseq_sql::guc({
             .flags = bioseq::sql::guc_flag::unit_mb,
             .minimum = 20,
@@ -266,11 +269,11 @@ struct settings final {
         static inline int capacity_mb = 200;
     };
 
-    /** Owns planner settings. */
+    /** Bioseq query-planning settings. */
     struct planner final {
         planner() = delete;
 
-        /** Owns Bioseq index-scan selection. */
+        /** Bioseq scans through PostgreSQL indexes. */
         struct index_scan final {
             index_scan() = delete;
 
@@ -281,7 +284,7 @@ struct settings final {
             static inline bool enabled = true;
         };
 
-        /** Owns custom-scan selection and path limits. */
+        /** Bioseq custom scans and their planner limits. */
         struct custom_scan final {
             custom_scan() = delete;
 
@@ -300,7 +303,7 @@ struct settings final {
             static inline int max_paths = 64;
         };
 
-        /** Owns predicate-pushdown settings. */
+        /** Filtering rows and skipping chunks inside a custom scan */
         struct qual_pushdown final {
             qual_pushdown() = delete;
 
@@ -310,8 +313,9 @@ struct settings final {
             })]]
             static inline bool enabled = true;
 
-            /** @brief Sets the minimum column correlation used for predicate
-             * pushdown. */
+            /** @brief Minimum absolute column correlation for  chunk-filter pushdown.
+             * Columns ordered with their row positions are nseful for min/max pruning.
+             */
             [[bioseq_sql::guc({
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
                 .minimum = 0,
@@ -320,7 +324,7 @@ struct settings final {
             static inline double correlation_threshold = 0.4;
         };
 
-        /** Owns planner diagnostic settings. */
+        /** Messages emitted while planning Bioseq scans. */
         struct diagnostics final {
             diagnostics() = delete;
 
@@ -331,7 +335,7 @@ struct settings final {
                     planner_log_level::debug3};
         };
 
-        /** Owns sequence-sort custom-scan selection. */
+        /** Batch sorting of sequence values in a custom scan. */
         struct sequence_sort_scan final {
             sequence_sort_scan() = delete;
 
@@ -343,27 +347,27 @@ struct settings final {
         };
     };
 
-    /** Owns sequence-index settings. */
+    /** Reading and building sequence indexes. */
     struct index final {
         index() = delete;
 
-        /** Owns insert-time index maintenance. */
+        /** Index writes performed during INSERT. */
         struct insert_maintenance final {
             insert_maintenance() = delete;
 
             /**
-             * @brief Enables legacy insert-time index maintenance.
+             * @brief Update indexes during INSERT using the older index format.
              *
-             * The default grouped-SoA minimizer format is published after the
-             * source rows commit, through bioseq.update_index. It cannot use
-             * this scheme-untagged INSERT writer. Unindexed rows remain
-             * searchable through the selected algorithm's transient indexes.
+             * Grouped minimizer indexes require bioseq.update_index after the
+             * source rows commit. This INSERT writer cannot, publish that format.
+             * Rows without stored indexes remain searchable using temporary
+             * indexes built by the selected alignment  algorithm.
              */
             [[bioseq_sql::guc]]
             static inline bool enabled = false;
         };
 
-        /** Owns per-sequence index reads. */
+        /** Reading an index stored for one sequence. */
         struct sequence_read final {
             sequence_read() = delete;
 
@@ -374,21 +378,21 @@ struct settings final {
             static inline bool enabled = true;
         };
 
-        /** Owns asynchronous index persistence. */
+        /** Saving indexes in the background. */
         struct async_persistence final {
             async_persistence() = delete;
 
             /**
-             * @brief Persists opportunistically built indexes asynchronously.
+             * @brief Save indexes built during searches in the background.
              *
-             * Off by default because grouped-SoA generations require explicit
-             * publication; the legacy asynchronous writer cannot publish them.
+             * Disabled by default. The background writer cannot publish grouped
+             * minimizer generations, which require bioseq.update_index.
              */
             [[bioseq_sql::guc]]
             static inline bool enabled = false;
         };
 
-        /** Owns asynchronous persistence after recomputation. */
+        /** Saving rebuilt indexes in the background. */
         struct recompute_async_persistence final {
             recompute_async_persistence() = delete;
 
@@ -398,9 +402,8 @@ struct settings final {
         };
 
         /**
-         * @brief Caps resident index memory in megabytes.
-         *
-         * Zero uses the runtime memory budget.
+         * @brief Limit memory used by loaded indexes, in MiB.
+         * Zero lets the runtime choose its memory budget.
          */
         [[bioseq_sql::guc({
             .flags = bioseq::sql::guc_flag::unit_mb,
@@ -409,7 +412,7 @@ struct settings final {
         })]]
         static inline int memory_cap_mb = 0;
 
-        /** Owns minimizer-sequence pair sorting. */
+        /** Sorting minimizer/sequence pairs for an ipdex. */
         struct sequence_minimizer_sort final {
             sequence_minimizer_sort() = delete;
 
@@ -425,14 +428,13 @@ struct settings final {
         };
     };
 
-    /** Owns index-build settings. */
+    /** Building stored sequence indexes. */
     struct index_build final {
         index_build() = delete;
 
         /**
-         * @brief Overrides the external-sort run buffer size.
-         *
-         * Zero uses the computed production size.
+         * @brief Size in bytes of an in-memory run for external sorting.
+         * Zero keeps the index builder's default  buffer size.
          */
         [[bioseq_sql::guc({
             .context = bioseq::sql::guc_context::superuser,
@@ -443,15 +445,17 @@ struct settings final {
         static inline int run_buffer_bytes = 0;
     };
 
-    /** Owns sequence-loading settings. */
+    /** Loading sequences from input files. */
     struct load final {
         load() = delete;
 
-        /** Owns overlap between decoding and storage writes. */
+        /** Decoding the next input batch while writing the current batch. */
         struct write_overlap final {
             write_overlap() = delete;
 
-            /** @brief Overlaps input decoding with column writes during loading. */
+            /** @brief Allow input decoding to overlap column writes.
+             * Requires a scheduler mode and worker count that allow parallel dispatch
+             */
             [[bioseq_sql::guc]]
             static inline bool enabled = false;
         };

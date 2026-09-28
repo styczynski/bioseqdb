@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Collects match owners and finalizes stable helper bindings after setrefs.
+ * @brief Binds match helpers to their final scan nodes after PostgreSQL runs setrefs.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -42,15 +42,14 @@ export {
     static_assert(std::is_trivially_destructible_v<std::span<match_owner_finalization>>);
 
 #ifdef BIOSEQ_TEST_INDEXES
-    /* Backend-local audit that a PostgreSQL ERROR cannot jump across the heap-
-     * backed owner vector.  The test hook reads the balance after
-     * a user-triggered ambiguous-owner error in the same backend. */
-    /** @brief Counts heap-owner scopes entered by the test-only finalization audit. */
+    /* Tests compare these counters after an ambiguous-helper error to
+     * check that PostgreSQL error handling still destroys the owner  vector. */
+    /** @brief Counts entries into the test-only match-finalization scope. */
     std::uint64_t match_owner_finalization_scopes_entered = 0u;
-    /** @brief Counts heap-owner scopes exited by the test-only finalization audit. */
+    /** @brief Counts completed cleanup of the test-only match-finalization scope. */
     std::uint64_t match_owner_finalization_scopes_exited = 0u;
 
-    /** @brief Records balanced entry and exit of a test-only finalization scope. */
+    /** @brief Lets tests check that finalization leaves its C++ scope after a PostgreSQL error. */
     struct match_owner_finalization_scope_guard {
         /** @brief Records scope entry without allocating or invoking PostgreSQL. */
         match_owner_finalization_scope_guard() noexcept {
@@ -66,14 +65,14 @@ export {
     };
 #endif
 
-    /** @brief Classifies the outcome of resolving one helper site to a match owner. */
+    /** @brief Reports a unique bikding, ambiguity, or an invalid helper argument. */
     enum class match_site_resolution_status : std::uint8_t {
         bound,
         ambiguous,
         invalid,
     };
 
-    /** @brief Reports the selected owner, binding form, and number of candidates. */
+    /** @brief Stores the helper-resolution result, selected owner, and candidate count. */
     struct match_site_resolution {
         match_site_resolution_status status = match_site_resolution_status::invalid;
         match_helper_binding_kind kind = match_helper_binding_kind::unresolved;
@@ -82,8 +81,8 @@ export {
     };
 
     /**
-     * @brief Reads and validates an integer cell from a serialized binding list.
-     * @throws PostgreSQL ERROR when the requested cell is absent or has the wrong node type.
+     * @brief Reads an integer field from saved match-binding data.
+     * @throws PostgreSQL ERROR if the field is missing or is not an Integer node.
      */
     [[nodiscard]] Integer* match_binding_integer(List* values, const int index, const char* field) {
         Node* node = values == nullptr || index < 0 || index >= list_length(values)
@@ -98,7 +97,7 @@ export {
         return reinterpret_cast<Integer*>(node);
     }
 
-    /** @brief Tests whether a canonical helper argument belongs to an owner's query-local lineage. */
+    /** @brief Checks whether a helper names a  source column of an owner in the same query. */
     [[nodiscard]] bool match_owner_lineage_contains(const match_owner_finalization& site_owner,
                                                     const match_owner_finalization& owner,
                                                     Node* argument,
@@ -117,10 +116,9 @@ export {
             }
             return false;
         }
-        /* Query-local Var identity is the alias boundary.  Relation OIDs are not:
-         * inheritance, partitions, and composite recipes may legitimately expose
-         * distinct physical relations while retaining one SQL-visible lineage,
-         * whereas two aliases of one relation must never be conflated. */
+        /* Compare relation references within this query so separate aliases
+         * stay distinct. Physical relation OIDs can differ across partitions
+         * or source expressions while the SQL relation reference stays the same. */
         if (variable->varno == owner.base_relid)
             return true;
         for (Var* base : postgres_list<Var>(owner.base_lineage)) {
@@ -131,17 +129,21 @@ export {
         return false;
     }
 
-    /** @brief Resolves one canonical helper argument against owners in the registering query scope. */
+    /**
+     * @brief Resolves a helper argument to one match owner in its query.
+     *
+     * First look for an equal target expression. If none exists, check the source
+     * columns named by the argument Accept a unique match only when it is the scan
+     * that registered this helper. Report ambiguity  when multiple owners qualify.
+     */
     [[nodiscard]] match_site_resolution
     resolve_match_helper_site(match_owner_finalization& site_owner,
                               Node* canonical_argument,
                               std::span<match_owner_finalization> owners,
                               const bioseq_stub_oids& oids) noexcept {
         match_site_resolution result{};
-        /* Resolve exact recipes across the complete query-local owner set before
-         * honoring the registering site.  Two equal recipes owned by distinct plan
-         * nodes are not distinguishable from SQL and must fail closed instead of
-         * letting traversal/registration order choose one. */
+        /* Check every owner in this query before choosing an exact expression
+         * match. Equal targets in two scans luave the helper ambiguous. */
         for (match_owner_finalization& candidate : owners) {
             if (candidate.query_scope_id != site_owner.query_scope_id)
                 continue;
@@ -186,17 +188,13 @@ export {
         return result;
     }
 
-/* BIOSEQ_TEST_INDEXES has no SQL-visible helper for this invariant on purpose:
- * exposing one would create another executable match-helper surface.  The
- * first real owner finalization in a test backend runs this resolver seam.  It
- * validates both halves of the scope contract with the exact pre-setrefs collision
- * that nested PlannerInfos can produce: an equal local Var in another scope is
- * ignored, while two owners in one scope remain ambiguous for a lineage key
- * Var even when their physical relation OIDs differ.  A second alias of the
- * same physical relation remains distinct by Var identity.  Duplicate exact
- * recipes fail closed rather than selecting by traversal order. */
+/* Test the, resolver during the first match finalization in a test backend.
+ * The fixtures cover equal Vars in separate queries, ambiguous owners within
+ * one query, and distinct aliases of the same physical relation. They also
+ * check duplicate target expressions and targets built from several sources.
+ * Running  internally avoids adding a SQL function for this test. */
 #ifdef BIOSEQ_TEST_INDEXES
-    /** @brief Runs the backend-local query-scope and ambiguity resolver self-test once. */
+    /** @brief Runs the query-scope and ambiguous-helper checks once per test backend. */
     void verify_match_owner_scope_resolution(const bioseq_stub_oids& oids) {
         static bool verified = false;
         if (verified)
@@ -334,7 +332,7 @@ export {
     }
 #endif
 
-    /** @brief Allocates a nonzero query-scope identifier and advances its counter. */
+    /** @brief Allocates a nonzero query-scope ID, raising an error before the counter wraps. */
     [[nodiscard]] std::uint64_t allocate_match_owner_scope(std::uint64_t& next_scope_id) {
         if (next_scope_id == 0u || next_scope_id == (std::numeric_limits<std::uint64_t>::max)()) {
             ereport(ERROR,
@@ -344,7 +342,12 @@ export {
         return next_scope_id++;
     }
 
-    /** @brief Finds and validates the optional base-scan match-owner tag. */
+    /**
+     * @brief Finds the base scan's optional saved match-owner record.
+     *
+     * Return NIL when absent. Reject duplicate records or invalid versions and
+     * field types before their contents are used.
+     */
     [[nodiscard]] List* find_base_match_owner_plan_tag(CustomScan* scan) {
         if (scan == nullptr || scan->methods != bioseq_column_scan_scan_methods()) {
             return NIL;
@@ -400,8 +403,13 @@ export {
     }
 
     /**
-     * @brief Collects match owners recursively while assigning distinct scopes to subplans.
-     * @throws PostgreSQL ERROR when serialized owner metadata violates its plan ABI.
+     * @brief Collects match-producing scans and records the query each belongs to.
+     *
+     * Keep base-scan, batch-join, and per-row owners with their saved expressions.
+     * Give each SubqueryScan a fresh scope so identical  local column references
+     * cannot bind helpers across queries.
+     *
+     * @throws PostgreSQL ERROR if a recognized owner record has invalid fields.
      */
     void collect_match_owner_plan(Plan* plan,
                                   std::vector<match_owner_finalization>& owners,
@@ -577,7 +585,7 @@ export {
         }
     }
 
-    /** @brief Checks that setrefs preserved one base-lineage Var's physical attribute identity. */
+    /** @brief Checks that setrefs kept a source sequence column's physical position and typ */
     [[nodiscard]] bool
     base_match_target_var_translation_agrees(const Var* planner_target,
                                              const Var* executor_target,
@@ -598,7 +606,13 @@ export {
                planner_target->varcollid == executor_target->varcollid;
     }
 
-    /** @brief Checks planner and executor Vars for the selected helper binding form. */
+    /**
+     * @brief Checks a column helper argument before and after setrefs.
+     *
+     * An exact-target binding must still name the target column. A non-sequence
+     * column used to identify the source row must stay in the target relation and
+     * keep its column number and type metadata.
+     */
     [[nodiscard]] bool
     base_match_site_var_translation_agrees(const Var* planner_argument,
                                            const Var* executor_argument,
@@ -624,15 +638,15 @@ export {
             planner_argument->varno != planner_target->varno ||
             executor_argument->varno != executor_target->varno)
             return false;
-        /* setrefs may offset the query-local RTE index, but it cannot change which
-         * physical attribute, type, typmod, or collation the row marker names. */
+        /* Relation numbers may  shift during setrefs. The row-identifying
+         * column must keep its physical position and type metadata. */
         return planner_argument->varattno == executor_argument->varattno &&
                planner_argument->vartype == executor_argument->vartype &&
                planner_argument->vartypmod == executor_argument->vartypmod &&
                planner_argument->varcollid == executor_argument->varcollid;
     }
 
-    /** @brief Checks whether setrefs translated an expression only by its scan relation index. */
+    /** @brief Checks that an expression changed only by the base scan's relation-number translation. */
     [[nodiscard]] bool base_match_expression_translation_agrees(Node* planner_expression,
                                                                 Node* executor_expression,
                                                                 const Index planner_relid,
@@ -652,7 +666,7 @@ export {
         return equal(translated, executor_expression);
     }
 
-    /** @brief Checks the post-setrefs target recipe and each canonical base-lineage source. */
+    /** @brief Checks that setrefs preserved the match target and each source sequence column. */
     [[nodiscard]] bool
     base_match_target_expression_translation_agrees(Node* planner_target,
                                                     Node* executor_target,
@@ -682,7 +696,13 @@ export {
         return true;
     }
 
-    /** @brief Checks one helper argument's planner-to-executor translation. */
+    /**
+     * @brief Checks that a helper argument still identifies its match target, after setrefs.
+     *
+     * For an exact binding, compare the complete target expressions. For a source
+     * column binding, require the same physical column and type metadata. Sequence
+     * columns must also occur among  the target's sources in both versions.
+     */
     [[nodiscard]] bool
     base_match_site_expression_translation_agrees(Node* planner_argument,
                                                   Node* executor_argument,
@@ -737,14 +757,19 @@ export {
         return planner_member && executor_member;
     }
 
-    /** @brief Tests a finalized helper argument against its canonical planner expression. */
+    /** @brief Checks that an executor helper argument sjill refers to its saved source expression. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(CustomScan* scan,
                                                                           Node* translated,
                                                                           Node* canonical) noexcept;
 
     /**
-     * @brief Builds the post-setrefs descriptor and helper sites for a base scan owner.
-     * @throws PostgreSQL ERROR when planner and executor identities do not agree.
+     * @brief Builds the base scan's helper bindings using the expressions left by setrefs.
+     *
+     * Check the translated target against its saved planner expression, then match
+     * the helper sites in the output list Save a separate executor descriptor and
+     * site list with the final match ID.
+     *
+     * @throws PostgreSQL ERROR if the translated target or helper sites disagree.
      */
     void finalize_base_match_owner_executor_image(match_owner_finalization& owner,
                                                   const bioseq_stub_oids& oids) {
@@ -878,8 +903,13 @@ export {
     }
 
     /**
-     * @brief Assigns stable owner identifiers and resolves every registered helper site.
-     * @throws PostgreSQL ERROR for invalid, ambiguous, or cross-owner bindings.
+     * @brief Links saved match owners and helper bindings to their final plan-node IDs.
+     *
+     * Require unique scan IDs. Resolve  each helper within its query, rejecting
+     * ambiguous targets and bindings to another scan. Then build the base scans'
+     * executor bindings from their translated expressions.
+     *
+     * @throws PostgreSQL ERROR for invalid or ambiguous bindings.
      */
     void finalize_match_owner_bindings(std::span<match_owner_finalization> owners) {
         const bioseq_stub_oids& oids = get_cached_stub_oids();
@@ -889,9 +919,8 @@ export {
         Bitmapset* stable_ids = nullptr;
         std::size_t owner_index = 0u;
         for (match_owner_finalization& owner : owners) {
-            /* set_plan_references() may assign zero to the root Plan.  The stable
-             * owner ABI is the exact plan_node_id, so only negative ids are invalid
-             * and zero must participate in duplicate detection like every other id. */
+            /* PostgreSQL may give the root plan ID 0. Keep it as a valid match ID
+             * and include it in the duplicate check. */
             const bool duplicate_stable_id =
                 owner.stable_match_id >= 0 && bms_is_member(owner.stable_match_id, stable_ids);
             if (owner.scan == nullptr || owner.descriptor == NIL ||
@@ -979,11 +1008,18 @@ export {
         }
     }
 
-    /** @brief Rewrites helper placeholders owned by ancestor match plans to inert expressions. */
+    /** @brief Replaces dummy helper calls with typed NULLs when an ancestor supplies their results. */
     void neutralize_ancestor_owned_dummy_match_helpers(PlannedStmt* statement,
                                                        std::span<match_owner_finalization> owners);
 
-    /** @brief Resolve every match helper to one finalized owner in a planned statement. */
+    /**
+     * @brief Finishes match-helper bindings after PostgreSQL has assigned plan-node IDs.
+     *
+     * Collect owners from the main plan and subplans, keeping query scopes
+     * separate. Resolve  the helpers and remove ancestor-supplied dummy calls.
+     * Translate PostgreSQL errors through C++ so the owner vector is destroyed
+     * before the error is raised again.
+     */
     void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
         if (statement == nullptr || statement->planTree == nullptr ||
             !OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
@@ -996,12 +1032,12 @@ export {
 #endif
             std::vector<match_owner_finalization> owners;
             try {
-                /* This callback is below PostgreSQL's sigsetjmp boundary.  Every local
-                 * it reaches is either PostgreSQL-owned (List/Bitmapset) or statically
-                 * trivially destructible (span/fixed fixture/scalars).  The sole heap-
-                * owning C++ container is this outer vector, which remains above the
-                 * boundary and therefore unwinds after a translated PG error. */
-                // Collect and finalize all query-local owners inside the translated error boundary.
+                /* Keep the owner vector outside invoke_pg_as_cpp: PostgreSQL ERROR
+                 * jumps to that function's handler without running, C++ destructors.
+                 * Objects created nside the callback must use PostgreSQL memory or
+                 * need no destruction. The translated exception then unwinds this
+                 * outer scope and destroys the vector. */
+                // Collect query-local owners and resolve their helper bindings.
                 bioseq::postgres::support::invoke_pg_as_cpp([statement, &owners] {
                     std::uint64_t next_scope_id = 1u;
                     const std::uint64_t statement_scope = allocate_match_owner_scope(next_scope_id);
@@ -1022,8 +1058,7 @@ export {
                 exact_error = error.release_error_data();
             }
         }
-        /* Re-enter PostgreSQL's error ABI only after the vector and every other C++
-         * owner in the finalization scope have been destroyed. */
+        /* Raise the saved PostgreSQL error after C++ cleanup has finished */
         if (exact_error != nullptr)
             ReThrowError(exact_error);
     }

@@ -603,8 +603,8 @@ inline void run_guc_generator_contract_self_tests() {
              "k_missing_integer_guc_constant"},
             "missing integer identifier did not fail closed");
     }
-    // Synthetic aliases retain their registered owner without depending on
-    // which production constants have compiler-derived structural records.
+    // Add test aliases with an explicit owner so these checks do not depend
+    // on the constants present in the production source scan.
     const auto add_structural_integer_alias = [&owners](
         collected_program& candidate,
         std::string name,

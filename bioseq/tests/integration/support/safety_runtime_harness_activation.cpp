@@ -1,4 +1,7 @@
-/** @file Safety runtime activation command family. */
+/**
+ * @file
+ * @brief Installs the runtime-safety test build in its private PostgreSQL cluster.
+ */
 
 module;
 
@@ -48,7 +51,7 @@ module bioseq.tests.integration.safety_runtime_harness_support;
 
 namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Install sealed artifacts, restart PostgreSQL, and emit an activation receipt.
+/// Install the checked build files, restart the private cluster, and record its active build.
 [[nodiscard]] int activate(
         const command_line& command) {
     require_exact_options(

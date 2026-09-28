@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates frozen semantics, callback contracts, and cache validation.
+ * @brief Re-exports saved scan settings, planner callbacks and cache APIs.
  */
 export module bioseq.postgres.table:custom_scan_semantic_payload;
 

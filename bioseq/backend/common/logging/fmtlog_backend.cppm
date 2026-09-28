@@ -1,6 +1,6 @@
 /**
  * @file fmtlog_backend.cppm
- * @brief Exposes the embedded fmtlog backend through the stable logging partition.
+ * @brief Exports the embedded fmtlog logger through the logging module.
  */
 export module bioseq.common.logging:fmtlog_backend;
 

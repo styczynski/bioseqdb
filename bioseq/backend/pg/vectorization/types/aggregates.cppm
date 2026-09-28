@@ -1,16 +1,9 @@
 /**
  * @file
- * Defines vector aggregate SQL routines and their generated aggregate owners.
+ * Define SQL aggregates that update their state from a vector batch.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/types/aggregates.cppm
- *
- * Typed owners for the vector aggregate transition and final functions.
- *
- *-------------------------------------------------------------------------
- */
+
 module;
 
 #include <bioseq/pg_compat.h>
@@ -41,7 +34,7 @@ import bioseq.postgres.vectorization.types.numeric;
 namespace {
 
 #if defined(BIOSEQ_TEST_INDEXES)
-/** Identifies each aggregate routine covered by the runtime ownership probe. */
+/** Aggregate routines whose calls are counted by the runtime test. */
 enum class aggregate_owner_runtime_id : std::size_t {
     vemptycount,
     vanycount,
@@ -64,12 +57,12 @@ enum class aggregate_owner_runtime_id : std::size_t {
     count,
 };
 
-/** Counts calls to each aggregate owner in the current backend thread. */
+/** Calls to each aggregate routine on the current backend thread. */
 inline thread_local std::array<std::uint64_t,
                                static_cast<std::size_t>(aggregate_owner_runtime_id::count)>
     aggregate_owner_runtime_visits{};
 
-/** Records one aggregate owner invocation for test diagnostics. */
+/** Count one aggregate  routine call for the runtime test. */
 inline void note_aggregate_owner_visit(aggregate_owner_runtime_id owner) noexcept {
     ++aggregate_owner_runtime_visits[static_cast<std::size_t>(owner)];
 }
@@ -79,7 +72,8 @@ inline void note_aggregate_owner_visit(aggregate_owner_runtime_id) noexcept {}
 #endif
 
 template <class p_state, class p_column, class p_fold>
-/** Applies a fold to each non-null lane while retaining a null state. */
+/** Update an existing state with each non-NULL vector value.
+ * A NULL state or missing input leaves the state unchanged. */
 [[nodiscard]] std::optional<p_state>
 fold_vector(std::optional<p_state> state, const std::optional<p_column>& input, p_fold&& fold) {
     if (!state.has_value() || !input.has_value()) {
@@ -94,7 +88,7 @@ fold_vector(std::optional<p_state> state, const std::optional<p_column>& input, 
 }
 
 template <auto p_sql_type, class p_value_type>
-/** Accumulates count and sum lanes for SMALLINT or INTEGER averages. */
+/** Add non-NULL SMALLINT or INTEGER values to the count and sum used by AVG. */
 [[nodiscard]] std::optional<bioseq::postgres::support::int64_array_aggregate_state>
 accumulate_integer_average_state(
     std::optional<bioseq::postgres::support::int64_array_aggregate_state> state,
@@ -113,7 +107,7 @@ accumulate_integer_average_state(
     return state;
 }
 
-/** Divides an int64 sum by its count with PostgreSQL Numeric semantics. */
+/** Return sum divided by cout using PostgreSQL numeric arithmetic */
 [[nodiscard]] bioseq::postgres::support::numeric_result numeric_average(std::int64_t count,
                                                                         std::int64_t sum) {
     Numeric count_numeric =
@@ -131,7 +125,7 @@ accumulate_integer_average_state(
     return bioseq::postgres::support::numeric_result::from_numeric(quotient_numeric);
 }
 
-/** Divides an int128 aggregate sum by its count as PostgreSQL Numeric. */
+/** Convert the 128-bit sum to numeric and divide it by the stored count. */
 [[nodiscard]] bioseq::postgres::support::numeric_result
 numeric_average(const int128_aggregate_state_storage& state) {
     Numeric sum_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -153,7 +147,7 @@ numeric_average(const int128_aggregate_state_storage& state) {
 
 export namespace bioseq::vector::aggregate_sql_routines {
 
-/** Returns the running count for a zero-argument vector batch. */
+/** Keep the COUNT(*) state unchanged here. The vector executor adds the batch's row count. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t> vemptycount(std::optional<std::int64_t> running_count) {
@@ -163,7 +157,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return running_count;
 }
 
-/** Adds the non-null lane count to the running COUNT state. */
+/** Add the batch's non-NULL row count to an initialized COUNT state. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -181,7 +175,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return running_count;
 }
 
-/** Adds SMALLINT lanes to the running integer sum. */
+/** Add non-NULL SMALLINT values to an initialized bigint sum. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -198,7 +192,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Accumulates SMALLINT lane count and sum for AVG. */
+/** Add non-NULL SMALLINT values to the count and sum used by AVG. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -217,7 +211,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return accumulate_integer_average_state(std::move(state), input);
 }
 
-/** Selects the greatest SMALLINT value across the batch and state. */
+/** Update  an initialized SMALLINT maximum with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int16_t>
@@ -236,7 +230,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Selects the least SMALLINT value across the batch and state. */
+/** Update an initialized SMALLINT minimum with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int16_t>
@@ -255,7 +249,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Adds INTEGER lanes to the running bigint sum. */
+/** Add non-NULL INTEGER values to an initialized bigint sum. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -272,7 +266,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Accumulates INTEGER lane count and sum for AVG. */
+/** Add non-NULL INTEGER values to the count and sum used by AVG. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -291,7 +285,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return accumulate_integer_average_state(std::move(state), input);
 }
 
-/** Selects the greatest INTEGER value across the batch and state. */
+/** Update an initialized INTEGER maximum with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int32_t>
@@ -310,7 +304,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Selects the least INTEGER value across the batch and state. */
+/** Update an initialized INTEGER minimum, with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int32_t>
@@ -329,7 +323,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Finalizes a SMALLINT or INTEGER average as Numeric. */
+/** Return a SMALLINT or INTEGER average as numeric, or NULL when no values were counted. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -346,7 +340,8 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return numeric_average(state->value().count, state->value().sum);
 }
 
-/** Accumulates BIGINT lanes in PostgreSQL aggregate memory. */
+/** Accumulate BIGINT values in a 128-bit sum and count them for SUM or AVG.
+ * Allocate missing state in the aggregate memory context and skip NULL rows. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -386,7 +381,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return state;
 }
 
-/** Finalizes a BIGINT sum as Numeric. */
+/** Return the BIGINT sum as numeric, or NULL when no values were counted. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -405,7 +400,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return bioseq::postgres::support::numeric_result::from_numeric(sum_numeric);
 }
 
-/** Finalizes a BIGINT average as Numeric. */
+/** Return the BIGINT average  as numeric, or NULL when no values were counted. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -422,7 +417,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return numeric_average(state->value());
 }
 
-/** Selects the greatest BIGINT value across the batch and state. */
+/** Update an initialized BIGINT maximum with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -440,7 +435,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Selects the least BIGINT value across the batch and state. */
+/** Update an initialized BIGINT minimum with the batch's non-NULL values. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -459,7 +454,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Selects the greatest DATE value across the batch and state. */
+/** Update an initialized latest date with the batch's non-NULL dates. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -481,7 +476,7 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Selects the least DATE value across the batch and state. */
+/** Update an initialized earliest date with the batch's non-NULL dates. */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -504,12 +499,12 @@ export namespace bioseq::vector::aggregate_sql_routines {
 }
 
 #if defined(BIOSEQ_TEST_INDEXES)
-/** Clears per-backend aggregate owner visit counts. */
+/** Reset this backend thread's aggregate routine call counts. */
 void reset_runtime_owner_visits() noexcept {
     aggregate_owner_runtime_visits.fill(0);
 }
 
-/** Requires every generated aggregate owner to have executed at least once. */
+/** Fail the runtime test if any registered aggregate routine was never called. */
 void validate_runtime_owner_visits() {
     static constexpr std::array<std::string_view, 18> owner_names{
         "vemptycount",
@@ -545,10 +540,7 @@ void validate_runtime_owner_visits() {
     }
 }
 
-/**
- * Exercise PostgreSQL's int8 aggregate serialization pair with one state
- * containing a sum wider than 64 bits.
- */
+/** Check that PostgreSQL's int8 aggregate serializer preserves a sum wider than 64 bits. */
 void validate_int8_serial_roundtrip() {
     ExprContext expression_context{};
     NodeSetTag(&expression_context, T_ExprContext);
@@ -634,7 +626,7 @@ namespace count_all {
     .transition = bioseq::vector::aggregate_sql_routines::vemptycount,
     .initial_condition = std::int64_t{0},
 })]]
-/** Declares the generated vector owner for zero-argument COUNT. */
+/** Register vector COUNT(*), witz row counting performed by the executor */
 inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
@@ -643,7 +635,7 @@ namespace count_any {
     .transition = bioseq::vector::aggregate_sql_routines::vanycount,
     .initial_condition = std::int64_t{0},
 })]]
-/** Declares the generated vector owner for nullable-argument COUNT. */
+/** Register vector COUNT(value), counting only non-NULL rows. */
 inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
@@ -652,7 +644,7 @@ namespace smallint_sum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2sum,
     .initial_condition = std::int64_t{0},
 })]]
-/** Declares the generated vector owner for SMALLINT SUM. */
+/** Register vector SMALLINT SUM with  a bigint state initialized to zero. */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -662,7 +654,7 @@ namespace smallint_average {
     .final = bioseq::vector::aggregate_sql_routines::vint2int4avg,
     .initial_condition = bioseq::sql::pg_input_text{"{0,0}"},
 })]]
-/** Declares the generated vector owner for SMALLINT AVG. */
+/** Register vector SMALLINT AVG using a count and sum, then numeric division. */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -671,7 +663,7 @@ namespace smallint_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2larger,
     .initial_condition = std::int64_t{-32768},
 })]]
-/** Declares the generated vector owner for SMALLINT MAX. */
+/** Register vector SMALLINT MAX with the smallest representable initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -680,7 +672,7 @@ namespace smallint_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2smaller,
     .initial_condition = std::int64_t{32767},
 })]]
-/** Declares the generated vector owner for SMALLINT MIN. */
+/** Register vector SMALLINT MIN with the largest representable initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -689,7 +681,7 @@ namespace integer_sum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4sum,
     .initial_condition = std::int64_t{0},
 })]]
-/** Declares the generated vector owner for INTEGER SUM. */
+/** Register vector INTEGER SUM with a bigint state initialized to zero. */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -699,7 +691,7 @@ namespace integer_average {
     .final = bioseq::vector::aggregate_sql_routines::vint2int4avg,
     .initial_condition = bioseq::sql::pg_input_text{"{0,0}"},
 })]]
-/** Declares the generated vector owner for INTEGER AVG. */
+/** Register vector INTEGER AVG using a count and sum, then numeric division. */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -708,7 +700,7 @@ namespace integer_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4larger,
     .initial_condition = std::int64_t{-2147483648},
 })]]
-/** Declares the generated vector owner for INTEGER MAX. */
+/** Register vector INTEGER MAX with the smallest representable initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -717,7 +709,7 @@ namespace integer_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4smaller,
     .initial_condition = std::int64_t{2147483647},
 })]]
-/** Declares the generated vector owner for INTEGER MIN. */
+/** Register vector INTEGER MIN with the largest representable initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -728,7 +720,7 @@ namespace bigint_sum {
     .serial = bioseq::sql::pg_catalog_reference::int8_avg_serialize,
     .deserial = bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
 })]]
-/** Declares the generated vector owner for BIGINT SUM. */
+/** Register  vector BIGINT SUM with 128-bit accumulation and PostgreSQL state serialization. */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -739,7 +731,7 @@ namespace bigint_average {
     .serial = bioseq::sql::pg_catalog_reference::int8_avg_serialize,
     .deserial = bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
 })]]
-/** Declares the generated vector owner for BIGINT AVG. */
+/** Register vector BIGINT AVG with 128-bit accumulation and PostgreSQL state serialization. */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -748,7 +740,7 @@ namespace bigint_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint8larger,
     .initial_condition = std::int64_t{-9223372036854775807LL - 1},
 })]]
-/** Declares the generated vector owner for BIGINT MAX. */
+/** Register vector BIGINT MAX wita the smallest representable, initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -757,7 +749,7 @@ namespace bigint_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint8smaller,
     .initial_condition = std::int64_t{9223372036854775807LL},
 })]]
-/** Declares the generated vector owner for BIGINT MIN. */
+/** Register vector BIGINT MIN with the largest representable initial value. */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -766,7 +758,7 @@ namespace date_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vdatelarger,
     .initial_condition = bioseq::sql::pg_infinity::negative,
 })]]
-/** Declares the generated vector owner for DATE MAX. */
+/** Register vector DATE MAX starting from negative infinity. */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -775,7 +767,7 @@ namespace date_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vdatesmaller,
     .initial_condition = bioseq::sql::pg_infinity::positive,
 })]]
-/** Declares the generated vector owner for DATE MIN. */
+/** Register vector DATE MIN starting from positive infinity. */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 

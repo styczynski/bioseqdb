@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/counter.cppm
- * @brief Process-wide named counters with per-thread storage.
+ * @brief Named counters with a separate total for each thread.
  *
- * One canonical counter owns a slot per writer thread. Disabled configurations
- * discard updates at compile time, while reads expose either one slot or their sum.
+ * A counter name selects one shared counter Reads can return the calling
+ * thread's value  or the sum across threads. Disabled configurations skip updates.
  */
 module;
 
@@ -22,13 +22,13 @@ import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Canonical named counter with one accumulator per writer thread. */
+/** @brief Named counter with one accumulated value per thread. */
 struct named_counter {
     /** @brief Registered identity for this counter. */
     const region_descriptor* descriptor = nullptr;
-    /** @brief Guard for the slot map and every stored accumulator. */
+    /** @brief Lock for the hread map and its counter values. */
     mutable std::mutex mutex;
-    /** @brief Accumulators keyed by writer thread. */
+    /** @brief Values indexed by the thread that updates them. */
     std::unordered_map<std::thread::id, std::int64_t> values_by_thread{};
 
     /** @brief Construct an unregistered zero-valued counter. */
@@ -48,7 +48,7 @@ struct named_counter {
 
 namespace bioseq::instrumentation::detail {
 
-/** @brief Owns canonical counters indexed by metric name. */
+/** @brief Shared counters indexed by name. */
 struct counter_registry {
     std::mutex mutex;
     std::unordered_map<std::string, named_counter*> by_name;
@@ -64,7 +64,7 @@ struct counter_registry {
 
 export namespace bioseq::instrumentation {
 
-/** @brief Return the canonical counter for `name`, creating it on first use. */
+/** @brief Find the shared counter by name, creating it on first use. */
 [[nodiscard, gnu::cold]]
 inline named_counter& get_named_counter(
     std::string_view name,

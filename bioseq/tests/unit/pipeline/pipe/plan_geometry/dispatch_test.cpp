@@ -1,6 +1,6 @@
 /**
  * @file dispatch_test.cpp
- * @brief Exercises pipeline compile-time dispatch geometry.
+ * @brief Check how pipeline parameters select compiled algorithms and record sizes.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -142,8 +142,9 @@ TEST_CASE("statement plan route is identical across scan join union admission st
         params.downstream_active_wall = &tracker;
         bind_fixed_highway(params);
         auto plan = make_statement_execution_plan(std::move(params));
-        // Automatic binding is E2E-only. Ordinary TEST executors can contain
-        // multiple scan-node plans sharing one downstream timing union.
+        // Bind the pln explicitly in this test. Automatic binding is enabled for
+        // end-to-end benchmarks, while ordinary tests can share one timer across
+        // several scan plans.
         REQUIRE(tracker.bind_benchmark_e2e_statement_owner(plan));
         return plan;
     };
@@ -177,8 +178,8 @@ TEST_CASE("statement plan route is identical across scan join union admission st
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::join_preparation);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::query_union);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
-        // Distinct native-batch callbacks can overlap. Their pending edges stay
-        // callback-local; the statement tracker accepts each exact-owner edge.
+        // Two  batch callbacks can request retries before either resumes. Each
+        // callback tracks its own pending retry, and both use the same statement plan.
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_reentry);
@@ -300,11 +301,8 @@ TEST_CASE("dispatch_exact_value_or_default falls back to DefaultValue",
 TEST_CASE("dispatch_smallest_not_less picks the right bucket",
           "[component:bioseq][layer:unit][feature:planner]")
 {
-    // The bucket list is the union of `compute_breakpoints_for<K>()` across
-    // every K in `kmer_size_buckets`. The extended-k-mer capability selects
-    // {15, 7, 27}, whose union is L = {7, 15, 17, 27, 33, 49, 63}.
-    // Baseline profiles select {15}, collapsing the union to K=15's per-K
-    // breakpoints. Gate the table so both specialization domains are covered.
+    // Available length buckets combine the breakpoints for every compiled
+    // k-mer size. Check the extended set when K=7 and K=27 are enabled.
     if constexpr (kmer_size_buckets.size() >= 3u) {
         static constexpr std::array<std::pair<std::size_t, std::size_t>, 15u> cases{{
             { 1u,   7u}, { 7u,   7u}, { 8u,  15u}, {15u, 15u}, {16u, 17u},
@@ -319,11 +317,8 @@ TEST_CASE("dispatch_smallest_not_less picks the right bucket",
             REQUIRE(captured == expected);
         }
     } else {
-        // Reduced-branching mode (K = {15}). Reuse the K=15 breakpoints:
-        // dispatch_smallest_not_less picks the smallest L breakpoint >= want.
-        // Verify the contract holds for a few representative `want` values
-        // — the exact breakpoint set is materialised by
-        // `compute_breakpoints_for<15>()` so we walk the same sequence.
+        // With only K=15 compiled, check each of its breakpoints against the
+        // selected length bucket.
         constexpr auto bp = detail::compute_breakpoints_for<15u>();
         REQUIRE(bp.second > 0u);
         for (std::size_t i = 0u; i < bp.second; ++i) {
@@ -428,8 +423,8 @@ TEST_CASE("dispatch_chain heterogeneous NTTPs (L, K, BAA)",
     using dispatch_test_support::lkb_probe_traits;
 
     ::bioseq::simd::minimap2_parameters params;
-    // Build two dummy sequences of differing sizes so seq_len_log2_step
-    // picks a non-trivial L.
+    // Use different query and target lengths to check selection from the
+    // longer sequence.
     std::vector<seq::dna4> q_data(1u << 10);
     std::vector<seq::dna4> t_data(1u << 14);
     compact_sequence_range<std::vector<seq::dna4>> q{q_data};
@@ -449,12 +444,10 @@ TEST_CASE("dispatch_chain heterogeneous NTTPs (L, K, BAA)",
         >::template run<>(params, q, t, l_out, k_out, baa_out);
         REQUIRE(r == 1);
         REQUIRE(k_out == 15u);
-        REQUIRE(l_out == 15u);  // round_up_seq_len_log2(max(1<<10, 1<<14), 15) = 15
+        REQUIRE(l_out == 15u);  // K=15 sets the minimum length bucket.
         REQUIRE(baa_out == base_alignment_algorithm_type::ksw2);
     }
-    // Gated by `kmer_size_buckets.size()`: only run when the extended-k-mer
-    // capability compiles the K=7 dispatch branch. Baseline profiles contain
-    // only {15u}, so their smallest-ge fallback is K=15.
+    // The K=7 case needs the extended set of compiled k-mer sizes.
     if constexpr (kmer_size_buckets.size() >= 3u) {
         SECTION("K=7 — picks the K=7 bucket and L=7 from short sequences") {
             std::vector<seq::dna4> q_small(64);
@@ -488,9 +481,8 @@ TEST_CASE("dispatch_chain skips inactive steps via guarded_step",
     using dispatch_test_support::bca_probe_traits;
 
     ::bioseq::simd::minimap2_parameters params;
-    // Inject an out-of-range MA value to confirm the chain never reads
-    // params.minimizer_algorithm — guarded_step short-circuits to
-    // ma_step::default_value (SCALAR) when active=false.
+    // An inactive minimizer step must select its scalar default even when
+    // the supplied algorithm value is  invalid.
     params.minimizer_algorithm      = static_cast<minimizer_algorithm_type>(0xFF);
     params.base_alignment_algorithm = base_alignment_algorithm_type::block_aligner;
     params.chaining_algorithm       = chaining_algorithm_type::scalar_minimap2;
@@ -537,12 +529,9 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
     using dispatch_test_support::minimizer_algorithm_type;
 
     SECTION("(W=10, K=15) — selects the specialised Cep") {
-        // Both branches use the same fully-instantiated pipeline body —
-        // we cannot directly observe which Cep was picked without a probe
-        // hook inside pipeline_run_impl.  Instead, we exercise the leaf's
-        // (W, K) gate behaviour and confirm the call completes without
-        // an out-of-bounds access by passing zero-sized sequences and
-        // empty minimizers.
+        // Call the matching parameter branch with empty minimizers and check, for
+        // an empty result This test cannot directly observe which compiled
+        // parameter type the pipeline selected.
         ::bioseq::simd::minimap2_parameters params;
         bind_fixed_highway(params);
         params.window_size = 10;
@@ -567,7 +556,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
         const auto plan = make_statement_execution_plan(std::move(params));
         ::bioseq::indexing::minimizer_hashmap_fragment_index idx;
         idx.build(*minimizers_owner, t.bp_size());
-        // The leaf's W==10 && K==15 branch picks SpecCep.
+        // W=10 and K=15 match the specialized parameters when that build option is enabled.
         auto result = detail::pipeline_run_leaf<
             pipeline_entry_point::with_prebuilt_minimizers,
             seq::dna4,
@@ -641,14 +630,9 @@ TEST_CASE("non-canonical kmer_size resolves to the right L bucket",
                 detail::baa_step
             >::template run<>(params, q, t, l_out, k_out, baa_out);
             REQUIRE(k_out == kmer_size_default);
-            // round_up_seq_len_log2(1<<10, k) = max(10, k) = k for k in {11, 21}.
-            // Then seq_len_log2_step picks the smallest L >= k from the
-            // (union over kmer_size_buckets) breakpoint list. With the
-            // extended-k-mer capability that list is
-            // {7, 15, 17, 27, 33, 49, 63}: k=11 → L=15;  k=21 → L=27.
-            // Baseline profiles include only K=15, so the list collapses to
-            // K=15's per-K breakpoints
-            // {15, 33, 63}: k=11 → L=15; k=21 → L=33.
+            // For these shorc sequences, k determines the required position width.
+            // Round up to an available length bucket. The K=15-only build has fewer
+            // buckets, so k=21 reaches L=33 there.
             if constexpr (kmer_size_buckets.size() >= 3u) {
                 if (k == 11) REQUIRE(l_out == 15u);
                 if (k == 21) REQUIRE(l_out == 27u);
@@ -672,9 +656,8 @@ TEST_CASE("non-canonical kmer_size resolves to the right L bucket",
                 detail::baa_step
             >::template run<>(params, q, t, l_out, k_out, baa_out);
             REQUIRE(k_out == kmer_size_default);
-            // round_up_seq_len_log2(1<<20, k) = 20. The smallest L >= 20
-            // in {7, 15, 17, 27, 33, 49, 63} is 27 (default level >= 2);
-            // in {15, 33, 63} (level == 1) it is 33.
+            // The larger sequence needs at least 20 position bits. Both tested k-mer
+            // sizes select L=27 in the extended build or L=33 in the K=15-only build.
             if constexpr (kmer_size_buckets.size() >= 3u) {
                 REQUIRE(l_out == 27u);
             } else {
@@ -694,9 +677,9 @@ TEST_CASE("dispatch_chain rejects rvalue args at compile time",
     // lvalue references are accepted.
     static_assert(dispatch_test_support::chain_accepts_v<base_alignment_algorithm_type&, chaining_algorithm_type&, minimizer_algorithm_type&>);
     static_assert(dispatch_test_support::chain_accepts_v<const base_alignment_algorithm_type&, const chaining_algorithm_type&, const minimizer_algorithm_type&>);
-    // By-value (deduced as non-reference type) is rejected.
+    // Values passed without references are rejected.
     static_assert(!dispatch_test_support::chain_accepts_v<base_alignment_algorithm_type, chaining_algorithm_type, minimizer_algorithm_type>);
-    // rvalue ref is rejected.
+    // Rvalue references are rejected.
     static_assert(!dispatch_test_support::chain_accepts_v<base_alignment_algorithm_type&&, chaining_algorithm_type&&, minimizer_algorithm_type&&>);
     SUCCEED();
 }
@@ -706,8 +689,8 @@ TEST_CASE("algorithm-aware k20 layout separates physical K from runtime biologic
     using namespace ::bioseq::minimizers;
     using algorithm = ::bioseq::simd::minimizer_algorithm;
     for (const auto selected : {algorithm::bounded_nthash_simd, algorithm::two_stack_nthash}) {
-        // Bounded keeps its u32 hash; two-stack's selected K20 profile uses
-        // the existing wider record for query/index hash-mask compatibility.
+        // Bounded ntHash keeps 32-bit hashes at runtime k=20. Two-stack ntHash
+        // uses a wider record so query and index hashes use the same mask.
         const auto expected_physical_k =
             selected == algorithm::bounded_nthash_simd ? 15u : 20u;
         const auto expected_position_log2 =

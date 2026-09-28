@@ -1,6 +1,6 @@
 /**
  * @file active_read_policy.cppm
- * @brief Declares the authority behind one active-read index selection.
+ * @brief Record where an active index choice came from.
  */
 module;
 
@@ -19,11 +19,7 @@ enum class active_read_policy_source : std::uint8_t {
     authoritative_no_row_default,
 };
 
-/**
- * @brief Returns the stable diagnostic name for a policy source.
- * @param[in] source Policy source to name.
- * @return A static string view, or `invalid` for an unknown enumerator.
- */
+/** Return a policy source's diagnostic name, or "invalid" for an unknown value. */
 [[nodiscard]] constexpr std::string_view
 active_read_policy_resolution_source_name(const active_read_policy_source source) noexcept {
     switch (source) {

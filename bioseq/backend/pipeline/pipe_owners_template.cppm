@@ -1,6 +1,9 @@
 /**
  * @file pipeline/pipe_owners_template.cppm
- * @brief Scan-only source for generated alphabet-specific pipeline owners.
+ * @brief Input used to generate pipeline  entry points for, each alphabet and route.
+ *
+ * Code generation reads this file. The build compiles the generated
+ * implementations selected by its profile.
  */
 module;
 
@@ -27,7 +30,7 @@ import bioseq.indexing.gpu_minimizer_index;
 namespace bioseq {
 namespace simd {
 
-/// Alphabet axis expanded into one DNA4 owner and one DNA5 owner per route.
+/// Generate DNA4 and DNA5 versions of each enabled route.
 static constexpr bool owner_dna5
     [[bioseq::template_flatten(
         "identity", "alphabet",
@@ -35,7 +38,7 @@ static constexpr bool owner_dna5
         "dna5", "true")]]
     = false;
 
-/// Route axis expanded into six generated owner modules per alphabet.
+/// Split each alphabet's generated implementations acros six route choices.
 static constexpr std::uint8_t owner_route
     [[bioseq::template_flatten(
         "shard", "route",
@@ -49,13 +52,17 @@ static constexpr std::uint8_t owner_route
 
 namespace {
 
-/// Alphabet selected for the current generated owner specialization.
+/// Alphabet used by this generated implementation.
 using owner_alphabet = std::conditional_t<
     owner_dna5, ::seq::dna5, ::seq::dna4>;
 
 } // namespace
 
-/** Open one generated record owner and enter the existing typed index pipeline. */
+/**
+ * Check the query sketch against the statement plan, then call the pipeline
+ * with its selected record type Share the host records so they stay alive
+ * through index lookup and chaining.
+ */
 template <class p_target_index>
 [[nodiscard]] static match_result_collection minimap_port_physical_owner_with_index(
     bioseq::storage::lazy_sequence_view<owner_alphabet> query_seq,
@@ -105,7 +112,7 @@ template <class p_target_index>
         });
 }
 
-/** Execute the raw-sequence route through its pinned runtime shape. */
+/** Match raw query and target sequences using the statement's selected layout. */
 [[bioseq::template_flatten_when("route", "raw")]]
 [[nodiscard, gnu::noinline]] match_result_collection minimap_port_raw_owned(
     bioseq::storage::lazy_sequence_view<owner_alphabet> query_seq,
@@ -116,7 +123,7 @@ template <class p_target_index>
         std::move(query_seq), std::move(target_seq), execution_plan);
 }
 
-/** Execute the memory-bounded segmented target route. */
+/** Match  the query against target segments within the memory budget. */
 [[bioseq::template_flatten_when("route", "segmented")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_segmented_owned(
@@ -129,7 +136,7 @@ minimap_port_segmented_owned(
             std::move(query_seq), std::move(target_seq), execution_plan);
 }
 
-/** Execute a fragment-index route with a host or device minimizer batch. */
+/** Match against a fragment index using a query sketch with host storage. */
 [[bioseq::template_flatten_when("route", "fragment_index")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_fragment_index_batch_owned(
@@ -153,7 +160,7 @@ minimap_port_fragment_index_batch_owned(
             gpu_index_identity, allow_gpu_target_index_build);
 }
 
-/** Adapt a host minimizer vector to the fragment-index batch route. */
+/** Match against a fragment index using shared host minimizers. */
 [[bioseq::template_flatten_when("route", "fragment_index")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_fragment_index_vector_owned(
@@ -177,7 +184,7 @@ minimap_port_fragment_index_vector_owned(
         gpu_index_identity, allow_gpu_target_index_build);
 }
 
-/** Execute a fragment-index route with one generated physical query owner. */
+/** Match against a fragment index using the query sketch's selected record type. */
 [[bioseq::template_flatten_when("route", "fragment_index")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_fragment_index_physical_owned(
@@ -201,7 +208,7 @@ minimap_port_fragment_index_physical_owned(
         allow_gpu_target_index_build);
 }
 
-/** Execute against a persisted hash-major selective reader. */
+/** Match using the persisted index reader prepared for the query's hashes. */
 [[bioseq::template_flatten_when("route", "hash_major")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_hash_major_owned(
@@ -226,7 +233,7 @@ minimap_port_hash_major_owned(
         allow_gpu_target_index_build);
 }
 
-/** Execute against a prepared grouped-SoA query reader. */
+/** Match using prepared target postings stored as grouped coordinate arrays. */
 [[bioseq::template_flatten_when("route", "grouped_soa")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_grouped_soa_owned(
@@ -251,7 +258,7 @@ minimap_port_grouped_soa_owned(
         allow_gpu_target_index_build);
 }
 
-/** Execute against a prepared fragment-anchor query handle. */
+/** Match using the query's prepared fragment-anchor lookup handle. */
 [[bioseq::template_flatten_when("route", "fragment_query")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_fragment_query_owned(

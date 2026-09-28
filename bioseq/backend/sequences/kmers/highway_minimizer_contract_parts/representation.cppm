@@ -1,6 +1,6 @@
 /**
  * @file representation.cppm
- * @brief Exact minimizer record layouts and query bounds.
+ * @brief Packed minimizer formats, borrowed views and shared record storage.
  */
 module;
 
@@ -43,7 +43,7 @@ export import bioseq.sequences.kmers.minimizer_physical_records;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 namespace bioseq::minimizers::physical_batch_owner_detail {
 
-/** Flush one shared-owner allocation failure without replacing its exception. */
+/** Log a shared-owner allocation failure while preserving the original exception. */
 inline void emit_admitted_shared_owner_failure(
     const char* site,
     std::uint64_t payload_capacity_bytes,
@@ -128,7 +128,7 @@ struct record_coordinates<minimizer_representation<
     static constexpr std::size_t physical_kmer_size = p_physical_kmer_size;
 };
 
-/** Map only an exact canonical representation specialization into the generated table. */
+/** Find the generated record ID matching this minimizer_representation type. */
 template <class p_record>
 [[nodiscard]] consteval minimizer_physical_record_id record_id() noexcept {
     using record_type = std::remove_cvref_t<p_record>;
@@ -163,14 +163,14 @@ inline constexpr bool k_has_32_bit_record = has_32_bit_record();
 
 } // namespace minimizer_physical_record_detail
 
-/** Exact canonical record specialization present in the generated physical table. */
+/** Requires an unqualified minimizer_representation type listed in the generated registry */
 template <class p_record>
 concept generated_minimizer_physical_record =
     std::same_as<p_record, std::remove_cvref_t<p_record>> &&
     (minimizer_physical_record_detail::record_id<p_record>() !=
      minimizer_physical_record_id::invalid);
 
-/** Generated record supported by the existing 32/64/128-bit decoded batch view. */
+/** Requires a registeed 32-, 64- or 128-bit record that the batch view can decode. */
 template <class p_record>
 concept generated_minimizer_physical_batch_record =
     generated_minimizer_physical_record<p_record> &&
@@ -178,14 +178,14 @@ concept generated_minimizer_physical_batch_record =
      (minimizer_physical_record_detail::k_has_32_bit_record &&
       sizeof(p_record) == sizeof(std::uint32_t)));
 
-/** Physical format family, independent of the requested biological k/w. */
+/** Record format families, separate from the runtime k-mer and  window sizes. */
 enum class minimizer_physical_layout_family : std::uint8_t {
     fixed_u32_hash_legacy_k15,
     minimap2_reference_exact_k,
     minimap2_scalar_reference_exact_k,
 };
 
-/** Immutable value selection consumed before any record type is instantiated. */
+/** Selected record format and runtime minimizer settings. */
 struct minimizer_physical_layout_selection {
     minimizer_physical_layout_family family;
     minimizer_physical_record_id record_id;
@@ -202,7 +202,7 @@ struct minimizer_physical_layout_selection {
     [[nodiscard]] bool operator==(const minimizer_physical_layout_selection&) const = default;
 };
 
-/** Width-independent fields decoded from one registered physical record. */
+/** Hash and encoded position decoded from any registered record format. */
 struct minimizer_physical_record_value {
     std::uint64_t hash = 0u;
     std::uint64_t position_strand = 0u;
@@ -219,12 +219,11 @@ struct minimizer_physical_record_value {
 };
 
 /**
- * Non-owning, record-layout-authenticated view used below the generated visitor.
+ * @brief Borrows a batch of one registered minimizer record type.
  *
- * This is an execution adapter, not a second record registry: construction is
- * possible only from a concrete record selected by the generated registry. The
- * selected descriptor authenticates one homogeneous 32-, 64-, or 128-bit record ABI;
- * bulk decoding branches on that ABI once and constructs values field-wise.
+ * Construction derives the format from the concrete record type. Decoding
+ * uses that format to read hashes and positions from 32-, 64- or 128-bit
+ * records. The caller keeps the underlying records alive and unchanged.
  */
 class minimizer_physical_batch_view {
   private:
@@ -279,12 +278,12 @@ class minimizer_physical_batch_view {
   public:
     constexpr minimizer_physical_batch_view() noexcept = default;
 
-    /** Convert a concrete registered-record span into an immediate borrowed view. */
+    /** Borrow a span of records whose type appears in the generated registry. */
     template <generated_minimizer_physical_batch_record p_record>
     minimizer_physical_batch_view(const std::span<const p_record> records)
         : minimizer_physical_batch_view(from_span(records)) {}
 
-    /** Adapt a named contiguous record owner without permitting a temporary owner. */
+    /** Borrow a named contiguous  record range. Temporary ranges cannot bind here. */
     template <std::ranges::contiguous_range p_range>
         requires generated_minimizer_physical_batch_record<
             std::ranges::range_value_t<p_range>>
@@ -292,7 +291,7 @@ class minimizer_physical_batch_view {
         : minimizer_physical_batch_view(from_span(
               std::span<const std::ranges::range_value_t<p_range>>{records})) {}
 
-    /** Bind an immediate borrowed span of one registered concrete record. */
+    /** Create a borrowed view and derive its format from the span's record type. */
     template <generated_minimizer_physical_batch_record p_record>
     [[nodiscard]] static minimizer_physical_batch_view from_span(
         const std::span<const p_record> records) {
@@ -316,7 +315,7 @@ class minimizer_physical_batch_view {
                     std::remove_cvref_t<p_record>>::position_log2)};
     }
 
-    /** Return the authenticated physical record tag. */
+    /** Return the registered format of the borrowed records. */
     [[nodiscard]] constexpr minimizer_physical_record_id record_id() const noexcept {
         return record_id_;
     }
@@ -331,12 +330,12 @@ class minimizer_physical_batch_view {
         return size_ == 0u;
     }
 
-    /** Return the concrete vector/span address used for lifetime checks. */
+    /** Return the address of the first borrowed record. */
     [[nodiscard]] constexpr const void* data_owner_address() const noexcept {
         return data_identity_;
     }
 
-    /** Decode one prevalidated record without a registry switch or indirect call. */
+    /** Decode one record. The caller must keep ordinal below size(). */
     [[nodiscard, gnu::always_inline]] minimizer_physical_record_value
     at_unchecked(const std::size_t ordinal) const noexcept {
         const auto* const record = static_cast<const std::byte*>(data_identity_) +
@@ -366,7 +365,7 @@ class minimizer_physical_batch_view {
         };
     }
 
-    /** Decode only packed position/strand; it is always the first native word. */
+    /** Read the encoded position and strand from the frst word of a valid record. */
     [[nodiscard, gnu::always_inline]] std::uint64_t
     position_strand_at_unchecked(const std::size_t ordinal) const noexcept {
         const auto* const record = static_cast<const std::byte*>(data_identity_) +
@@ -383,7 +382,7 @@ class minimizer_physical_batch_view {
         return position_word & position_strand_mask_;
     }
 
-    /** Decode a whole homogeneous owner with one native-stride loop. */
+    /** Visit decoded records in order, selecting the storage width once before  the loop. */
     template <class p_visitor>
     [[gnu::always_inline]] void for_each_decoded(p_visitor&& visitor) const {
         const auto* record = static_cast<const std::byte*>(data_identity_);
@@ -429,7 +428,7 @@ class minimizer_physical_batch_view {
         }
     }
 
-    /** Decode a homogeneous owner in reverse order with one native-stride branch. */
+    /** Visit decoded records in reverse order, selecting the storage width once */
     template <class p_visitor>
     [[gnu::always_inline]] void for_each_decoded_reverse(p_visitor&& visitor) const {
         if (size_ == 0u) {
@@ -482,7 +481,7 @@ class minimizer_physical_batch_view {
         }
     }
 
-    /** Decode one checked record for cold diagnostics and focused tests. */
+    /** Decode one record, throwing std::out_of_range if ordinal is outside the, batch. */
     [[nodiscard]] minimizer_physical_record_value at(std::size_t ordinal) const;
 };
 
@@ -533,7 +532,7 @@ class transaction_scope {
     allocation_transaction transaction_{};
 };
 
-/** Stateless allocator retained safely by the shared control block. */
+/** Allocator that reserves shared-owner memory through the active allocation transaction. */
 template <class p_value>
 class admitted_shared_owner_allocator {
   public:
@@ -640,13 +639,11 @@ class admitted_shared_owner_allocator {
 } // namespace physical_batch_owner_detail
 
 /**
- * Real shared owner for a vector of one generated physical minimizer record.
+ * @brief Owns a shared, read-only vector of one registered minimizer record type.
  *
- * The erased pointer always shares the concrete vector's control block. No
- * no-op deleter or borrowed-owner substitution is accepted. Consumers recover
- * a typed shared owner only after the generated visitor selects the same tag.
- * The factory reconciles payload plus allocator-reported control/vector-object
- * capacity into the caller's adjacent permit before publication.
+ * Creation accounts for the vector capacity and its shared control block in
+ * the caller's memory permit. That permit remains outside this object  and
+ * must outlive every shared alias. Typed access checks the selected record format.
  */
 class minimizer_physical_batch_owner {
   private:
@@ -670,7 +667,7 @@ class minimizer_physical_batch_owner {
                layout.physical_kmer_size == descriptor->physical_kmer_size;
     }
 
-    /** Erase a concrete, immutable vector while preserving its real shared owner. */
+    /** Store a shared vector after checking that its type matches the selected format. */
     template <generated_minimizer_physical_record p_record>
     [[nodiscard]] static minimizer_physical_batch_owner from_shared_host(
         const minimizer_physical_layout_selection& layout,
@@ -733,7 +730,7 @@ class minimizer_physical_batch_owner {
         return *this;
     }
 
-    /** Move one concrete vector into a new real shared owner. */
+    /** Move a record vector into shared ownership and reserve the shared-owner allocation. */
     template <generated_minimizer_physical_record p_record>
     [[nodiscard]] static minimizer_physical_batch_owner from_owned_host(
         const minimizer_physical_layout_selection& layout,
@@ -764,9 +761,8 @@ class minimizer_physical_batch_owner {
     }
 
     /**
-     * Recover the selected concrete vector through a shared aliasing owner.
-     * Every alias must remain nested inside the adjacent permit retained by
-     * the enclosing prepared-query or aggregate-query owner.
+     * Return a shared pointer to the vector after checking its record type.
+     * Keep every returned pointer within the lifetime of the caller's memor permit.
      */
     template <generated_minimizer_physical_record p_record>
     [[nodiscard]] std::shared_ptr<const std::vector<p_record>> shared_host() const {
@@ -778,7 +774,7 @@ class minimizer_physical_batch_owner {
             vector_owner_, static_cast<const std::vector<p_record>*>(vector_owner_.get())};
     }
 
-    /** Borrow a concrete-record dispatcher while this owner remains live. */
+    /** Borrow a decoded view while the record owner  remains alive. */
     [[nodiscard]] minimizer_physical_batch_view view() const noexcept {
         return valid() ? minimizer_physical_batch_view{
                              data_identity_,
@@ -789,37 +785,37 @@ class minimizer_physical_batch_owner {
                        : minimizer_physical_batch_view{};
     }
 
-    /** Return the exact generated layout selected before allocation. */
+    /** Return the record format and runtime settings saved with this owner. */
     [[nodiscard]] const minimizer_physical_layout_selection& layout() const noexcept {
         return layout_;
     }
 
-    /** Return the immutable record count. */
+    /** Return the number of owned records. */
     [[nodiscard]] std::size_t size() const noexcept {
         return size_;
     }
 
-    /** Return the immutable concrete vector capacity. */
+    /** Return the vector capacity in records. */
     [[nodiscard]] std::size_t capacity() const noexcept {
         return capacity_;
     }
 
-    /** Return payload plus allocator-reported shared-owner capacity bytes. */
+    /** Return reserved bytes for the vector buffer and shared-owner allocation. */
     [[nodiscard]] std::uint64_t capacity_bytes() const noexcept {
         return capacity_bytes_;
     }
 
-    /** Return retained bytes owned by the concrete vector payload allocation. */
+    /** Return bytes occupied by the vector's allocated record capacity. */
     [[nodiscard]] std::uint64_t payload_capacity_bytes() const noexcept {
         return payload_capacity_bytes_;
     }
 
-    /** Return the allocator-reported shared control/vector-object extent. */
+    /** Return allocation bytes for the shared control block and vector object */
     [[nodiscard]] std::uint64_t owner_allocation_bytes() const noexcept {
         return owner_allocation_bytes_;
     }
 
-    /** Return whether this object carries a non-null concrete shared owner. */
+    /** Check that a shared vector exists and its format and allocation sizes agree. */
     [[nodiscard]] bool valid() const noexcept {
         const auto* const descriptor = find_minimizer_physical_record(layout_.record_id);
         return vector_owner_ != nullptr && descriptor != nullptr &&
@@ -830,7 +826,7 @@ class minimizer_physical_batch_owner {
                layout_.record_id != minimizer_physical_record_id::invalid;
     }
 
-    /** Release the concrete vector owner and its decoded geometry. */
+    /** Release this shared owner and clear its  saved sizes and format. */
     void reset() noexcept {
         vector_owner_.reset();
         size_ = 0u;
@@ -844,7 +840,11 @@ class minimizer_physical_batch_owner {
     }
 };
 
-/** Resolve a registered layout by its generated alphabet wire id. */
+/**
+ * Select a registered record format for the algorithm, alphabet and runtime sizes.
+ * Its, position field must fit every position in a sequence of up to
+ * maximum_sequence_bp symbols. Unsupported combinations throw std::invalid_argument.
+ */
 [[nodiscard]] constexpr minimizer_physical_layout_selection select_minimizer_physical_layout(
     const ::bioseq::simd::minimizer_algorithm algorithm,
     const std::uint64_t maximum_sequence_bp,
@@ -889,7 +889,7 @@ class minimizer_physical_batch_owner {
     };
 }
 
-/** Resolve a registered layout without allocation or a second shape registry. */
+/** Select a registered format using the alphabet and packed word types. */
 template <sequence_alphabet p_alphabet, class p_storage_unit>
     requires (std::same_as<p_storage_unit, std::uint32_t> ||
               std::same_as<p_storage_unit, std::uint64_t>)
@@ -912,13 +912,12 @@ template <sequence_alphabet p_alphabet, class p_storage_unit>
 }
 
 /**
- * @brief Selects the smallest packed record that preserves a minimizer shape.
- * @tparam p_max_sequence_log2 Position bits required by the sequence bound.
- * @tparam p_kmer_length K-mer length used to size the hash field.
+ * @brief Chooses a storage width from the required position and hash bits.
+ * p_kmer_length sizes the hash field. It can differ from the runtime k-mer size.
  */
 template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length>
 struct minimizer_layout {
-    /// Record-format parameter, independent of the biological sketch k.
+    /// K-mer size used to choose the record fmrmat.
     static constexpr std::size_t k_physical_kmer_size = p_kmer_length;
     static constexpr unsigned k_strand_bits = 1u;
     static constexpr unsigned k_position_bits = p_max_sequence_log2;
@@ -944,10 +943,9 @@ struct minimizer_layout {
 };
 
 /**
- * @brief Stores one exact minimizer shape in its selected packed layout.
- * @tparam p_max_sequence_log2 Position bits carried by the record.
- * @tparam p_kmer_length K-mer length used to size the hash field.
- * @tparam p_is_128_bit Selects the two-word layout when `true`.
+ * @brief Packs a minimizer  into the selected record width.
+ * p_max_sequence_log2 gives position bits. p_kmer_length sizes the hash field.
+ * p_is_128_bit selects the two-word specialization.
  */
 template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length,
          bool p_is_128_bit =
@@ -987,10 +985,10 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, false> {
 
     storage_type value_;
 
-    /** Construct the zero-valued wire record. */
+    /** Construct a record with all bits zero. */
     constexpr minimizer_representation() noexcept : value_(0) {}
 
-    /** Pack hash, last position, and strand into the selected storage word. */
+    /** Pack hash, k-mer end position and strand, masking each value to its field width. */
     constexpr minimizer_representation(
         const std::uint64_t kmer_hash,
         const std::uint64_t last_position,
@@ -1034,7 +1032,7 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, false> {
     [[nodiscard]] constexpr storage_type raw_value() const noexcept {
         return value_;
     }
-    /** Sentinel that compares above every valid hash. */
+    /** Return the reserved maximum-hash sentinel with zero position and strand. */
     [[nodiscard]] static constexpr minimizer_representation maximum() noexcept {
         return from_raw_storage(k_hash_mask);
     }
@@ -1046,19 +1044,19 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, false> {
     constexpr void set_max() noexcept {
         value_ = k_hash_mask;
     }
-    /** @brief Orders records by their masked canonical hash. */
+    /** @brief Compares hashes, ignoring position and strand. */
     [[nodiscard]] constexpr auto operator<=> (
         const minimizer_representation& other) const noexcept
     {
         return (value_ & k_hash_mask) <=> (other.value_ & k_hash_mask);
     }
-    /** @brief Tests canonical-hash equality without position identity. */
+    /** @brief Tests whether the hashes are equal. Position and strand are ignored. */
     [[nodiscard]] constexpr bool operator==(
         const minimizer_representation& other) const noexcept
     {
         return (value_ & k_hash_mask) == (other.value_ & k_hash_mask);
     }
-    /** Whether equal hashes carry different position/strand identity. */
+    /** Test for equal hashes at different encoded positions or strands. */
     [[nodiscard]] static constexpr bool does_sketch_match(
         const minimizer_representation& first,
         const minimizer_representation& second) noexcept
@@ -1099,7 +1097,7 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, true> {
     /** Construct the zero-valued two-word record. */
     constexpr minimizer_representation() noexcept : low_(0), high_(0) {}
 
-    /** Pack hash, position, strand, and span into two uint64 words. */
+    /** Pack all fields into  two 64-bit words, masking each to its available width */
     constexpr minimizer_representation(
         const std::uint64_t kmer_hash,
         const std::uint64_t last_position,
@@ -1139,7 +1137,7 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, true> {
     [[nodiscard]] constexpr std::uint64_t pos_strand_encoded() const noexcept {
         return low_;
     }
-    /** @brief Returns the sentinel that compares above every valid hash. */
+    /** @brief Returns the reserved maximum-hash sentinel with all other fields zero. */
     [[nodiscard]] static constexpr minimizer_representation maximum() noexcept {
         minimizer_representation result;
         result.high_ = k_high_hash_mask;
@@ -1154,19 +1152,19 @@ struct minimizer_representation<p_max_sequence_log2, p_kmer_length, true> {
         high_ = k_high_hash_mask;
         low_ = 0u;
     }
-    /** @brief Orders records by their masked canonical hash. */
+    /** @brief Compares hashes, ignoring span, position and strand. */
     [[nodiscard]] constexpr auto operator<=> (
         const minimizer_representation& other) const noexcept
     {
         return (high_ & k_high_hash_mask) <=> (other.high_ & k_high_hash_mask);
     }
-    /** @brief Tests canonical-hash equality without span or position identity. */
+    /** @brief Tests hash equality, ignoring span, position and strand. */
     [[nodiscard]] constexpr bool operator==(
         const minimizer_representation& other) const noexcept
     {
         return (high_ & k_high_hash_mask) == (other.high_ & k_high_hash_mask);
     }
-    /** @brief Tests equal hashes with distinct span or position identity. */
+    /** @brief Tests for equal hashes at different encoded positions or strands. Span is ignored. */
     [[nodiscard]] static constexpr bool does_sketch_match(
         const minimizer_representation& first,
         const minimizer_representation& second) noexcept
@@ -1187,7 +1185,7 @@ minimizer_physical_batch_view::at(const std::size_t ordinal) const {
     return at_unchecked(ordinal);
 }
 
-/** Canonical minimap2-compatible 64-bit sketch record. */
+/** Default 64-bit sketch record with 35 hash bits, 28 position bits and one strand bit. */
 using minimap_sketch_data = minimizer_representation<28u, 15u>;
 
 static_assert(std::same_as<minimap_sketch_data, minimizer_representation<28u, 15u>>);
@@ -1199,10 +1197,7 @@ static_assert(std::is_trivially_copyable_v<minimap_sketch_data>);
 using std::size_t;
 using std::uint64_t;
 
-/**
- * @brief Maximum sequence length representable without masking a position bit.
- * @tparam p_minimizer_type Packed minimizer record defining the position mask.
- */
+/** @brief Maximum sequence length whose zero-based positions fit the record. */
 template <class p_minimizer_type>
 inline constexpr bioseq::storage::sequence_size_t
 k_max_minimizer_sequence_length = []() constexpr {
@@ -1267,7 +1262,7 @@ static_assert(minimizer_layout<28u, 15u>::k_storage_bits == 64u,
     "and the bit-layout (hash:35 | pos:28 | strand:1) is hardcoded in the wire "
     "protocol.  Update the sidecar wire format before relaxing this constraint.");
 
-// Pin the canonical layout independently of other representation shapes.
+// Check each field of the default packed format.
 static_assert(minimap_sketch_data::layout_type::k_position_bits == 28u);
 static_assert(minimap_sketch_data::layout_type::k_hash_bits == 35u);
 static_assert(minimap_sketch_data::layout_type::k_strand_bits == 1u);

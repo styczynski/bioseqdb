@@ -1,6 +1,6 @@
 /**
  * @file external/provider/model.cppm
- * @brief Provider records, assets, provenance, and delivery models.
+ * @brief Provider records, sequence data, and retrieval history.
  */
 module;
 
@@ -19,36 +19,33 @@ import bioseq.external.provider.base;
 import bioseq.external.provider.errors;
 import bioseq.common.sink_control;
 
-/// Normalized transient and owning provider row models.
-///
-/// Transient views remain valid for one sink callback. Owning forms preserve
-/// field order and optionality while retaining referenced data for channels.
+/// Provider rows and the owned storage behind their views.
+/// Views borrow data for one callback. Owned rows keep their data alive
+/// while passing through a channel.
 export namespace bioseq::external::provider {
 
-// ===========================================================================
-// Transient row views.
-// ===========================================================================
+// Row views borrowed for one callback.
 
-/// Borrowed metadata for one provider retrieval hop.
+/// Borrowed details of one step used to retrieve a record.
 struct provenance_hop_view {
     std::optional<provider_id> known_provider;
     std::string_view provider_name;
     std::string_view operation;
     std::string_view provider_version;
     std::string_view request_id;
-    std::string_view source_url; // Sanitized and never contains credentials.
+    std::string_view source_url; // Caller must remove credentials from this URL.
     std::string_view media_type;
     std::chrono::system_clock::time_point retrieved_at;
 };
 
-/// Borrowed completion metadata and retrieval provenance for one row.
+/// Borrowed retrieval history and completion time for a row.
 struct row_audit_view {
     std::optional<std::string_view> logical_provider_version;
     std::chrono::system_clock::time_point completed_at;
     std::span<const provenance_hop_view> provenance;
 };
 
-/// Borrowed provider-neutral gene identifier and annotations.
+/// Borrowed gene ID and annotations in the shared provider  format.
 struct gene_reference_view {
     std::string_view name_space; // NCBI GeneID, HGNC, locus tag, provider.
     std::string_view identifier;
@@ -58,17 +55,17 @@ struct gene_reference_view {
     std::optional<std::string_view> locus_tag;
 };
 
-/// Byte domain covered by an integrity check.
+/// Which bytes an integrity check covers.
 enum class integrity_scope : std::uint8_t { transfer_bytes, decoded_member, decoded_record };
 
-/// Borrowed integrity algorithm, value, and byte domain.
+/// Borrowed checksum details and the bytes they cover.
 struct integrity_check_view {
     std::string_view algorithm;
     std::string_view value;
     integrity_scope applies_to;
 };
 
-/// Borrowed normalized taxonomy row.
+/// Taxonomy row in the shared format, with borrowed text and lists.
 struct taxonomy_row_view {
     provider_id provider;
     std::optional<std::int64_t> taxon_id; // Normalized NCBI TaxID when known.
@@ -83,7 +80,7 @@ struct taxonomy_row_view {
     row_audit_view audit;
 };
 
-/// Borrowed normalized catalog row.
+/// Catalog record in the shared format, widh borrowed text and lists.
 struct catalog_row_view {
     record_key_view key;
     entity_kind kind;
@@ -115,7 +112,7 @@ struct catalog_row_view {
     row_audit_view audit;
 };
 
-/// Borrowed flattened record-to-gene relation row.
+/// One gene associated with a record, including its position in the gene list.
 struct record_gene_row_view {
     record_key_view key;
     gene_reference_view gene;
@@ -124,7 +121,7 @@ struct record_gene_row_view {
     row_audit_view audit;
 };
 
-/// Borrowed flattened record-to-location relation row.
+/// One genomic location for a record, including its position in the location list.
 struct record_location_row_view {
     record_key_view key;
     genomic_interval location;
@@ -133,11 +130,9 @@ struct record_location_row_view {
     row_audit_view audit;
 };
 
-// ===========================================================================
-// Shared owning leaf types. Field order and optionality match their views.
-// ===========================================================================
+// Owned values used to build row views.
 
-/// Owning form of a normalized provider record key.
+/// Record identity with owned accession and provider text.
 struct owning_record_key {
     provider_id provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -147,7 +142,7 @@ struct owning_record_key {
     bounded_string<maximum_identifier_bytes> accession;
     std::optional<std::uint32_t> version;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate, storage for the key and its  identifier strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -181,7 +176,7 @@ struct owning_integrity_check {
     bounded_string<maximum_identifier_bytes> value;
     integrity_scope applies_to;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the checksum algorithm and value.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += algorithm.measure_deep_size_bytes() - sizeof(algorithm);
@@ -205,7 +200,7 @@ struct owning_integrity_result {
     bounded_string<maximum_identifier_bytes> actual_value;
     bool is_verified;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the expected and observed checksum values.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += expected.measure_deep_size_bytes() - sizeof(expected);
@@ -224,7 +219,7 @@ struct owning_sequence_origin {
     std::optional<std::uint64_t> end0;
     genomic_interval::strand orientation{genomic_interval::strand::unknown};
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the origin and its assembly names.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         if (assembly_accession) {
@@ -259,7 +254,7 @@ struct owning_sequence_origin {
     }
 };
 
-/// Owning metadata for one provider retrieval hop.
+/// Owned details of one step used to retrieve a record
 struct owning_provenance_hop {
     std::optional<provider_id> known_provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -270,7 +265,7 @@ struct owning_provenance_hop {
     bounded_string<256> media_type;
     external_timestamp retrieved_at;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for this retrieval step and its text fields.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -282,7 +277,7 @@ struct owning_provenance_hop {
         return total;
     }
 
-    /// Returns a view backed by this provenance hop.
+    /// Return a retrieval-step view backed by this object.
     [[nodiscard]] provenance_hop_view view() const noexcept {
         provenance_hop_view result;
         result.known_provider = known_provider;
@@ -298,13 +293,13 @@ struct owning_provenance_hop {
     }
 };
 
-/// Owning completion metadata and retrieval provenance for one row.
+/// Owned retrieval history and completion time for a row.
 struct owning_row_audit {
     std::optional<bounded_string<maximum_identifier_bytes>> logical_provider_version;
     external_timestamp completed_at;
     std::vector<owning_provenance_hop> provenance;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the row's retrieval history.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         if (logical_provider_version) {
@@ -319,12 +314,12 @@ struct owning_row_audit {
     }
 };
 
-/// Owning provenance used to complete streamed sequence audits.
+/// Retrieval history saved until  a streamed sequence is complet.
 struct owning_sequence_audit_seed {
     std::optional<bounded_string<maximum_identifier_bytes>> logical_provider_version;
     std::vector<owning_provenance_hop> provenance;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the saved retrieval history.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         if (logical_provider_version) {
@@ -339,11 +334,9 @@ struct owning_sequence_audit_seed {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Owning helper leaves for repeated catalog data.
-// ---------------------------------------------------------------------------
+// Owned gene and location data for catalog records.
 
-/// Owning form of a provider-neutral gene reference.
+/// Gene ID and annotations with owned text.
 struct owning_gene_reference {
     bounded_string<maximum_identifier_bytes> name_space;
     bounded_string<maximum_identifier_bytes> identifier;
@@ -352,7 +345,7 @@ struct owning_gene_reference {
     std::optional<bounded_string<maximum_identifier_bytes>> type;
     std::optional<bounded_string<maximum_identifier_bytes>> locus_tag;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the gene ID and annotation text.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += name_space.measure_deep_size_bytes() - sizeof(name_space);
@@ -386,7 +379,7 @@ struct owning_gene_reference {
     }
 };
 
-/// Owning form of a normalized genomic interval.
+/// Genomic interval with owned assembly and sequence names.
 struct owning_genomic_interval {
     std::optional<bounded_string<maximum_identifier_bytes>> assembly_accession;
     std::optional<bounded_string<maximum_identifier_bytes>> assembly_database;
@@ -395,7 +388,7 @@ struct owning_genomic_interval {
     std::uint64_t end0{};
     genomic_interval::strand orientation{genomic_interval::strand::unknown};
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the interval and its sequence names.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         if (assembly_accession) {
@@ -425,14 +418,13 @@ struct owning_genomic_interval {
     }
 };
 
-/// @brief Owns transient provenance views used while exposing an owning audit.
-///
-/// The returned view remains valid until the next call on the same storage or
-/// until the storage is destroyed.
+/// Stores the borrowed retrieval-step array used by an audit view.
+/// The audit must stay alive and unchanged  while its view is used.
+/// The next make_view call also invalidates that view.
 struct row_audit_view_storage {
     mutable std::vector<provenance_hop_view> provenance;
 
-    /// @brief Reconstructs a callback-scoped view without output parameters.
+    /// Borrow an audit using this object's temporary retrieval-step array.
     [[nodiscard]] row_audit_view make_view(const owning_row_audit& audit) const noexcept {
         provenance.clear();
         provenance.reserve(audit.provenance.size());
@@ -450,18 +442,15 @@ struct row_audit_view_storage {
         return result;
     }
 
-    /// @brief Returns the dynamic storage retained for reconstructed views.
+    /// Return the capacity in bytes of the temporary view array.
     [[nodiscard]] std::size_t measure_storage_bytes() const noexcept {
         return provenance.capacity() * sizeof(provenance_hop_view);
     }
 };
 
-// ===========================================================================
-// Owning row messages mirror taxonomy_row_view and catalog_row_view while
-// retaining provider identity and callback-view storage.
-// ===========================================================================
+// Owned rows and temporary arrays used to expose their callback views.
 
-/// Owning normalized taxonomy row and callback-view storage.
+/// Taxonomy row with owned text and temporary callback views.
 struct owning_taxonomy_row {
     provider_id provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -476,11 +465,11 @@ struct owning_taxonomy_row {
     std::optional<bounded_string<maximum_attributes_json_bytes>> provider_attributes_json;
     owning_row_audit audit;
 
-    // Transient reconstruction storage, rebuilt for each callback view.
+    // Temporary arrays rebuilt when a callback view is requested.
     mutable std::vector<std::string_view> synonyms_scratch_;
     mutable row_audit_view_storage audit_view_storage_;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the taxonomy row, and its temporary view arrays.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -512,7 +501,7 @@ struct owning_taxonomy_row {
         return total;
     }
 
-    /// Reconstructs a callback-scoped taxonomy row view.
+    /// Borrow the txonomy row for  one callback.
     [[nodiscard]] taxonomy_row_view view() const noexcept {
         taxonomy_row_view result;
         result.provider = provider;
@@ -545,10 +534,9 @@ struct owning_taxonomy_row {
     }
 };
 
-/// Owning sequence data and coordinates for sequence relation rows.
-///
-/// Chunk fields apply to chunked delivery. `bases` retains the letters until
-/// the row writer materializes the target value.
+/// Sequence letters and coordinates passed to the row writer
+/// Chunked results also record their chunk index and offset within the sequence.
+/// The bases string keeps the letters alive until the writer builds the SQL value.
 struct owning_sequence_payload {
     provider_id provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -566,7 +554,7 @@ struct owning_sequence_payload {
     bool end_of_record{true};
     owning_row_audit audit;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the sequence letters and row metadata.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -586,7 +574,7 @@ struct owning_sequence_payload {
     }
 };
 
-/// Owning normalized catalog row and callback-view storage.
+/// Catalog row with owned text and temporary callback views.
 struct owning_catalog_row {
     provider_id provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -619,14 +607,14 @@ struct owning_catalog_row {
     std::optional<bounded_string<maximum_attributes_json_bytes>> provider_attributes_json;
     owning_row_audit audit;
 
-    // Transient reconstruction storage, rebuilt for each callback view.
+    // Temporary arrays rebuilt when a callback view is requested.
     mutable std::vector<record_key_view> aliases_scratch_;
     mutable std::vector<gene_reference_view> genes_scratch_;
     mutable std::vector<std::string_view> keywords_scratch_;
     mutable std::vector<genomic_interval> locations_scratch_;
     mutable row_audit_view_storage audit_view_storage_;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the catalog row and its temporary view arrays.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -694,7 +682,7 @@ struct owning_catalog_row {
         return total;
     }
 
-    /// Reconstructs a callback-scoped catalog row view.
+    /// Borrow the catalog row for one callback.
     [[nodiscard]] catalog_row_view view() const noexcept {
         catalog_row_view result;
         result.key = key.view();

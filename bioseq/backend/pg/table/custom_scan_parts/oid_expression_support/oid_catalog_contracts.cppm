@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares the Bioseq catalog identity surface without importing lookup implementations.
+ * @brief Exposes Bioseq catalog OIDs and checks for ordinary relation references.
  */
 module;
 extern "C" {
@@ -19,7 +19,7 @@ export import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
 export {
 
-    /** @brief Tests whether an Index is a concrete range-table identifier rather than a special Var. */
+    /** @brief Checks that a relation number is nonzero, and is not a special executor Var number. */
     [[nodiscard]] constexpr bool bioseq_is_concrete_rte_varno(const Index varno) noexcept {
         return varno != 0 && !IS_SPECIAL_VARNO(varno);
     }

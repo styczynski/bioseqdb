@@ -1,21 +1,14 @@
 /**
  * @file vulkan.cppm
- * @brief Vulkan G3SA tiled-DP anchor-chaining backend.
+ * @brief Score anchor chains on the GPU and collect the resulting chains.
  *
- * Consumes the anchors `collect_seed_hits` already produced and sorted, runs
- * the G3SA-style tiled dynamic-programming score generation on Vulkan, then
- * reuses bioseq's `backtrack_chains` to emit the same `(chain, reordered
- * anchor)` ABI the downstream stages already consume. The shader returns the DP
- * arrays (`best_scores`, absolute `predecessors`). This module does not run
- * G3SA's CUDA backtracking stack.
+ * Vulkan scores anchors in canonical_anchor_less order and records predecessors.
+ * Full alignment requests collect chains on the CPU. Coordinate-only requests
+ * trace one qualifying chain on the GPU.
  *
- * Alphabet-neutral by construction: chaining reads anchor coordinates and
- * `query_span` only, never sequence letters, so the same backend serves every
- * supported nucleotide alphabet.
- *
- * Failure policy: if this backend is selected, Vulkan execution is mandatory.
- * `vulkan_enabled == false`, an unusable device, unsupported shape,
- * memory-admission failure, or any runtime error throws `vulkan_runtime_error`.
+ * Chaining reads positions and spans, so it worgs with any sequence alphabet.
+ * A usable  hardware Vulkan device is required. Device errors and failed memory
+ * reservations propagate to the caller.
  */
 module;
 
@@ -47,16 +40,15 @@ import bioseq.instrumentation;
 
 export namespace bioseq::chaining {
 
-/// Return whether a usable Vulkan device exists for anchor chaining.
+/// Return whether a usable hardware Vulkan device is available for chaining.
 [[nodiscard]] inline bool is_vulkan_chaining_supported() {
     auto& vulkan_runtime = bioseq::gpu::vulkan::runtime::instance();
     return vulkan_runtime.is_usable()
         && !vulkan_runtime.features().software_device;
 }
 
-/// Throws when the selected Vulkan chaining backend is not allowed to execute.
-/// This is intentionally not a fallback hook: explicit GPU selection must fail
-/// loudly instead of routing work through CPU kernels.
+/// Require a usable hardware Vulkan device for the selected chaining backend.
+/// Throw a Vulkan runtime error if the device is unavailable or uses software.
 inline void require_vulkan_chaining_supported() {
     auto& vulkan_runtime = bioseq::gpu::vulkan::runtime::instance();
     if (!vulkan_runtime.is_usable()) {
@@ -75,10 +67,8 @@ inline void require_vulkan_chaining_supported() {
     }
 }
 
-/// Pick the tile/local workgroup dimensions for the chaining pipeline from the
-/// device limits. 384 is the portable floor (~12 KiB shared stays under the
-/// 16 KiB Vulkan guaranteed minimum). 1024 is only chosen on devices that can
-/// host the largest tile footprint comfortably.
+/// Get the shader variant used for chaining. The current selector returns one
+/// 32-lane subgroup per workgroup, with a  tile size of 32.
 [[nodiscard]] inline bioseq::gpu::vulkan::chaining_pipeline_key
 choose_vulkan_chaining_pipeline(
     const bioseq::gpu::vulkan::vulkan_feature_set& features) noexcept
@@ -90,9 +80,8 @@ choose_vulkan_chaining_pipeline(
     });
 }
 
-/// Exact component breakdown for unified-memory chaining. Keeping each
-/// component typed prevents a strict GPU decline
-/// from collapsing into an unactionable total byte count.
+/// Memory needed by the GPU scoring and host backtracking phases, split by
+/// buffer so a failed reservation can report where the bytes were needed.
 struct vulkan_chaining_memory_plan {
     std::uint64_t anchor_count = 0;
     std::uint64_t device_anchor_count = 0;
@@ -113,7 +102,8 @@ struct vulkan_chaining_memory_plan {
     std::uint64_t total_bytes = 0;
 };
 
-/// Recompute lifetime-aware peaks and the admitted total for @p plan.
+/// Recalculate the GPU and CPU phase totals and use the larger as the planned
+/// memory requirement GPU input buffers are freed before CPU backtracking.
 inline void recompute_vulkan_chaining_memory_total(
         vulkan_chaining_memory_plan& plan) noexcept {
     using bioseq::common::saturating_add;
@@ -144,7 +134,8 @@ inline void recompute_vulkan_chaining_memory_total(
         plan.gpu_execution_bytes, plan.host_backtracking_bytes);
 }
 
-/// Build an algorithmic byte plan before driver allocation rounding.
+/// Estimate storage for the chosen anchor count and backtracking mode. Device
+/// buffer sizes still need adjustment for the Vulkan driver's allocation rules.
 [[nodiscard]] inline vulkan_chaining_memory_plan
 make_vulkan_chaining_memory_plan(
         std::uint64_t anchor_count,
@@ -201,7 +192,7 @@ make_vulkan_chaining_memory_plan(
         /*coordinate_only=*/false);
 }
 
-/// Replace raw device sizes with driver-accounted allocation requirements.
+/// Ask Vulkan for  each buffer's allocation size, then updat the phase totals.
 inline void apply_vulkan_chaining_allocation_requirements(
         vulkan_chaining_memory_plan& plan,
         bioseq::gpu::vulkan::runtime& vulkan_runtime,
@@ -249,7 +240,7 @@ inline void apply_vulkan_chaining_allocation_requirements(
     recompute_vulkan_chaining_memory_total(plan);
 }
 
-/// Strict execution error retaining both the byte plan and admission snapshot.
+/// A failed memory reservation, including buffer sizes and the available budget.
 class vulkan_chaining_admission_error final
     : public bioseq::gpu::vulkan::vulkan_runtime_error {
 public:
@@ -257,9 +248,9 @@ public:
     bioseq::parallelism::memory_admission_failure admission{};
 
     /**
-     * @brief Builds a Vulkan admission error that retains both diagnostic records.
-     * @param memory_plan Exact byte plan that was rejected.
-     * @param failure Memory-admission snapshot captured at rejection.
+     * @brief Report why memory could not be reserved for Vulkan chaining.
+     * @param memory_plan Buffer sizes and peak memory needed by the operation.
+     * @param failure Available memory and the reason the, reservation failed.
      */
     vulkan_chaining_admission_error(
             vulkan_chaining_memory_plan memory_plan,
@@ -312,12 +303,17 @@ public:
 namespace vulkan_chaining_detail {
 
 /**
- * @brief Creates one Vulkan allocation with an adjacent physical permit.
- * @param cpu_readback Prefer CPU-cached memory for arrays used by host backtracking.
- * @param allocation_permit Null outside an admitted attempt; otherwise receives
- * only unreflected driver allocation bytes and must outlive the returned buffer.
- * The driver requirement is resolved before the admission transaction, avoiding
- * acquisition of the runtime planning mutex while materialization is locked.
+ * @brief Allocate a chaining buffer and account for its physical memory.
+ *
+ * If allocation_permit is supplied, reserve the driver's allocation size before
+ * creating the buffer. Keep the  permit until the buffer is freed or the memory
+ * controller confirms that the allocation is already counted in process memory.
+ * The caller must obtain allocation_requirement before entering this function
+ * so allocation planning does not take the runtime mutex inside materialize().
+ *
+ * @param cpu_readback Prefer CPU-cached memory for host backtracking.
+ * @param allocation_permit An empty permit that outlives the buffer, or null
+ * when the caller has reserved memory for the whole operation.
  */
 [[nodiscard]] inline bioseq::gpu::vulkan::buffer make_chaining_buffer(
     bioseq::gpu::vulkan::runtime& vulkan_runtime,
@@ -343,8 +339,8 @@ namespace vulkan_chaining_detail {
         throw vulkan_chaining_admission_error{memory_plan, failure};
     }
     *allocation_permit = std::move(*candidate);
-    // Local storage is destroyed before the caller's still-live permit on any
-    // allocation, mapping, initialization, or receipt failure.
+    // Keep this buffer kocal so an error destroys it while  the caller's memory
+    // permit is still alive
     bioseq::gpu::vulkan::buffer created{};
     const auto materialization = admission.materialize(
         *allocation_permit,
@@ -377,9 +373,9 @@ namespace vulkan_chaining_detail {
     return created;
 }
 
-/// Materialise the hard chaining ranges into a chain-arena array. The boundary
-/// predicate matches `analyze_gpu_chaining_shape` exactly so the fill count equals
-/// the pre-counted `expected_range_count`.
+/// Split anchors into ranges at strand changes and reference gaps too large
+/// for chaining. Use the same boundaries as the earlier count so the arena
+/// allocation has room for exactly expected_range_count ranges.
 [[nodiscard]] inline std::span<bioseq::gpu::vulkan::gpu_chain_range>
 build_gpu_chain_ranges(
     std::span<const anchor> anchors,
@@ -424,7 +420,7 @@ constexpr std::uint32_t k_gpu_chain_compact_range_threshold = 131'072u;
 constexpr std::uint32_t k_gpu_chain_compact_range_target = 65'536u;
 constexpr std::size_t k_coordinate_only_fast_probe_limit = 16u;
 
-/** @brief Counts hard ranges and the device anchor population after optional compaction. */
+/** @brief Range count and anchor count needed before allocating GPU buffers. */
 struct vulkan_chaining_shape_plan {
     std::size_t range_count = 0;
     std::size_t device_anchor_count = 0;
@@ -432,10 +428,10 @@ struct vulkan_chaining_shape_plan {
 };
 
 /**
- * @brief Analyzes range boundaries and long-range compaction without allocating.
- * @param anchors Canonically ordered anchors.
- * @param max_ref_dist Maximum reference-coordinate separation within a range.
- * @return Range count, device anchor count, and compaction decision.
+ * @brief Count ranges and any anchor thinning before allocating storage.
+ * @param anchors Anchors in canonical_anchor_less order.
+ * @param max_ref_dist Largest allowed gap between adjacent reference positions.
+ * @return Range count, sampled anchor count, and whether thinning is needed.
  */
 [[nodiscard]] inline vulkan_chaining_shape_plan analyze_gpu_chaining_shape(
         std::span<const anchor> anchors,
@@ -443,7 +439,7 @@ struct vulkan_chaining_shape_plan {
     vulkan_chaining_shape_plan shape{};
     if (anchors.empty()) return shape;
 
-    // Adds one range using the same sampling count as device compaction.
+    // Count the anchors that compaction would keep from this range.
     auto add_range = [&shape](std::size_t length) noexcept {
         ++shape.range_count;
         if (length > k_gpu_chain_compact_range_threshold) {
@@ -451,9 +447,8 @@ struct vulkan_chaining_shape_plan {
             const std::size_t stride =
                 (length + k_gpu_chain_compact_range_target - 1u)
                 / k_gpu_chain_compact_range_target;
-            // Exact number selected by compact_long_gpu_chain_ranges:
-            // 0,stride,... plus the last element when it is not already in
-            // that progression.
+            // Count positions 0, stride, ... and  include the last anchor if the
+            // stride would skip it.
             shape.device_anchor_count +=
                 1u + ((length - 1u) + stride - 1u) / stride;
         } else {
@@ -479,10 +474,9 @@ struct vulkan_chaining_shape_plan {
     return shape;
 }
 
-/// Very long hard ranges are usually near-colinear dense minimizer runs where
-/// chaining every anchor adds DP cost without improving the downstream extension
-/// seed. Keep sorted order and both range endpoints, but adaptively thin the
-/// interior so the GPU DP inner path is bounded.
+/// Reduce GPU chaining work by sampling anchors from very long ranges.
+/// Keep every stride-th anchor and both endpoints in their original order.
+/// This is a heuristic: a removed anchor can change the best chain.
 [[nodiscard]] inline bool compact_long_gpu_chain_ranges(
     std::span<const anchor> anchors,
     std::span<const bioseq::gpu::vulkan::gpu_chain_range> ranges,
@@ -529,9 +523,10 @@ struct vulkan_chaining_shape_plan {
     return true;
 }
 
-/// Emit the highest-scoring predecessor trace only. This is selected only when
-/// SQL projection flags prove that downstream code needs a coordinate/strand
-/// mapping but not CIGAR, divergence, MAPQ, or the full secondary list.
+/// Find one chain that meets the score and anchor-count thresholds.
+/// Try up to 16 unvisited endpoints, starting with the highest score, and  marp
+/// rejected traces before trying the next endpoint. Append the first qualifying
+/// chain in forward order. Return false if none of these attempts qualifies.
 [[nodiscard]] inline bool backtrack_best_coordinate_chain(
     std::span<const anchor> anchors,
     std::span<const int32_t> best_scores,
@@ -612,9 +607,10 @@ struct vulkan_chaining_shape_plan {
     return false;
 }
 
-/// Run the Vulkan tiled-DP chaining path. Throws `vulkan_runtime_error` on any
-/// selected-GPU decline. Algorithm fallback must be chosen by the caller before
-/// entering the pipeline.
+/// Run GPU chaining and collect chains using the requested backtracking mode.
+/// Check, the allocation context, then return false for empty input Return true
+/// once GPU work completes, including when no chain qualifies. Disabled Vulkan,
+/// an unusable device, failed memory reservation, or invalid output raises an error.
 [[nodiscard]] inline bool execute_vulkan_chaining(
     std::span<const anchor> anchors,
     const chaining_parameters& params,
@@ -669,9 +665,9 @@ struct vulkan_chaining_shape_plan {
         anchors, static_cast<std::uint64_t>(max_dist_x));
     const std::size_t range_count = shape.range_count;
     if (range_count == 0) return false;
-    // The kernel grid-strides one invocation per range and the runtime clamps
-    // dispatch to maxComputeWorkGroupCount[0], so range_count describes data
-    // size rather than a device workgroup bound.
+    // Each workgroup processes ranges in a strided loop. The runtime limits
+    // the number of dispatched workgroups to the device limit, so it can
+    // handle a range count larger than  that limit.
 
     vulkan_chaining_memory_plan memory_plan =
         make_vulkan_chaining_memory_plan(
@@ -691,9 +687,9 @@ struct vulkan_chaining_shape_plan {
             throw vulkan_chaining_admission_error{memory_plan, admission_failure};
         }
     }
-    // In an admitted attempt, the installed hook transfers exact unreflected
-    // context blocks directly to attempt_retention at allocation time. Logical
-    // range/compaction/backtracking extents therefore acquire no second permit.
+    // The context hook already accounts for arena allocations through
+    // attempt_retention. Reserving again for ranges, compacted anchors, or
+    // backtracking arrays would count the same memory twice.
 
     auto dp_scope = context::current().push<context::arena::chain>();
     auto ranges = build_gpu_chain_ranges(
@@ -721,10 +717,10 @@ struct vulkan_chaining_shape_plan {
             device_anchor_count));
     }
 
-    // GPU inputs stay device-local. Host backtracking repeatedly reads scores
-    // and predecessors, so those mapped arrays must prefer CPU-cached memory.
-    // Coordinate-only execution backtracks on the GPU and retains device-local
-    // arrays. The transfer sentinel still allocates no bounce buffer.
+    // Prefer device memory for GPU inputs. CPU backtracking reads mapped
+    // scores and predecessors, so prefer CPU-cached memory for those buffers.
+    // Coordinate-only tracing keeps that work on the GPU. The transfer
+    // sentinel does not allocate a staging buffer.
     bioseq::gpu::vulkan::buffer transfer_scratch{};
     bioseq::parallelism::memory_permit anchor_permit{};
     auto anchor_buffer = make_chaining_buffer(vulkan_runtime,
@@ -862,11 +858,10 @@ struct vulkan_chaining_shape_plan {
 #endif
         );
 
-    // The queue fence completed inside the runtime call.  Anchors and hard
-    // ranges are host-owned below and their device copies are dead before CPU
-    // validation/backtracking allocates its 28*N arena scratch.  This lifetime
-    // split makes the admitted peak the maximum of GPU execution and host
-    // backtracking memory rather than their sum.
+    // GPU work has finished. Free its anchor and range buffers before CPU
+    // backtracking allocates scratch arrays. Scores and predecessors stay
+    // available for validation and tracing, while the host  still has anchors
+    // and ranges. Reserve for the larger phase instead of adding both peaks.
     anchor_buffer.reset();
     anchor_permit.release();
     range_buffer.reset();
@@ -895,7 +890,7 @@ struct vulkan_chaining_shape_plan {
         reordered_anchors_out);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     if (completed_operation != nullptr) {
-        // Publish authority only after the existing host backtracking succeeds.
+        // Report the completed operation ony after host backtracking succeeds.
         if (!pending_operation.is_valid_for_chaining_tiled_dp()) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "completed chaining lacks its causal GPU receipt");
@@ -909,21 +904,22 @@ struct vulkan_chaining_shape_plan {
 }  // namespace vulkan_chaining_detail
 
 /**
- * @brief Chain canonical anchors with the Vulkan tiled-DP backend.
+ * @brief Chain sorted anchors with Vulkan.
  *
- * Pins the @ref anchor ABI before dispatch. Once selected, the function never
- * falls back to scalar execution and propagates every unsupported condition.
+ * Check the anchor memory layout expected by the shader, then run GPU scoring.
+ * Full requests collect chains on the CPU. Coordinate-only requests trace one
+ * chain on the GPU.
  *
- * @param anchors Canonically ordered anchors to chain.
- * @param params Chaining distances, penalties, and execution policy.
- * @param chains_out Arena-backed destination for chain descriptors.
- * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
- * @param attempt_retention Retention owned by the installed admitted context;
- * null preserves ordinary non-campaign admission. The context hook transfers its
- * physical blocks directly into this retention; device buffers stay independent.
- * @return `true` when Vulkan completed the selected operation.
- * @throws vulkan_runtime_error If the device, shape, dispatch, or result contract is rejected.
- * @throws vulkan_chaining_admission_error If the exact memory plan is denied.
+ * @param anchors Anchors in canonical_anchor_less order.
+ * @param params Distance limits, scoring penalties, and execution settings.
+ * @param chains_out Arena-backed output for chain descriptions.
+ * @param reordered_anchors_out Arena-backed output for anchors in chain order
+ * @param attempt_retention Keeps reservations for  context allocations alive.
+ * Requires the installed context hook and host backtracking. Null reserves
+ * memory for the whole operation.
+ * @return False for empty input, or true when GPU execution completes.
+ * @throws vulkan_runtime_error If device setup, dispatch, or output checks fail.
+ * @throws vulkan_chaining_admission_error If memory cannot be reserved.
  */
 inline bool chain_anchors_vulkan(
     std::span<const anchor> anchors,

@@ -1,6 +1,6 @@
 /**
  * @file storage_relation_cleanup.cppm
- * @brief Native relation discovery and transaction-safe index cleanup.
+ * @brief Find and drop internal index tables.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -25,10 +25,10 @@ export import :storage_adapter_contract;
 namespace bioseq::storage::indexing {
 namespace {
 
-/// SPI stage whose return code is being classified during index cleanup.
+/// Cleanup step that produced an SPI status code.
 enum class drop_index_spi_stage : std::uint8_t { connect, discovery, drop, finish };
 
-/// Required control-flow response to an SPI cleanup return code.
+/// How cleanup should respond to an SPI status code.
 enum class drop_index_return_code_action : std::uint8_t {
     continue_operation,
     return_without_error,
@@ -129,7 +129,7 @@ static_assert(drop_index_return_code_policy(drop_index_selector_kind::prefix_str
                                             SPI_OK_FINISH) ==
               drop_index_status_action::continue_operation);
 
-/// Checked SPI lifetime used by native relation cleanup.
+/// Close the cleanup SPI session  on success or while unwinding an exception.
 class drop_index_spi_session {
     bool active_ = false;
 
@@ -218,8 +218,9 @@ struct discovered_index_relation_name {
 } // namespace bioseq::storage::indexing
 
 export namespace bioseq::storage::indexing {
-/// Drop the selector's relation set while preserving strict and best-effort
-/// SPI failure policy.
+/// Drop the selected index tables.
+/// Prefix cleanup treats failed SPI statuses as errors. Global cleanup stops
+/// when a returned status indicates failure. PostgreSQL exceptions propagate.
 void drop_index_relations(drop_index_relation_selector selector) {
     static constexpr char k_all_index_tables_query[] =
         "SELECT c.relname "

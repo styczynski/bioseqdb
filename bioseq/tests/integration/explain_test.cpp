@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises base Bioseq planner and scan EXPLAIN contracts.
+ * @brief Checks BioseqScan plans and their EXPLAIN output.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -31,14 +31,12 @@ TEST_CASE("EXPLAIN's Bioseq Projected Columns property lists exactly the SELECTe
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     const auto value = find_explain_property(plan, "Bioseq Projected Columns");
     REQUIRE(value.has_value());
-    // The property orders columns by their SELECT-list position; "pk, seq0"
-    // is the canonical order for the SELECT in `explain_target_sql`. The
-    // the exact value to enforce stable ordering.
+    // Keep projected columns in the SELECT-list, order used by explain_target_sql.
     REQUIRE(value.value() == "pk, seq0");
 }
 
 namespace {
-/** Require the Bioseq custom scan to survive one planner GUC setting. */
+/** Checks that BioseqScan is still selected with this configuration setting. */
 void check_explain_keeps_custom_scan(std::string_view guc, std::string_view value) {
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);

@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/pmu/unsupported.cppm
- * @brief Explicit behavior when thread PMU counters are unavailable.
+ * @brief Fallback for platforms without hardware-counter support.
  *
- * Initialization remains a no-op, availability stays false, and reads return
- * the four-event zero sample.
+ * Initialization succeeds without setting anything up Availability  is false,
+ * and every read returns zero counts.
  */
 module;
 
@@ -22,10 +22,10 @@ struct counter_sample {
 };
 static_assert(sizeof(counter_sample) == 32);
 
-/** @brief Initialize the no-op backend. */
+/** @brief Return success, without initializing counters. */
 [[nodiscard]] inline bool initialize() noexcept { return true; }
 
-/** @brief Shut down the no-op backend. */
+/** @brief Do nothing because this backend owns no counter resources. */
 inline void shutdown() noexcept {}
 
 /** @brief Return a zero-valued counter sample. */

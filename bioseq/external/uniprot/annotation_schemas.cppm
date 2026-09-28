@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/annotation_schemas.cppm
- * @brief UniProt annotation schema fragments.
+ * @brief UniProt protein annotation schemas for client generation.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:annotation_schemas;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Comment, feature, location, and attribution schemas. */
+/** @brief Schemas for protein comments, reactions, and  cellular locations. */
 inline constexpr std::string_view annotation_schemas =
     R"bioseq_openapi(    AlternativeProductsComment:
       type: object

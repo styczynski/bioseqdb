@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines mutable projection-placeholder ownership without importing scan runtimes.
+ * @brief Holds the writable constants used to project match results and symbol counts.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -11,38 +11,26 @@ import std;
 
 export {
     /**
-     * @brief Binds one rewritten symbol-count call to its mutable result placeholder.
+     * @brief Connects a symbol_count call to its result constant and source column
      *
-     * The Const*
-     * replaces the FuncExpr in runtime.newtargetlist; `rank` is resolved once at
-     * plan time via seqan3 so the per-row populate path is a single array
-     * index into the meta_sidecar counts[]. `letter` + `column_name` are
-     * retained for the EXPLAIN-time "Fetched from meta:" string.
+     * Resolve  the letter's rank when the executor rewrites the target list. Use
+     * that rank to read a stored count or count the sequence when needed.
      */
     struct symbol_count_call_site {
         Const* placeholder = nullptr;
         int rank = -1;
         char letter = '\0';
-        int16_t column_attno = 0; // SEQ column whose symbols are counted
-        std::string column_name;  // attname for EXPLAIN output
+        int16_t column_attno = 0; // sequence column whose symbols are counted
+        std::string column_name;  // column name used in rewrite diagnostics
     };
 
     /**
-     * @brief Owns mutable Const nodes populated immediately before PostgreSQL projection.
+     * @brief Holds the writable Const nodes used in the scan's output expressions.
      *
-     * The nodes are injected by VarInjectorMutator into the
-     * rewritten target list. Each one stands in for a bioseq.<field>(...)
-     * FuncExpr; per-row values are written into constvalue/constisnull
-     * before ExecProject runs. All pointers start as nullptr in a fresh
-     * bioseq_scan_runtime; CustomExecScan's first-call init allocates them
-     * and VarInjectorMutator wires them into runtime.newtargetlist.
-     *
-     * symbol_count_sites is populated dynamically by VarInjectorMutator as
-     * it discovers `symbol_count(Var, 'L')` call sites in the target list.
-     * Multiple call sites per scan are supported (different letters or
-     * different columns resolve to independent placeholders), and the
-     * vector is cleared at the top of every scan init so stale entries
-     * from a prior query cannot bleed across.
+     * The first scan call allocates these nodes and replaces bound helper calls
+     * with them. Before projection, fill their values from the current match or
+     * row. Each rewritten symbol_count call has its own site, so different letters
+     * and columns can  be requested together.
      */
     struct placeholder_constants {
         Const* dp_score_node = nullptr; // bioseq.score / bioseq.dp_score

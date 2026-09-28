@@ -1,10 +1,10 @@
 /**
  * @file external/tests/io/archive_source_test.cpp
- * @brief Archive path-safety, resource-cap, and stream-integrity tests.
+ * @brief Check archive member names, size limits, and checksum validation.
  */
 
-// Build ZIP fixtures in memory to exercise archive path safety, resource caps,
-// catalog-based member selection, and decoded-member digest validation.
+// Build ZIP fixtures in memory to test member selection and checksum checks.
+// Also check unsafe paths and archive size limits.
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -66,7 +66,7 @@ std::vector<std::uint8_t> build_zip(const std::vector<zip_member>& members) {
     return std::vector<std::uint8_t>(scratch.begin(), scratch.begin() + static_cast<long>(used));
 }
 
-// A sink that just tallies the emitted sequence letters and chunk rows.
+// Collect sequence counts, chunk positions, and member-completion details.
 struct chunk_counter {
     std::uint64_t letters = 0;
     std::uint64_t chunks = 0;
@@ -115,15 +115,15 @@ std::string fasta_body() {
     return body;
 }
 
-// Two FASTA records in one member (mirrors an NCBI Datasets multi-segment
-// genomic.fna). Record ids are the first header token: "seg1", "seg2".
+// Put two FASTA records in one archive  member. Their first header tokens,
+// seg1 and seg2, identify the records.
 std::string multi_record_body() {
     std::string body = ">seg1 first segment description\n";
     for (int i = 0; i < 10; ++i)
-        body += "ACGTACGTACGT\n"; // 120 bases
+        body += "ACGTACGTACGT\n"; // 120 bases across ten lines
     body += ">seg2 second segment description\n";
     for (int i = 0; i < 5; ++i)
-        body += "TTTTGGGGCCCC\n"; // 60 bases
+        body += "TTTTGGGGCCCC\n"; // 60 bases across five lines
     return body;
 }
 
@@ -134,9 +134,8 @@ std::string catalog_selecting_fasta() {
     return c;
 }
 
-// A catalog that selects TWO FASTA members (both FASTA file types) so the archive
-// reader emits both under one accession — exercises the cross-member chunk_index
-// carry that keeps (accession, chunk_index) unique.
+// Select two FASTA members to check that chunk indices continue across
+// files sharing one assembly accession
 std::string catalog_selecting_two_fasta(std::string_view p1, std::string_view p2) {
     std::string c = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
     c += p1;
@@ -154,8 +153,7 @@ std::string md5sum_line(std::string_view digest, std::string_view path) {
     return s;
 }
 
-// Mirror the emitter's stripping: count non-whitespace bytes on lines that do
-// not begin a FASTA header ('>').
+// Count fixture bases while skipping FASTA headers and whitespace.
 std::uint64_t expected_fasta_letters(std::string_view body) {
     std::uint64_t letters = 0;
     bool in_header = false;
@@ -178,8 +176,7 @@ std::uint64_t expected_fasta_letters(std::string_view body) {
     return letters;
 }
 
-// A well-formed hydrated package: catalog selects the FASTA, md5sum.txt carries
-// its true digest.
+// Build a package whose catalog selects the FASTA and whose checksum matches it.
 std::vector<zip_member> good_members() {
     const std::string body = fasta_body();
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
@@ -193,9 +190,8 @@ std::vector<zip_member> good_members() {
     return members;
 }
 
-// Mirrors the REAL NCBI Datasets layout: the ZIP entry and md5sum.txt use the
-// full "ncbi_dataset/data/<path>" while dataset_catalog.json filePath is relative
-// to that data dir. Exercises the reader's three-way path canonicalization.
+// Use a catalog path relative to ncbi_dataset/data, with full paths in
+// the ZIP and checksum file. All three must identify the same member.
 constexpr std::string_view k_real_relative_path = "GCF_test.1/GCF_test.1_genomic.fna";
 constexpr std::string_view k_real_full_path = "ncbi_dataset/data/GCF_test.1/GCF_test.1_genomic.fna";
 
@@ -204,11 +200,11 @@ std::vector<zip_member> real_layout_members() {
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::string catalog = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
-    catalog += k_real_relative_path; // data-dir-relative, as NCBI emits it
+    catalog += k_real_relative_path; // Path relative to the  data directory.
     catalog += "\",\"fileType\":\"GENOMIC_NUCLEOTIDE_FASTA\"}]}]}";
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog});
-    members.push_back({.path = "md5sum.txt", // root, full-path key
+    members.push_back({.path = "md5sum.txt", // Checksum file at ZIP root, containing full member paths.
                        .content = md5sum_line(digest, k_real_full_path)});
     members.push_back({.path = std::string(k_real_full_path), .content = body});
     return members;
@@ -255,21 +251,19 @@ TEST_CASE("archive_source extracts and verifies a well-formed package",
     REQUIRE(result->members_selected == 1);
     REQUIRE(result->members_verified == 1);
     REQUIRE(result->sequence_rows >= 1);
-    // The emitter strips the '>' header and whitespace. Letters equal the raw
-    // base count and must have actually flowed to the sink.
+    // Check that the sink received the sequence bases with headers removed.
     REQUIRE(counter.letters == expected_fasta_letters(fasta_body()));
     REQUIRE(counter.letters > 0);
     REQUIRE(counter.chunks >= 1);
-    // total_decoded_bytes is the full member byte count (header + newlines
-    // included), so it strictly exceeds the stripped letter count.
+    // Decoded bytes include headers and line endings. The base count excludes them.
     REQUIRE(result->total_decoded_bytes == fasta_body().size());
     REQUIRE(counter.letters < result->total_decoded_bytes);
 }
 
 TEST_CASE("archive_source keys emitted chunks by the queried accession",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // Emitted chunks use the queried assembly accession so the scan's accession
-    // filter matches instead of receiving the member file path.
+    // Keep the queried assembly accessjon on emitted chunks so the scan
+    // can apply its accession filter.
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
     const auto result =
@@ -287,8 +281,7 @@ TEST_CASE("archive_source keys emitted chunks by the queried accession",
 
 TEST_CASE("archive_source emits one verified asset-end MD5 event per member",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // A fully decoded, MD5-verified member produces one terminal asset-end with
-    // the decoded-member digest.
+    // A verified member produces one completion message containing its MD5.
     const std::string body = fasta_body();
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
@@ -311,8 +304,8 @@ TEST_CASE("archive_source emits one verified asset-end MD5 event per member",
 
 TEST_CASE("archive_source streams every record of a multi-record member",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // A multi-record member streams every record under the queried assembly
-    // accession, with a distinct end_of_record chunk for each record.
+    // Both records use the queried assembly accession and each ends with
+    // its own end_of_record marker.
     const std::string body = multi_record_body();
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
@@ -337,18 +330,17 @@ TEST_CASE("archive_source streams every record of a multi-record member",
     REQUIRE(counter.record_ends == 2);                        // one end_of_record per record
     REQUIRE(counter.last_accession == "GCF_multi.1");         // assembly keys all chunks
     REQUIRE(counter.last_original_identifier == "seg2");      // last record's own id
-    REQUIRE(counter.asset_ends == 1);                         // still one asset-end per member
-    REQUIRE(counter.last_record_count == 2);                  // true record count, uncapped
-    // Each record is smaller than chunk_bases, so each occupies one chunk.
-    // chunk_index remains global and contiguous while base_offset resets at each
-    // record boundary.
+    REQUIRE(counter.asset_ends == 1);                         // One completion message for the  member.
+    REQUIRE(counter.last_record_count == 2);                  // Both records counted.
+    // Each short record fits in one chunk. Chunk indices continue across
+    // records, while, each record starts at base offset zero.
     REQUIRE(counter.chunk_index_seq == std::vector<std::uint64_t>{0, 1});
     REQUIRE(counter.base_offset_seq == std::vector<std::uint64_t>{0, 0});
 }
 
 TEST_CASE("archive_source multi-record whole-sequence target counts every row",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // For the whole-record target, finish() reports the number of emitted rows.
+    // Whole-record output reports one emitted row per FASTA record.
     const std::string body = multi_record_body();
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
@@ -369,7 +361,7 @@ TEST_CASE("archive_source multi-record whole-sequence target counts every row",
                                                                      "GCF_multi.1");
     REQUIRE(result.has_value());
     REQUIRE(result->sequence_rows == 2);
-    REQUIRE(counter.chunks == 2);      // two whole-record rows actually delivered
+    REQUIRE(counter.chunks == 2);      // Two whole-record rows delivered.
     REQUIRE(counter.record_ends == 2); // each whole record is one end_of_record row
     REQUIRE(counter.letters == expected_fasta_letters(body));
     REQUIRE(counter.chunk_index_seq == std::vector<std::uint64_t>{0, 1});
@@ -384,7 +376,7 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
     const std::string body1 = multi_record_body(); // seg1(120) + seg2(60)
     std::string body2 = ">seg3 third segment\n";
     for (int i = 0; i < 9; ++i)
-        body2 += "ACGTACGTAC\n"; // 90 bases, one record
+        body2 += "ACGTACGTAC\n"; // 90 bases across nine lines, one record
     const std::string d1 = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body1.data()), body1.size()));
     const std::string d2 = exio::compute_md5_hex(std::span<const std::uint8_t>(
@@ -420,8 +412,8 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
 
 TEST_CASE("archive_source reconciles NCBI's three path conventions",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // catalog filePath is data-dir-relative. md5sum.txt and the ZIP entry are full
-    // paths. Canonicalization must make all three match → member selected+verified.
+    // Match the relative catalog path with the full ZIP and checksum paths
+    // so the member can be selected and verified.
     const std::vector<std::uint8_t> zip = build_zip(real_layout_members());
     chunk_counter counter;
     const auto result =
@@ -550,7 +542,7 @@ TEST_CASE("archive_source enforces the maximum entry count",
 TEST_CASE("archive_source enforces the decoded/compressed expansion ratio",
           "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
-    // A near-zero ratio ceiling: any decoded FASTA body exceeds it.
+    // Set the expansion limit low enough to reject the FASTA fixture
     limits.maximum_expansion = {.numerator = 1, .denominator = 1000000, .grace_bytes = 0};
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;

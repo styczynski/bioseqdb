@@ -1,6 +1,6 @@
 /**
  * @file compact_hash32_direct_index.cppm
- * @brief Exposes the stable direct hash32 indexing module.
+ * @brief Import the direct-index types, builders, planners, and readers together.
  */
 export module bioseq.indexing.compact_hash32_direct_index;
 

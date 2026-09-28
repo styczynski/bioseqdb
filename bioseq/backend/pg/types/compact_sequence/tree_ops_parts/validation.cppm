@@ -1,6 +1,6 @@
 /**
  * @file validation.cppm
- * @brief Full and bounded validation for persistent piece trees.
+ * @brief Check piece-tree metadata, storage accounting, and new join results.
  */
 module;
 
@@ -29,14 +29,14 @@ import bioseq.storage.layout;
 
 namespace {
 
-/// Recomputed logical metadata for one validated subtree.
+/// Length, leaf count, and height checked for a subtree.
 struct validated_tree_fields {
     std::uint64_t length;
     std::uint32_t pieces;
     std::uint16_t height;
 };
 
-/// Validate exact byte/category accounting for one arena.
+/// Check an arena's reference state and that  its stoage counts add up
 inline void validate_arena_accounting(piece_tree_arena const& arena)
 {
     const Size node_unit = MAXALIGN(sizeof(piece_node));
@@ -88,7 +88,7 @@ inline void validate_arena_accounting(piece_tree_arena const& arena)
     }
 }
 
-/// Validate inline and overflow storage for retired rotation roots.
+/// Check records for branches discarded by rotations, including any overflow blocks.
 inline void validate_retired_join_root_storage(
     piece_tree_arena const& arena)
 {
@@ -185,7 +185,7 @@ inline void validate_retired_join_root_storage(
     }
 }
 
-/// Recursively validate cached tree metadata and leaf bounds.
+/// Walk the tree and check lengths, AVL balance, leaf ranges, and compatible alphabets.
 [[nodiscard]] inline validated_tree_fields validate_tree_node(
     piece_edge edge,
     compact_sequence_stdc_type_params result_type,
@@ -286,7 +286,11 @@ inline void validate_retired_join_root_storage(
 
 } // namespace
 
-/// Validate full tree metadata, dependencies, alphabet binding, and logical length.
+/**
+ * Walk the full tree and compare its checked length with the expected sequence length.
+ * Check arena accounting, branch balance, leaf metadata, and retired-root storage.
+ * Letter contents are left to the readers and alphabet-binding code.
+ */
 export inline void validate_tree_and_limits(
     piece_edge edge, compact_sequence_stdc_type_params result_type,
     std::uint64_t expected_length, bool alphabet_bound = true) {
@@ -305,7 +309,7 @@ export inline void validate_tree_and_limits(
   }
 }
 
-/// Work summary for validation limited to a newly allocated join closure.
+/// Counts of new nodes and dependencies checked after a  join.
 export struct bounded_join_validation_audit {
     std::uint32_t new_nodes_visited;
     std::uint32_t external_edges_checked;
@@ -343,14 +347,14 @@ static_assert((bounded_join_source_multiset_capacity
     return static_cast<std::size_t>(value);
 }
 
-/// Required and matched multiplicity for one arena dependency.
+/// Number of references to an arena required by nodes and found in the dependency list.
 struct bounded_join_arena_multiset_slot {
     piece_tree_arena* key{};
     std::uint32_t required{};
     std::uint32_t matched{};
 };
 
-/// Required and matched multiplicity for one source dependency.
+/// Number of references to a source required by leaves and found in the dependency list.
 struct bounded_join_source_multiset_slot {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};
@@ -373,7 +377,7 @@ struct bounded_join_source_multiset_slot {
     return static_cast<std::uint64_t>(pieces) >= upper;
 }
 
-/// Validate cached metadata for one edge in a bounded join closure.
+/// Check an edge's cached shape and limits without walking its children.
 inline void validate_bounded_edge_summary(
     piece_edge edge, bounded_join_validation_audit& audit,
     bool count_external)
@@ -412,7 +416,7 @@ inline void validate_bounded_edge_summary(
     }
 }
 
-/// Validate source or literal metadata for one bounded join leaf.
+/// Check a new leaf's storage range and alphabet metadata.
 inline void validate_bounded_join_leaf(
     piece_edge edge, compact_sequence_stdc_type_params result_type,
     bool alphabet_bound)
@@ -463,10 +467,12 @@ inline void validate_bounded_join_leaf(
 } // namespace
 
 /**
- * @brief Validate a new join closure against two trusted immutable roots.
+ * Check a join result using the cached summaries of its already validated inputs.
  *
- * Existing subtrees use cached summaries. Every node and dependency allocated
- * by the destination arena is visited exactly once.
+ * Walk the destination arena's new nodes and the branches discarded by rotations.
+ * Match, their storage dependencies against the arena's registered references.
+ * Older subtrees keep their existing vwlidation, so  the work follows the changed
+ * path instead of growing with the full sequence tree.
  */
 export [[nodiscard]] inline bounded_join_validation_audit
 validate_trusted_join_and_limits(
@@ -766,11 +772,9 @@ validate_trusted_join_and_limits(
         pg_unreachable();
     };
 
-    /* A rotation may discard a destination-local branch after reusing its
-     * children in the final tree.  Walk those explicitly recorded roots as a
-     * second allocation closure.  Final-tree nodes may be shared by that
-     * recorded closure; cached height descent proves that the bounded
-     * immutable allocation graph is acyclic even when old roots overlap. */
+    /* Rotations can leave allocated branches outside the final tree. Check
+     * those recorded roots too, while counting shared children only once
+     * Child heights must decrease, which also rules out cycles. */
     for (std::uint32_t retired_index = 0u;
          retired_index < destination.retired_join_root_count;
          ++retired_index) {
@@ -975,7 +979,7 @@ validate_trusted_join_and_limits(
     return audit;
 }
 
-/// Publish a validated root and its exact type/length metadata into an expanded value.
+/// Assign a validated root and its type and length to an expanded sequence.
 export inline void publish_root_noexcept(pg_sequence_expanded &value,
                                          piece_edge next,
                                          compact_sequence_stdc_type_params type,

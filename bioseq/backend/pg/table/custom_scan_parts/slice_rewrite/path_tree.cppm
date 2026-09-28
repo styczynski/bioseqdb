@@ -40,14 +40,12 @@ export {
                strcmp(custom->methods->CustomName, "BioseqScan") == 0;
     }
 
-    /* Planner Path nodes are deliberately marked `no_copy_equal` by PostgreSQL.
-     * `copyObject(path)` therefore reaches copyObjectImpl's "unrecognized node
-     * type" branch for every Path-family tag. Clone exactly the mutable path
-     * spine used by the SliceProject tagger while sharing immutable leaf paths
-     * and expression metadata. */
+    /* PostgreSQL copyObject does not support Path nodes. Copy the containers
+     * that source tagging changes, whije sharing expression metadata and leaf
+     * paths that the tagger leaves alone. */
     [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path);
 
-    /** Clones every Path in @p paths through slice_project_clone_mutable_path_spine. */
+    /** @brief Copy the list and pass each child through the path-container copier */
     [[nodiscard]] List* slice_project_clone_path_list(List* paths) {
         List* clones = NIL;
         for (Path* child : postgres_list<Path>(paths)) {
@@ -56,7 +54,7 @@ export {
         return clones;
     }
 
-    /** Clones the mutable containers in @p path and shares unsupported leaves. */
+    /** @brief Copy supported path containers, sharing expression metadata and other leaves. */
     [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path) {
         if (path == nullptr)
             return nullptr;
@@ -164,7 +162,7 @@ export {
         return path;
     }
 
-    /** Returns true when @p path contains a BioseqScan in a supported path container. */
+    /** @brief Search supported path children for a BioseqScan. */
     [[nodiscard]] bool slice_project_path_tree_has_bioseq_scan(Path* path) noexcept {
         if (path == nullptr)
             return false;
@@ -229,4 +227,4 @@ export {
         return false;
     }
 
-} // export custom-scan path-tree helpers
+} // export

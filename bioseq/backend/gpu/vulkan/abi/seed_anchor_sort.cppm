@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines Vulkan seed-anchor sorting and canonicalization contracts.
+ * @brief Plans GPU anchor sorting and checks the resulting chaining order.
  */
 module;
 
@@ -29,7 +29,7 @@ enum class seed_anchor_sort_backend : std::uint8_t {
     radix,
 };
 
-/** @brief Classifies why an anchor-sort request cannot be admitted. */
+/** @brief Reason an anchor-sort request cannot run. */
 enum class seed_anchor_sort_plan_failure : std::uint8_t {
     none,
     anchor_count_exceeds_u32,
@@ -41,11 +41,11 @@ enum class seed_anchor_sort_plan_failure : std::uint8_t {
 };
 
 /**
- * @brief Describes deterministic allocation and dispatch for one anchor sort.
+ * @brief Buffer sizes and dispatch settings for one anchor sort.
  *
- * `device_sort_bytes` includes primary anchor and key arrays, radix ping-pong
- * scratch, and the histogram or bitonic range. `host_result_bytes` is the
- * downloaded 24-byte anchor array.
+ * `device_sort_bytes` includes anchors, keys, and scratch buffers for the
+ * selected sort. `host_result_bytes` covers the downloaded 24-byte anchor
+ * records.
  */
 struct seed_anchor_sort_plan {
     seed_anchor_sort_backend backend = seed_anchor_sort_backend::none;
@@ -57,10 +57,9 @@ struct seed_anchor_sort_plan {
     std::uint64_t device_sort_bytes = 0;
     std::uint64_t host_result_bytes = 0;
     std::uint64_t transient_bytes = 0;
-    // Anchors and keys remain segment-local. The offset binds admission and
-    // runtime validation to the same target segment. The maximum absolute
-    // position establishes overflow-free, order-preserving rebasing without
-    // changing the anchor wire layout.
+    // Anchors and sort keys use coordinates within the target segment. Record
+    // its offset  and largest position so the runtime can check that adding
+    // the offset preserves order and cannot overflow.
     std::uint64_t target_position_offset = 0;
     std::uint64_t max_local_ref_position = 0;
     std::uint64_t max_absolute_ref_position = 0;
@@ -69,19 +68,20 @@ struct seed_anchor_sort_plan {
     std::uint32_t num_workgroups = 0;
     std::uint32_t elements_per_workgroup = 0;
 
-    /** @brief Reports whether admission produced an executable sort plan. */
+    /** @brief Returns true if planning found no edror, including an empty sort */
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return failure == seed_anchor_sort_plan_failure::none;
     }
 
-    /** @brief Compares the complete admission, allocation, and dispatch plan. */
+    /** @brief Compares all buffer sizes, limits, and dispatch settings. */
     [[nodiscard]] constexpr bool operator==(const seed_anchor_sort_plan&) const noexcept = default;
 };
 
 /**
- * @brief Reports whether the final radix pass leaves its result in scratch.
- * @param[in] pass_count Number of radix scatter passes.
- * @return `true` when the pass parity selects the scratch allocation.
+ * @brief Returns whether the last radix pass writes into the scratch buffer.
+ *
+ * Odd pass counts leave the result in scratch. Even counts leave it in the
+ * original buffer.
  */
 [[nodiscard]] inline constexpr bool
 is_seed_radix_result_in_scratch(std::uint32_t pass_count) noexcept {
@@ -89,11 +89,10 @@ is_seed_radix_result_in_scratch(std::uint32_t pass_count) noexcept {
 }
 
 /**
- * @brief Computes the largest supported power-of-two bitonic anchor capacity.
- * @param[in] max_workgroup_invocations Device invocation limit.
- * @param[in] max_workgroup_size_x Device X-dimension workgroup limit.
- * @param[in] max_shared_memory_bytes Device shared-memory limit in bytes.
- * @return Largest supported capacity, or zero when no lane is admissible.
+ * @brief Finds the largest bitonic-sort capacity supported by the device.
+ *
+ * The result is a power of two that fits the invocation and shared-memory
+ * limits, up to the shader maximum. Zero means even  one lane will not fit.
  */
 [[nodiscard]] inline constexpr std::uint32_t
 compute_seed_anchor_bitonic_capacity(std::uint32_t max_workgroup_invocations,
@@ -114,16 +113,14 @@ compute_seed_anchor_bitonic_capacity(std::uint32_t max_workgroup_invocations,
 }
 
 /**
- * @brief Builds the deterministic allocation and dispatch plan for an anchor sort.
- * @param[in] anchor_count Number of anchors to sort.
- * @param[in] target_length Target segment length in bases.
- * @param[in] target_position_offset Absolute coordinate of the segment's first base.
- * @param[in] bitonic_capacity Largest anchor count supported by one bitonic workgroup.
- * @param[in] max_workgroup_count_x Device X-dimension dispatch limit.
- * @param[in] max_workgroup_invocations Maximum invocations in one workgroup.
- * @param[in] max_workgroup_size_x Device X-dimension workgroup-size limit.
- * @param[in] max_storage_buffer_range Maximum bytes addressable by one storage binding.
- * @return A plan whose `is_valid()` predicate reports admission success.
+ * @brief Chooses an anchor sorter and calculates its buffer and dispatch sizes.
+ *
+ * Small inputs use one bitonic workgroup. Larger inputs use radix sorting,
+ * with enough passes for the segment-local coordinate and strand. Target
+ * coordinates must remain valid when the segment offset is added.
+ *
+ * The returned failure explains unsupported device limits or arithmetic
+ * overflow. Zero anchors produce a valid plan with no sorting work.
  */
 [[nodiscard]] inline constexpr seed_anchor_sort_plan
 make_seed_anchor_sort_plan(std::uint64_t anchor_count,
@@ -245,9 +242,10 @@ struct seed_lookup_sort_execution_stats {
 };
 
 /**
- * @brief Mirrors the explicit 24-byte anchor payload emitted by a seed shader.
+ * @brief The 24-byte anhor record written by a seed shader.
  *
- * Naming every field keeps padding outside canonical biological digests.
+ * Hashing reads these fields individually so padding bytes do not  affect
+ * result comparisons.
  */
 struct seed_anchor_wire {
     std::uint64_t ref_position = 0u;
@@ -265,12 +263,12 @@ static_assert(offsetof(seed_anchor_wire, query_span) == 20u);
 static_assert(offsetof(seed_anchor_wire, flags) == 21u);
 static_assert(offsetof(seed_anchor_wire, segment_id) == 22u);
 
-/** @brief Initial low lane for canonical anchor payload digests. */
+/** @brief Initial value for the low half of the anchor hash. */
 inline constexpr std::uint64_t k_seed_anchor_digest_seed_low = 0x243f6a8885a308d3ULL;
-/** @brief Initial high lane for canonical anchor payload digests. */
+/** @brief Initial value for the high half of the anchor hash */
 inline constexpr std::uint64_t k_seed_anchor_digest_seed_high = 0x13198a2e03707344ULL;
 
-/** @brief Reports canonical-order validation and explicit-field digest identity. */
+/** @brief Anchor-order check and a hash of all anchor fields. */
 struct seed_anchor_canonical_order_audit {
     std::uint64_t anchor_count = 0u;
     std::uint64_t digest_lo = k_seed_anchor_digest_seed_low;
@@ -279,7 +277,7 @@ struct seed_anchor_canonical_order_audit {
     bool canonical_order_accepted = false;
 };
 
-/** @brief Reports equal-reference tie normalization and input-order validity. */
+/** @brief Counts reordered ties and reports whether, target-key order was valid. */
 struct seed_anchor_tie_normalization_result {
     std::uint64_t canonical_tie_run_count = 0u;
     std::uint64_t canonical_tie_anchor_count = 0u;
@@ -288,9 +286,7 @@ struct seed_anchor_tie_normalization_result {
 };
 
 /**
- * @brief Mixes one value into a canonical anchor digest lane.
- * @param[in] value Unsigned field value with its caller-provided domain tag.
- * @return SplitMix-derived digest contribution.
+ * @brief Scrambles a field value for the anchor hash using SplitMix steps.
  */
 [[nodiscard]] inline constexpr std::uint64_t seed_anchor_digest_mix(std::uint64_t value) noexcept {
     value += 0x9e3779b97f4a7c15ULL;
@@ -300,10 +296,10 @@ struct seed_anchor_tie_normalization_result {
 }
 
 /**
- * @brief Compares two anchors using the canonical chaining order.
- * @param[in] left First anchor.
- * @param[in] right Second anchor.
- * @return `true` when `left` precedes `right`.
+ * @brief Compares anchors in the order required for chaining.
+ *
+ * Strand and target position come first. Ties use segment, flags, span, and
+ * the low query-position bits, followed by the full query position.
  */
 [[nodiscard]] inline constexpr bool
 is_seed_anchor_wire_less(const seed_anchor_wire& left, const seed_anchor_wire& right) noexcept {
@@ -386,14 +382,14 @@ inline void swap_seed_anchor_wires(std::span<std::byte> payload,
 }
 
 /**
- * @brief Sorts one equal-reference run by the remaining canonical fields.
+ * @brief Sorts an equal-target-position  group by the remaining chaining fields.
  *
- * This allocation-free heap sort normalizes a device reference-key sort. It is
- * not a biological CPU fallback.
- *
- * @param[in,out] payload Contiguous anchor bytes to normalize.
- * @param[in] begin First anchor ordinal in the tie run.
- * @param[in] count Number of anchors in the tie run.
+ * GPU radix sorting orders the target keys. This in-place heap sort resolves
+ * ties using query coordinates and anchor metadata, without allocating another
+ * anchor array.
+ * @param[in,out] payload Anchor bytes.
+ * @param[in] begin First record in the tied group.
+ * @param[in] count Number of records in the group.
  */
 inline void normalize_seed_anchor_tie_run(std::span<std::byte> payload,
                                           std::uint64_t begin,
@@ -427,10 +423,11 @@ inline void normalize_seed_anchor_tie_run(std::span<std::byte> payload,
 }
 
 /**
- * @brief Normalizes equal-reference tie runs after a device radix sort.
- * @param[in,out] payload Contiguous anchor bytes to normalize.
- * @param[in] anchor_count Number of anchor records in `payload`.
- * @return Normalization counters and validation status for the device order.
+ * @brief Checks GPU target-key order and sorts equal-key groups.
+ *
+ * The payload must contain exactly `anchor_count` records. Invalid strands or
+ * decreasing target keys fail the check. Earlier groups may already have been
+ * reordered wsen a later group fails. Returns the check status and  tie counts.
  */
 [[nodiscard]] inline seed_anchor_tie_normalization_result
 normalize_seed_anchor_equal_ref_ties(std::span<std::byte> payload,
@@ -488,10 +485,11 @@ normalize_seed_anchor_equal_ref_ties(std::span<std::byte> payload,
 }
 
 /**
- * @brief Validates canonical anchor order and digests every explicit field.
- * @param[in] payload Contiguous anchor bytes to validate.
- * @param[in] anchor_count Number of anchor records in `payload`.
- * @return Order audit with independent low and high digest lanes.
+ * @brief Checks chaining order and hashes every anchor field.
+ *
+ * The payload must contain exactly `anchor_count` records. The hash includes
+ * record order but excludes padding. Invalid strand flags or decreasing keys
+ * fail the order check.
  */
 [[nodiscard]] inline seed_anchor_canonical_order_audit
 audit_seed_anchor_canonical_order(std::span<const std::byte> payload,

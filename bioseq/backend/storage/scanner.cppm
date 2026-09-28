@@ -1,11 +1,10 @@
 /**
  * @file
- * @brief Scanner contracts for resident and bounded-memory sequence access.
+ * @brief Scanner interfaces for resident and fragmented sequences.
  *
- * A fragmented scanner owns the backing lifetime of every loaded fragment.
- * Consumers may retain at most the number of fragments allowed by their local
- * cache and must call `release_fragment()` when evicting one. Resident
- * scanners expose the same compile-time contract without adding runtime state.
+ * Fragmented scanners keep loaded fragments valid until release_fragment().
+ * Readers bound their cache and release fragments when evicting them. Resident
+ * scanners need, only a stateless tag.
  */
 module;
 
@@ -54,7 +53,7 @@ struct sequence_fragment {
     std::uint16_t trailing_padding = 0u;
 };
 
-/** Minimum compile-time surface implemented by every sequence scanner. */
+/** Types and size information required from a sequence scanner. */
 template <class p_scanner>
 concept sequence_scanner = requires {
     typename p_scanner::storage_unit;
@@ -98,10 +97,10 @@ static_assert(!fragmented_sequence_scanner<
               resident_sequence_scanner<std::uint64_t>>);
 
 /**
- * Fragmented scanner over caller-owned packed storage.
+ * Presents caller-owned packed storage as fixed-size fragments.
  *
- * This implementation is useful for deterministic chunking and for any
- * in-process source whose lifetime already dominates the scanner.
+ * The backing storage  must remain alive while the scanner is used. Loading a
+ * fragment returns a subspan, and releasing one requires no work.
  */
 template <class p_storage_unit, std::size_t p_fragment_storage_units>
 struct chunked_span_sequence_scanner final {
@@ -114,11 +113,8 @@ struct chunked_span_sequence_scanner final {
     [[nodiscard]] [[gnu::always_inline]]
     static constexpr bool is_fragmented() noexcept { return true; }
 
-    /// Build a chunked scanner over the storage of an existing in-memory
-    /// compact_sequence_range. The backing span is `range`'s packed storage
-    /// units. The caller owns those bytes for the scanner's lifetime. We
-    /// derive the span from `read_cptr(cbegin())` + `size()` because the
-    /// project's compact_sequence_range has no `raw_storage_span` accessor.
+    /// Borrows the packed words of an in-memory compact range.
+    /// The caller must keep those words alive for the scanner's lifetime.
     template <class p_range>
     [[nodiscard]] static chunked_span_sequence_scanner
     from_range(const compact_sequence_range<p_range>& range) noexcept {
@@ -201,7 +197,7 @@ static_assert(fragmented_sequence_scanner<
 static_assert(fragmented_sequence_scanner<
               chunked_span_sequence_scanner<std::uint64_t, 1u>>);
 
-/** Structural contract implemented by concrete lazy-sequence owners. */
+/** Required type aliases for a concrete lazy-sequence owner. */
 template <class p_view>
 concept concrete_lazy_sequence = requires {
     typename p_view::scanner_type;
@@ -213,7 +209,7 @@ concept concrete_lazy_sequence = requires {
 /** @brief Marks views that satisfy the logical lazy-sequence slice contract. */
 struct lazy_sequence_slice_tag {};
 
-/** @brief Contiguity guarantee required by a sequence consumer. */
+/** Sequence access pattern requested by a consumer. */
 enum class sequence_access_requirement : std::uint8_t {
     sequential_symbols,
     bounded_random_window,
@@ -246,8 +242,8 @@ template <typename p_range>
 concept logical_rank_range = requires(p_range const& range) {
     { range.begin() };
     { range.end() } -> std::same_as<decltype(range.begin())>;
-    // Existing compact ranges return iterator endpoints by const reference.
-    // Validate the usable value type, not the accessor's reference qualifier.
+    // Compact ranges can return iterator endpoints by reference. Check the
+    // iterator ype after removing that reference.
     requires logical_rank_iterator<
         std::remove_cvref_t<decltype(range.begin())>>;
 };

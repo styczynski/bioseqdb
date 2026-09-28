@@ -1,6 +1,6 @@
 /**
  * @file metal_archive/command_capture.cppm
- * @brief Exec-clean capture of MoltenVK's exact internal command library.
+ * @brief Captures MoltenVK command-library source inside a separate helper process.
  */
 module;
 
@@ -38,7 +38,7 @@ using objc_object = void*;
 using objc_selector = void*;
 using objc_class = void*;
 
-/// @brief Objective-C entry points required only inside the exec-clean capture helper.
+/// @brief Objective-C functions loaded, by the command-source capture helper.
 struct capture_objc_runtime {
     void* handle = nullptr;
     void* message_send = nullptr;
@@ -106,7 +106,7 @@ struct capture_objc_runtime {
     }
 };
 
-/// @brief Canonical values of every MoltenVK-relevant MTLCompileOptions field.
+/// @brief Compiler option values and availability flags saved with the captured source
 struct captured_compile_options {
     std::uint64_t language_version = 0u;
     std::uint64_t fast_math_enabled = 0u;
@@ -134,13 +134,13 @@ struct captured_compile_options {
     [[nodiscard]] bool operator==(const captured_compile_options&) const noexcept = default;
 };
 
-/// @brief Returns the count of one NSArray/NSDictionary-compatible object.
+/// @brief Returns the collection size, or zero  for a null NSArray or NSDictionary.
 [[nodiscard]] std::uint64_t collection_count(const capture_objc_runtime& objc,
                                              objc_object collection) noexcept {
     return collection == nullptr ? 0u : objc.unsigned_property(collection, "count");
 }
 
-/// @brief Returns the UTF-8 byte count of one NSString-compatible object.
+/// @brief Returns the UTF-8 byte count, or zero for a null string or text pointer.
 [[nodiscard]] std::uint64_t string_byte_count(const capture_objc_runtime& objc,
                                               objc_object string) noexcept {
     if (string == nullptr)
@@ -151,7 +151,7 @@ struct captured_compile_options {
     return text == nullptr ? 0u : static_cast<std::uint64_t>(std::strlen(text));
 }
 
-/// @brief Captures the complete bounded option subset used by MoltenVK command compilation.
+/// @brief Reads the compiler options supported by this capture format.
 [[nodiscard]] captured_compile_options capture_options(const capture_objc_runtime& objc,
                                                        objc_object options) noexcept {
     captured_compile_options result{};
@@ -207,7 +207,7 @@ struct captured_compile_options {
     return result;
 }
 
-/// @brief Process-global capture state used only while the helper owns both swizzles.
+/// @brief Shared state while wrappers intercept Metal's source-compilation methods.
 struct command_capture_state {
     capture_objc_runtime objc{};
     void* original_sync = nullptr;
@@ -223,19 +223,19 @@ struct command_capture_state {
     std::uint64_t metal_registry_id = 0u;
     std::uint64_t capture_count = 0u;
     bool divergent = false;
-    bool lifecycle_consumed = false; ///< Guarded by lifecycle_mutex; prevents pointer ABA.
+    bool lifecycle_consumed = false; ///< Protected by lifecycle_mutex. Prevents reusing this state for a second capture.
 };
 
-/// @brief Returns process-lifetime storage retained beyond every wrapper invocation.
+/// @brief Returns capture storage that stays alive until the helper exits.
 [[nodiscard]] command_capture_state& command_capture_process_state() noexcept {
     static command_capture_state state;
     return state;
 }
 
-/// @brief Publishes the capture authority acquired by source-method wrappers.
+/// @brief State currently available to the source-compilation wrappers.
 std::atomic<command_capture_state*> g_command_capture_state{nullptr};
 
-/// @brief Pins one published capture state until its wrapper returns.
+/// @brief Keeps an active-wrapper count until this guard is destroyed.
 class command_capture_access {
   public:
     command_capture_access() = default;
@@ -257,7 +257,7 @@ class command_capture_access {
     command_capture_state* state_ = nullptr;
 };
 
-/// @brief Atomically pins the currently published state or returns an empty guard.
+/// @brief Acquires the current capture stte, or an empty guard if capture is unavailable.
 [[nodiscard]] command_capture_access acquire_command_capture_state() noexcept {
     command_capture_state* state = g_command_capture_state.load(std::memory_order_acquire);
     if (state == nullptr)
@@ -293,7 +293,7 @@ template <std::size_t p_size>
     return encode_hex(std::string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()});
 }
 
-/// @brief Records one exact MoltenVK command-source call before invoking the original compiler.
+/// @brief Saves a matching MoltenVK source  request and detects changes across repeated requests.
 void record_command_request(command_capture_state& state,
                             objc_object receiver,
                             objc_object source,
@@ -365,7 +365,7 @@ extern "C" void bioseq_capture_new_library_with_source_async(
         self, selector, source, options, completion);
 }
 
-/// @brief Finds an instance method on the exact device class hierarchy.
+/// @brief Searches the device class and its parent classes for an instance method.
 [[nodiscard]] void* find_instance_method(const capture_objc_runtime& objc,
                                          objc_object device,
                                          objc_selector selector) noexcept {
@@ -377,7 +377,12 @@ extern "C" void bioseq_capture_new_library_with_source_async(
     return nullptr;
 }
 
-/// @brief Writes exact nonempty bytes to a new private regular file.
+/**
+ * @brief Creates a private source file and syncs its bytes to disk.
+ *
+ * The path must be absolute and unused, and the source must be non-empty.
+ * Returns false on failure and removes any incomplete file it created.
+ */
 [[nodiscard]] bool write_exclusive_file(std::string_view path, std::string_view bytes) noexcept {
     if (path.empty() || path.front() != '/' || bytes.empty())
         return false;
@@ -412,7 +417,7 @@ extern "C" void bioseq_capture_new_library_with_source_async(
     return true;
 }
 
-/// @brief Dynamically resolved Vulkan entry points used by the capture probe.
+/// @brief Vulkan functions loaded for the device-creation probe.
 struct capture_vulkan_runtime {
     void* loader_handle = nullptr;
     PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extensions = nullptr;
@@ -503,7 +508,7 @@ struct capture_vulkan_runtime {
     return false;
 }
 
-/// @brief Makes the Homebrew MoltenVK ICD visible before the helper's first loader call.
+/// @brief Keeps the selected Vulkan ICD, or finds Homebrew's MoltenVK driver.
 [[nodiscard]] bool configure_moltenvk_icd() noexcept {
     if (::setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0) != 0)
         return false;
@@ -522,7 +527,7 @@ struct capture_vulkan_runtime {
     return false;
 }
 
-/// @brief Creates one matching Vulkan device, triggering MoltenVK's command-source compile.
+/// @brief Creates a compute-capable Vulkan device to trigger MoltenVK command compilation.
 [[nodiscard]] bool create_capture_device(capture_vulkan_runtime& vk,
                                          VkInstance* instance,
                                          VkDevice* device,

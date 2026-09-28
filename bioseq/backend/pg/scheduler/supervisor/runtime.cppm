@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/runtime.cppm
- * @brief PostgreSQL-facing scheduler supervision and stats implementation.
+ * @brief Run the scheduler supervisor and report PostgreSQL batch, activity.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -43,19 +43,18 @@ import bioseq.parallelism.memory_admission;
 
 namespace bioseq::postgres::scheduler {
 
-/** @brief Previous shared-memory request hook retained for callback chaining. */
+/** Previous shared-memory request hook to call before reserving Bioseq space. */
 inline shmem_request_hook_type prev_shmem_request_hook = nullptr;
-/** @brief Previous shared-memory startup hook retained for callback chaining. */
+/** Previous shared-memory startup hook to call before attaching Bioseq state. */
 inline shmem_startup_hook_type prev_shmem_startup_hook = nullptr;
-/** @brief Signal-safe termination flag consumed by the supervisor loop. */
+/** SIGTERM fla checked by the supervisor loop. */
 inline volatile sig_atomic_t got_sigterm = 0;
-/** @brief Signal-safe configuration reload flag consumed by the supervisor loop. */
+/** SIGHUP flag requesting a configuration reload in the supervisor loop. */
 inline volatile sig_atomic_t got_sighup = 0;
 
 /**
- * @brief Resets scheduler counters and timing anchors in shared memory.
- * @param[out] stats Shared counters owned by the current cluster generation.
- * @param[in] now_ns Monotonic reset time in nanoseconds.
+ * Clear shared batch counters and restart their timing  window
+ * @param now_ns Reset time from the monotonic clock, in nanoseconds.
  */
 void reset_shared_stats(pg_scheduler_stats& stats, std::uint64_t now_ns) {
     pg_atomic_write_u64(&stats.batches_scheduled, 0);
@@ -73,7 +72,7 @@ void reset_shared_stats(pg_scheduler_stats& stats, std::uint64_t now_ns) {
     }
 }
 
-/** @brief Chains the prior request hook and reserves scheduler shared memory. */
+/** Run the previous request hook, then reserve Bioseq scheduler shared memory. */
 void scheduler_shmem_request() {
     if (prev_shmem_request_hook != nullptr) {
         prev_shmem_request_hook();
@@ -81,7 +80,7 @@ void scheduler_shmem_request() {
     RequestAddinShmemSpace(sizeof(scheduler_shared_state));
 }
 
-/** @brief Chains the prior startup hook and initializes scheduler shared state once. */
+/** Attach the scheduler shared memory and initialize it when first created. */
 void scheduler_shmem_startup() {
     if (prev_shmem_startup_hook != nullptr) {
         prev_shmem_startup_hook();
@@ -148,7 +147,7 @@ void scheduler_shmem_startup() {
     }
 }
 
-/** @brief Shuts down the process-local parallel pool during backend exit. */
+/** Stop the backend's worker pool before PostgreSQL releases shared memory. */
 void pool_shutdown_before_exit(int, Datum) {
     bioseq::parallelism::global_pool::instance().shutdown_at_exit();
 }
@@ -174,9 +173,9 @@ void supervisor_sighup(SIGNAL_ARGS) {
 }
 
 /**
- * @brief Resolves zero to hardware concurrency and applies PostgreSQL worker limits.
- * @param[in] configured Requested concurrency, or zero for the hardware default.
- * @return A positive effective concurrency.
+ * Choose the worker concurrency, using the hardware default for zero.
+ * PostgreSQL parallel workers use one thread when Bioseq parallelism in those
+ * workers is disabled. The result is always at least one.
  */
 [[nodiscard]] unsigned effective_max_concurrency(unsigned configured) {
     unsigned concurrency =
@@ -191,7 +190,7 @@ void supervisor_sighup(SIGNAL_ARGS) {
 
 namespace bioseq::postgres::scheduler {
 
-/** @brief Installs scheduler shared-memory hooks while preserving the prior callbacks. */
+/** Install Bioseq's shared-memory hooks and  save the previous hooks for chaining. */
 void install_scheduler_shmem_hooks() {
     prev_shmem_request_hook = shmem_request_hook;
     shmem_request_hook = scheduler_shmem_request;
@@ -199,7 +198,7 @@ void install_scheduler_shmem_hooks() {
     shmem_startup_hook = scheduler_shmem_startup;
 }
 
-/** @brief Registers the process-lifetime scheduler background worker. */
+/** Register the scheduler worker to start after recovery and restart after failure. */
 void register_scheduler_supervisor() {
     BackgroundWorker worker;
     std::memset(&worker, 0, sizeof(worker));
@@ -216,15 +215,15 @@ void register_scheduler_supervisor() {
         "[bioseq] scheduler: shared supervisor background worker registered");
 }
 
-/**
- * @brief Reports whether this backend attached scheduler shared memory.
- * @return True when shared supervisor state is available.
- */
+/** Check whether this backend has attached scheduler shared memory. */
 [[nodiscard]] bool supervisor_available() noexcept {
     return g_shared != nullptr;
 }
 
-/** @brief Applies the current shared configuration to backend-local runtime owners. */
+/**
+ * Update this backend's thread pool and index memory budget from currena settings.
+ * Register pool cleanup and install the PostgreSQL shader provider when available.
+ */
 void backend_sync() {
     static bool exit_hook_registered = false;
     if (!exit_hook_registered) {
@@ -262,9 +261,10 @@ void backend_sync() {
 }
 
 /**
- * @brief Admits a batch into shared counters or the backend-local pool.
- * @param[in] queries Query count, with negative values treated as zero.
- * @return A ticket consumed once by `end_batch`.
+ * Count a batch as started and return its completion ticket. Use shared
+ * counters when attached, otherwise use the backend's local pool counters.
+ * @param queries Query count, with  negative values treated as zero.
+ * @return Ticket to pass once to end_batch.
  */
 [[nodiscard]] batch_ticket begin_batch(std::int64_t queries) noexcept {
     if (queries < 0) {
@@ -293,9 +293,8 @@ void backend_sync() {
 }
 
 /**
- * @brief Completes or cancels one admitted scheduler batch.
- * @param[in] ticket Ticket returned by `begin_batch`.
- * @param[in] completed Whether to record completed work instead of cancellation.
+ * Finish counting a batch. Record completed queries only when completed is true.
+ * @param ticket Ticket returned by begin_batch, used once.
  */
 void end_batch(batch_ticket ticket, bool completed) noexcept {
     if (!ticket.shared) {
@@ -323,7 +322,7 @@ void end_batch(batch_ticket ticket, bool completed) noexcept {
     }
 }
 
-/** @brief Starts a new scheduler generation with current configuration. */
+/** Apply current scheduler settings and, start a new generation of batch statistics */
 void restart_cluster() {
     backend_sync();
     const std::uint64_t now = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
@@ -344,10 +343,7 @@ void restart_cluster() {
     pool.reset_stats(now);
 }
 
-/**
- * @brief Samples shared or backend-local scheduler counters.
- * @return Current queue, throughput, concurrency, and memory state.
- */
+/** Read current batch counts, thread use, queue depth, and reserved index memory. */
 [[nodiscard]] scheduler_snapshot snapshot() {
     backend_sync();
     auto& pool = bioseq::parallelism::global_pool::instance();
@@ -417,9 +413,8 @@ void restart_cluster() {
 } // namespace bioseq::postgres::scheduler
 
 /**
- * @brief Runs the registered scheduler supervisor background worker.
- *
- * The external callback spelling and unnamed PostgreSQL argument are ABI-mandated.
+ * Initialize the shared runtime, then service shader requests and queued index
+ * builds until PostgreSQL stops this worker. SIGHUP reloads scheduler settings.
  */
 extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     using bioseq::postgres::scheduler::g_shared;

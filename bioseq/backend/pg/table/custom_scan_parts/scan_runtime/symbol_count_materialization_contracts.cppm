@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares exact per-row symbol-count placeholder materialization.
+ * @brief Declares symbol_count result lookup for a stored row.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_scan_runtime_symbol_count_materi
 
 import :custom_scan_runtime_placeholder_contracts;
 
-/** @brief Populates symbol-count placeholders for one columnar row. */
+/** @brief Fills symbol_count results from stored counts or by reading the sequence. */
 export void populate_symbol_count_placeholders(placeholder_constants& consts,
                                                Relation main,
                                                std::int64_t rowno,

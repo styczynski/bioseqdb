@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_run.cppm
- * @brief PostgreSQL ExecutorRun hook.
+ * @brief Track running alignment queries and whether their output was consumed.
  */
 module;
 
@@ -24,12 +24,11 @@ namespace bioseq::pg::detail {
 namespace {
 
 /**
- * @brief Reports whether one ExecutorRun call drained forward output.
+ * @brief Check whether, a forward run reached the end of its output.
  *
- * A zero count is PostgreSQL's unbounded contract. A bounded run is known to
- * reach end of output only when it produces fewer tuples than requested.
- *
- * @return True only when the run establishes forward end of output.
+ * A zero count requests all output. With a row limit, fewer returned tuples
+ * than requested establishes completion. Reaching the limit leaves completion
+ * unknown. Backward scans do not establish forwad  completion.
  */
 [[nodiscard]] constexpr bool executor_run_output_fully_drained(
 		const ScanDirection direction,
@@ -82,12 +81,14 @@ void call_previous_or_standard_executor_run(
 } // namespace
 
 /**
- * @brief Chains ExecutorRun while tracking the active frame and output-drain state.
- * @param[in,out] query_desc PostgreSQL query descriptor for this executor invocation.
+ * @brief Run PostgreSQL execution while tracking the active alignment frame.
+ * Record whether this call consumed all forward output. Remove the frame
+ * from the active-call stack on success or error.
+ * @param[in,out] query_desc Query being executed.
  * @param[in] direction Requested scan direction.
- * @param[in] count Maximum tuples to emit, or zero for an unbounded run.
- * @param[in] execute_once PostgreSQL 17 execute-once hint forwarded unchanged;
- * PostgreSQL 18 removed this argument from the executor hook ABI.
+ * @param[in] count Maximum output tuples, or zero for all tuples.
+ * @param[in] execute_once Hint passed through on PostgreSQL 17.
+ * PostgreSQL 18 has no execute_once argument
  */
 void bioseq_alignment_executor_run(
 		QueryDesc* query_desc,

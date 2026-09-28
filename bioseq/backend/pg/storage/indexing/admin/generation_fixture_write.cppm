@@ -1,6 +1,6 @@
 /**
  * @file admin/generation_fixture_write.cppm
- * @brief PostgreSQL grouped-SoA generation fixture publication support.
+ * @brief Build stored minimizer tpst data and check publication failures.
  */
 module;
 
@@ -89,7 +89,7 @@ ready_minimizer_generation_coordinator_fixture_result::sealed_publication() cons
     return *publication;
 }
 
-/// Parsed fixture backend and coordinated failure-injection request.
+/// Minimizer backend and failure settings selected  for this test build
 struct ready_minimizer_fixture_backend_request {
     bioseq::minimizers::minimizer_sketch_backend backend =
         bioseq::minimizers::minimizer_sketch_backend::scalar;
@@ -106,7 +106,7 @@ struct ready_minimizer_fixture_backend_request {
 #endif
 };
 
-/// Parse a fixture backend or one supported failure scenario.
+/// Parse a backend name or a named test-failure scenario.
 [[nodiscard]] inline ready_minimizer_fixture_backend_request
 parse_ready_minimizer_fixture_backend_request(std::string_view name) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -133,9 +133,8 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
             .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
             .sorted_run_failure = sorted_run_failure_injection::compact_create_before,
             .sorted_run_failure_operation = 2u,
-            // Three 32-Kbp source cores produce three input runs. A two-reader
-            // budget forces two compaction outputs, so operation 2 occurs only
-            // after output 1 completed and its two input handles were closed.
+            // Limit the merge to two readers so the second output is attempted
+            // after the first output has closed its input runs.
             .sorted_run_merge_reader_budget_bytes = std::uint64_t{64} << 10,
         };
     }
@@ -143,9 +142,8 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
         return {
             .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
             .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
-            // Three inputs cannot use minimum buffers under this request
-            // ceiling, while two inputs can. This exercises reader-size
-            // fallback, fan-in fallback, and a multi-pass merge.
+            // Make a three-input merge exceed the test budget while two inputs fit.
+            // This tests smaller reader buffers and merging in several passes.
             .sorted_run_reader_admission =
                 sorted_run_reader_admission_injection::request_ceiling,
             .sorted_run_reader_request_ceiling_bytes = std::uint64_t{160} << 10,
@@ -155,7 +153,7 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
         return {
             .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
             .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
-            // One 32-KiB reader plus metadata and 2x headroom exceeds this.
+            // Make even one minimum-size reader exceed the test reservation limit.
             .sorted_run_reader_admission =
                 sorted_run_reader_admission_injection::request_ceiling,
             .sorted_run_reader_request_ceiling_bytes = std::uint64_t{64} << 10,
@@ -164,8 +162,8 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
     if (name == "scalar_fail_sorted_reader_system_pressure") {
         return {
             .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
-            // A one-shot refusal proves system pressure is not retried with a
-            // smaller buffer and is not converted into a compaction attempt.
+            // Refuse, one reservation because of system memory pressure. The  build
+            // must stop without retrying with smaller reader buffers.
             .sorted_run_reader_admission =
                 sorted_run_reader_admission_injection::system_pressure_once,
         };
@@ -282,7 +280,7 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
     };
 }
 
-/// Arm every failure surface selected by one fixture request.
+/// Enable the failure injections and memory limits selected for this test.
 inline void arm_ready_minimizer_fixture_failures(
     const ready_minimizer_fixture_backend_request& request) noexcept {
     arm_minimizer_generation_failure_injection(request.failure);
@@ -297,7 +295,7 @@ inline void arm_ready_minimizer_fixture_failures(
 #endif
 }
 
-/// Clear fixture failure injection and merge-budget overrides.
+/// Clear the test failures and restore the normal merge-reader budget.
 inline void disarm_ready_minimizer_fixture_failures() noexcept {
     disarm_minimizer_generation_failure_injection();
 #ifdef BIOSEQ_TEST_INDEXES
@@ -307,14 +305,15 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
 }
 
 /**
- * @brief Execute the grouped-SoA coordinator through the integration-only direct route.
- * @param rel_oid Source Bioseq relation.
+ * Test the grouped-SoA build coordinator on a stored sequence using k=15 and
+ * w=10. Publish the generation, then reopen its head and manifest to check
+ * their identities and counts. A named backend must be available.
+ * @param rel_oid Source Bioseq table.
  * @param index_name Registered fragment or sequence minimizer index.
- * @param sequence_rowno Visible source-row ordinal and query key.
- * @param backend_name Exact requested producer backend.
- * @return Published generation identity, metadata, and producer receipt.
- *
- * This route does not update metadata_age_log; unavailable SIMD/GPU backends fail closed.
+ * @param sequence_rowno Source row number used as the index query key.
+ * @param backend_name Backend name or supported test-failure sceario.
+ * @return Publication result and independently  read metadata.
+ * @note This test path leaves metadata_age_log unchanged.
  */
 [[nodiscard]] ready_minimizer_generation_coordinator_fixture_result
 build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
@@ -614,9 +613,8 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             [state] { UnregisterSnapshot(state->source_snapshot); });
         state->source_snapshot = nullptr;
 
-        // Reopen the published head and immutable manifest independently.  A
-        // fresh registered copy validates that the rows are visible
-        // through PostgreSQL after the private READY token was consumed.
+        // Reopen the published head and manifest with a fresh registered snapshot
+        // to check that PostgreSQL can read the newly written metadata.
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
         Snapshot verification_source =
             bioseq::postgres::support::invoke_pg_as_cpp([] { return GetActiveSnapshot(); });
@@ -721,28 +719,27 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
     return result;
 }
 
-/// Deterministic replayable producer used by the live PG fixture. Its declared
-/// scheme is the caller-requested backend identity. The Vulkan-labelled
-/// storage fixture emits up to 32768 events with small valid
-/// cores to exercise multi-entry/multi-segment scanning. Other fixtures use a
-/// 4096-event bound. No path retains biological source bytes.
+/// Generate repeatable sorted minimizer events for storage tests. Label them
+/// with the requested backend identity Vulkan-labelled data spans the target
+/// to test multiple position segments, with up to 32768 events. Other backends
+/// use up to 4096 events.
 struct minimizer_generation_fixture_producer {
     std::uint64_t target_length = 0;
     bioseq::minimizers::minimizer_sketch_backend backend =
         bioseq::minimizers::minimizer_sketch_backend::scalar;
 
-    /// Return the persisted minimizer scheme selected by the fixture backend.
+    /// Return the minimizer scheme assigned to this test backend.
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity scheme_identity() const noexcept {
         return bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
     }
 
-    /// Return the producer identity selected by the fixture backend.
+    /// Return  the producer identity assigned to this test backend.
     [[nodiscard]] bioseq::indexing::minimizer_producer_identity
     producer_backend_identity() const noexcept {
         return bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
     }
 
-    /// Replay deterministic globally sorted events into one receiver.
+    /// Replay the test events in increasing hash order.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -760,9 +757,9 @@ struct minimizer_generation_fixture_producer {
         const std::uint64_t position_remainder =
             spread_across_target ? (target_length - 1u) % position_divisor : 0u;
         for (std::uint64_t event = 0; event < event_count; ++event) {
-            // Exact endpoint-preserving interpolation without multiplying two
-            // source-sized u64 values. The final event is target_length-1, so
-            // any canonical grouped-SoA segment boundary is genuinely crossed.
+            // Spread positions through the taret while avoiding overflow from a
+            // target_length-sized multiplication. The last event reaches the
+            // final base, allowing long test sources to cross segment boundaries.
             const std::uint64_t position =
                 spread_across_target
                     ? event * position_quotient + (event * position_remainder) / position_divisor
@@ -781,10 +778,8 @@ struct minimizer_generation_fixture_producer {
 
 static_assert(bioseq::indexing::grouped_soa_event_producer<minimizer_generation_fixture_producer>);
 
-/// Build and publish one exact live grouped-SoA generation. Every write
-/// goes through the row sink. The write path opens no read
-/// session so a later SQL statement/backend can validate an independently
-/// reopened reader without inheriting session-owned state.
+/// Publish deterministic grouped-SoA test data through the normal row writer.
+/// A later statement can open a new read session to check  the stored result.
 [[nodiscard]] minimizer_generation_integration_fixture_result
 build_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,

@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_test_contract.cppm
- * @brief Narrow source-domain failure and output-lifetime diagnostic contract.
+ * @brief Inject read failures and count source and output cleanup in tests.
  */
 module;
 
@@ -21,7 +21,7 @@ export module bioseq.postgres.storage.scanner.source_test_contract;
 export namespace bioseq::storage {
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// One-shot failure sites covering source-domain construction and cleanup.
+/// Places where tests can raise a one-time source or output error.
 enum class sequence_source_failure : std::uint8_t {
     none,
     provider_after_registry_control,
@@ -40,7 +40,7 @@ enum class sequence_source_failure : std::uint8_t {
     mmsearch_output_after_promotion,
 };
 
-/// Test-only counters for provider, registry, domain and facade lifetimes.
+/// Test counts for source creation, reads and cleanup, including live resources.
 struct sequence_source_stats {
     std::uint64_t registries_created = 0u;
     std::uint64_t registries_destroyed = 0u;
@@ -97,8 +97,8 @@ inline thread_local sequence_source_failure g_pg_sequence_source_failure =
     sequence_source_failure::none;
 inline thread_local sequence_source_stats g_pg_sequence_source_stats{};
 
-/// Arm one source-domain failure site for the next matching operation.
-/// @param point One-shot failure site, or `none` to disable injection.
+/// Raise a test error on the next visit to the selected location.
+/// @param point Failure location, or `none` to disable the error.
 inline void
 arm_pg_sequence_source_failure(sequence_source_failure point) noexcept {
     g_pg_sequence_source_failure = point;
@@ -106,9 +106,9 @@ arm_pg_sequence_source_failure(sequence_source_failure point) noexcept {
 
 namespace sequence_source_detail {
 
-/// Raise the armed source-domain failure at its exact PostgreSQL leaf.
-/// @param point Failure site being entered.
+/// Raise  and clear the test errnr if this is its selected location
 /// @throws PostgreSQL ERROR when `point` is armed.
+/// @param point Failure location, being entered.
 inline void inject_pg_sequence_source_failure(sequence_source_failure point) {
     if (g_pg_sequence_source_failure != point) {
         return;
@@ -127,8 +127,8 @@ inline void inject_pg_sequence_source_failure(sequence_source_failure point) {
 } // namespace sequence_source_detail
 #endif
 
-/* Output-lifetime diagnostics share the source-domain test counter surface.
- * Production callers retain an unconditional, inlinable no-op. */
+/* Output cleanup uses the source test counters. These functions do
+ * nothing in production builds. */
 /// Record an output memory-context reset in test builds.
 inline void note_mmsearch_output_context_reset_for_test() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -137,8 +137,8 @@ inline void note_mmsearch_output_context_reset_for_test() noexcept {
 #endif
 }
 
-/// Record whether an output value required locator promotion.
-/// @param promoted_locator Whether promotion occurred.
+/// Count an output locator converted to an expanded sequence in test builds.
+/// @param promoted_locator Whether the output locator was opened.
 inline void note_mmsearch_output_locator_promotion_for_test(
         const bool promoted_locator) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -151,8 +151,8 @@ inline void note_mmsearch_output_locator_promotion_for_test(
 #endif
 }
 
-/// Record whether output state was restored after a PostgreSQL error.
-/// @param state_restored Whether the output owner returned to its prior state.
+/// Count error recovery in test builds and record whether prior state was restored.
+/// @param state_restored Whether the output  owner returned to its prior state.
 inline void note_mmsearch_output_pg_error_restore_for_test(
         const bool state_restored) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -167,8 +167,8 @@ inline void note_mmsearch_output_pg_error_restore_for_test(
 #endif
 }
 
-/// Raise the armed failure immediately after output locator promotion.
-/// @throws PostgreSQL ERROR when the test failure site is armed.
+/// Raise the selected test error immediately after an output locator is opened.
+/// @throws PostgreSQL ERROR when this test error is armed.
 inline void inject_mmsearch_output_after_promotion_failure_for_test() {
 #ifdef BIOSEQ_TEST_INDEXES
     sequence_source_detail::inject_pg_sequence_source_failure(

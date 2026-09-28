@@ -50,9 +50,8 @@ using bioseq::io::writer_options;
 using benchmark_alphabet = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using benchmark_batch = sequence_batch<benchmark_alphabet>;
 
-/// Reader Input. Owns the on-disk corpus path. Synthetic corpora are
-/// generated in `on_input` and deleted in `on_cleanup`. Real-data
-/// corpora are referenced by absolute path and are never deleted.
+/// Corpus path and size estimates for a reader run. Cleanup deletes synthetic
+/// files created for the benchmark and keeps supplied data files.
 struct reader_input {
     std::string corpus_path;
     std::size_t bytes_on_disk = 0;
@@ -63,9 +62,7 @@ struct reader_input {
     bool is_synthetic = false;
 };
 
-/// Writer Input. Same shape as reader_input, but additionally the source
-/// corpus is slurped into memory once so the timed loop only measures
-/// the writer.
+/// Corpus loaded before timing so a writer run measures writing the batches.
 struct writer_input {
     std::string source_corpus_path;
     std::size_t source_bytes_on_disk = 0;
@@ -73,21 +70,15 @@ struct writer_input {
     bool is_fastq = false;
     bool is_synthetic_source = false;
 
-    /// Per-iteration scratch path. Each `on_run` call writes here, then
-    /// `on_evaluate` re-reads to validate roundtrip integrity. Created
-    /// once in `on_input` and deleted in `on_cleanup`.
+    /// Output path reused by writer runs. Evaluation reads the result  back, and
+    /// cleanup removes the file.
     std::string output_scratch_path;
 
     /// In-memory corpus for the writer loop. Populated in `on_input`.
     std::vector<benchmark_batch> batches;
 
-    /// XOR-aggregated content hash of `batches`, computed once in
-    /// `on_input` for the FASTQ shape (= header || seq ASCII || qual
-    /// truncated to encoded length). The `on_evaluate` lambda
-    /// recomputes this from the writer's on-disk output and compares
-    /// — any mismatch surfaces as `roundtrip_record_match = 0`.
-    /// `_fastq` and `_fasta` variants because the FASTQ form folds in
-    /// quality bytes. FASTA counts only header and sequence bytes.
+    /// Expected XOR of record hashes for checking the written output. FASTA hashes
+    /// headers and sequences. FASTQ also hashes quality bytes up to sequence length.
     std::uint64_t expected_content_hash_fastq = 0;
     std::uint64_t expected_content_hash_fasta = 0;
 };
@@ -97,11 +88,11 @@ struct io_measurement {
     std::size_t observed_record_count = 0;
     std::size_t observed_body_bytes = 0;
     std::size_t bytes_written = 0;          ///< writer outputs only
-    std::size_t roundtrip_record_count = 0; ///< writer outputs only
+    std::size_t roundtrip_record_count = 0; ///< Reserved for a writer round-trip record count.
 };
 
-/// Input for identifier extraction versus whole-header copying.
-/// Keeps PostgreSQL catalog and coercion work outside the timed workload.
+/// Reader input and field mapping for comparing UniProt header parsing with
+/// copying the whole header. Mapping setup happens before timing.
 struct identifier_benchmark_input {
     reader_input reader;
     bioseq::io::identifier_parser::identifier_mapping_result mapping;
@@ -118,8 +109,8 @@ struct identifier_benchmark_measurement {
     std::size_t parsed_field_bytes = 0;
 };
 
-/// PostgreSQL-independent lazy-expression types backed by the production
-/// admitted packed materializer.
+/// Sequence types for comparing immediate, and delayed copying. Packed results
+/// use the same memory budget and materializer as the storage code.
 using lazy_expression_range = compact_sequence_range<benchmark_alphabet>;
 using lazy_expression_facade = bioseq::storage::lazy_sequence_view<seq::dna4>;
 using lazy_expression_packed = bioseq::storage::admitted_packed_sequence<seq::dna4>;
@@ -128,7 +119,7 @@ using lazy_expression_size = bioseq::storage::sequence_size_t;
 inline constexpr std::uint64_t lazy_expression_hash_seed = 0x0377d1a5e5e0c0deULL;
 inline constexpr std::uint8_t lazy_expression_storage_width = 8u;
 
-/// Source sequence and independent correctness oracle for a lazy-expression run.
+/// Source  sequence, expected output length, and hash for an expressirn run.
 struct lazy_expression_input {
     lazy_expression_range source;
     lazy_expression_size source_logical_length = 0;
@@ -136,7 +127,7 @@ struct lazy_expression_input {
     std::uint64_t expected_hash = 0;
 };
 
-/// Allocation and admission counters for lazy-expression materialization.
+/// Bytes allocated and reserved from the memory budget while copying results.
 struct lazy_expression_allocation_statistics {
     std::uint64_t payload_materializations = 0;
     std::uint64_t intermediate_payload_materializations = 0;
@@ -149,7 +140,7 @@ struct lazy_expression_allocation_statistics {
     std::uint64_t peak_live_admitted_bytes = 0;
 };
 
-/// Logical output identity and allocation counters from one expression run.
+/// Output length, content hash, and allocation counts from one expression run.
 struct lazy_expression_measurement {
     lazy_expression_size output_logical_length = 0;
     std::uint64_t logical_hash = 0;
@@ -188,7 +179,8 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     return value;
 }
 
-/// Allocate a unique scratch path under the system temp directory.
+/// Choose a scratch filename in the system temporary directory
+/// The name includes a process ID, counter, and random suffix.
 [[nodiscard]] std::string allocate_temp_path(std::string_view tag) {
     static std::atomic<std::uint64_t> counter{0};
     filesystem::path temp_directory_root = filesystem::temp_directory_path();
@@ -201,8 +193,8 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     return full_path.string();
 }
 
-/// Write a synthetic FASTA / FASTQ corpus to `output_path`. Returns
-/// the number of bytes actually written.
+/// Write generated DNA records as FASTA or FASTQ. Return the number of bytes
+/// submitted to the output stream, or zero if the file cannot be opened.
 [[nodiscard]] std::size_t emit_synthetic_corpus(const std::string& output_path,
                                                 bool is_fastq,
                                                 std::size_t record_count,
@@ -238,9 +230,8 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
         const double sample = length_dist(rng);
         const std::size_t record_length = static_cast<std::size_t>(std::max(8.0, sample));
-        // `header_shape` defaults to "plain", preserving configured corpus bytes. The
-        // "uniprot_metadata" shape exercises positional fields, a multi-word
-        // description, EQUALS tags, alias routing and metadata stripping at once.
+        // UniProt-shaped FASTA headers exercise positional fields and metadata tags.
+        // Plain headers and FASTQ records use  the sequence number.
         if (header_shape == "uniprot_metadata" && !is_fastq) {
             buffer.append(fmt::format(">tr|P{:06}|P{:06}_BENCH Synthetic parser benchmark protein "
                                       "OS=Homo sapiens OX=9606 PE=1 SV={}\n",
@@ -286,11 +277,8 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     return bytes_written;
 }
 
-/// Common attributes resolved from a test-case `data` blob: where the
-/// corpus lives, how big it is, whether it was generated locally (and
-/// thus needs `on_cleanup` to delete it). Returned by
-/// `prepare_corpus`. Reader and writer `on_input` lambdas copy whichever
-/// fields they care about into their own `Input` struct.
+/// File details from prepare_corpus. The synthetic flag tells cleanup whether
+/// this benchmark created the file.
 struct corpus_descriptor {
     std::string path;
     std::size_t bytes_on_disk = 0;
@@ -374,14 +362,9 @@ struct corpus_descriptor {
     return descriptor;
 }
 
-/// Best-effort estimate of total bytes that one batch of this test case
-/// will need to keep in memory.  For synthetic corpora we multiply
-/// record_count by mean_record_logical_length. For real-data corpora we
-/// stat the on-disk file (and scale up by the canonical ~3.2x to
-/// approximate the decompressed size when `compressed: true`).
-///
-/// Reader and writer estimates share this model. Returns zero when neither
-/// corpus shape is measurable, which excludes the run from budget throttling.
+/// Estimate corpus memory from the configured record count and mean length,
+/// or from a supplied file's size. Compressed files use a rough expansion factor.
+/// Return zero when the size cannot be determined.
 [[nodiscard]] std::size_t estimate_corpus_bytes(std::string_view data_dir,
                                                 simdjson::dom::element data) noexcept {
     const std::string kind = read_string_field(data, "kind", "synthetic");
@@ -409,15 +392,8 @@ struct corpus_descriptor {
     return record_count * mean_record_logical_length;
 }
 
-/// Reader-side resource estimator. The reader input holds only the corpus path
-/// plus a few size counters, so the persistent
-/// (`base_memory`) cost is small.  However, we still budget `2x` the
-/// total corpus bytes for both base + extra so the dynamic memory
-/// budget throttles concurrent batches: the actual reader paths
-/// (mmap'd regions, parallel-gzip ring buffers, decoded sequence
-/// batches handed to the per-batch handler) push real RAM pressure
-/// during `on_run`, even though the framework can't see those
-/// allocations from the outside.
+/// Estimate memory for reader buffers and decoded batches so the benchmark
+/// framework can limit concurrent runs. The estimate is based on corpus  size.
 [[nodiscard]] run_constraints estimate_reader_resources(std::string_view data_dir,
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {
@@ -428,15 +404,8 @@ struct corpus_descriptor {
     };
 }
 
-/// Writer-side resource estimator.  Differs from the reader because
-/// `writer_input` slurps every input batch into RAM (see
-/// `writer_input::batches`), so the persistent footprint *is* really
-/// `~bytes` bytes.  Same `2x base + 2x extra` shape as the reader for
-/// uniformity and headroom. Callers can rely on it as a known
-/// "this batch needs ~4x corpus bytes free" gate.  Compressed cells
-/// are reader-only (`build_writer_input` early-returns) but we still
-/// emit a sensible estimate so the framework doesn't think those
-/// batches are free.
+/// Estimate memory for the batches kept by a writer run and its output
+/// buffers. The framework uses this to limit conturrent runs.
 [[nodiscard]] run_constraints estimate_writer_resources(std::string_view data_dir,
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {

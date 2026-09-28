@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/segmented_planning.cppm
- * @brief Plans segment geometry and admitted sketch storage.
+ * @brief Assigns segment minimizers to fragments and prepares query sketches.
  */
 module;
 
@@ -62,17 +62,21 @@ export {
 
     namespace bioseq::simd {
 
-    /// Fragment-local minimizers claimed by one processed segment core.
+    /// Minimizers assigned to one fragment  by a processed segment's core.
     template <class p_minimizer> struct segment_fragment_emission {
-        /// Global fragment ordinal receiving this emission.
+        /// Fragment number within the full sequence.
         std::size_t fragment_no = 0;
-        /// Biological length of the destination fragment.
+        /// Destination fragment length in bases.
         sequence_size_t fragment_len_bp = 0;
-        /// Fragment-local minimizers owned by this emission.
+        /// Owned minimizers with positions relative to the fragment's start.
         std::vector<p_minimizer> minimizers{};
     };
 
-    /** Collect fragment-local minimizers claimed by one segment core. */
+    /**
+     * Split a segment's minimizers between the fragments covered by its core.
+     * Ignore minimizers in the overlapping context outside that core, then
+     * convert, the accepted positions to offsets within each fragment.
+     */
     template <class p_minimizer>
     [[nodiscard]] std::vector<segment_fragment_emission<p_minimizer>>
     collect_fragment_emissions_for_segment(const ::bioseq::indexing::segment_unit_range& range,
@@ -115,18 +119,12 @@ export {
         return out;
     }
 
-    // =============================================================================
-    // Query sketch for persistent-index bucket selection
-    // =============================================================================
-    //
-    // Holds the query minimizers produced for persistent-index bucket filtering,
-    // keeping the optional GPU host-result permit and device span alive for the
-    // caller's lifetime. The host vector feeds the assembly/filter helpers; the
-    // Vulkan branch sketches the query on the GPU so the segmented
-    // path's seed lookup consumes byte-identical minimizers.
+    /// Owns the query sketch used to select persisted-index buckets.
+    /// GPU sketches keep both host results and device storage, together with
+    /// their memory reservations, for as long as the sketch is needed.
     template <class p_minimizer> struct budgeted_sketch_vector {
-        // Reverse destruction is the ownership contract: host capacity and the
-        // device lifetime anchor disappear before either reservation can release.
+        // Members are destroyed in  reverse order. Keep the host vector and
+        // device owner after the pxrmit so their memory is released first.
         std::optional<bioseq::parallelism::memory_permit> permit;
         std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device;
         std::vector<p_minimizer> minimizers;
@@ -137,17 +135,17 @@ export {
         bounded_nthash_execution_stats bounded_nthash_stats{};
         bool bounded_nthash_execution_stats_available = false;
 
-        /// Create an empty query-sketch owner.
+        /// Create an empty query sketch.
         budgeted_sketch_vector() = default;
         budgeted_sketch_vector(const budgeted_sketch_vector&) = delete;
         budgeted_sketch_vector& operator=(const budgeted_sketch_vector&) = delete;
 
-        /// Transfer every allocation and its corresponding admission anchor.
+        /// Move the sketch storage and its memory reservations together.
         budgeted_sketch_vector(budgeted_sketch_vector&& other) noexcept {
             steal_from_(std::move(other));
         }
 
-        /// Replace this query sketch after releasing its owned allocations.
+        /// Release the current sketch, then take ownership of the supplied sketch
         budgeted_sketch_vector& operator=(budgeted_sketch_vector&& other) noexcept {
             if (this != &other) {
                 release_owned_memory_before_permit();
@@ -156,7 +154,7 @@ export {
             return *this;
         }
 
-        /// Destroy host/device storage before releasing either permit.
+        /// Free sketch storage before releasing its memory reservations.
         void release_owned_memory_before_permit() noexcept {
             {
                 std::vector<p_minimizer> empty;
@@ -166,17 +164,16 @@ export {
             permit.reset();
         }
 
-        /// Borrow the retained host minimizers.
+        /// Borrow a read-only view of the host minimizers.
         [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
             return minimizers;
         }
 
       private:
-        /// Move storage, permits, and execution evidence from one emptying owner.
+        /// Move a sketch and its statistics into  this empty owner.
         void steal_from_(budgeted_sketch_vector&& other) noexcept {
-            // Transfer allocations while all source admission anchors remain live,
-            // then transfer device and host permits. Swap proves the source has no
-            // residual vector capacity after the permit move.
+            // Move storage while its reservations remain held. Swapping the vector
+            // leaves the source with no capacity before its permit is moved.
             minimizers.swap(other.minimizers);
             device = std::move(other.device);
             other.device.reset();
@@ -194,7 +191,8 @@ export {
         }
     };
 
-    /// Sketch one query through the backend used for index selection.
+    /// Build the query sketch used to choose target-index buckets.
+    /// Use the target's sketch backend so matching seeds use the same scheme.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] budgeted_sketch_vector<p_minimizer>
     sketch_query_for_index_selection(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -221,22 +219,12 @@ export {
 
         basic_sketch_collector<p_minimizer> query_collector;
         query_collector.reserve(query_seq.bp_size() / std::max<std::size_t>(w, 1) + 64);
-        // Vulkan query sketching returned above. For the existing all-simd tuple,
-        // use the same exact_simd continuation backend as target preparation;
-        // every other non-GPU tuple retains its explicitly scalar query backend.
+        // Match the CPU sketch backend used to prepare target indexes.
         const minimizer_sketch_backend cpu_query_backend =
             pipe::target_index_sketch_backend_from_params(params);
-        // The SQL/bench dna4 query representation is packed in u64 units, while
-        // the exact K15/W10/B8 continuation kernel consumes u32 words on NEON.
-        // Reinterpret a whole resident query as u32 without copying so the same
-        // persisted-index-compatible continuation scheme executes eight
-        // chronological candidates per block.  This is intentionally *not* the
-        // report-76 resident vector_stream selection route: its minimizer scheme
-        // differs from the persisted target index and remains forbidden here.
-        // The u32 view changes only the decoder lane width; scalar-oracle
-        // differential tests freeze the emitted raw minimizer sequence. Native
-        // little-endian word order is part of this zero-copy split; other targets
-        // retain the existing generic-u64 continuation.
+        // Indexed exact-SIMD queries use chronological continuation with 32-bit
+        // packed words to match the target index's seed selection. The access
+        // planner borrows suitable storage or packs a  copy under a reservation.
         const pipe::minimizer_range_execution_stats execution_stats =
             pipe::minimizer_dispatch_indexed_query_whole<p_minimizer>(
                 query_collector, query_seq, w, k, cpu_query_backend, params.highway_kernels);

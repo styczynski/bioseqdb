@@ -1,6 +1,6 @@
 /**
  * @file minimizer_persistence_policy.cppm
- * @brief Declares the persisted minimizer policy resolver.
+ * @brief Read saved settings for minimizer indexes on a sequence column.
  */
 module;
 
@@ -15,19 +15,23 @@ import bioseq.indexing.type;
 
 export namespace bioseq::storage::indexing {
 
-/// Effective enablement and insert-maintenance policy for minimizer indexes.
+/// Whether each minimizer  index is enabled and updated when rows are inserted.
 struct minimizer_persistence_policy_resolution {
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()> enabled{};
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()> update_on_insert{};
 };
 
 /**
- * @brief Resolves persisted minimizer policy under a registered MVCC snapshot.
- * @param[in] user_relid User relation named by the policy rows.
- * @param[in] relfilenode Current main-relation relfilenode.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in] registered_snapshot Registered MVCC snapshot used for the scan.
- * @return Effective policy for every minimizer index.
+ * @brief Read minimizer index settings visible to the supplied snapshot.
+ *
+ * Missing catalog rows use the index defaults. The carler keeps the MVCC
+ * snapshot registered throughout the lookup.
+ *
+ * @param[in] user_relid User table OID.
+ * @param[in] relfilenode Current main table file number.
+ * @param[in] attno One-based sequence column number.
+ * @param[in] registered_snapshot Snapshot used to read the settings.
+ * @return Enabled and update-on-insert flags for each minimizer index.
  */
 [[nodiscard]] minimizer_persistence_policy_resolution
 resolve_minimizer_persistence_policy(std::uint32_t user_relid,

@@ -1,6 +1,6 @@
 /**
  * @file pipeline/vulkan_decline.cppm
- * @brief Narrow fail-closed diagnostic contract for mandatory Vulkan execution.
+ * @brief Report why a requested Vulkan stage could not run.
  */
 export module bioseq.pipeline.vulkan_decline;
 
@@ -10,7 +10,7 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::simd::pipe {
 
-/// Report that a mandatory Vulkan stage did not execute.
+/// Throw a Vulkan error with the stage name and the reason it could not, run.
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     const std::string detail =

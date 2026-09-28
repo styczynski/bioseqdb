@@ -1,12 +1,11 @@
 /**
  * @file index.cppm
- * @brief Aggregate interface for PostgreSQL-backed Bioseq table I/O.
+ * @brief Read and write Bioseq columnar tables.
  *
- * @details Re-exports chunk buffers, predicate pruning, decoding, reader and
- * writer lifecycles, and the backend-local chunk cache. Callers must observe
- * the PostgreSQL memory-context and relation lifetimes of selected operations.
+ * Exports the table reader, writer, chunk decoding and filtering helpers,
+ * and the cache of decompressed columns.
  */
-/** @brief Stable module symbol re-exporting all table-I/O partitions. */
+/** @brief Export the table I/O modules through one interface. */
 export module bioseq.postgres.table.io;
 export import :buffers;
 export import :pruning;

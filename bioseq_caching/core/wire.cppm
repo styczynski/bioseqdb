@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/wire.cppm
- * @brief Fixed-width cache identities, enums, and serialized-record fields.
+ * @brief Cache identifiers, shared record fields and dependency serialization.
  */
 module;
 
@@ -44,14 +44,14 @@ inline constexpr std::uint64_t k_cache_memory_fraction_denominator = 4;
 inline constexpr std::uint64_t k_maximum_file_cache_bytes = 128ULL << 30;
 inline constexpr std::uint64_t k_minimum_file_free_bytes = 10ULL << 30;
 
-/** A collision-index digest; equality still requires canonical bytes. */
+/** Digest used to find candidates. Compare their canonical bytes to rule out collisions. */
 struct cache_digest_256 {
     std::array<std::uint8_t, 32> bytes{};
 
     [[nodiscard]] bool operator==(const cache_digest_256&) const noexcept = default;
 };
 
-/** ABA-safe identity for one cache generation. */
+/** Identifies a cache generation acros slot reuse and server restarts. */
 struct cache_entry_id {
     cache_digest_256 digest{};
     std::uint64_t boot_nonce = 0;
@@ -98,16 +98,15 @@ enum class cache_execution_mode : std::uint32_t {
     explain_only = 4,
 };
 
-/** Disclosure level for one producer-owned administrative cache row. */
+/** Controls whether a diagnostic row includes SQL and plan, text. */
 enum class cache_diagnostic_disclosure_level : std::uint8_t {
     summary_only = 0,
     full_text = 1,
 };
 
 /**
- * Decide whether one caller may see SQL and producer-plan text for one row.
- * Explicit monitoring grants alone expose bounded scalar summaries; the
- * producing role, a superuser, or the policy monitoring role may see text.
+ * Allow SQL and plan text for the producing role, superusers and the policy
+ * monitoring role Other callers receive summary fields only.
  */
 [[nodiscard]] constexpr cache_diagnostic_disclosure_level
 cache_diagnostic_disclosure(bool caller_is_superuser,
@@ -180,7 +179,7 @@ struct dependency_version {
 inline constexpr std::uint32_t k_dependency_vector_magic = 0x42445631U;
 inline constexpr std::uint32_t k_dependency_vector_abi_revision = 1;
 
-/** Exact dependency epoch plus the ABA generation of its directory record. */
+/** Dependency version  plus a generation counter that detects directory record reuse. */
 struct dependency_vector_entry {
     dependency_version version{};
     std::uint64_t record_generation = 0;
@@ -191,7 +190,7 @@ struct dependency_vector_entry {
 inline constexpr std::uint32_t k_dependency_vector_header_bytes = 40;
 inline constexpr std::uint32_t k_dependency_vector_entry_bytes = 88;
 
-/** Native shared-memory envelope; no process pointer enters persisted bytes. */
+/** Header fields for the serialized dependency list. It contains no process pointers. */
 struct dependency_vector_header {
     std::uint32_t magic = k_dependency_vector_magic;
     std::uint32_t abi_revision = k_dependency_vector_abi_revision;
@@ -225,7 +224,7 @@ struct dependency_vector_envelope_result {
     }
 };
 
-/** Exact byte requirement, or zero when the bounded count is invalid. */
+/** Return the serialized size, or zero if the dependency count exceeds the limit. */
 [[nodiscard]] constexpr std::size_t
 dependency_vector_envelope_bytes(std::size_t entry_count) noexcept {
     return entry_count <= k_maximum_dependencies_per_generation
@@ -233,7 +232,7 @@ dependency_vector_envelope_bytes(std::size_t entry_count) noexcept {
                : 0;
 }
 
-/** Stable non-cryptographic integrity checksum over canonical entry bytes. */
+/** Checksum for detecting changes to encoded entries. It is not cryptographic. */
 [[nodiscard]] constexpr std::uint64_t
 dependency_vector_payload_checksum(std::span<const std::byte> payload) noexcept {
     std::uint64_t checksum = 14695981039346656037ULL;
@@ -290,7 +289,7 @@ dependency_vector_entry_valid(const dependency_vector_entry& entry) noexcept {
            observability_valid && version.reserved == 0;
 }
 
-/** One database-wide committed-write epoch used as an exact fallback guard. */
+/** Check a database-wide write version used when precise invalidation is unavailable. */
 [[nodiscard]] constexpr bool
 database_write_guard_entry_valid(const dependency_vector_entry& entry) noexcept {
     const dependency_version& version = entry.version;
@@ -302,7 +301,7 @@ database_write_guard_entry_valid(const dependency_vector_entry& entry) noexcept 
            version.observability == write_observability::database_wide_fallback;
 }
 
-/** One database-wide committed-definition epoch used by precise generations. */
+/** Check a database-wide definition version used alongside precise dependencies. */
 [[nodiscard]] constexpr bool
 database_definition_guard_entry_valid(const dependency_vector_entry& entry) noexcept {
     const dependency_version& version = entry.version;
@@ -314,13 +313,13 @@ database_definition_guard_entry_valid(const dependency_vector_entry& entry) noex
            version.observability == write_observability::database_wide_fallback;
 }
 
-/** Validate the single outside-envelope per-database epoch guard. */
+/** Validate the database-wide version record stored separately  from the plan dependencies. */
 [[nodiscard]] constexpr bool
 database_guard_entry_valid(const dependency_vector_entry& entry) noexcept {
     return database_write_guard_entry_valid(entry) || database_definition_guard_entry_valid(entry);
 }
 
-/** Only the conservative data-write guard carries a continuing XID oracle. */
+/** A database-wide write version also requires checking transaction completions. */
 [[nodiscard]] constexpr bool
 database_guard_requires_completion(const dependency_key& key) noexcept {
     return key.kind == dependency_kind::database_write_epoch;
@@ -333,11 +332,10 @@ database_guard_requires_completion(const dependency_vector_entry& entry) noexcep
 }
 
 /**
- * Validate the PG snapshot-to-dependency handshake without depending on a
- * native SnapshotData layout.  PostgreSQL deliberately clears the copied
- * snapshot field, so a nonzero caller-minted binding is always authoritative;
- * a nonzero snapshot field is additional equality evidence.  The continuing
- * count is optional and is used only by conservative in-flight generations.
+ * Check that the dependency sample still belongs to the bound PostgreSQL snapshot.
+ * The binding counter must be nonzero and match the current counter. A copied
+ * snapshot may have a cleared counter. If that rounter or the optional ongoing
+ * check is present, it must agree too.
  */
 [[nodiscard]] constexpr bool
 dependency_completion_handshake_valid(std::uint64_t copied_snapshot_completion_count,
@@ -476,7 +474,7 @@ decode_entry(std::span<const std::byte> input) noexcept {
 
 } // namespace dependency_vector_wire_detail
 
-/** Build an exact, canonical envelope without allocating or retaining pointers. */
+/** Write sorted, distinct dependencies into an  exactly sized buffer, with a header and checksum. */
 [[nodiscard]] inline dependency_vector_envelope_result
 initialize_dependency_vector_envelope(std::span<std::byte> envelope,
                                       std::span<const dependency_vector_entry> entries) noexcept {
@@ -521,7 +519,7 @@ initialize_dependency_vector_envelope(std::span<std::byte> envelope,
     return result;
 }
 
-/** Validate shape, cap, checksum, entry semantics, and strict canonical order. */
+/** Check the format and checksum, then validate every entry and its order. */
 [[nodiscard]] inline dependency_vector_envelope_result
 validate_dependency_vector_envelope(std::span<const std::byte> envelope) noexcept {
     dependency_vector_envelope_result result{};
@@ -579,7 +577,7 @@ validate_dependency_vector_envelope(std::span<const std::byte> envelope) noexcep
     return result;
 }
 
-/** Decode every validated entry into caller-owned process-local storage. */
+/** Validate the encoded list and copy its entries into an exactly sized output buffer */
 [[nodiscard]] inline dependency_vector_envelope_result
 copy_dependency_vector_entries(std::span<const std::byte> envelope,
                                std::span<dependency_vector_entry> output) noexcept {
@@ -601,9 +599,9 @@ copy_dependency_vector_entries(std::span<const std::byte> envelope,
 }
 
 /**
- * Exact SHA input size for a canonical plan envelope and optional database
- * guard.  The completion counter is deliberately absent: it is an in-flight
- * publication handshake, not a committed dependency version.
+ * Return the bytes needed to hash the plan dependencies and optional database version.
+ * Completion counters check snapshot timing and are excluded from this hash.
+ * The fingerprint describes committed dependency versions.
  */
 [[nodiscard]] constexpr std::size_t
 dependency_fingerprint_material_bytes(std::size_t plan_dependency_count,
@@ -615,8 +613,8 @@ dependency_fingerprint_material_bytes(std::size_t plan_dependency_count,
 }
 
 /**
- * Copy stable dependency-fingerprint material without native layout bytes:
- * the validated canonical plan envelope followed by one encoded guard entry.
+ * Copy the validated dependency bytes and optional database version for hashing.
+ * Explicit  field encoding keeps compiler padding out of the fingerprint.
  */
 [[nodiscard]] inline dependency_vector_envelope_result initialize_dependency_fingerprint_material(
     std::span<std::byte> material,

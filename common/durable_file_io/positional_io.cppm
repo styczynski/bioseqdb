@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/positional_io.cppm
- * @brief Complete positional I/O and regular-file identity capture.
+ * @brief Read or write a complete byte range at a file offset.
  */
 module;
 
@@ -58,7 +58,7 @@ namespace bioseq::common::durable_file_io::detail {
 
 export namespace bioseq::common::durable_file_io {
 
-/** Capture a regular descriptor's complete stable identity. */
+/** Read metadata for an open regular file so callers can detect  later changes. */
 [[nodiscard]] inline std::expected<regular_file_identity, file_error>
 capture_regular_file_identity(
     int descriptor,
@@ -74,10 +74,9 @@ capture_regular_file_identity(
 }
 
 /**
- * Read exactly `destination.size()` bytes at `offset`.
- *
- * EINTR and short reads are retried. EOF before the requested span is
- * `unexpected_end_of_file`; every failure reports the first unread offset.
+ * Read exactly destination.size() bytes starting at offset.
+ * Retry interrupted and short reads. Reaching EOF early reports
+ * unexpected_end_of_file. A failure records the first unread offset.
  */
 [[nodiscard]] inline std::expected<void, file_error>
 read_exact_at(
@@ -148,10 +147,9 @@ read_exact_at(
 }
 
 /**
- * Write all bytes at `offset`.
- *
- * EINTR and short writes are retried. A zero-length write while bytes remain
- * is `no_write_progress`; every failure reports the first unwritten offset.
+ * Write the, complete byte span starting at offset.
+ * Retry interrupted and short writes. A write that makes no progress reports
+ * no_write_progress. A failure records the first unwritten offset.
  */
 [[nodiscard]] inline std::expected<void, file_error>
 write_all_at(

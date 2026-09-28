@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates base-scan runtime, EXPLAIN, and parallel execution callbacks.
+ * @brief Export the execution callbacks for Bioseq custom scans.
  */
 export module bioseq.postgres.table:custom_scan_scan_execution;
 

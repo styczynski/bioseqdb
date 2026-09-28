@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Collects executor-owned sequence source routes for BatchSort.
+ * @brief Keep child sequence readers available while BatchSort buffers their rows.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -21,7 +21,7 @@ import :custom_scan_scan_runtime_state_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** Walks @p plan for lazy BioseqScan providers and adds each source route to @p routes. */
+    /** Find lazy Bioseq scans below @p plan and add their sequence-reader references to @p routes. */
     void batch_sort_collect_source_routes(PlanState* plan,
                                           bioseq::storage::pg_sequence_source_route_set& routes,
                                           std::uint32_t& provider_count) {
@@ -72,7 +72,7 @@ export {
         }
     }
 
-    /** Collects BioseqScan source routes from @p child into @p routes and reports whether any provider was found. */
+    /** Keep @p child sequence readers alive and return whether any provider was found. */
     [[nodiscard]] bool
     batch_sort_attach_source_routes(PlanState* child,
                                     bioseq::storage::pg_sequence_source_route_set& routes) {

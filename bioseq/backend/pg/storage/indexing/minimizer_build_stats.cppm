@@ -1,6 +1,6 @@
 /**
  * @file minimizer_build_stats.cppm
- * @brief Backend-local statistics shape for one minimizer-sequence index build.
+ * @brief Statistics from the latest minimizer sequence-index build in this backend.
  */
 module;
 
@@ -11,10 +11,10 @@ export module bioseq.postgres.storage.indexing.minimizer_build_stats;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Captures retained, spilled, and merged runs from the latest local build.
+ * @brief Memory use, temporary files and  merge work from the latest local index build.
  *
- * Storage updates the counters, administration resets them, and SQL reads them
- * from the same PostgreSQL backend process.
+ * Index storage fills these counters. Administrative calls reset them, and SQL
+ * diagnostics read the values from the same PostgreSQL backend process.
  */
 struct last_minimizer_sequence_build_stats {
     std::uint64_t backend_pid = 0;
@@ -37,7 +37,7 @@ struct last_minimizer_sequence_build_stats {
     std::uint64_t position_spill_count = 0;
 };
 
-/// Backend-local counters populated by the active minimizer-sequence build.
+/// Statistics from the current or most recent build in this PostgreSQL backend.
 inline last_minimizer_sequence_build_stats
     g_last_minimizer_sequence_build_stats{};
 

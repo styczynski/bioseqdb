@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Generates fixed-target SIMD matrix utility probes.
+ * @brief Tests SIMD matrix  loading and transposition on each compiled CPU target.
  */
 
 #ifndef BIOSEQ_TEST_INDEXES
@@ -59,8 +59,8 @@ template<class p_element>
 /**
  * @brief Computes source offsets for overlapping matrix rows.
  * @tparam p_row_count Compile-time row capacity.
- * @param[in] lanes Active matrix width.
- * @param[in] row_context Overlap retained between adjacent rows.
+ * @param[in] lanes Active matrix width
+ * @param[in] row_context Overlap kept between adjacent rows.
  * @return Offset for each potential row.
  */
 template<std::size_t p_row_count>
@@ -77,13 +77,10 @@ template<std::size_t p_row_count>
 }
 
 /**
- * @brief Materializes target-local matrix rows as scalar vectors.
- * @tparam p_element Scalar lane type.
- * @tparam p_simd_tag Highway descriptor type.
- * @tparam p_row_count Compile-time row capacity.
- * @param[in] simd_tag Active descriptor.
- * @param[in] storage Target-native row vectors.
- * @return Active square matrix in row-major vectors.
+ * @brief Copies active SIMD matrix rows into ordinary vectors for comparison.
+ * @param[in] simd_tag SIMD lane type and width.
+ * @param[in] storage Matrix rows stored as SIMD vectors.
+ * @return A square matrx with one scalar value per lane.
  */
 template<class p_element, class p_simd_tag, std::size_t p_row_count>
 [[nodiscard]] auto materialize_matrix_rows(
@@ -158,10 +155,11 @@ template<class p_element>
 }
 
 /**
- * @brief Checks bounded row loading at every supported boundary shape.
- * @tparam p_element Scalar lane type.
- * @param[in,out] cases Number of boundary shapes exercised.
- * @return `true` when bounded loads match their scalar projection.
+ * @brief Compares full and bounded row loads with scalar expectations.
+ *
+ * Tests several row overlaps.
+ * @param[in,out] cases Number of tested combinations.
+ * @return True when  each loaded matrix matches.
  */
 template<class p_element>
 [[nodiscard]] auto check_load_bounded_rows(std::uint32_t& cases) -> bool {
@@ -212,9 +210,8 @@ template<class p_element>
 }
 
 /**
- * @brief Checks row loading from explicit nonuniform offsets.
- * @tparam p_element Scalar lane type.
- * @return `true` when each row begins at its requested source offset.
+ * @brief Checks row loading with explicitly supplied row offsets.
+ * @return True when each row matches the source and the loaded count is correct.
  */
 template<class p_element>
 [[nodiscard]] auto check_load_rows_at_explicit_offsets() -> bool {
@@ -239,9 +236,9 @@ template<class p_element>
 }
 
 /**
- * @brief Checks bounded row loading from explicit nonuniform offsets.
- * @param[in,out] cases Number of boundary shapes exercised.
- * @return `true` when active lanes match the bounded source spans.
+ * @brief Checks row loads and returned counts with several source strides.
+ * @param[in,out] cases Number of tested combinations.
+ * @return True when values and full/partial load counts match.
  */
 [[nodiscard]] auto check_load_bounded_rows_at_explicit_offsets(
     std::uint32_t& cases) -> bool {
@@ -346,11 +343,13 @@ template<class p_element>
 }
 
 /**
- * @brief Runs a typed check for every supported unsigned lane width.
- * @tparam p_function Templated nullary check type.
- * @param[in] function Check invoked for each lane type.
- * @param[in,out] cases Number of typed checks attempted.
- * @return `true` when every typed check passes.
+ * @brief Checks unsigned lane widths from 8 to 64 bits.
+ *
+ * Stops calling the check after a failure, while still counting the
+ * remaining width cases.
+ * @param[in] function Test taking the lane type as a template argument.
+ * @param[in,out] cases Count of  width cases.
+ * @return True if all widths pass.
  */
 template<class p_function>
 [[nodiscard]] auto run_for_widths(

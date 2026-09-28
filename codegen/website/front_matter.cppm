@@ -21,10 +21,9 @@ module bioseq.codegen.website:front_matter;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Strict tutorial frontmatter and site configuration parsing (§9, §10.1).
-// yaml-cpp is the sole frontmatter/config parser and stays confined to this
-// unit. Anchors, aliases, custom tags, duplicate keys, and unknown/missing keys
-// are fatal so authoring errors surface before any cluster starts.
+// Reads tutorial metadata and  site settings with yaml-cpp. Rejects
+// unsupported YAML features, duplicate or unknown keys, and missing required
+// keys before the website build starts a database.
 namespace bioseq::codegen::website {
 
 struct front_matter_sections {
@@ -35,8 +34,8 @@ struct front_matter_sections {
 
 namespace {
 
-// SAX handler that rejects anchors, aliases, and custom tags, and detects
-// duplicate mapping keys — none of which yaml-cpp's DOM (YAML::Load) surfaces.
+// Check YAML parser events before building the document tree, so we
+// can reject anchors, aliases, custom tags, and duplicate mapping keys.
 struct strict_yaml_handler : YAML::EventHandler {
     struct frame {
         bool is_map{};
@@ -60,7 +59,7 @@ struct strict_yaml_handler : YAML::EventHandler {
             reject("custom YAML tag '" + tag + "' is not allowed");
         }
     }
-    // Consume a scalar node in the parent frame's key/value alternation.
+    // Record a scalar key or value in the enclosing mapping.
     void enter_scalar(const std::string& value) {
         if (stack.empty() || !stack.back().is_map) {
             return;
@@ -71,7 +70,7 @@ struct strict_yaml_handler : YAML::EventHandler {
         }
         current.expecting_key = !current.expecting_key;
     }
-    // Consume a container node (map/seq) in the parent's alternation.
+    // Count this map or, sequence as the next key or value in the enclosing mapping.
     void enter_container() {
         if (stack.empty() || !stack.back().is_map) {
             return;
@@ -176,11 +175,11 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
     return split;
 }
 
-/// @brief Parses and validates strict tutorial frontmatter (§10.1).
-/// @param yaml Raw YAML frontmatter text.
-/// @param path Source path for diagnostics.
+/// @brief Reads and checks tutorial metadata.
+/// @param yaml Raw YAML frontmatter text
+/// @param path Source path for errors.
 /// @param default_slug Snake-case filename stem used when slug is omitted.
-/// @return The validated metadata; throws on any unknown or missing key.
+/// @return Parsed metadata. Throws for  unknown keys or missing required keys.
 [[nodiscard]] tutorial_metadata parse_tutorial_metadata(
     std::string_view yaml,
     std::string_view path,
@@ -250,7 +249,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
     return metadata;
 }
 
-/// @brief Validated site configuration (§9 site.yaml closed schema).
+/// @brief Website settings read from site.yaml.
 struct site_configuration {
     std::string title;
     std::string short_description;
@@ -284,7 +283,7 @@ void validate_base_path(std::string_view value, std::string_view path) {
         throw std::runtime_error("default_base_path may not contain query/fragment/"
                                  "percent-encoded slash: " + std::string(path));
     }
-    // Every interior segment must be a nonempty, lower URL-safe, non-dot segment.
+    // Reject empty path components, dot traversal, and unsupported URL characters.
     std::size_t begin = 1;
     while (begin < value.size()) {
         const std::size_t end = value.find('/', begin);
@@ -331,10 +330,10 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
 
 }  // namespace
 
-/// @brief Parses and validates website/site.yaml (§9).
+/// @brief Reads and checks website/site.yaml.
 /// @param yaml Raw site.yaml text.
-/// @param path Source path for diagnostics.
-/// @return The validated, closed-schema configuration.
+/// @param path Source path for errors.
+/// @return Parsed settings. Throws for unsupported or missing required fields.
 [[nodiscard]] site_configuration parse_site_configuration(
     std::string_view yaml, std::string_view path) {
     const std::string yaml_text(yaml);

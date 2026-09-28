@@ -1,10 +1,9 @@
 /**
  * @file boundary_parity_test.cpp
- * @brief Tests fragment-index parity at k-mer, window, and fragment boundaries.
+ * @brief Compares fragment-index positions with minimizers collected  from the whole sequence.
  *
- * The tests compare resident and chunked scanners with whole-sequence
- * minimizer collection. They run inside `bioseq::simd::HWY_NAMESPACE` to call
- * the selected collectors directly.
+ * Resident and chunked inputs must agree at k-mer, window and fragment boundaries.
+ * Tests use the selected Highway target to call its collectors directly.
  */
 
 #include <hwy/highway.h>
@@ -44,21 +43,21 @@ using bioseq::storage::lazy_sequence;
 using bioseq::storage::make_resident_lazy_sequence;
 using bioseq::indexing::test::fake_fragment_storage;
 
-/// Packed DNA4 alphabet used by parity fixtures.
+/// DNA4 packed into 64-bit words for these fixtures.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-/// Resident DNA4 range used by parity fixtures.
+/// Packed DNA4 range shared by the scanner fixtures.
 using range_t = compact_sequence_range<dna4_u64>;
 
-/// Window length shared with the fragment builder.
+/// Minimizer window length used by both the reference collector and fragment builder.
 constexpr std::size_t k_window_size = 10;
 /// K-mer length shared with the fragment builder.
 constexpr std::size_t k_kmer_size = 15;
-/// Scanner storage units per source fragment.
+/// Packed 64-bit words per source fraqment.
 constexpr std::size_t k_fragment_units = 1024;
-/// Logical base-pair span of one persisted fragment.
+/// Number of bases in one full fragment.
 constexpr std::size_t k_fragment_bp = k_fragment_units * 32;
 
-/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+/// Generates repeatable DNA4 symbols from a random seed.
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
                                                std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> symbols(symbol_count);
@@ -72,7 +71,7 @@ constexpr std::size_t k_fragment_bp = k_fragment_units * 32;
     return symbols;
 }
 
-/// Collect the whole-sequence hash-to-position oracle.
+/// Collects whole-sequence minimizers into a reference map with  sorted, distinct positions.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 whole_sequence_map(range_t& range) {
     if (range.bp_size() < k_window_size + k_kmer_size) {
@@ -93,7 +92,7 @@ whole_sequence_map(range_t& range) {
     return output;
 }
 
-/// Collect sorted positions from an assembled index over the oracle hashes.
+/// Looks up the reference hashes in the assembled index and sorts their distinct positions.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 assembled_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
               const std::map<std::uint64_t, std::vector<std::uint64_t>>& universe) {
@@ -111,7 +110,7 @@ assembled_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
     return output;
 }
 
-/// Build through one scanner type and compare with whole-sequence collection.
+/// Builds an index through the selected scanner and compares positions for all reference hashes.
 template <class p_scanner> void check_segment_parity(std::size_t symbol_count, std::uint64_t seed) {
     auto data = make_dna4(symbol_count, seed);
     range_t range(data);
@@ -167,7 +166,7 @@ template <class p_scanner> void check_segment_parity(std::size_t symbol_count, s
 TEST_CASE("per-fragment assemble_segment parity across boundary lengths (scanner_none)",
           "[component:bioseq][layer:unit][feature:index]") {
     using none = resident_sequence_scanner<std::uint64_t>;
-    // 0, < k, k..(w+k-1), exactly w+k, then a multi-fragment length.
+    // Check empty and short inputs, the first full minimizer window, and a sequence spanning fragments.
     for (std::size_t n : {std::size_t{0}, std::size_t{8}, std::size_t{15}, std::size_t{20},
                           std::size_t{24}, std::size_t{25}, std::size_t{64}, std::size_t{40000}}) {
         DYNAMIC_SECTION("scanner_none n=" << n) {

@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hash_major_diagnostics.cppm
- * @brief Hash-major generation inspection and parallel transport probe SQL routines.
+ * @brief Inspect minimizer indexes ordered by hash and test parallel payload reads.
  */
 module;
 
@@ -261,8 +261,9 @@ using bioseq::pg::detail::fixed_hex_u64;
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Validates a source-bound ready hash-major generation and verifies its
- * metadata, catalog rows, byte counts, and checksums.
+ * @brief Verify a published index whose minimizer records are ordered by hash
+ * Check the source sequence, metadata and stored streams, then return their
+ * identities, sizes and checksums as JSON.
  */
 bioseq::postgres::support::jsonb_value inspect_ready_hash_major_minimizer_generation(
     Oid rel, std::string index_name, std::int64_t query_key) {
@@ -279,9 +280,10 @@ bioseq::postgres::support::jsonb_value inspect_ready_hash_major_minimizer_genera
 }
 
 /**
- * @brief Validates a ready generation row, plain payload, and address checksum
- * using a serial scan when requested_workers is zero or a shared parallel heap
- * scan when it is positive.
+ * @brief Test reading a published index with serial or parallel  heap scans.
+ * Zero workers selects a serial scan. A positive count requests workers
+ * sharing one scan. Check row contents and checksums, and return read counts
+ * and elapsed time. Missing, duplicate or corrupt rows raise an error.
  */
 bioseq::postgres::support::jsonb_value
 hash_major_minimizer_parallel_scan_probe(Oid source_table,

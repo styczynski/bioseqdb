@@ -1,9 +1,6 @@
 /**
  * @file sequence_storage.cppm
- * @brief Stable facade for PostgreSQL sequence storage partitions.
- *
- * Re-exports catalog, layout, DDL, write and read contracts while retaining
- * the authored orphan-reaper and vacuum SQL entry points.
+ * @brief Export sequence storage APIs and provide shard cleanup and vacuum procedures.
  */
 module;
 
@@ -85,16 +82,15 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter;  // ceil_log2 used in letters_per_unit_for
+import bioseq.common.seqan_adapter;  // ceil_log2 for calculating letters per storage unit.
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-// The PG-free bucket math and sequence_locator value live in their own
-// module so the unit-test TU can link them without the Postgres backend.
-// Re-exported here so existing `import bioseq_storage` consumers are unchanged.
+// Keep bucket calculations and sequence_locator independent of PostgreSQL
+// so unit tests can use them. Re-export them with the storage manager API.
 export import bioseq.storage.layout;
 
 export import :sequence_storage_catalog;
@@ -108,20 +104,17 @@ static_assert(__cplusplus >= 202302L,
 
 namespace bioseq::storage {
 
-// Orphan relation maintenance.
-// ---------------------------------------------------------------------------
+// Remove unused storage tables and registry rows.
 
 /**
- * @brief Sweep stale shard rows and unreferenced fragment or sidecar relations.
- * @return One event per deleted catalog row, dropped relation, or recoverable
- * relation-drop failure.
- * @throws A translated PostgreSQL error or `std::runtime_error` when catalog
- * discovery, locking, SPI, or an unrecoverable drop fails.
+ * @brief Delete stale shard registrations and drop unreferenced storage tables.
  *
- * Catalog-row cleanup holds `ShareRowExclusiveLock` on the registry. Physical
- * candidates are revalidated while holding `AccessExclusiveLock` on the
- * candidate and `ShareRowExclusiveLock` on the registry. Each physical drop
- * runs in a subtransaction so a recoverable PostgreSQL error can be reported.
+ * Lock the registry while deleting stale rows. Before each table  drop, lock the
+ * table and registry and check its identity and references again Each drop runs
+ * in a subtransaction so recoverable PostgreSQL errors can be reported.
+ *
+ * @return Events for deleted rows, dropped tables and recoverable drop failures.
+ * @throws PostgreSQL or C++ exceptions when cleanup cannot continue.
  */
 export [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -141,7 +134,7 @@ reap_orphan_seq_sub_tables() {
     bioseq::postgres::support::safety_runtime_probe::destructor_sentinel
         reaper_call_sentinel{"orphan_reaper_call"};
 #endif
-    // Append one owning result row while keeping fault injection at this boundary.
+    // Collect a result row here so tests can inject an allocation failure.
     const auto append_event =
         [&events](reaper_event event) {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
@@ -161,9 +154,8 @@ reap_orphan_seq_sub_tables() {
     }
 
     /*
-     * Serialize Direction-A discovery/deletion against seq_sub_table writers.
-     * Direction B reacquires this self-conflicting mode per physical candidate
-     * in the production writer's physical-then-catalog lock order.
+     * Block registry writers while finding and deleting stale rows. Table drops
+     * later take the physical table lock first, matchig the writer lock order.
      */
     const Oid internal_namespace_oid =
         bioseq::postgres::support::invoke_pg_as_cpp([] {
@@ -185,7 +177,7 @@ reap_orphan_seq_sub_tables() {
                 seq_sub_table_oid, ShareRowExclusiveLock);
         });
 
-    // Convert unexpected SPI statuses into the function's C++ error path.
+    // Throw a C++ exception when SPI returns an  unexpected status.
     const auto require_status = [](
             int actual,
             int expected,
@@ -327,7 +319,7 @@ reap_orphan_seq_sub_tables() {
         "      SELECT 1 FROM bioseq_internal.seq_sub_table s "
         "      WHERE s.sub_table_relid = c.oid OR s.sidecar_relid = c.oid) "
         "ORDER BY c.oid;";
-    /// Catalog snapshot of one physical relation eligible for revalidation.
+    /// A table name and OID to check again before dropping it.
     struct orphan_relation_candidate final {
         Oid relation_oid = InvalidOid;
         std::string leaf_name;
@@ -560,11 +552,9 @@ reap_orphan_seq_sub_tables() {
                         relation_oid, AccessExclusiveLock);
                 });
             /*
-             * Writers lock a physical shard before recording or updating its
-             * catalog row.  Match that order, then hold the catalog lock
-             * through revalidation and DROP.  Releasing this one explicit
-             * lock before the next candidate avoids cross-candidate
-             * physical/catalog lock inversion.
+             * Lock the table before its registry, as writers do. Hold both while
+             * checking references and dropping the table, then release this
+             * registry lock before locking another candidate to avoid a deadlock.
              */
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [seq_sub_table_oid] {
@@ -688,29 +678,25 @@ reap_orphan_seq_sub_tables() {
 
 namespace {
 
-/// Sequence shard and sidecar relation pair selected for maintenance.
+/// A fragment table and its sidecar selected for vacuum.
 struct vacuum_target_pair {
-    /// Fragment relation vacuumed before its co-sharded sidecar.
+    /// Fragment, table to vacuum first.
     Oid sub_relation = InvalidOid;
-    /// Sidecar relation paired with `sub_relation`.
+    /// Sidecar belonging to the same shard.
     Oid sidecar_relation = InvalidOid;
 };
 
 }  // namespace
 
 /**
- * @brief Vacuum and analyze every fragment and sidecar shard owned by a table.
- * @param rel Parent relation OID. SQL NULL performs no maintenance.
- * @throws A translated PostgreSQL error or `std::runtime_error` when the call
- * is atomic, SPI state cannot be changed, or vacuum fails for a reason other
- * than a concurrently removed relation.
+ * @brief Vacuum and  analyze a table's fragment storage and sidecars.
  *
- * The injected call context enforces non-atomic procedure execution and
- * manages transaction boundaries; it is not a SQL-visible parameter.
+ * Requires a procedure call that allows commits. Commit before each table pair
+ * because VACUUM needs its own transaction. If a shard disappears, roll back
+ * that maintenance transaction and continue with the next pair
  *
- * The procedure commits before each relation pair because PostgreSQL VACUUM
- * cannot execute inside the caller's transaction. A concurrently dropped shard
- * is skipped after rolling back the maintenance transaction.
+ * @param rel Parent table OID. SQL NULL does nothing.
+ * @throws PostgreSQL or C++ exceptions if transaction control, SPI or vacuum fails.
  */
 export [[bioseq_sql::procedure({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

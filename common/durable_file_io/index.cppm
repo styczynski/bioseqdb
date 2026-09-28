@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/index.cppm
- * @brief Public crash-durable POSIX file I/O facade.
+ * @brief File reads, writes and publication with explicit sync and error checks.
  */
 export module bioseq.common.durable_file_io;
 

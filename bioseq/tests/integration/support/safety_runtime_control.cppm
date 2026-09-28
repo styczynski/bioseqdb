@@ -1,10 +1,10 @@
 /**
  * @file safety_runtime_control.cppm
- * @brief PostgreSQL control module for backend-local runtime safety probes.
+ * @brief Controls runtime-safety tests inside one PostgreSQL backend.
  *
- * The Bioseq extension communicates with this helper through a backend-local
- * rendezvous API. Keeping the SQL-callable control functions here preserves
- * the extension DSO's generated fmgr export closure.
+ * The extension calls these probes through  a backend-local rendezvous API.
+ * SQL control functions live in this helper library so the extension keeps
+ * only its generated SQL entry points.
  */
 
 module;
@@ -73,7 +73,7 @@ constexpr std::string_view terminal_finish_non_ok_event =
 constexpr std::string_view terminal_marker_schema =
     "bioseq.postgres_error_safety.terminal_marker";
 
-/** Describes the required ordering between a probe site and injected fault. */
+/** Required order of the selected site visit and injected fault. */
 enum class probe_relation : std::uint8_t {
     natural_at_site,
     injected_routes_to_site,
@@ -88,7 +88,7 @@ struct event_counter final {
     std::uint64_t count = 0;
 };
 
-/** Holds the backend-local state of one armed probe case. */
+/** State and counters for the probe armed in this backend. */
 struct probe_state final {
     bool enabled = false;
     bool inside_target = false;
@@ -125,14 +125,14 @@ struct probe_state final {
 /** Active probe state for the current PostgreSQL backend. */
 probe_state state{};
 
-/** Returns whether the active fault may run outside the target function. */
+/** Checks whether the active vacuum-cleanup fault may run outside the selected SQL function. */
 [[nodiscard]] bool backend_scoped_case() noexcept {
     return state.enabled
         && std::string_view{state.fault_key.data()}
             == backend_scoped_vacuum_fault_key;
 }
 
-/** Copies a nonempty string into a fixed buffer when it fits exactly once. */
+/** Copy nonempty text and its terminator if it fits and has no embedded NUL. */
 [[nodiscard]] bool bounded_copy(
         char* destination,
         std::size_t destination_size,
@@ -164,14 +164,14 @@ probe_state state{};
     return true;
 }
 
-/** Returns whether a named runtime profile is supported by this helper. */
+/** Accept the production and test_indexes runtime profiles. */
 [[nodiscard]] bool valid_profile(
         std::string_view profile) noexcept {
     return profile == "production"
         || profile == "test_indexes";
 }
 
-/** Returns whether a site identifier contains the sealed probe token form. */
+/** Check for probe: followed by  a 64-digit lowercase hexadecimal token. */
 [[nodiscard]] bool valid_site_id(
         std::string_view site_id) noexcept {
     constexpr std::string_view prefix = "probe:";
@@ -180,7 +180,7 @@ probe_state state{};
         && lowercase_hex_token(site_id.substr(prefix.size()));
 }
 
-/** Parses a probe relation name into its fixed representation. */
+/** Parse the required site/fault order from its protocol name. */
 [[nodiscard]] bool parse_relation(
         std::string_view name,
         probe_relation& relation) noexcept {
@@ -201,7 +201,7 @@ probe_state state{};
     return false;
 }
 
-/** Returns the stable text name for a probe relation. */
+/** Return the, protocol name for a site/fault ordering rule. */
 [[nodiscard]] const char* relation_name(
         probe_relation relation) noexcept {
     switch (relation) {
@@ -215,7 +215,7 @@ probe_state state{};
     return "invalid";
 }
 
-/** Returns whether an event name uses the probe event alphabet and length. */
+/** Check the length and allowed characters of a probe event name. */
 [[nodiscard]] bool valid_event_name(
         std::string_view name) noexcept {
     if (name.empty() || name.size() >= event_name_capacity) {
@@ -232,7 +232,7 @@ probe_state state{};
     return true;
 }
 
-/** Returns whether a fault key uses the accepted key alphabet and length. */
+/** Check the length and allowed characters of a fault key. */
 [[nodiscard]] bool valid_fault_key(
         std::string_view key) noexcept {
     if (key.empty() || key.size() >= fault_key_capacity) {
@@ -258,7 +258,7 @@ void increment(std::uint64_t& value) noexcept {
     ++value;
 }
 
-/** Defines the marker emitted for a terminal cleanup guard callback. */
+/** Fault, event, and marker names for cleanup that ends the backend. */
 struct terminal_guard_contract final {
     std::string_view fault_key;
     std::string_view event_name;
@@ -279,7 +279,7 @@ constexpr std::array<terminal_guard_contract, 2>
         },
     }};
 
-/** Finds the terminal marker contract for a cleanup event. */
+/** Find the markpr definition for a recognized terminal cleanup event. */
 [[nodiscard]] const terminal_guard_contract*
 find_terminal_guard_contract(
         probe_abi::event_kind kind,
@@ -296,7 +296,7 @@ find_terminal_guard_contract(
     return nullptr;
 }
 
-/** Writes an entire payload while retrying interrupted system calls. */
+/** Write all bytes, retrying interrupted writes and returning false on failure. */
 [[nodiscard]] bool write_complete(
         int file_descriptor,
         std::string_view payload) noexcept {
@@ -318,7 +318,7 @@ find_terminal_guard_contract(
     return true;
 }
 
-/** Persists one durable marker for a valid terminal guard sequence. */
+/** Write and sync a terminal marker after the expected fault and site  visit */
 void persist_terminal_marker(
         const terminal_guard_contract& contract) noexcept {
     if (state.terminal_marker_written
@@ -451,7 +451,7 @@ void append_event(
     ++state.event_count;
 }
 
-/** Records an ABI event callback after validating active probe scope. */
+/** Record a valid event from the armed probe and write a terminal marker if needed. */
 void record_event_api(
         std::uint32_t raw_kind,
         const char* raw_name,
@@ -479,7 +479,7 @@ void record_event_api(
     }
 }
 
-/** Records the first matching visit to the configured probe site. */
+/** Record the selected site once, checking its order relative to the fault. */
 void record_site_visit_api(
         const char* raw_site_reference,
         std::size_t site_reference_size) noexcept {
@@ -575,7 +575,7 @@ std::uint32_t consume_fault_api(
     return state.fault_trigger_count == 1 ? 1U : 0U;
 }
 
-/** Rendezvous API published while a probe case is armed. */
+/** Callbacks made available to the extension while this probe is armed. */
 const probe_abi::probe_api api{
     .abi_revision = probe_abi::k_abi_revision,
     .struct_size = sizeof(probe_abi::probe_api),
@@ -584,7 +584,7 @@ const probe_abi::probe_api api{
     .consume_fault = &consume_fault_api,
 };
 
-/** Selects the target function while preserving the previous hook chain. */
+/** Request fmgr callbacks for the target and keep the previous hook for other functions. */
 [[nodiscard]] bool needs_hook_callback(Oid function_oid) {
     if (state.enabled && function_oid == state.target_oid) {
         return true;
@@ -670,7 +670,7 @@ void clear_case_state() noexcept {
     state.api_slot = nullptr;
 }
 
-/** Publishes the probe ABI through its backend-local rendezvous slot. */
+/** Put the probe callbacks in the backend's rendezvous slot. */
 void publish_api() {
     void** const slot =
         find_rendezvous_variable(probe_abi::k_rendezvous_name);
@@ -687,7 +687,7 @@ void publish_api() {
     state.api_published = true;
 }
 
-/** Removes the probe ABI after confirming rendezvous ownership. */
+/** Unpublish the callbacks, raising an error if another owner changed the rendezvous slot. */
 void unpublish_api() {
     if (!state.api_published) {
         return;
@@ -705,7 +705,7 @@ void unpublish_api() {
     state.api_published = false;
 }
 
-/** Installs the fmgr hooks while retaining the existing hook chain. */
+/** Install function-call hooks and  save the previous callbacks. */
 void install_hooks() {
     if (state.hooks_installed
         || needs_fmgr_hook == &needs_hook_callback
@@ -759,7 +759,7 @@ void require_token(std::string_view token) {
     }
 }
 
-/** Returns the stable snapshot name for an ABI event kind. */
+/** Return the event-kind name used in probe snapshots. */
 [[nodiscard]] const char* event_kind_name(
         probe_abi::event_kind kind) noexcept {
     switch (kind) {
@@ -773,13 +773,13 @@ void require_token(std::string_view token) {
     return "invalid";
 }
 
-/** Owns an attested marker directory descriptor and canonical path. */
+/** Open marker-directory descriptor and its checked canonrcal path. */
 struct marker_directory_attestation final {
     int file_descriptor = -1;
     std::array<char, PATH_MAX> canonical_path{};
 };
 
-/** Opens and attests a secure marker directory directly below DataDir. */
+/** Open an owned 0700 marker directory directly below DataDir and verify its identity. */
 [[nodiscard]] marker_directory_attestation
 attest_marker_directory(std::string_view expected_path) {
     if (expected_path.empty()
@@ -931,7 +931,7 @@ attest_marker_directory(std::string_view expected_path) {
     return result;
 }
 
-/** Confirms that a target routine resolves to the expected shared image. */
+/** Check that the SQL function comes from the expected shared-library path. */
 void attest_target_image(
         Oid target_oid,
         std::string_view expected_path) {
@@ -979,14 +979,14 @@ void attest_target_image(
     }
 }
 
-/** Records which optional hooks are installed on one PostgreSQL GUC. */
+/** Presence of check, assign, and show hooks on one PostgreSQL setting. */
 struct guc_hook_presence final {
     bool check = false;
     bool assign = false;
     bool show = false;
 };
 
-/** Reads hook presence from a typed PostgreSQL GUC record. */
+/** Read hook presence from the setting's type-specific PostgreSQL record. */
 [[nodiscard]] bool inspect_guc_hooks(
         const config_generic* record,
         guc_hook_presence& hooks) noexcept {
@@ -1048,7 +1048,7 @@ struct guc_hook_presence final {
     return false;
 }
 
-/** Returns whether a name is a well-formed Bioseq GUC identifier. */
+/** Check  the bioseq. prefix, separators, and allowed characters of a setting name. */
 [[nodiscard]] bool valid_bioseq_guc_name(
         std::string_view name) noexcept {
     constexpr std::string_view prefix = "bioseq.";
@@ -1078,7 +1078,7 @@ PG_FUNCTION_INFO_V1(bioseq_safety_runtime_probe_snapshot);
 PG_FUNCTION_INFO_V1(bioseq_safety_runtime_probe_disarm);
 PG_FUNCTION_INFO_V1(bioseq_safety_runtime_guc_internal_contract);
 
-/** Returns the stable internal contract for all registered Bioseq GUCs. */
+/** List registered Bioseq settings with their flags and hook presence, sorted by name */
 PGDLLEXPORT Datum
 bioseq_safety_runtime_guc_internal_contract(PG_FUNCTION_ARGS) {
     if (PG_NARGS() != 0) {
@@ -1211,7 +1211,7 @@ bioseq_safety_runtime_guc_internal_contract(PG_FUNCTION_ARGS) {
         cstring_to_text_with_len(output.data, output.len));
 }
 
-/** Arms one backend-local runtime probe after attesting its inputs. */
+/** Validate the requested case and arm its probe in this PostgreSQL backend. */
 PGDLLEXPORT Datum
 bioseq_safety_runtime_probe_arm(PG_FUNCTION_ARGS) {
     if (PG_NARGS() != 8) {
@@ -1296,7 +1296,7 @@ bioseq_safety_runtime_probe_arm(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
 }
 
-/** Returns a deterministic snapshot of the active runtime probe. */
+/** Return the active probe's counters and events after checking its token, and hooks. */
 PGDLLEXPORT Datum
 bioseq_safety_runtime_probe_snapshot(PG_FUNCTION_ARGS) {
     if (PG_NARGS() != 1) {

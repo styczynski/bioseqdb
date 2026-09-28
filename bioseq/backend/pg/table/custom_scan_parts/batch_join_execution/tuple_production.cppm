@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Owns batched-join placeholders, source restoration, and output tuples.
+ * @brief Combine query rows, target rows, and alignment results into join output.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so imported target-specific types share one
+// translation-unit definition
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -49,8 +49,8 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Writes one match-derived placeholder into a combined output slot.
-     * @param output_context Memory context that owns any varlena result.
+     * @brief Fill a result column such as score, coordinates, or CIGAR from one match.
+     * @param output_context Memory context for variable-length results.
      */
     void batch_join_set_placeholder_value(TupleTableSlot* slot,
                                           const batch_join_placeholder_site& site,
@@ -124,21 +124,21 @@ export {
         slot->tts_isnull[site.resno - 1] = is_null;
     }
 
-    /** @brief Records one borrowed target-source datum for restoration after projection. */
+    /** Original target value to  restore after producing a match row. */
     struct batch_join_target_source_datum {
         AttrNumber resno = InvalidAttrNumber;
         Datum datum = Datum{0};
     };
 
-    /** @brief Describes target-source datums copied into the output memory context. */
+    /** Saved target values and their column positions. The values remain borrowed. */
     struct batch_join_target_source_restore {
         batch_join_target_source_datum* sources = nullptr;
         std::size_t count = 0u;
     };
 
     /**
-     * @brief Captures projected target-source datums before temporary source promotion.
-     * @param output_context Context that owns the returned descriptor array.
+     * @brief Save target values before temporarily converting their locators.
+     * @param output_context Context that owns the array of saved values.
      */
     [[nodiscard]] batch_join_target_source_restore capture_batch_join_target_sources(
         bioseq_scan_runtime& target_runtime, TupleTableSlot* slot, MemoryContext output_context) {
@@ -189,7 +189,7 @@ export {
         return restore;
     }
 
-    /** @brief Restores borrowed target-source datums after temporary promotion. */
+    /** Put the original borrowed target values back after producing an output row. */
     void
     restore_batch_join_target_sources(TupleTableSlot* slot,
                                       const batch_join_target_source_restore& restore) noexcept {
@@ -203,7 +203,7 @@ export {
         }
     }
 
-    /** @brief Detoasts retained target-source datums into the per-output memory context. */
+    /** Give stored target values a normal varlena header before reading sequence fields. */
     void normalize_batch_join_target_sources(TupleTableSlot* slot,
                                              const batch_join_target_source_restore& restore,
                                              MemoryContext output_context) {
@@ -212,10 +212,9 @@ export {
             if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source.datum))) {
                 continue;
             }
-            /* The dispatch buffer owns a MinimalTuple copy, which may short-pack an
-             * extended sequence Datum.  BSS3's locator decoder requires the ordinary
-             * four-byte varlena header, so normalize in the output lifetime before it
-             * examines bioseq::pg_types::seq fields. */
+            /* MinimalTuple storage can use a short varlena header. The sequenc
+             * locator decoder expects the normal four-byte header, so detoast into
+             * this output row's memory context before reading the  sequence header. */
             MemoryContext previous = MemoryContextSwitchTo(output_context);
             bioseq::pg_types::seq* flat =
                 reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(source.datum));
@@ -233,8 +232,8 @@ export {
     }
 
     /**
-     * @brief Combines one target match with its query row and evaluates the parent projection.
-     * @return The projected slot, or null when the executor qual rejects this match.
+     * @brief Combine a target match with its query row and evaluate the output projection.
+     * @return The projected row, or null if the output predicate rejects the match.
      */
     TupleTableSlot*
     batch_join_project_output(CustomScanState* node,
@@ -267,12 +266,10 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqBatchJoin combined tuple layout is invalid")));
         }
-        /* A locator target remains deferred while BatchJoin aligns it.  Once the
-         * match has been produced, an enclosing SliceProject may consume that same
-         * target through a source-backed recipe, and an upper BatchJoin may bind a
-         * sibling sequence as PARAM_EXEC. Promote the output copy only now, into
-         * this output's per-tuple context, copy the promoted Datums, then restore
-         * the retained locator tuple before another match can reuse it. */
+        /* A parent projection or join may need sequence values from this target.
+         * Convert locators in the output copy now, keeping the values in this
+         * row's context. Restore the buffered tuple afterward so later matches
+         * can, reuse its original locators. */
         bioseq_scan_runtime* target_runtime = nullptr;
         if (runtime.target_child != nullptr && IsA(runtime.target_child, CustomScanState)) {
             auto* target_custom = reinterpret_cast<CustomScanState*>(runtime.target_child);
@@ -353,9 +350,8 @@ export {
         expression_context->ecxt_scantuple = combined;
         if (node->ss.ps.qual != nullptr && !ExecQual(node->ss.ps.qual, expression_context)) {
             InstrCountFiltered1(&node->ss, 1);
-            /* A rejected output can be followed by finish_join_target() inside this
-             * same executor call. Drop borrowed query/target recipe Datums before that
-             * transition resets the dispatch arena. */
+            /* The next loop step may release  this target's dispatch buffer Clear
+             * borrowed sequence references before that storage is reset. */
             clear_recipe_scan_parent_tuple_references(node);
             return nullptr;
         }
@@ -363,14 +359,13 @@ export {
     }
 
     /**
-     * @brief Allocates the PostgreSQL custom scan state without mutating the stored plan.
-     * @return A state node allocated in the current PostgreSQL memory context.
+     * @brief Allocate execution state for a stored join plan.
+     * @return State in the current PostgreSQL memory context.
      */
     Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan) {
-        /* A PlannedStmt can outlive every executor context (prepared statements,
-         * generic plans, EXPLAIN followed by EXECUTE).  Treat the plan as immutable;
-         * planner setrefs must already have mapped each registered whole-helper
-         * identity to its INDEX_VAR descriptor. */
+        /* Prepared plans can be reused after the executor context is gone. Keep
+         * the plan unchanged herk. Planning must already have replaced helper
+         * calls with INDEX_VAR references to result columns. */
         if (cscan == nullptr) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),

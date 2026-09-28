@@ -1,6 +1,6 @@
 /**
  * @file pipeline_cache.cppm
- * @brief Owns compute-pipeline construction, cache admission, and descriptor binding.
+ * @brief Creates and caches Vulkan pipelines and binds their buffers.
  */
 module;
 
@@ -26,8 +26,8 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
-/// Seal native pipeline creation without inventing Metal cache/seed evidence.
-/// Handles remain owned by the pipeline-cache entry for the receipt's lifetime.
+/// Record a successful native Vulkan pipeline creation. The cache entry
+/// keeps the shader module and pipeline handles alive while this record is used
 [[nodiscard]] runtime_metal_archive_pipeline_audit native_pipeline_audit(
     const vulkan_feature_set& features,
     const shader_variant_key& key,
@@ -59,9 +59,8 @@ namespace {
 
 } // namespace
 
-/// @brief Destroys one pipeline handle set in reverse ownership order.
-///
-/// All handles become null before return. The owning device must still be live.
+/// @brief Frees the pipeline and its shader and descriptor objects, then clears the handles.
+/// The Vulkan device must remain alive until this cleanup finishes.
 void runtime::owned_pipeline_handles::reset() noexcept {
     if (device != VK_NULL_HANDLE) {
         if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
@@ -88,7 +87,7 @@ void runtime::owned_pipeline_handles::reset() noexcept {
     pipeline = VK_NULL_HANDLE;
 }
 
-/// @brief Totals retained host metadata for both runtime pipeline caches.
+/// @brief Counts host, storage  kept by both pipeline caches, including their creation records.
 std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
@@ -112,10 +111,10 @@ std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     return owned;
 }
 
-/// @brief Admits a prospective cache capacity before either vector grows.
-/// @param[in] normal_capacity Proposed chaining-pipeline vector capacity.
-/// @param[in] compute_pipeline_capacity Proposed general compute-pipeline vector capacity.
-/// @throws vulkan_runtime_error When the metadata reservation is not admitted.
+/// @brief Reserves memory before either pipeline-cche vector grows.
+/// @param[in] normal_capacity Requested capacity of the chaining-pipeline cache.
+/// @param[in] compute_pipeline_capacity Requested capacity of the general compute cache.
+/// @throws vulkan_runtime_error If the memory reservation cannot be obtained.
 void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
                                                  std::size_t compute_pipeline_capacity) {
     using bioseq::common::saturating_add;
@@ -134,8 +133,8 @@ void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
                                                                      compute_pipelines_.capacity()),
                                           sizeof(owned_compute_pipeline)));
     }
-    // Covers one pending entry, receipt allocation/control metadata, all five
-    // bounded audit strings, and vector/string allocator headroom.
+    // Include the pending pipeline record and its strings, with spare space
+    // for vector growth and allocator overhead.
     projected = saturating_add(projected,
                                sizeof(runtime_metal_archive_pipeline_receipt) +
                                    sizeof(runtime_metal_archive_pipeline_audit) + 16u * 1024u);
@@ -172,15 +171,15 @@ void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
     }
 }
 
-/// @brief Shrinks the metadata permit to the cache capacities actually retained.
+/// @brief Reduces the cache memory reservation to the storage still owned.
 void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
     if (!pipeline_cache_metadata_permit_)
         return;
     const std::uint64_t retained = pipeline_cache_metadata_bytes_locked();
     if (retained == (std::numeric_limits<std::uint64_t>::max)() ||
         retained > pipeline_cache_metadata_permit_.bytes()) {
-        // The conservative preallocation must make this unreachable. Retain
-        // the larger permit and fail closed at the next live policy gate.
+        // Keep the current reservation if the  measured capacity exceeds it.
+        // On Apple, record a failure for the next Metal settings check.
 #if defined(__APPLE__)
         mark_metal_archive_sticky_failure_literal(
             metal_pipeline_archive_interpose_state(),
@@ -193,10 +192,11 @@ void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
         pipeline_cache_metadata_permit_.release();
 }
 
-/// @brief Creates one chaining pipeline and binds its immutable Metal archive receipt.
-/// @param[in] key Tile and local-size specialization used as the cache key.
-/// @return Pipeline view whose handles and receipt remain valid while the cache entry is retained.
-/// @throws vulkan_runtime_error When shader loading, ABI validation, policy, or creation fails.
+/// @brief Finds or creates a cached chaining pipeline for the requested settings.
+/// Saves the pipeline-creation checks with the cache entry. The caller holds the runtime lock.
+/// @param[in] key Tile and workgroup settings identifying the pipeline.
+/// @return Borrowed pipeline view, valid while the cache entry remains alive.
+/// @throws vulkan_runtime_error If shader loading, layout checks, or pipeline creation fails.
 runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeline_key& key) {
     const bool provider_used = should_use_shader_provider_locked();
     const bool archive_receipt_required =
@@ -272,9 +272,8 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
             throw vulkan_runtime_error(fmt::format("shader compile failed: {}", exception.what()));
         }
 
-        // Validate the direct-anchor ABI in the emitted SPIR-V before trusting the
-        // pipeline. A stride/offset mismatch would silently corrupt the DP read of
-        // every anchor; reject rather than hide it behind a conversion buffer.
+        // Check that the shader reads anchors with the same layout as the host.
+        // A wrong stride or  field offset would make every anchor read incorrect
         const spirv_layout_scan scan = scan_spirv_layout(spirv);
         if (!scan.has_array_stride(24)) {
             throw vulkan_runtime_error("SPIR-V Anchors array stride != 24");
@@ -377,16 +376,16 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
     };
 }
 
-// ---------------------------------------------------------------------------
-// Upload / download helpers (called under mu_, command buffer already open)
-// ---------------------------------------------------------------------------
+// General compute pipelines and their buffer bindings.
 
-/// @brief Returns a cached compute pipeline or creates its exact shader variant.
-/// @param[in] kind Shader program selected for the pipeline.
-/// @param[in] local_size Variant local-size parameter.
-/// @param[in] max_span Variant span or geometry parameter.
-/// @return Non-owning view valid while its cache entry and runtime remain alive.
-/// @throws vulkan_runtime_error When geometry, shader loading, policy, or creation fails.
+/// @brief Finds or creates a cached compute pipeline for one shader variant.
+/// Checks workgroup limits and shadey buffer layouts before creation.
+/// The caller holds the runtime lock.
+/// @param[in] kind Shader to use.
+/// @param[in] local_size Workgroup-size setting for this variant.
+/// @param[in] max_span Shader-specific span or size setting.
+/// @return Borrowed view, valid while its cache entry and runtime remain alive.
+/// @throws vulkan_runtime_error If shader, device-limit, layout, or pipeline checks fail.
 runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                                                                std::uint32_t local_size,
                                                                std::uint32_t max_span) {
@@ -532,8 +531,8 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                 fmt::format("seed lookup shader compile failed: {}", compile_error.what()));
         }
 
-        // Pin the SSBO wire ABI: a sort-range-stride mismatch would silently
-        // corrupt direct sort_range_wire reads.
+        // Check  that shader, buffer layouts match the host records used for each
+        // operation. A wrong stride or offset would corrupt reads or writes.
         const spirv_layout_scan scan = scan_spirv_layout(spirv);
         const auto binding_scalar = [&scan](const std::uint32_t binding,
                                             const std::uint32_t stride) {
@@ -772,9 +771,9 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     return compute_pipelines_.back().view();
 }
 
-/// @brief Updates one reusable descriptor set with whole-buffer storage bindings.
-/// @param[in] entry Pipeline whose descriptor set is updated.
-/// @param[in] buffers Buffer handles ordered by shader binding number.
+/// @brief Binds whole buffers to the pipeline's reusable descriptor set.
+/// @param[in] entry Pipeline whose bindings are updated.
+/// @param[in] buffers Buffer handles in shader-binding order.
 void runtime::bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                        std::span<const VkBuffer> buffers) {
     DEBUG_ASSERT(buffers.size() == entry.binding_count,

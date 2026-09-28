@@ -1,6 +1,6 @@
 /**
  * @file sketch.cppm
- * @brief Executes single and batched minimizer sketch dispatch protocols.
+ * @brief Runs GPU minimizer sketches and checks query-buffer readback.
  */
 module;
 
@@ -24,7 +24,7 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
-/** @brief Runtime-local proof for one completed authorized download. */
+/** @brief Records the buffers and completed steps of a checked minimizer download. */
 struct authorized_readback_receipt {
     runtime_buffer_identity source{};
     runtime_buffer_identity destination{};
@@ -36,7 +36,7 @@ struct authorized_readback_receipt {
     bool command_reset = false;
 };
 
-/** @brief Match a local receipt to the exact submitted identities and byte extent. */
+/** @brief Checks that a completed download used the expected buffers and byte range. */
 [[nodiscard]] inline bool authorized_readback_receipt_matches(
     const authorized_readback_receipt& receipt,
     const runtime_buffer_identity& expected_source,
@@ -54,15 +54,16 @@ struct authorized_readback_receipt {
 
 } // namespace
 
-/// @brief Runs one count, scan, and emit sketch roundtrip with host materialization.
-/// @param[in] packed_sequence Borrowed packed sequence bytes consumed before return.
-/// @param[in] rank_lut Rank translation table copied into the arena.
-/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
-/// @param[in] max_minimizers Maximum output count covered by the allocation.
-/// @param[in] query_gate_words Optional canonical query-position gate bitset.
-/// @param[in] query_gate_mask Mask for the final gate word, or zero when no gate is supplied.
-/// @return Sketch count and an owning device buffer when output fits.
-/// @throws vulkan_runtime_error When validation, allocation, submission, or policy checks fail.
+/// @brief Counts and writes one sequence's minimizers in one GPU submission.
+/// Temporary  arena storage is freed before return.
+/// @param[in] packed_sequence Packed bytes copied before submission.
+/// @param[in] rank_lut Packed-rank, translation table
+/// @param[in] params Sequence encoding and minimizer settings.
+/// @param[in] max_minimizers Output capacity in minimizers.
+/// @param[in] query_gate_words Optional query-hash bitmap.
+/// @param[in] query_gate_mask Low-bit hash mask, or zero without a bitmap.
+/// @return Exact count and owned device buffer, or overflow.
+/// @throws vulkan_runtime_error If validation or execution fails.
 runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                     const vulkan_rank_lut& rank_lut,
                                                     const vulkan_sketch_params& params,
@@ -75,10 +76,9 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         throw vulkan_runtime_error("run_sketch_roundtrip on unavailable device");
     }
     gpu_arena& arena = reusable_gpu_arena();
-    // A completed minimizer roundtrip returns only a standalone output buffer;
-    // no result aliases the shared arena.  Drop any idle high-water inherited
-    // from an earlier request, then cover every exit/exception path in this
-    // request with the same physical-trim invariant.
+    // The result owns a separate output buffer, so the shared arena can be
+    // freed before return. Drop  memory left by earlier calls, then arrange
+    // the same cleanup for this call, including exception paths.
     if (!arena.release_idle_capacity()) {
         throw vulkan_runtime_error("gpu sketch entered with live arena slices");
     }
@@ -130,11 +130,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    // The sketch kernel grid-strides one invocation per tile, so the
-    // dispatch is ceil(num_tiles / local) workgroups CLAMPED to the device limit
-    // (the shader loop covers any tiles beyond the clamped grid). No throw — a
-    // window larger than 64 * max_workgroup_count_x tiles is still processed
-    // correctly, just over more grid-stride steps.
+    // Cap workgroups at the device limit. The shader loops over tile indices,
+    // so the same diqpatch still processes every tile.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
     const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
@@ -326,16 +323,15 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     return result;
 }
 
-/// @brief Runs a tiled sketch batch while preserving device-only authorization when requested.
-/// @param[in] packed_sequence Borrowed packed sequence bytes consumed before return.
-/// @param[in] rank_lut Rank translation table copied into the arena.
-/// @param[in] params Packed alphabet and minimizer geometry shared by every tile.
-/// @param[in] tiles Dense tile records processed in input order.
-/// @param[in] query_layouts Dense per-query partitions over `tiles`.
-/// @param[in] max_minimizers Maximum output count accepted by the caller.
-/// @param[in] materialization Whether host bytes are copied or device authority is retained.
-/// @return Tile counts, offsets, dispatch statistics, and the owning output buffer.
-/// @throws vulkan_runtime_error When validation, allocation, submission, or policy checks fail.
+/// @brief Sketches query tiles and records each query's minimizer range.
+/// Host output uses one submission. Device-only output counts first, allocates
+/// exact output, then emits in a second submission and saves a query record
+/// for later seed lookup checks. Overflow returns without device-only emission.
+/// `query_layouts` must consecutively cover all tiles. Inputs are  copied before
+/// submission.
+/// @return Owned device output, tile counts, offsets, and dispatch measurements.
+/// Host mode also returns a host copy.
+/// @throws vulkan_runtime_error If validation or execution fails.
 runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::span<const std::byte> packed_sequence,
     const vulkan_rank_lut& rank_lut,
@@ -391,9 +387,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         return result;
     }
 
-    // Preserve the established host-materialized path: it reserves its
-    // pessimistic output up front and records count/scan/emit in one submit.
-    // Only device-only mode waits for the scan before allocating exact output.
+    // Host output reserves the maximum size and counts, scans, and emits in
+    // one submission Device-only output waits for the count before allocating.
     buffer host_materialized_out_words;
     if (materialization == vulkan_sketch_host_materialization::host_and_device) {
         const std::uint64_t pessimistic_output_bytes = std::max<std::uint64_t>(
@@ -416,12 +411,12 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
                         arena_bytes));
     }
     const gpu_arena_mark mark = arena.mark();
-    // Restores the borrowed arena cursors on normal and exceptional exits.
+    // Restore the arena allocation positions even if the batch throws.
     struct arena_rewind_guard {
         gpu_arena* arena = nullptr;
         gpu_arena_mark mark{};
 
-        /// @brief Rewinds the borrowed arena when the batch scope exits.
+        /// @brief Restores the arena mark when the batch ends.
         ~arena_rewind_guard() {
             if (arena != nullptr)
                 arena->rewind(mark);
@@ -485,7 +480,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     const compute_pipeline scan_add_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
     if (query_pipeline_collector != nullptr) {
-        // Registers every pipeline whose receipt contributes to query authority.
+        // Record each pipeline used to produce the query buffer.
         const auto prepare = [&query_pipeline_collector](const compute_pipeline& pipe) {
             query_pipeline_collector->prepare(
                 make_shader_key(pipe.kind, 384u, pipe.local_size, pipe.max_span),
@@ -497,9 +492,9 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     }
     reset_dispatch_descriptor_pool_locked();
 
-    // Device-only count mode never dereferences binding 4, so it can use the
-    // tiny counters slice until the exact output exists.  Host mode binds its
-    // established pessimistic output, which the same submit later emits into.
+    // Counting does not write minimizer output. Device-only  mode can bind the
+    // counters buffer here until the count gives the required output size.
+    // Host mode binds the output, buffer ued by its later emit dispatch.
     const VkDescriptorBufferInfo initial_output_info =
         materialization == vulkan_sketch_host_materialization::host_and_device
             ? VkDescriptorBufferInfo{host_materialized_out_words.buffer_handle, 0, VK_WHOLE_SIZE}
@@ -651,10 +646,9 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         }
         result.minimizer_words = std::move(host_materialized_out_words);
     } else {
-        // The count/scan result is authoritative.  Allocate only the exact
-        // device payload (Vulkan requires a nonzero buffer, hence the 4-byte
-        // physical minimum for an empty logical result), then reuse the
-        // resident input/count/offset slices for an emit-only submission.
+        // Allocate from the completed count, keeping a 4-byte buffer for an empty
+        // result because Vulkan requires a nonzero size. Reuse the uploaded
+        // sequence and tile counts for the submission that writes minimizers.
         const std::uint64_t exact_device_bytes = std::max<std::uint64_t>(
             minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, total),
             4u);
@@ -678,8 +672,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
         }};
 
-        // The first queue submission is complete, so its descriptor sets may
-        // be recycled.  The arena mark and all resident slices remain live.
+        // The first submission has finished, so its descriptor sets can be reused.
+        // Keep the arena slices until the emit submission finishes.
         reset_dispatch_descriptor_pool_locked();
         if (query_pipeline_collector != nullptr) {
             query_pipeline_collector->burn_before_reset(command_buffer_);
@@ -691,8 +685,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         if (query_pipeline_collector != nullptr) {
             query_pipeline_collector->begin(command_buffer_);
         }
-        // Covers the packed-u16 zero-fill; the compute barrier carries the
-        // prior submission's count/offset shader writes into this emit read.
+        // Make the packed-u16 zero fill and the earlier GPU counts visible to
+        // the emit  shader.
         record_host_to_shader(command_buffer_);
         record_compute_barrier(command_buffer_);
         push.emit_mode = 1u;
@@ -786,7 +780,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     return result;
 }
 
-/// @brief Authenticates every private field of a device-only query sketch.
+/// @brief Checks that a query buffer and its requested ranges match the completed sketch record.
+/// @return Number of minimizer bytes covered by the record.
 std::uint64_t runtime::validate_query_sketch_authorization_locked(
     const device_query_sketch_authorization& authorization,
     const buffer& device_words,
@@ -837,7 +832,9 @@ std::uint64_t runtime::validate_query_sketch_authorization_locked(
     return *exact_bytes;
 }
 
-/// @brief Performs one private, authorized device-to-host minimizer copy.
+/// @brief Copies query minimizers to the host after checking their sketch record.
+/// The destination size must equal the payload size. The query record remains
+/// available for seed lookup after this copy
 void runtime::readback_authorized_query_minimizers(
     const device_query_sketch_authorization& authorization,
     const buffer& device_words,

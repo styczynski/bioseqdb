@@ -1,6 +1,6 @@
 /**
  * @file sequence_storage_contract.cppm
- * @brief Contracts for sequence, table, and relation-cleanup storage adapters.
+ * @brief Store a sequence index in one row or a table index in numbered chunks.
  */
 module;
 
@@ -80,20 +80,20 @@ import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.postgres.storage.scanner.lazy_binding; // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.storage.scanner.lazy_binding; // Read sequence fragments through a PostgreSQL snapshot.
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -114,21 +114,21 @@ import :generation_session;
 import :hash_major_writer;
 export namespace bioseq::storage::indexing {
 
-/// Bounded cursor exposing one k-mer's unique positions as a single batch.
+/// Borrow a vector of positions and present it as one batch.
 struct position_batch_cursor {
     const std::vector<std::uint64_t>* v = nullptr;
-    /// Return the number of unique positions in the borrowed batch.
+    /// Return  the number of positions in the borrowed vector.
     [[nodiscard]] std::uint64_t total_count() const {
         return v->size();
     }
-    /// Present the complete borrowed position batch to one callback.
+    /// Call the callback once with all positions, or skip it when the vector is empty.
     template <class p_callback> void for_each_batch(p_callback&& f) const {
         if (!v->empty())
             f(std::span<const std::uint64_t>(v->data(), v->size()));
     }
 };
 
-/// PostgreSQL adapter for one inline-per-sequence index value.
+/// Store one sequence index as a single PostgreSQL row.
 struct sequence_index_storage {
     Oid db_oid_ = InvalidOid, tablespace_oid_ = InvalidOid, main_relfilenode_ = InvalidOid,
         user_relid_ = InvalidOid;
@@ -156,7 +156,8 @@ struct sequence_index_storage {
     ~sequence_index_storage() {
         release_();
     }
-    /// Transfer the handle while leaving the source safe for destruction.
+    /// Move the storage identity and take ownership of the buffer fontext.
+    /// Clear the source's owning pointers so it can be destroyed.
     void steal_(sequence_index_storage&& o) noexcept {
         db_oid_ = o.db_oid_;
         tablespace_oid_ = o.tablespace_oid_;
@@ -181,7 +182,7 @@ struct sequence_index_storage {
         o.index_relid_ = InvalidOid;
         o.decoded_valid_ = false;
     }
-    /// Assert that checked close or PG-error abandonment already ran.
+    /// Assert that close or error handling has cleared the context pointer.
     void release_() noexcept {
         DEBUG_ASSERT(
             own_mctx_ == nullptr,
@@ -189,7 +190,7 @@ struct sequence_index_storage {
         own_mctx_ = nullptr;
         decoded_ = nullptr;
     }
-    /// Delete the owned MemoryContext through the translated PG boundary.
+    /// Delete the buffer memory context, converting PostgreSQL errors to C++ exceptions.
     void close_checked() {
         if (own_mctx_ != nullptr) {
             MemoryContext finished_context = std::exchange(own_mctx_, nullptr);
@@ -198,7 +199,7 @@ struct sequence_index_storage {
                 [finished_context] { MemoryContextDelete(finished_context); });
         }
     }
-    /// Forget aliases whose storage now belongs to transaction-abort cleanup.
+    /// Clear handles after a PostgreSQL error and leave memory release  to, transaction cleanup
     void abandon_after_pg_error_noexcept() noexcept {
         own_mctx_ = nullptr;
         decoded_ = nullptr;
@@ -208,7 +209,7 @@ struct sequence_index_storage {
         index_relid_ = InvalidOid;
     }
 
-    /// Raise a PostgreSQL data-corruption error at the C++ boundary.
+    /// Report corrupt index data as a PostgreSQL error wrapped in a C++ exception.
     [[noreturn]] void index_error(std::string_view msg) const {
         bioseq::postgres::support::invoke_pg_as_cpp([msg] {
             ereport(ERROR,
@@ -218,7 +219,7 @@ struct sequence_index_storage {
         pg_unreachable();
     }
 
-    /// Derive the inline sidecar name from the complete logical identity.
+    /// Build the index table name from the parent table, column, index and shard.
     [[nodiscard]] std::string this_table_name() const {
         return format_seqidx_name(index_name_,
                                   db_oid_,
@@ -228,7 +229,7 @@ struct sequence_index_storage {
                                   bucket_idx_,
                                   shard_idx_);
     }
-    /// Resolve or create the inline sidecar for this exact handle.
+    /// Find the index table, creating it when requested.
     [[nodiscard]] Oid resolve_relid_(bool create_if_missing) const {
         if (OidIsValid(index_relid_))
             return index_relid_;
@@ -256,21 +257,20 @@ struct sequence_index_storage {
         index_relid_ = rid;
         return rid;
     }
-    /// Open the resolved inline sidecar under the caller-selected lock.
+    /// Open the index table with the requested lock, or return null if it is absent.
     [[nodiscard]] Relation open_(bool create, LOCKMODE lock) const {
         const Oid rid = resolve_relid_(create);
         if (!OidIsValid(rid))
             return nullptr;
         return bioseq::postgres::support::try_open_postgres_relation(rid, lock);
     }
-    /// Resolve the read sidecar without leaving a C++ frame inside PG_TRY.
+    /// Find the index table while converting PostgreSQL errors to C++ exceptions.
     [[nodiscard]] Oid resolve_relid_for_read_checked_() const {
         if (OidIsValid(index_relid_)) {
             return index_relid_;
         }
-        // Build/destruct the C++ name outside every PG_TRY leaf. A PostgreSQL
-        // longjmp from namespace/relation lookup is converted before this
-        // ordinary C++ frame unwinds.
+        // Keep the string outside PG_TRY so a PostgreSQL error can be converted
+        // to a C++ exception before the string is destroyed.
         const std::string table_name = this_table_name();
         const Oid namespace_oid =
             bioseq::postgres::support::invoke_pg_as_cpp([] { return bioseq_internal_ns(); });
@@ -283,7 +283,7 @@ struct sequence_index_storage {
         index_relid_ = relation_oid;
         return relation_oid;
     }
-    /// Open the read sidecar through translated PostgreSQL leaves.
+    /// Open  the index table for reading, converting PostgreSQL errors to C++ exceptions.
     [[nodiscard]] Relation open_for_read_checked_() const {
         const Oid relation_oid = resolve_relid_for_read_checked_();
         if (!OidIsValid(relation_oid)) {
@@ -294,7 +294,7 @@ struct sequence_index_storage {
                                                                          AccessShareLock);
         });
     }
-    /// Grow the MemoryContext-owned decode buffer through a translated PG leaf.
+    /// Grow the read buffer in the handle's PostgreSQL memory conext.
     void ensure_buffer_checked_(const std::size_t units) const {
         if (decoded_units_ >= units && decoded_ != nullptr) {
             return;
@@ -315,7 +315,7 @@ struct sequence_index_storage {
         decoded_ = replacement;
         decoded_units_ = units;
     }
-    /// Load and validate the bound inline tuple into the reusable buffer.
+    /// Copy this sequence's stored index bytes into the reusable read buffer.
     void load_() const {
         Relation rel = open_for_read_checked_();
         if (rel == nullptr) {
@@ -371,17 +371,18 @@ struct sequence_index_storage {
         });
         decoded_valid_ = true;
     }
-    /// Report whether the single inline payload exists.
+    /// Return one for a nonempty index payload, or zero otherwise.
     [[nodiscard]] std::size_t number_of_chunks() const {
         return chunk_byte_size() == 0 ? 0 : 1;
     }
-    /// Return the decoded byte length of the inline payload.
+    /// Return the stored payload length, reading the row on first use.
     [[nodiscard]] std::size_t chunk_byte_size() const {
         if (!decoded_valid_)
             load_();
         return decoded_bytes_;
     }
-    /// Return the decoded inline payload in handle-owned storage.
+    /// Read the index bytes through the handle's reusable buffer.
+    /// The pointer remains valid until the buffer is reused or the handle closes.
     template <class p_value_type> [[nodiscard]] const p_value_type* read_chunk() {
         if (!decoded_valid_)
             load_();
@@ -394,9 +395,10 @@ struct sequence_index_storage {
                 "bioseq index inline: bytes exceed single-chunk MAX");
         planned_bytes_ = bytes;
     }
-    /// Preserve the storage concept hook for the already-inline payload.
+    /// No preparation is needed before reading this single-row index.
     void prefetch_chunk() {}
-    /// Replace the single inline tuple from one bounded writer callback.
+    /// Fill a temporary buffer and replace  this sequence's index row.
+    /// Call resize first The callback receives chunk zero and must return zero.
     template <class p_value_type, class p_callback> void write_to_each(p_callback&& writer) {
         static_assert(bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>,
                       "inline write_to_each writer shape");
@@ -414,7 +416,7 @@ struct sequence_index_storage {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "bioseq index inline: writer emitted >1 chunk");
         Relation rel = open_(true, RowExclusiveLock);
-        // upsert (delete then insert) so rebuild replaces the single row.
+        // Replace the old row when rebuilding this sequence's index.
         {
             const Oid pk = bioseq::postgres::support::find_primary_key_oid(rel);
             ScanKeyData k[1];
@@ -447,7 +449,7 @@ struct sequence_index_storage {
         decoded_valid_ = false;
         planned_bytes_ = std::numeric_limits<std::size_t>::max();
     }
-    /// Delete the inline tuple owned by the bound query identity.
+    /// Delete the index row for this sequence.
     void clear_entity() {
         const Oid rid = resolve_relid_(false);
         if (!OidIsValid(rid))
@@ -461,7 +463,7 @@ struct sequence_index_storage {
         }
         decoded_valid_ = false;
     }
-    /// Drop every physical shard belonging to the named logical index.
+    /// Drop the tables whose names identify shards of the named index.
     void clear(std::string_view name);
     /// Rebind this handle to one sequence row without reallocating its context.
     void reset_entity(const sequence_locator& loc, std::uint64_t sequence_rowno) {
@@ -474,7 +476,7 @@ struct sequence_index_storage {
     }
 };
 
-/// PostgreSQL adapter for chunked-per-table index storage.
+/// Store a table index as numbered PostgreSQL rows, one payload per chunk.
 struct table_index_storage {
     Oid db_oid_ = InvalidOid, tablespace_oid_ = InvalidOid, main_relfilenode_ = InvalidOid,
         user_relid_ = InvalidOid;
@@ -498,7 +500,8 @@ struct table_index_storage {
     ~table_index_storage() {
         release_();
     }
-    /// Transfer the handle while leaving the source safe for destruction.
+    /// Move the storage identity and take ownership of the buffer context.
+    /// Clear the source's owning pointers so it can be destroyed.
     void steal_(table_index_storage&& o) noexcept {
         db_oid_ = o.db_oid_;
         tablespace_oid_ = o.tablespace_oid_;
@@ -519,7 +522,7 @@ struct table_index_storage {
         o.index_relid_ = InvalidOid;
         o.decoded_units_ = 0;
     }
-    /// Assert that checked close or PG-error abandonment already ran.
+    /// Assert that close or error handling has cleared the context pointer.
     void release_() noexcept {
         DEBUG_ASSERT(own_mctx_ == nullptr,
                      "table_index_storage must be close_checked or abandoned before destruction");
@@ -542,18 +545,18 @@ struct table_index_storage {
         decoded_chunk_ = -1;
         index_relid_ = InvalidOid;
     }
-    /// Terminate after reporting unrecoverable table-storage corruption.
+    /// Report a  tabe index, error and stop execution.
     [[noreturn]] void index_error(std::string_view msg) const {
         bioseq_log<logging_level::error, logging_target::postgres>("bioseq index: {}", msg);
         abort();
     }
 
-    /// Derive one table-shard name from the complete logical identity.
+    /// Build the index table name for one shard.
     [[nodiscard]] std::string this_table_name(std::int32_t shard = 0) const {
         return format_seqidxtab_name(
             index_name_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, shard);
     }
-    /// Resolve or create the table sidecar for this exact handle.
+    /// Find the chunk table, creating it when requested.
     [[nodiscard]] Oid resolve_relid_(bool create) const {
         if (OidIsValid(index_relid_))
             return index_relid_;
@@ -579,14 +582,14 @@ struct table_index_storage {
         index_relid_ = rid;
         return rid;
     }
-    /// Open the resolved table sidecar under the caller-selected lock.
+    /// Open the chunk table with the requested lock, or return null if it is absent.
     [[nodiscard]] Relation open_(bool create, LOCKMODE lock) const {
         const Oid rid = resolve_relid_(create);
         if (!OidIsValid(rid))
             return nullptr;
         return bioseq::postgres::support::try_open_postgres_relation(rid, lock);
     }
-    /// Grow the MemoryContext-owned table decode buffer.
+    /// Grow the read buffer in the handle's PostgreSQL memory context.
     void ensure_buffer_(std::size_t units) const {
         if (decoded_units_ >= units && decoded_ != nullptr)
             return;
@@ -597,7 +600,7 @@ struct table_index_storage {
         decoded_units_ = units;
         MemoryContextSwitchTo(previous_context);
     }
-    /// Count table chunks by following the contiguous primary key range.
+    /// Count the stored chunk rows.
     [[nodiscard]] std::size_t number_of_chunks() const {
         Relation rel = open_(false, AccessShareLock);
         if (rel == nullptr)
@@ -636,7 +639,8 @@ struct table_index_storage {
         relation_close(rel, AccessShareLock);
         return out;
     }
-    /// Decode one table chunk into the reusable handle-owned buffer.
+    /// Copy a chunk into the reusable read buffer.
+    /// The returned pointer remains valid until another chunk  is read or the handle closes.
     template <class p_value_type>
     [[nodiscard]] const p_value_type* read_chunk(std::size_t chunk_no) {
         if (decoded_ != nullptr && decoded_chunk_ == static_cast<std::int64_t>(chunk_no)) {
@@ -681,13 +685,13 @@ struct table_index_storage {
     void resize(std::size_t bytes) {
         planned_bytes_for_chunk_ = bytes;
     }
-    /// Preserve the storage concept hook for uncached table chunks.
+    /// No preparation is needed before reading a table chunk.
     void prefetch_chunk(std::size_t) {}
-    /// Write the first table chunk through the generic storage contract.
+    /// Write chunk zero using the size set by resize.
     template <class p_value_type, class p_callback> void write_to_each(p_callback&& writer) {
         write_to<p_value_type>(0, std::forward<p_callback>(writer));
     }
-    /// Replace one table chunk from a bounded writer callback.
+    /// Fill a temporary buffer and replace the requested chunk row
     template <class p_value_type, class p_callback>
     void write_to(std::size_t chunk_no, p_callback&& writer) {
         static_assert(bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>,
@@ -731,14 +735,14 @@ struct table_index_storage {
         relation_close(rel, RowExclusiveLock);
         decoded_chunk_ = -1;
     }
-    /// Visit every sequence visible through the table handle snapshot.
+    /// Visit each non-null sequence using a registered transaction snapshot.
     template <class p_callback> void for_each_sequence(p_callback&& loader);
-    /// Drop every physical shard belonging to the named logical index.
+    /// Drop the tables whose names identify shards of the named index.
     void clear(std::string_view name);
 };
 
-// ---- shared native relation-drop helper -----------------------------------
-/// Translate a strict SPI cleanup status into the preserved PostgreSQL error.
+// Shared index table cleanup.
+/// Report a failed cleanup operaion as a PostgreSQL error wrapped in a C++ exception.
 [[noreturn]] inline void index_clear_spi_error_as_cpp(const char* stage, int status) {
     bioseq::postgres::support::invoke_pg_as_cpp([stage, status] {
         ereport(
@@ -751,7 +755,7 @@ struct table_index_storage {
     pg_unreachable();
 }
 
-/// Select either best-effort global cleanup or strict prefix cleanup.
+/// Select all index  tables for best-effort cleanup, or a prefix whose cleanup must succeed.
 struct drop_index_relation_selector {
     enum class kind : std::uint8_t { all_index_tables_best_effort, prefix_strict };
 
@@ -763,25 +767,25 @@ struct drop_index_relation_selector {
         return {.selected_kind = kind::all_index_tables_best_effort, .prefix = {}};
     }
 
-    /// Select strict cleanup of relations matching one exact prefix.
+    /// Require cleanup of index tables whose names start with this prefix.
     [[nodiscard]] static constexpr drop_index_relation_selector
     with_prefix(std::string_view selected_prefix) noexcept {
         return {.selected_kind = kind::prefix_strict, .prefix = selected_prefix};
     }
 };
 
-/// Drop the selected internal index relations under checked SPI ownership.
+/// Drop the selected internal index tables and finish the SPI session.
 void drop_index_relations(drop_index_relation_selector selector);
 
 /**
- * @brief Visits every non-null sequence in the handle's table column.
+ * @brief Visit each non-null sequence in the table column.
  *
- * The main relation remains under `AccessShareLock` and the function owns a
- * registered transaction snapshot for the full traversal. The callback view
- * borrows per-row storage and must not escape its invocation.
+ * Hold AccessShareLock on the parent table and register a transaction snapshot
+ * while reading. Each callback borrows its sequence view for that call  only.
+ * Locator-backed values read their fragments using the column reader's current snapshot.
  *
- * @tparam p_callback Callable accepting `(sequence_view, row_number, total_rows)`.
- * @param[in] loader Callback invoked for each inline or locator-backed sequence.
+ * @tparam p_callback Callable accepting (sequence_view, row_number, total_rows).
+ * @param[in] loader Callback for each inline or locator-backed sequence.
  */
 template <class p_callback>
 inline void table_index_storage::for_each_sequence(p_callback&& loader) {
@@ -822,7 +826,7 @@ inline void table_index_storage::for_each_sequence(p_callback&& loader) {
             const sequence_locator loc = decode_locator_from_stub(hdr);
             bioseq::pg_types::seq::dispatch_instance(
                 alpha, bw, [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
-                    // Binds the locator to the traversal snapshot and per-row context.
+                    // Read locator fragments with this traversal's snapshot and row memory context.
                     using source_binding =
                         bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
                     const source_binding bound_source{
@@ -843,8 +847,8 @@ inline void table_index_storage::for_each_sequence(p_callback&& loader) {
         }
         hdr_detoasted.free_if_copy();
     }
-    // with_postgres_lazy_sequence keyed cached fragment readers by rs->snapshot.
-    // Release them before the outer reader unregisters a refreshed snapshot.
+    // Cached fragment readers borrow rs->snapshot. Close them before
+    // end_column_read unregisters any snapshot it refreshed during the scan.
     if (read_caches_ != nullptr) {
         read_caches_->close_all(/*commit=*/false);
     }

@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/core.cppm
- * @brief Index rebuild routes and PostgreSQL error translation.
+ * @brief Rebuild indexes from stored sequences and report failures to PostgreSQL.
  */
 module;
 
@@ -44,7 +44,7 @@ import bioseq.storage.layout;
 import bioseq.storage.size;
 import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
 import bioseq.storage.scanner;                 // sequence access requirements
-import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
+import bioseq.postgres.storage.scanner;        // PostgreSQL sequence read sessions
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.indexing.type;
@@ -90,11 +90,9 @@ template <class p_supported_indexes>
 }
 
 /**
- * @brief Run one storage build and preserve its checked success or abort cleanup.
- * @tparam p_storage Storage adapter owning spill and close state.
- * @tparam p_build_function Build callable.
- * @param storage Adapter whose runs and close state are finalized.
- * @param build_fn Callable that performs the build.
+ * Run a build and close its storage on success On failure, give PostgreSQL
+ * ownership of jrror cleanup where supported, or release temporary runs for
+ * a C++ failure before rethrowing it.
  */
 template <class p_storage, class p_build_function>
 inline void run_pg_index_build_with_cleanup(p_storage& storage, p_build_function&& build_fn) {
@@ -143,12 +141,14 @@ inline void run_pg_index_build_with_cleanup(p_storage& storage, p_build_function
     }
 }
 
-/// Own an admitted resident target for a parallel sequence-index build.
+/// Own a packed sequence and its reserved memory during a parallel index build.
 template <sequence_alphabet p_alphabet> struct resident_index_build_target {
     bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
 };
 
-/// Admit a fragmented target for parallel resident processing when allowed.
+/// Copy a streamed target into reserved memory when CPU parallelism  is enabled
+/// and the memory limit permits it. Return no value when copying is unnecessary
+/// or unavailable, so the caller can keep, reading the sequence as a stream.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<resident_index_build_target<p_alphabet>>
 try_materialize_for_parallel_sequence_index_build(
@@ -207,10 +207,9 @@ try_materialize_for_parallel_sequence_index_build(
     return resident_index_build_target<p_alphabet>{std::move(owner)};
 }
 
-// Whole-target resident materialization is disabled under Vulkan: the goal is
-// streaming fragmented GPU windows, not making the fragmented target
-// contiguous on the host.
-/// Rebuild one fragment index through a resident or streamed source route.
+// Only scalar sequence-wide builds try copying the whole target into memory.
+// Vulkan keeps reading the target in windows for GPU processing.
+/// Rebuild a fragment-storage index, copying the source for scalar parallel work when possible.
 template <class p_supported_indexes, class p_storage, sequence_alphabet p_alphabet>
 inline void
 rebuild_one_fragmented_maybe_resident(p_supported_indexes& idx,
@@ -235,7 +234,7 @@ rebuild_one_fragmented_maybe_resident(p_supported_indexes& idx,
     idx.rebuild_one_fragmented(name, store, sequence, backend, kernels, alphabet_code);
 }
 
-/// Reject a grouped-SoA rebuild before mixing inline and locator sources.
+/// Reject an inline source that would mix storage formats in a READY index.
 [[noreturn]] inline void reject_grouped_soa_nonlocator_source_as_cpp(std::string_view index_name) {
     bioseq::postgres::support::invoke_pg_as_cpp([index_name] {
         ereport(ERROR,
@@ -253,10 +252,9 @@ rebuild_one_fragmented_maybe_resident(p_supported_indexes& idx,
     pg_unreachable();
 }
 
-/// Fail before the destructive index clear if the grouped-SoA rebuild
-/// cannot use one homogeneous PostgreSQL-locator source domain. The table AM
-/// normally guarantees locator stubs. This scan makes that prerequisite an
-/// enforced storage contract.
+/// Check  every non-null source for a PostgreSQL locator before rebuilding.
+/// READY generations need these locators to verify source identity, and all
+/// rows under one index name must use the same storage format.
 inline void
 verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
                                                 std::span<const std::int16_t> seq_attnos,
@@ -346,8 +344,7 @@ verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
         failure = std::current_exception();
     }
 
-    // One exit owns every leaf cleanup. Cleanup failures are retained only
-    // when there is no earlier source/preflight failure to preserve.
+    // Attempt every cleanup step, keeing the original failure if cleanup also fails.
     const auto cleanup_leaf = [&failure](auto&& function) {
         try {
             function();
@@ -398,11 +395,11 @@ verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
 }
 
 /**
- * @brief Rebuild one registered index across every sequence column and visible row.
- * @tparam p_supported_indexes Registry that supplies storage and index implementations.
- * @param rel_oid Relation whose sequence columns are rebuilt.
- * @param name Registered logical index name.
- * @return Number of visible sequence rows processed by the rebuild.
+ * Rebuild the named index for all sequence columns in a Bioseq table
+ * READY minimizer builds keep the previous generation until the new head is
+ * published. Other layouts clear their old data before  building.
+ *
+ * @return Rows with a non-null sequence value, or the table row count for a table index.
  */
 template <class p_supported_indexes>
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
@@ -494,8 +491,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     const std::uint16_t frozen_kmer_size = static_cast<std::uint16_t>(configured_kmer_size);
     const std::uint16_t frozen_window_size = static_cast<std::uint16_t>(configured_window_size);
     if (is_minimizer_index) {
-        // Cold fail-closed gate before generation-id allocation, relation/file
-        // creation, payload writes, or descriptor/head publication.
+        // Validate the minimizer storage catalogs before allocating or writing a generation.
         bioseq::storage::validate_minimizer_generation_storage_catalogs_pg();
     }
     reset_last_minimizer_sequence_build_stats();
@@ -530,8 +526,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         static_cast<int>(frozen_minimizer_algorithm),
         use_grouped_soa_generation);
 
-    // Locate every bioseq.seq column: the index covers each sequence column;
-    // mmsearch(target, query) queries the target column, which may not be the first).
+    // Include every sequence column because mmsearch can target any of them.
     std::vector<std::int16_t> seq_attnos;
     const std::string seq_attno_sql =
         fmt::format("SELECT a.attnum FROM pg_attribute a JOIN pg_type t "
@@ -620,19 +615,15 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             try {
                 bioseq::postgres::support::invoke_pg_as_cpp([work] { MemoryContextDelete(work); });
             } catch (...) {
-                // Preserve the source-contract failure; transaction abort owns
-                // any context whose defensive delete also failed.
+                // Keep the source error. Transaction abort will release the context if deletion failed.
             }
             std::rethrow_exception(failure);
         }
     }
 
-    // Replace-in-place layouts still require a destructive
-    // clear.  Generation-backed minimizers instead append a new immutable
-    // positive generation to the existing canonical sidecar and atomically
-    // replace only generation zero's head.  Clearing here would drop the
-    // relation, invalidate its OID/relfilenode, and erase the rollback/GC
-    // predecessor before publication.
+    // Clear layouts that replace their stored data in place. READY minimizers
+    // append a generation and replace its head, preserving the old generation
+    // for  rollback and later cleanup. Dropping their table here would lose it.
     if (!use_grouped_soa_generation) {
         for (std::int16_t a : seq_attnos) {
             acquire_index_advisory_xact_lock(
@@ -698,29 +689,24 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
         for (std::int16_t a : seq_attnos)
             mark_serialized_index_write_successful_pg(rel_oid, rid.relfilenode, a, name);
-        caches->close_all(/*commit=*/false); // close cached seq_sub read-state relations (else
-                                             // "resource was not closed" at commit)
+        caches->close_all(/*commit=*/false); // Close cached sequence relations before transaction-end checks.
+                                             // These caches were used for reading.
         bioseq::storage::destroy_seq_caches(caches);
         MemoryContextDelete(work);
         return written;
     }
 
-    // per-sequence walk: build the index for every SEQ column of every row.
+    // Build each non-null sequence column in every, visible row.
     Relation ur = nullptr;
     TupleDesc utd = nullptr;
     Snapshot snap = nullptr;
     column_read_state* rs = nullptr;
     MemoryContext inner = nullptr;
     bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
-    // Read each row's stored value via the column reader, not
-    // table_scan_getnextslot. The bioseq table-AM scan assembles the full
-    // sequence into one varlena, which exceeds MaxAllocSize (~1 GiB) for a multi-Gbp
-    // target (6 Gbp => ~1.5 GB) and ERRORs "sequence too large to materialise as a
-    // single varlena". read_next_column_row returns the RAW stored value (the 56-byte
-    // locator stub for a large sequence); we decode the locator and STREAM fragments
-    // via scanner_pg (RSS bounded by one fragment) — the only path that can index a
-    // >MaxAllocSize target. `&rowno` is the columnar row number == query_key (no
-    // tid_to_row_number needed; that path also fixed the rowno source).
+    // Read stored values through the column reader so large sequences remain
+    // locator stubs. A nomal table scan may assemble the whole sequence into
+    // a varlena and exceed MaxAllocSize. The locator lets each builder read
+    // fragments as needed. The column row number is also  the index query key
     std::int64_t written = 0;
     std::exception_ptr row_walk_failure;
     try {
@@ -758,9 +744,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                      /*randomAccess=*/false,
                                      nullptr);
         });
-        // BeginRead may flush pending writes and replace its snapshot with a
-        // newly registered one. The provider and retained hash-major source
-        // authorization must observe that same authoritative snapshot.
+        // The column reader can refresh its snapshot after flushing pending writes.
+        // Bind the source provider to that snapshot so source checks and row reads agree.
         source_provider =
             bioseq::storage::create_standalone_pg_sequence_source_provider(ur, rs->snapshot);
         inner = bioseq::postgres::support::invoke_pg_as_cpp([work] {
@@ -775,7 +760,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         while (bioseq::postgres::support::invoke_pg_as_cpp(
             [rs, valp, nulls, &rowno] { return read_next_column_row(rs, valp, nulls, &rowno); })) {
             bioseq::postgres::support::invoke_pg_as_cpp([inner] { MemoryContextReset(inner); });
-            // Bound RSS to one row's decode plus one source fragment.
+            // Reuse the row context after releasing the previous row's sequence views.
             bool any_col = false;
             for (std::int16_t seq_attno : seq_attnos) {
                 if (nulls[seq_attno - 1])
@@ -1077,15 +1062,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                             }
                         });
                 }
-                any_col = true; // detoast copies live in `inner`, reclaimed by the per-row reset /
-                                // final delete
+                any_col = true; // Detoast copies belong to the row context.
+                                // The next row reset, or final cleanup, releases them.
             }
             if (any_col)
                 ++written;
         }
-        // Release the last expanded source handle before the provider performs
-        // its checked commit sweep.  Earlier rows were released by their next
-        // per-row reset.
+        // Release the final row's sequence handle before checking and closing the
+        // source provider. Earlier handles were released by the next row reset.
         bioseq::postgres::support::invoke_pg_as_cpp([inner] { MemoryContextReset(inner); });
         bioseq::postgres::support::invoke_pg_as_cpp([source_provider] {
             bioseq::storage::close_pg_sequence_source_provider(source_provider, /*is_commit=*/true);
@@ -1095,9 +1079,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         row_walk_failure = std::current_exception();
     }
 
-    // One cleanup exit preserves the biological/build error while attempting
-    // every PostgreSQL leaf. Fragment caches borrow rs->snapshot, so they close
-    // before end_column_read can unregister a refreshed snapshot copy.
+    // Attempt all cleanup  while keeping the first failure. Close fragment caches
+    // before the column reader because they borrow its snapshot.
     const auto cleanup_leaf = [&row_walk_failure](auto&& function) {
         try {
             function();
@@ -1107,9 +1090,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             }
         }
     };
-    // Expanded Datums retain their source domains.  The normal path reset the
-    // row context before its checked sweep; do the same before an abort sweep
-    // so no retained domain survives until transaction end.
+    // Delete row values before aborting the provider so their source references
+    // are released aefore the provider closes.
     if (inner != nullptr) {
         MemoryContext context = std::exchange(inner, nullptr);
         cleanup_leaf([context] {
@@ -1173,7 +1155,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     return written;
 }
 
-/// Map an Exact SIMD runtime rejection to the stable PostgreSQL error contract.
+/// Report an unsupported Exact SIMD build as a PostgreSQL error.
 [[noreturn]] inline void raise_exact_simd_index_pg_error(const char* operation,
                                                          const char* detail) {
     ereport(ERROR,
@@ -1186,7 +1168,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     pg_unreachable();
 }
 
-/// Map a bounded-ntHash status to its stable PostgreSQL SQLSTATE class.
+/// Map bounded-ntHash failures to PostgreSQL error codes.
 [[nodiscard]] constexpr int packed_bounded_nthash_index_pg_errcode(
     bioseq::indexing::packed_bounded_nthash_index_status status) noexcept {
     using status_type = bioseq::indexing::packed_bounded_nthash_index_status;
@@ -1262,12 +1244,11 @@ static_assert(packed_bounded_nthash_index_pg_errcode(
 }
 
 /**
- * @brief Translate a registry-backed index rebuild across the PostgreSQL C ABI.
- * @tparam p_supported_indexes Registry that supplies storage and index implementations.
- * @param rel_oid Relation whose sequence columns are rebuilt.
- * @param name_data Index name bytes.
- * @param name_size Number of bytes in @p name_data.
- * @return Number of visible sequence rows processed by the rebuild.
+ * Run an index rebuild and translate exceptions into PostgreSQL errors after
+ * C++ owners have been destroyed. Preserve PostgreSQL error details and report
+ * Exact SIMD and bounded-ntHash failures with their specific error codes.
+ *
+ * @return The row count reported by the  rebuild.
  */
 template <class p_supported_indexes>
 [[nodiscard]] inline std::int64_t
@@ -1304,8 +1285,7 @@ update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name
     } catch (...) {
         unknown_cpp_error = true;
     }
-    // Every owning index-build object has unwound before either PostgreSQL
-    // terminal path below.  Only fixed/trivial diagnostic state remains.
+    // C++ build owners have been destroyed. Report the saved error, to PostgreSQL now.
     if (exact_error != nullptr) {
         ReThrowError(exact_error);
     }

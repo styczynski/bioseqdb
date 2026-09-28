@@ -1,6 +1,6 @@
 /**
  * @file lazy_sequence_slicing_acceptance_test.cpp
- * @brief Exercises SQL slicing, sequence algebra, and stable mmsearch binding.
+ * @brief Tests sequence slicing and which mmsearch result each helper reads.
  */
 
 #include <cstdio>
@@ -127,9 +127,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "SET from_collapse_limit = 1; "
         "SET geqo = off;");
 
-    /* This diagnostic runs owner propagation over all five wrapper Path types.
-     * The nested SQL below supplies the finalized-plan executor evidence:
-     * helper values come from each MatchResult and never from a projection stub. */
+    /* Check that match-result bindings survive each supported plan wrapper.
+     * The SQL cases below also check that helpers return alignment results. */
     const auto wrapper_receipt = query_one(
         ctx,
         "SELECT exact_owner_found::text, clone_applied::text, "
@@ -171,8 +170,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         REQUIRE(*field == "true");
     }
 
-    /* A base BioseqScan is itself a stable match owner.  Its helpers must be
-     * finalized against the exact sequence column before executor rewriting. */
+    /* Helpers on t.seq0 must read the result of this base-table mmsearch. */
     const auto base_owner_rows = query_rows(ctx, fmt::format(
         "SELECT bioseq.query_len(t.seq0), bioseq.target_len(t.seq0), "
         "       bioseq.cigar(t.seq0) "
@@ -187,10 +185,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(base_owner_rows.front()[2].has_value());
     REQUIRE(*base_owner_rows.front()[2] != "!UNEXPECTED!");
 
-    /* The second materialized CTE is planned after an unrelated query level,
-     * so its BioseqScan Vars receive a nonzero final-rtable offset.  The
-     * planner-scope owner image must remain local for ambiguity resolution,
-     * while the executor image uses the shifted target and helper Vars. */
+    /* The unrelated CTE changes table numbering in the final plan. Helpers
+     * must still find  the mmsearch result from the owned CTE. */
     const std::string offset_base_owner_sql = fmt::format(
         "WITH pad AS MATERIALIZED ("
         "  SELECT count(*) AS n FROM {}"
@@ -242,8 +238,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         == offset_base_owner_rows);
     exec_sql(ctx, "DEALLOCATE sequence_acceptance_base_match_owner_offset;");
 
-    /* The base owner and an outer sliced owner share t.seq0 lineage.  A row
-     * marker cannot select between their MatchResults and must fail closed. */
+    /* Both searches use t.seq0, so t.pk alone cannot tell cigar which result
+     * to read. The error must report both candidates. */
     const auto finalization_scope_reset = query_one(ctx,
         "SELECT scopes_entered::text, scopes_exited::text, "
         "       scopes_active::text "
@@ -280,9 +276,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(finalization_scope_after_error[2]
         == std::optional<std::string>{"0"});
 
-    /* Every result helper names the complete transformed target recipe.  In
-     * particular, the coordinate helpers must describe the 128-letter logical
-     * slice rather than the 224-letter stored source. */
+    /* Helpers must match the complete target expression. This search aligns
+     * the 128-letter slice, so target_len must report 128. */
     const std::string exact_helpers_sql = fmt::format(
         "SELECT bioseq.query_len(t.seq0[0:128]), "
         "       bioseq.query_start(t.seq0[0:128]), "
@@ -313,9 +308,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
             return line.find("Custom Scan (BioseqBatchJoin)")
                 != std::string::npos;
         }) == 1);
-    /* EXPLAIN itself reaches core setrefs.  Keeping pk out of the visible
-     * SELECT list makes this a direct resjunk-sort carrier regression for the
-     * transformed owner, before any executor behavior can mask the defect. */
+    /* ORDER BY needs t.pk even though SELECT omits it. Adding that, hiddn
+     * column must preserve the single BioseqBatchJoin and its helper results. */
     const auto exact_helpers_plan = explain_text<false>(
         ctx, exact_helpers_sql);
     REQUIRE(std::count_if(
@@ -348,8 +342,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(exact_rows.front()[9]->find('M') != std::string::npos);
     REQUIRE(exact_rows.front()[10] == std::optional<std::string>{"t"});
 
-    /* The primary-key spelling provides the unique-lineage fallback when
-     * there is exactly one owner in the statement. */
+    /* A row key can identify the result when the row has only one mmsearch. */
     const std::string lineage_fallback_sql = fmt::format(
         "SELECT bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
         "       bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
@@ -371,8 +364,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(fallback_rows.front()[5] == exact_rows.front()[9]);
     REQUIRE(fallback_rows.front()[6] == std::optional<std::string>{"t"});
 
-    /* A sequence-valued edit argument for a transformed target must equal the
-     * complete target recipe. */
+    /* bioseq.edit must receive the same complete target expression as mmsearch. */
     const auto mismatched_edit = sql_error(ctx, fmt::format(
         "SELECT bioseq.edit(t.seq0) FROM {} AS t "
         "INNER JOIN sequence_acceptance_match_binding_queries AS q "
@@ -409,10 +401,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(*tail_exact.front()[2] != "!UNEXPECTED!");
     REQUIRE(raw_exact.front()[2] != tail_exact.front()[2]);
 
-    /* A parameterized baserel candidate sees both the base PARAM_EXTERN owner
-     * and the higher sliced join owner through ParamPathInfo.  Their distinct
-     * RestrictInfo frontiers must be decided before query operand shape; each
-     * exact helper then binds to its own MatchResult. */
+    /* A prepared  parameter drives the whole-target search, while the join
+     * searches the tail. Each helper must keep the result of its own search. */
     exec_sql(ctx,
         "SET plan_cache_mode = force_generic_plan; "
         "PREPARE sequence_acceptance_base_param_sliced_join(bioseq.seq) AS "
@@ -458,10 +448,9 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "DEALLOCATE sequence_acceptance_base_param_sliced_join; "
         "RESET plan_cache_mode;");
 
-    /* The same physical/recipe target can belong to two frontiers when the
-     * base restriction has a Const query and the higher join evaluates a
-     * sliced query recipe. The plan must contain one owner at each frontier
-     * and no executable SQL mmsearch filter. */
+    /* The base filter and join search the same target with different query
+     * expressions. Each needs its own scan, and mmsearch must be removed from
+     * the ordinary SQL filters. */
     const std::string base_const_same_target_sql = fmt::format(
         "SELECT t.pk, q.id "
         "FROM {} AS t "
@@ -492,10 +481,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         base_const_same_target_plan, "Filter: mmsearch"));
     REQUIRE_FALSE(plan_contains(
         base_const_same_target_plan, "Join Filter: mmsearch"));
-    /* Without a match-result helper both owners retain the full hit and the
-     * strong chain-only candidate.  Independent owner frontiers therefore
-     * compose as the Cartesian MatchResult multiset, rather than executing
-     * either RestrictInfo twice. */
+    /* Each search returns two rows on its own Combining them must produce
+     * all four pairs. */
     const auto base_const_rows = query_rows(ctx, fmt::format(
         "SELECT t.pk FROM {} AS t WHERE mmsearch(t.seq0, {}) "
         "ORDER BY t.pk",
@@ -523,12 +510,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
                 std::optional<std::string>{"1"}};
         }));
 
-    /* A parenthesized, collapse-disabled join tree creates two owner nodes in
-     * one PlannerInfo and therefore one stable-binding scope.  The inner raw
-     * owner aligns the 224-letter whole source; the outer transformed owner
-     * aligns its 96-letter tail.  Keeping only the outer owner transformed
-     * also confirms nested ownership without stacking two SliceProject source
-     * tags on the same BioseqScan. */
+    /* Keep the joins nested in one SQL statement. Helpers for the whole  target
+     * and its tail must read their corresponding mmsearch results. */
     const std::string nested_owner_sql = fmt::format(
         "SELECT t.pk, q1.id, q2.id, "
         "       bioseq.query_len(t.seq0), "
@@ -570,8 +553,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(prepared_second == nested_rows);
     exec_sql(ctx, "DEALLOCATE sequence_acceptance_exact_match_owners;");
 
-    /* Three pairwise-distinct PPI required-relids sets are three owning
-     * frontiers, not a three-call stack in the deepest baserel candidate. */
+    /* Three nested joins must keep three separate mmsearch results. */
     const std::string three_owner_sql = fmt::format(
         "SELECT t.pk, q1.id, q2.id, q3.id, "
         "       bioseq.query_len(t.seq0), "
@@ -611,9 +593,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
             exact_rows.front()[0], exact_rows.front()[3],
             exact_rows.front()[9]});
 
-    /* Force a safe SortPath on the route from the raw descendant owner to the
-     * transformed owner.  The exact inner helper identities must survive each
-     * wrapper targetlist edge and remain MatchResult-backed after setrefs. */
+    /* Force a merge join with a sort between the searches. Sorting must
+     * preserve the helper results from the inner search. */
     exec_sql(ctx,
         "SET enable_nestloop = off; "
         "SET enable_hashjoin = off; "
@@ -656,9 +637,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "RESET enable_hashjoin; "
         "RESET enable_mergejoin;");
 
-    /* A nonsequence helper marker from the second alias of a composite target
-     * binds through that exact alias lineage, not merely the first source Var
-     * selected for physical ownership. */
+    /* The target joins sequences from a and b. A helper using b.pk must find
+     * that combined tahget, even though b is the second source. */
     const auto composite_lineage = query_rows(ctx, fmt::format(
         "SELECT bioseq.query_len(b.pk), bioseq.target_len(b.pk), "
         "       bioseq.cigar(b.pk) "
@@ -675,9 +655,8 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(composite_lineage.front()[2].has_value());
     REQUIRE(*composite_lineage.front()[2] != "!UNEXPECTED!");
 
-    /* Both owners now inhabit the same finalization scope and descend from
-     * the same SQL-visible t.seq0 lineage.  A nonexact row marker therefore
-     * cannot select one MatchResult. */
+    /* Both searches use the same row. cigar(t.pk) is ambiguous because the
+     * key does not say which target expression to use. */
     const std::string ambiguous_shared_lineage_sql = fmt::format(
         "SELECT bioseq.cigar(t.pk) "
         "FROM ({} AS t "

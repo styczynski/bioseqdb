@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Audits exact parameterized mmsearch owners and their planner ABI.
+ * @brief Checks that, a parameterized mmsearch restriction has a valid executor owner.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -46,14 +46,12 @@ export {
     }
 
     /**
-     * @brief Checks whether two RestrictInfo nodes retain one PostgreSQL planner identity.
+     * @brief Checks whether two RestrictInfo nodes represent the same planner restriction.
      *
-     * PostgreSQL copies RestrictInfo nodes between baserel parameterization and
-     * join-path construction while preserving rinfo_serial specifically so the
-     * copies retain one planner identity.  Pointer equality alone therefore
-     * misses the BMO path that owns the same qual.  Admit only that documented
-     * clone relation plus an exact executable/security shape; equal SQL text with
-     * a different serial remains a distinct restriction.
+     * PostgreSQL can copy a restriction while preserving rinfo_serial. Accept
+     * those copies only when their expression, relation sets, and execution and
+     * security flags also agree. Equal expressions with  different serials remain
+     * separate restrictions.
      */
     [[nodiscard]] bool same_planner_restriction_identity(RestrictInfo* candidate,
                                                          RestrictInfo* expected) noexcept {
@@ -89,7 +87,7 @@ export {
         ownership.rejection_mask |= static_cast<std::uint32_t>(reason);
     }
 
-    /** @brief Validates a known BatchJoin owner that is foreign to the expected restriction. */
+    /** @brief Checks a BatchJoin or PerRow path that owns a different mmsearch restriction. */
     [[nodiscard]] bool foreign_known_join_owner_is_valid(PlannerInfo* root, CustomPath* custom) {
         if (root == nullptr || custom == nullptr)
             return false;
@@ -190,7 +188,13 @@ export {
                custom->path.total_cost >= custom->path.startup_cost;
     }
 
-    /** @brief Recursively counts exact owners while rejecting unmodeled executable path state. */
+    /**
+     * @brief Counts valid owners of the selected mmsearch restriction.
+     *
+     * Unknown path types are rejected because their hidden state cannot be checked.
+     * Set admit_known_wrapper_owner to count a validated BatchJoin or PerRow as
+     * this restriction's owner and check other expression stores for mmsearch calls.
+     */
     void count_exact_parameterized_bmo_owners(PlannerInfo* root,
                                               Path* path,
                                               RestrictInfo* restriction,
@@ -231,8 +235,8 @@ export {
             auto* custom = reinterpret_cast<CustomPath*>(path);
             if (custom->methods == bioseq_column_scan_path_methods() &&
                 custom->custom_paths != NIL) {
-                /* A BioseqColumnScan is a leaf.  Children would make the owner count
-                 * incomplete and therefore invalidate this internal path ABI. */
+                /* BioseqColumnScan must have no children. Otherwise this leaf check
+                 * would miss any owners hidden beoow it. */
                 reject_exact_parameterized_bmo_owner(ownership, k_exact_bmo_base_scan_has_children);
                 return;
             }
@@ -679,10 +683,9 @@ export {
             return;
         }
         if (IsA(path, GroupResultPath)) {
-            /* GroupResultPath is childless, but its bare HAVING quals are executable
-             * and are not represented by pathtarget or ParamPathInfo.  It can never
-             * own a BMO restriction, so any surviving mmsearch here invalidates the
-             * closed-world owner count instead of disappearing behind a leaf tag. */
+            /* GroupResultPath has no children, but its HAVING conditions still run.
+             * Check them  separately because they are absent from pathtarget and
+             * ParamPathInfo. An mmsearch here has no supported executor owner. */
             for (Node* qual :
                  postgres_list<Node>(reinterpret_cast<GroupResultPath*>(path)->quals)) {
                 if (count_mmsearch_occurrences(qual, get_cached_stub_oids()) != 0u) {
@@ -692,16 +695,16 @@ export {
             }
             return;
         }
-        /* Closed-world ownership: these are the only childless core Path variants
-         * admitted as leaves.  Any other tag may hide a child/owner layout this
-         * narrow fallback does not understand. */
+        /* These core path types have no child paths to inspect. Reject other
+         * types because this walk does not know where they store children or
+         * mmsearch calls. */
         if (IsA(path, Path) || IsA(path, IndexPath) || IsA(path, TidPath) ||
             IsA(path, TidRangePath))
             return;
         reject_exact_parameterized_bmo_owner(ownership, k_exact_bmo_unknown_core_path);
     }
 
-    /** @brief Bit flags describing failures while reconstructing a parameterized base owner. */
+    /** @brief Reasons that rebuilding a parameterized BioseqScan owner can fail. */
     enum exact_parameterized_bmo_reconstruction_rejection : std::uint32_t {
         k_exact_bmo_reconstruct_invalid_input = 1u << 0,
         k_exact_bmo_reconstruct_operand_shape = 1u << 1,
@@ -719,7 +722,7 @@ export {
         k_exact_bmo_reconstruct_cost = 1u << 13,
     };
 
-    /** @brief Bit flags describing mismatches in a reconstructed base-owner private ABI. */
+    /** @brief Reasons the rebuilt scan's stored mmsearch information does not match the expected owner. */
     enum exact_parameterized_bmo_reconstruction_abi_mismatch : std::uint32_t {
         k_exact_bmo_reconstruct_abi_invalid_tag = 1u << 0,
         k_exact_bmo_reconstruct_abi_missing_recipe = 1u << 1,
@@ -738,7 +741,7 @@ export {
         k_exact_bmo_reconstruct_abi_incompatible_options = 1u << 14,
     };
 
-    /** @brief Aggregates reconstruction rejection masks and owner multiplicities. */
+    /** @brief Failure flags and owner counts collected while rebuilding a parameterized BioseqScan. */
     struct exact_parameterized_bmo_reconstruction_audit {
         std::uint32_t rejection_mask = 0u;
         std::uint32_t owner_abi_mismatch_mask = 0u;

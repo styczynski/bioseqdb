@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_paths.cppm
- * @brief NCBI gene download endpoint fragments.
+ * @brief OpenAPI requests for downloading NCBI gene data packages.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene identifier and symbol download path entries. */
+/** @brief Gene  package downloads using GeneIDs in the path or a JSON request. */
 inline constexpr std::string_view gene_download_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/download:
     get:

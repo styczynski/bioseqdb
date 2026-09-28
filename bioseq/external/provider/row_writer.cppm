@@ -1,6 +1,6 @@
 /**
  * @file external/provider/row_writer.cppm
- * @brief Type-erased callback boundary for provider row emission.
+ * @brief Callbacks for consuming provider rows and diagnostics
  */
 module;
 
@@ -14,16 +14,13 @@ import bioseq.external.provider.errors;   // external_error
 import bioseq.external.provider.model;    // row views
 import bioseq.external.provider.messages; // provider_diagnostic_view
 
-/// @brief Consumer-side type-erased row-writer boundary.
-// Mirrors identifier_writer_ref:
-// validate the concrete sink at compile time, erase it once with void* plus
-// function pointers, keep the reference non-owning. The facade/PG executor
-// drains owning messages, builds one transient view on the caller/backend
-// thread, then invokes the writer. It is never passed to a worker or provider
-// session.
+/// Callbacks used by the consumer of provider rows.
+// Check the writer's methods at compile time, then borrow it through callbacks.
+// Call these callbacks on the consumer thread with views backed by owned messages.
+// Keep this writer refeence out of provider workers.
 export namespace bioseq::external::provider {
 
-/// Consumer contract for provider rows and diagnostics.
+/// Required methods for a consumer of provider rows and  diagnostics.
 template <class p_writer_type>
 concept external_row_writer_compatible =
     requires(p_writer_type &writer, const taxonomy_row_view &taxon,
@@ -38,7 +35,7 @@ concept external_row_writer_compatible =
       { writer.finish() } -> std::same_as<std::expected<void, external_error>>;
     };
 
-/// Non-owning type-erased provider-row writer.
+/// Borrowed callbacks for writing provider rows.
 struct external_row_writer_ref {
   void *object{};
   sink_control (*taxon_fn)(void *, const taxonomy_row_view &){};
@@ -56,11 +53,11 @@ struct external_row_writer_ref {
   [[nodiscard]] sink_control write_record(const catalog_row_view &row) const {
     return record_fn(object, row);
   }
-  /// Emit one gene projection.
+  /// Emit one record-to-gene row.
   [[nodiscard]] sink_control write_gene(const record_gene_row_view &row) const {
     return gene_fn(object, row);
   }
-  /// Emit one record-location projection.
+  /// Emit one record-to-location row.
   [[nodiscard]] sink_control
   write_location(const record_location_row_view &row) const {
     return location_fn(object, row);
@@ -70,13 +67,13 @@ struct external_row_writer_ref {
   write_diagnostic(const provider_diagnostic_view &row) const {
     return diagnostic_fn(object, row);
   }
-  /// Finalize the writer and return any terminal error.
+  /// Finish the writer and return any error it reports.
   [[nodiscard]] std::expected<void, external_error> finish() const {
     return finish_fn(object);
   }
 };
 
-/// Erase a concrete row writer without taking ownership.
+/// Borrow a writer through callbacks without taking ownership.
 template <external_row_writer_compatible p_writer_type>
 [[nodiscard]] external_row_writer_ref
 make_external_row_writer_ref(p_writer_type &writer) noexcept {

@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/row_adapters.cppm
- * @brief Defines locator identity checks and PostgreSQL source-provider adapters.
+ * @brief Check shared target readers and attach saved query statistics.
  */
 module;
 
@@ -32,9 +32,8 @@ import bioseq.storage.layout;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/// Compare every locator field before one resident target is shared by a
-/// query-parallel batch. The comparison stays PostgreSQL-free so it can also
-/// serve as a preflight stats before any worker is entered.
+/// Checks that two locators identify the same stored sequence before workers
+/// share a target copy. Compares all fields, including reserved fields.
 [[nodiscard]] constexpr bool
 same_dispatch_target_locator(const bioseq::storage::sequence_locator& left,
                              const bioseq::storage::sequence_locator& right) noexcept {
@@ -46,9 +45,9 @@ same_dispatch_target_locator(const bioseq::storage::sequence_locator& left,
            left.source_epoch == right.source_epoch;
 }
 
-/// Validate the complete immutable hash-major reader identity before it is
-/// borrowed concurrently. No worker may observe a partially authenticated,
-/// mixed-layout or storage-profile-transcoded prepared group.
+/// Checks that the hash-major reader belongs to this target and stored index
+/// generation. Its read checks and  memory counts must agree before query
+/// workers can share it.
 template <class p_prepared_index_group>
 [[nodiscard]] inline bool
 hash_major_parallel_reader_identity_valid(const p_prepared_index_group& group,
@@ -96,10 +95,9 @@ hash_major_parallel_reader_identity_valid(const p_prepared_index_group& group,
            !receipt.saturated;
 }
 
-/// grouped-SoA counterpart of the concurrent-reader stats. The reader owns only
-/// independent fragment address plans. Query routing/count reduction is
-/// transient wave state, and every persisted posting remains owned by exactly
-/// one fragment.
+/// Checks a mapped fragment reader before query workers share it. The mapping
+/// must stay alive, and its lookup format must match the prepared group. Query
+/// routing and selected anchors are allocated later for each wave.
 template <class p_prepared_index_group>
 [[nodiscard]] inline bool
 fragment_parallel_reader_identity_valid(const p_prepared_index_group& group,
@@ -173,9 +171,9 @@ fragment_parallel_reader_identity_valid(const p_prepared_index_group& group,
            read.source_decoded_bp == 0u;
 }
 
-/// Attach the retained query-sketch stats after a worker has joined. The
-/// prebuilt-minimizer entry point must not publish its own query stats. This
-/// check makes duplicate attachment fail closed on the PostgreSQL thread.
+/// Add the saved query-sketch statistics after its worker finishes.
+/// Reject a result that already contains query-sketch counts, preventing
+/// the same preparation work from being recorded twice
 inline void
 attach_retained_hash_major_query_stats(match_result_collection& collection,
                                        const pipe::minimizer_range_execution_stats& stats) {
@@ -215,7 +213,7 @@ attach_retained_hash_major_query_stats(match_result_collection& collection,
 #endif
     }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // The checked bridge attests nonempty reference work before this attachment.
+    // Record the reference algorithm  after its checked executio has completed.
     if (stats.checked_reference_simd_bridge_completed) {
         collection.record_completed_minimizer_algorithm_identity(
             minimizer_algorithm::simd_minimap2_reference);

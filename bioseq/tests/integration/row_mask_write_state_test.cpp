@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief PostgreSQL integration contract for row-mask write-state flushing.
+ * @brief Tests flushing ptnding row deletions to the row-mask catalog.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -36,8 +36,8 @@ TEST_CASE("row-mask writes survive explicit same-transaction flush",
     auto ctx = fresh_context({k_table});
     create_row_mask_table(ctx);
 
-    // Keep the covered-row prefix clear while making the catalog value large
-    // enough to exercise PostgreSQL's ordinary varlena detoast path.
+    // Leave the first rows unmasked, but enlarge the value to exercise
+    // reading a TOASTed row mask
     exec_sql(ctx,
              "UPDATE bioseq_internal.row_mask "
              "SET mask = ("
@@ -62,8 +62,8 @@ TEST_CASE("row-mask writes survive explicit same-transaction flush",
                                      "SELECT count(*) FROM removed;",
                                      k_table)) == 1);
 
-    // A normal sequential read explicitly flushes the pending mask and then
-    // consumes the persisted value in the same transaction.
+    // Force a sequential scan to flush the pending deletions. It must see
+    // the updated mask within  the same transaction.
     exec_sql(ctx,
              "SET LOCAL enable_seqscan = on; "
              "SET LOCAL enable_indexscan = off; "

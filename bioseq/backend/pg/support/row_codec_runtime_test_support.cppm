@@ -1,6 +1,6 @@
 /**
  * @file row_codec_runtime_test_support.cppm
- * @brief Exercises every generated SQL row codec in test-profile builds.
+ * @brief Test generated conversions between C++ rows and PostgreSQL tuples.
  */
 module;
 
@@ -72,8 +72,8 @@ import :codec_fixtures;
 export namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
 /**
- * Exercises all generated row codecs and compares their exact evidence receipt
- * with the generated manifest projection supplied by the integration harness.
+ * Test all generated row codecs and compare their result report with the
+ * manifest-based report supplied by the integration  test. Roll back test changes.
  */
 void exercise_all(std::string_view expected_receipt) {
     auto transaction = subtransaction::begin();
@@ -102,8 +102,8 @@ void exercise_index_table_shard_only() {
 }
 
 /**
- * Reach the generated reaper text decoder's real detoast/copy bridge with a
- * valid external pointer whose referenced TOAST relation does not exist.
+ * Check that a detoasting error reaches C++ and runs its destructors.
+ * The test text contains an external TOAST pointer to a nonexistent relation.
  */
 void exercise_reaper_text_bridge_error() {
     auto transaction = subtransaction::begin();

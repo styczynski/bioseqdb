@@ -21,16 +21,15 @@ import bioseq.libpq.client;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// PostgreSQL tutorial execution projects libpq results onto the source-neutral
-// website model. Native PGconn, PGresult, and catalog object identifiers stay
-// behind this module boundary.
+// Runs tutorial SQL and copies libpq results into the website model.
+// The result owns its text, so  rendering does not depend on a live connection.
 export namespace bioseq::codegen::website {
 
-/// @brief Configures database-per-example PostgreSQL isolation.
+/// @brief Settings for running each example in a separate database.
 ///
-/// Each example runs as a unique restricted role inside a unique database cloned
-/// from the extension-bearing template, reached through the same private Unix
-/// socket. The administrator connection targets the cluster control database.
+/// Each example gets a restricted login role and a database copied from the
+/// template with the extension installed. Connections use the private Unix
+/// socket. The administrator connects to the cluster control database.
 struct postgres_isolation_settings {
     std::string administrator_connection_info;
     std::string socket_directory;
@@ -43,10 +42,10 @@ struct postgres_isolation_settings {
     std::vector<std::string> restricted_sequence_relations;
 };
 
-/// @brief Executes tutorial SQL against a private Unix-socket cluster.
+/// @brief Runs tutorial SQL against a private PostgreSQL cluster.
 ///
-/// Models sql_example_executor: read_catalog and execute return typed results
-/// or a diagnostic, never raising libpq errors to callers.
+/// Implements sql_example_executor. Catalog reads and example execution return
+/// a result or diagnostic, with libpq command errors converted to diagnostics.
 class postgres_tutorial_executor {
 public:
     /// @brief Creates an executor for an existing PostgreSQL database.
@@ -54,8 +53,8 @@ public:
     explicit postgres_tutorial_executor(std::string connection_info)
         : connection_info_(std::move(connection_info)) {}
 
-    /// @brief Captures the live SQL catalog snapshot from the cluster.
-    /// @return The snapshot, or a diagnostic on any connection or command failure.
+    /// @brief Reads PostgreSQL and Bioseq extension versions into  a catalog snapshot.
+    /// @return Version metadata, or a diagnostic if a connection or command fails.
     [[nodiscard]] std::expected<sql_catalog_snapshot, diagnostic> read_catalog() {
         try {
             bioseq::libpq::client_connection connection(connection_info_);
@@ -76,9 +75,9 @@ public:
         }
     }
 
-    /// @brief Runs an example's visible SQL and captures its result model.
-    /// @param example The tutorial SQL example to execute.
-    /// @return The visible result model, or a diagnostic on failure.
+    /// @brief Runs setup and visibl SQL, then attempts teardown.
+    /// @param example Tutorial SQL and its expected outcome
+    /// @return Visible results and notices, or an execution or teardown diagnostic.
     [[nodiscard]] std::expected<sql_example_result, diagnostic> execute(
         sql_example const& example) {
         try {
@@ -109,16 +108,14 @@ public:
         }
     }
 
-    /// @brief Runs one example in a dedicated PostgreSQL database and role.
+    /// @brief Runs one example with its own database and restricted login role.
     ///
-    /// Creates a unique restricted LOGIN role and a unique database cloned from the
-    /// extension-bearing template owned by that role, revokes PUBLIC CONNECT and
-    /// grants it only to the role, runs the example as that role over the private
-    /// socket, and always drops the clone (WITH FORCE) and role afterward — even on
-    /// failure. The role never connects as the admin/initdb user.
-    /// @param example The tutorial SQL example.
-    /// @param settings Administrator connection, socket, port, and template database.
-    /// @return The visible result model, or a diagnostic on failure.
+    /// Copies the extension, template and checks permissions before running SQL
+    /// through the private socket. Cleanup tries to drop the database and roles
+    /// even when SQL fails. Database or role cleanup errors also fail the example.
+    /// @param example Tutorial SQL and its expected outcome.
+    /// @param settings Administrator  connection, socket, port, and template database.
+    /// @return Visible results, or an execution, isolation, or cleanup diagnostic.
     [[nodiscard]] std::expected<sql_example_result, diagnostic>
     execute_in_isolated_database(
         sql_example const& example,
@@ -153,10 +150,9 @@ public:
             const std::string quoted_peer = admin.escape_identifier(peer_role);
             const std::string quoted_template =
                 admin.escape_identifier(settings.template_database);
-            // The extension-bearing template becomes an
-            // unconnectable IS_TEMPLATE database with no PUBLIC access, and the
-            // standard cluster databases also reject PUBLIC CONNECT, so a restricted
-            // role can reach only its own clone. Idempotent across serial examples.
+            // Close the extension template to ordinary connections. Also revoke
+            // PUBLIC CONNECT on the standard databases so example roles cannot use them.
+            // These settings can be applied again for each example.
             seal_template_database(admin, quoted_template);
             (void)admin.execute("REVOKE CONNECT ON DATABASE postgres FROM PUBLIC");
             (void)admin.execute("REVOKE CONNECT ON DATABASE template0 FROM PUBLIC");
@@ -170,13 +166,12 @@ public:
                 + " TO " + quoted_role);
             grant_extension_example_privileges(
                 settings, admin_role, role, clone);
-            // A second restricted LOGIN role that owns nothing, standing in for
-            // another example's role: the clone must reject it, demonstrating
-            // that roles cannot cross example-database boundaries.
+            // Use another restricted role to check that an example database
+            // rejects connections from a different example role.
             (void)admin.execute("CREATE ROLE " + quoted_peer
                 + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
-            // Clone-ACL verification and negative connection assertions run
-            // before the example. A violated security guarantee fails the example.
+            // Check database access before  runnng tutorial SQL. Fail the example
+            // if the clone permissions or connection checks are wrong.
             if (std::optional<diagnostic> violation =
                     check_clone_connection_acl(admin, role, clone)) {
                 result = std::unexpected(std::move(*violation));
@@ -185,9 +180,9 @@ public:
                 try {
                     std::optional<diagnostic> preflight_violation;
                     {
-                        // Positive socket/HBA control: establish the restricted
-                        // role's own-clone connection before interpreting any
-                        // failed foreign connection as a security denial.
+                        // Connect to the role's own clone first. This confirms that the socket
+                        // and authentication work before treating a failed foreign connection
+                        // as a permissions check.
                         bioseq::libpq::client_connection probe_connection(
                             bioseq::libpq::make_unix_socket_conninfo(
                                 settings.socket_directory, clone, role,
@@ -206,7 +201,7 @@ public:
                                            settings.socket_directory, suffix)) {
                             preflight_violation = std::move(*violation);
                         }
-                    }  // The probe session can never leak state into tutorial SQL.
+                    }  // Use a fresh session so preflight session settings do not affect the example
                     if (preflight_violation) {
                         result = std::unexpected(std::move(*preflight_violation));
                     } else {
@@ -221,9 +216,8 @@ public:
                     result = std::unexpected(make_command_diagnostic(
                         diagnostic_operation::sql_execution, error));
                 }
-                // Author teardown is permitted only after every isolation preflight
-                // passed and the post-preflight role session was established. A
-                // failed preflight goes straight to administrative clone cleanup.
+                // Run author teardown only after the checks passed and the example
+                // session opened. Otherwise, proceed to administrator  cleanup.
                 if (role_connection) {
                     run_isolated_teardown(
                         settings, role, clone, example, &*role_connection);
@@ -233,9 +227,8 @@ public:
             result = std::unexpected(make_command_diagnostic(
                 diagnostic_operation::database_isolation, error));
         }
-        // Cleanup always runs on a fresh bounded administrator connection so a
-        // dead provisioning connection cannot leak a clone or role. Cleanup errors
-        // and verified residue override tutorial success.
+        // Open a fresh administrator connection for cleanup. Cleanup has time
+        // limits, and any failure or leftover database or role makes the example fail.
         if (std::optional<diagnostic> cleanup = cleanup_isolated_database(
                 settings, admin_role, role, clone, peer_role)) {
             if (!result && !result.error().message.empty()) {
@@ -250,24 +243,22 @@ public:
     }
 
 private:
-    /// @brief Executes the configured SQL steps on an already-open connection.
-    /// @param connection PostgreSQL connection that owns the example session.
+    /// @brief Configures the session and runs setup and visible SQL.
+    /// @param connection Session used for all example commands.
     /// @param example Parsed tutorial example.
-    /// @param run_teardown Whether teardown runs on the same connection.
-    /// @return Captured visible output, or the first execution diagnostic.
+    /// @param run_teardown Whether to attempt teardown in this helper.
+    /// @return Visible output, or the first execution, diagnostic.
     [[nodiscard]] static std::expected<sql_example_result, diagnostic>
     execute_on_connection(
         bioseq::libpq::client_connection& connection, sql_example const& example,
         bool run_teardown = true) {
         sql_example_result outcome;
         outcome.example_id = example.canonical_id;
-        // Setup, visible SQL, and teardown share one client deadline capped at
-        // sixty seconds, independent of the server statement_timeout that the
-        // deterministic session settings also install.
+        // Give each SQL step the same client timeout, capped at sixty seconds.
+        // PostgreSQL statement_timeout is configured separately  below.
         const std::chrono::milliseconds deadline = execution_deadline(example);
-        // Deterministic session settings precede setup so formatting,
-        // search_path, and server timeouts are fixed for
-        // every command. The bounded example timeout drives statement_timeout.
+        // Set output formats, search_path, and server timeouts befope setup
+        // so the example starts with the same session settings on each run.
         configure_tutorial_session(connection, example);
         if (!example.setup_sql.empty()) {
             (void)connection.execute(example.setup_sql, deadline);
@@ -275,19 +266,17 @@ private:
         // Only notices from visible SQL may render. Discard session-configuration
         // and setup notices before running it.
         (void)connection.drain_notices();
-        // The visible SQL is where the success/error expectation applies. A
-        // success example must not raise. An error example must raise the expected
-        // SQLSTATE (or any error, when unspecified). Completed result sets remain
-        // in execution order.
+        // Check the expected outcome only for visible SQL. An error example
+        // must fail with the requested SQLSTATE, or any error if none was given.
+        // Keep completed results in execution order.
         if (example.expectation == sql_expectation::error) {
             if (std::optional<diagnostic> failure = capture_expected_error(
                     connection, example, deadline, outcome)) {
                 return std::unexpected(std::move(*failure));
             }
         } else {
-            // The retention limits bound chunked accumulation as it streams. A
-            // breach is still reported by check_result_limits below with its
-            // author-facing message rather than a silent truncation.
+            // Limit result collection while rows arrive. A limit breach fails
+            // the example so the page cannot show an incomplete result as complete.
             const bioseq::libpq::command_batch_result visible_batch =
                 connection.execute_batch_with_limits(
                     example.visible_sql, deadline, visible_result_limits());
@@ -305,8 +294,7 @@ private:
                 outcome.visible_results.push_back(
                     make_result_set(command, type_names));
             }
-            // Exceeding a retention limit is a build error, never a silent
-            // truncation: displayed output must be the actual result.
+            // Fail the build if a result exceeds the display limits.
             if (std::optional<std::string> breach =
                     check_result_limits(outcome.visible_results)) {
                 diagnostic limit;
@@ -330,21 +318,20 @@ private:
             try {
                 (void)connection.execute(example.teardown_sql, deadline);
             } catch (const bioseq::libpq::command_error&) {
-                // Teardown failure is ignored after a captured expected error.
+                // Ignore  optional teardown errors here. Public execution paths handle teardown separately
             }
         }
         return outcome;
     }
 
-    /// @brief Runs author teardown after every direct execution outcome.
+    /// @brief Attempts teardown after direct execution, including failed SQL.
     ///
-    /// A failed visible statement can leave an explicit transaction aborted.
-    /// Roll it back before teardown so objects created by earlier autocommit
-    /// setup statements are still removed. A teardown error fails the example.
-    /// When execution also failed, its diagnostic remains the primary error.
-    /// @param connection Direct tutorial connection that owns the session.
-    /// @param example Example whose teardown SQL should run.
-    /// @return A teardown diagnostic when rollback or cleanup fails.
+    /// Roll back an open transaction first so an aborted transaction cannot block
+    /// teardown of objects created by earlier setup commands. Teardown failure
+    /// fails the example. If execution also failed, keep that as the primary error.
+    /// @param connection Direct tutorial session.
+    /// @param example Example containing the teardown SQL.
+    /// @return A diagnostic if rollback  or teardown fails.
     [[nodiscard]] static std::optional<diagnostic> run_direct_teardown(
         bioseq::libpq::client_connection& connection,
         sql_example const& example) {
@@ -364,9 +351,9 @@ private:
         return std::nullopt;
     }
 
-    /// @brief Returns the bounded client deadline for one tutorial SQL step.
-    /// @param example Tutorial example whose timeout supplies the requested bound.
-    /// @return A positive duration no greater than sixty seconds.
+    /// @brief Chooses a client timeout for each tutorial SQL wtep.
+    /// @param example Example containing the requested timeout.
+    /// @return A positive duration of at most sixty seconds.
     [[nodiscard]] static std::chrono::milliseconds execution_deadline(
         const sql_example& example) {
         long long timeout_ms = example.timeout.count();
@@ -376,8 +363,8 @@ private:
         return std::chrono::milliseconds(timeout_ms);
     }
 
-    /// @brief Returns the bounded retention policy for visible tutorial results.
-    /// @return Limits shared by streaming collection and post-collection checks.
+    /// @brief Sets the limits for collecting and displaying visible results.
+    /// @return The result count, row, column, and text limits used by both checks.
     [[nodiscard]] static bioseq::libpq::result_limits visible_result_limits() {
         return bioseq::libpq::result_limits{
             .max_rows = 200,
@@ -387,9 +374,9 @@ private:
             .max_result_sets = 10};
     }
 
-    /// @brief Attempts one bounded administrative command without propagating errors.
-    /// @param admin Administrative connection used for cleanup.
-    /// @param sql Command to execute within the fixed cleanup deadline.
+    /// @brief Attempts an administrator command with a cleanup timeout.
+    /// @param admin Administrator connection used for cleanup.
+    /// @param sql Command to attempt. Errors are ignored.
     static void try_cleanup_command(
         bioseq::libpq::client_connection& admin,
         const std::string& sql) {
@@ -399,7 +386,7 @@ private:
         }
     }
 
-    /// @brief Records the first bounded-cleanup failure.
+    /// @brief Records a cleanup error if no earlier cleanup error was saved.
     static void record_cleanup_failure(
         std::optional<diagnostic>& failure,
         std::string operation,
@@ -414,7 +401,7 @@ private:
             + " failed with SQLSTATE " + sql_state + ": " + error.what());
     }
 
-    /// @brief Runs one cleanup command while retaining its first failure.
+    /// @brief Runs one  cleanup command and keeps its first failure.
     /// @return `true` when PostgreSQL accepts the command.
     [[nodiscard]] static bool run_cleanup_command(
         bioseq::libpq::client_connection& admin,
@@ -430,13 +417,13 @@ private:
         }
     }
 
-    /// @brief Removes every database and role created for an isolated example.
+    /// @brief Attempts to remove the database and roles created for an, example.
     /// @param settings Private-cluster connection settings.
-    /// @param admin_role Cluster administrator role used for clone recovery.
+    /// @param admin_role Administrator role used to recover the clone.
     /// @param role Restricted example role.
     /// @param clone Per-example database.
-    /// @param peer_role Restricted role used by negative connection checks.
-    /// @return An error if cleanup fails or leaves cluster state behind.
+    /// @param peer_role Role used to check connection isolation.
+    /// @return An error if cleanup fails or leaves a database or role behind
     [[nodiscard]] static std::optional<diagnostic> cleanup_isolated_database(
         postgres_isolation_settings const& settings,
         const std::string& admin_role,
@@ -480,9 +467,9 @@ private:
                         "ALTER DATABASE " + quoted_clone
                         + " CONNECTION LIMIT -1", "connection-limit restoration");
 
-                    // Open the one administrative clone session before sealing.
-                    // The seal precedes the 2PC snapshot, so no new role session
-                    // can prepare a transaction after discovery and race the DROP.
+                    // Open an administrator session before blocking new clone connections.
+                    // Remove prepared transactions through thag session before dropping
+                    // the database, since PostgreSQL will refuse the drop  while they remain.
                     std::optional<bioseq::libpq::client_connection> clone_admin;
                     if (admin_role.empty()) {
                         if (!failure) {
@@ -617,8 +604,8 @@ private:
         return failure;
     }
 
-    /// @brief Seals the extension template against ordinary connections.
-    /// @param admin Administrative cluster connection.
+    /// @brief Prevents ordinary connections to the extension template.
+    /// @param admin Administrator connection to the cluster.
     /// @param quoted_template Escaped template-database identifier.
     static void seal_template_database(
         bioseq::libpq::client_connection& admin,
@@ -628,9 +615,9 @@ private:
         (void)admin.execute("ALTER DATABASE " + quoted_template + " ALLOW_CONNECTIONS false");
     }
 
-    /// @brief Builds a fatal isolation diagnostic.
-    /// @param message Actionable security or cleanup failure message.
-    /// @return An error-severity diagnostic attributed to database isolation.
+    /// @brief Builds an error diagnostic for an isolation or cleanup failure.
+    /// @param message Explanation of the failed check.
+    /// @return A diagnostic attributed to database isolation.
     [[nodiscard]] static diagnostic make_isolation_error(std::string message) {
         diagnostic violation;
         violation.severity = diagnostic_severity::error;
@@ -639,11 +626,11 @@ private:
         return violation;
     }
 
-    /// @brief Checks that only the owning example role may connect to its clone.
-    /// @param admin Administrative connection used to inspect `pg_database`.
+    /// @brief Checks that PUBLIC cannot connect and the example role has CONNECT.
+    /// @param admin Administrator connection used to inspect pg_database.
     /// @param role Restricted role that owns the clone.
     /// @param clone Per-example database name.
-    /// @return An isolation error when the connection ACL is too broad or incomplete.
+    /// @return An isolation  error if either ACL check fails.
     [[nodiscard]] static std::optional<diagnostic> check_clone_connection_acl(
         bioseq::libpq::client_connection& admin, const std::string& role,
         const std::string& clone) {
@@ -684,8 +671,11 @@ private:
         }
     }
 
-    /// @brief Checks cross-database and cross-role connection isolation.
-    /// @return The first unexpected connection as an isolation error.
+    /// @brief Checks that the example role cannot connect to the standard databases
+    /// or the extension template.
+    ///
+    /// Also checks that a second restricted role cannot connect to this clone.
+    /// @return An isolation error for the first unexpected connection.
     [[nodiscard]] static std::optional<diagnostic>
     check_database_connection_isolation(
         postgres_isolation_settings const& settings,
@@ -737,8 +727,8 @@ private:
         return make_isolation_error(std::move(violation));
     }
 
-    /// @brief Removes state created by a security-sensitive command attempt.
-    /// @return An isolation error if the bounded cleanup command fails.
+    /// @brief Attempts to remove objects created by a privilege check.
+    /// @return An isolation error if the cleanup command fails.
     [[nodiscard]] static std::optional<diagnostic> cleanup_security_probe(
         bioseq::libpq::client_connection& connection, const std::string& sql,
         std::string operation) {
@@ -753,10 +743,10 @@ private:
         }
     }
 
-    /// @brief Grants the clone owner only the extension privileges examples need.
-    /// @param settings Private-cluster and extension policy.
-    /// @param admin_role Cluster administrator used to enter the clone.
-    /// @param role Restricted example role receiving privileges.
+    /// @brief Grants the example role access needed to use the extension.
+    /// @param settings Private-cluste and extension settings.
+    /// @param admin_role Administrator  used, to connect to the clone.
+    /// @param role Restricted role receiving the grants.
     /// @param clone Per-example database name.
     static void grant_extension_example_privileges(
         postgres_isolation_settings const& settings,
@@ -778,10 +768,9 @@ private:
         (void)clone_admin.execute(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
             "bioseq_internal.metadata_age_log TO " + quoted_role);
-        // Grouped-SoA publication uses SELECT ... FOR UPDATE followed by
-        // descriptor INSERT/UPDATE. Grant only those operations in this
-        // disposable per-example database, never extension ownership or
-        // blanket access to internal tables/sequences.
+        // Publishing grouped minimizer storage locks descriptor rows, then
+        // inserts or updates them Grant those operations in the disposable
+        // example database without giving the role extension ownership.
         (void)clone_admin.execute(
             "GRANT SELECT, INSERT, UPDATE ON TABLE "
             "bioseq_internal.minimizer_generation_storage TO " + quoted_role);
@@ -811,10 +800,10 @@ private:
         }
     }
 
-    /// @brief Checks the clone owner's least-privilege extension access.
-    /// @param role_connection Connection authenticated as the clone owner.
-    /// @param settings Extension policy and restricted sequence relations.
-    /// @return An isolation error when an object is missing or access is too broad.
+    /// @brief Checks the example role's access to extension objects.
+    /// @param role_connection Session authenticated as the example role.
+    /// @param settings Extension settings and sequence tables to protect.
+    /// @return An isolation error for a missing object or incorrect privilege.
     [[nodiscard]] static std::optional<diagnostic>
     check_extension_example_privileges(
         bioseq::libpq::client_connection& role_connection,
@@ -941,8 +930,10 @@ private:
         return std::nullopt;
     }
 
-    /// @brief Checks that the clone role cannot perform cluster-wide operations.
-    /// @return The first privilege or cleanup violation, if any.
+    /// @brief Checks that  the example role cannot run privileged cluster operations.
+    ///
+    /// Attempts forbidden operations and removes any objects they unexpectedly create.
+    /// @return The first privilege or cleanup failure.
     [[nodiscard]] static std::optional<diagnostic>
     check_cluster_privilege_isolation(
         bioseq::libpq::client_connection& role_connection,
@@ -1060,12 +1051,12 @@ private:
         return std::nullopt;
     }
 
-    /// @brief Runs author teardown before administrative clone cleanup.
+    /// @brief Attempts author teardown before dropping the example database.
     /// @param settings Private-cluster connection settings.
     /// @param role Restricted example role.
     /// @param clone Per-example database.
-    /// @param example Example whose teardown SQL may run.
-    /// @param role_connection Existing example session, if still usable.
+    /// @param example Example containing teardown SQL.
+    /// @param role_connection Existing example session, if usable.
     static void run_isolated_teardown(
         postgres_isolation_settings const& settings,
         const std::string& role,
@@ -1081,12 +1072,12 @@ private:
             try {
                 (void)role_connection->execute(example.teardown_sql, deadline);
             } catch (const bioseq::libpq::command_error&) {
-                // The clone is dropped next even when teardown fails.
+                // Administrator cleanup will attempt to drop the clone after this.
             }
             return;
         }
-        // Recovery: restore the clone/role so the example role can reconnect,
-        // then run teardown once on a fresh role connection.
+        // Restore database accens  and the role login, then retry teardown
+        // through a fresh connection as the example role.
         try {
             bioseq::libpq::client_connection admin(
                 settings.administrator_connection_info);
@@ -1105,7 +1096,7 @@ private:
             try_cleanup_command(admin, "GRANT CONNECT ON DATABASE " + quoted_clone
                 + " TO " + quoted_role);
         } catch (const bioseq::libpq::command_error&) {
-            return;  // Cleanup drops the clone and role when restoration fails.
+            return;  // Leave a failed restoration to administrator cleanup.
         }
         try {
             bioseq::libpq::client_connection reconnect(bioseq::libpq::make_unix_socket_conninfo(
@@ -1113,13 +1104,13 @@ private:
             configure_tutorial_session(reconnect, example);
             (void)reconnect.execute(example.teardown_sql, deadline);
         } catch (const bioseq::libpq::command_error&) {
-            // The clone is dropped next even when teardown fails.
+            // Administrator cleanup will attempt to drop the clone after this.
         }
     }
 
-    /// @brief Builds a unique lower-snake suffix for transient database objects.
-    /// @param entity_id Stable tutorial-example identity.
-    /// @return A bounded PostgreSQL-safe suffix with a process-local counter.
+    /// @brief Makes a short database-object suffix from the example ID.
+    /// @param entity_id Tutorial-example identity.
+    /// @return Lowercase letters, digits, and underscores with a process-local counter.
     [[nodiscard]] static std::string make_unique_object_suffix(
         std::string_view entity_id) {
         static int counter = 0;
@@ -1137,9 +1128,9 @@ private:
         return clean + "_" + std::to_string(++counter);
     }
 
-    /// @brief Applies deterministic rendering and bounded-execution settings.
+    /// @brief Sets SQL output formats, search_path, and server timeouts.
     /// @param connection Tutorial PostgreSQL session.
-    /// @param example Example whose timeout bounds `statement_timeout`.
+    /// @param example Example whose timeout sets statement_timeout.
     static void configure_tutorial_session(
         bioseq::libpq::client_connection& connection, sql_example const& example) {
         long long timeout_ms = example.timeout.count();
@@ -1158,8 +1149,8 @@ private:
         (void)connection.execute("SET idle_in_transaction_session_timeout = '15s'");
     }
 
-    /// @brief Captures visible results followed by an expected PostgreSQL error.
-    /// @return A diagnostic for success, mismatched SQLSTATE, or result overflow.
+    /// @brief Keeps completed results and the expected PostgreSQL error.
+    /// @return A diagnostic if SQL succeeds, SQLSTATE differs, or  output exceeds limits.
     [[nodiscard]] static std::optional<diagnostic> capture_expected_error(
         bioseq::libpq::client_connection& connection, sql_example const& example,
         std::chrono::milliseconds deadline, sql_example_result& outcome) {
@@ -1184,7 +1175,7 @@ private:
                 + " but got " + sql_state + ": " + visible_batch.error->what();
             return mismatch;
         }
-        // Retain the results that completed before PostgreSQL stopped, in order.
+        // Keep the results that completed before PostgreSQL stopped, in, order
         const sql_type_name_by_oid type_names =
             load_sql_type_names(connection, visible_batch.completed);
         for (const bioseq::libpq::command_result& command :
@@ -1210,9 +1201,9 @@ private:
         return std::nullopt;
     }
 
-    /// @brief Enforces retained and rendered payload limits.
-    /// @param sets Visible result sets collected for one example.
-    /// @return An actionable message for the first exceeded limit.
+    /// @brief Checks that visible results fit the row, column, and text limits.
+    /// @param sets Result sets collected for one example.
+    /// @return A message describing the first limit exceeded.
     [[nodiscard]] static std::optional<std::string> check_result_limits(
         const std::vector<sql_result_set>& sets) {
         constexpr std::size_t max_result_sets = 10;
@@ -1303,10 +1294,10 @@ private:
         return names;
     }
 
-    /// @brief Projects a native libpq result onto the website SQL result model.
-    /// @param command Native command or row result.
-    /// @param type_names Same-database type-name mapping.
-    /// @return A source-neutral result set ready for rendering.
+    /// @brief Copies a libpq result into the website model.
+    /// @param command Command status or table result.
+    /// @param type_names Type names resolved in the same database as the result.
+    /// @return Owned column descriptions and cells, or a command tag and row count.
     [[nodiscard]] static sql_result_set make_result_set(
         const bioseq::libpq::command_result& command,
         const sql_type_name_by_oid& type_names) {
@@ -1347,7 +1338,7 @@ private:
         return set;
     }
 
-    /// @brief Projects a libpq command error onto the website diagnostic model.
+    /// @brief Converts a libpq command error into a website diagnostic.
     [[nodiscard]] static diagnostic make_command_diagnostic(
         diagnostic_operation operation,
         const bioseq::libpq::command_error& error) {

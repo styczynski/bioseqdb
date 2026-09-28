@@ -1,13 +1,9 @@
 /**
  * @file instrumentation/index.cppm
- * @brief Public entry point. Re-exports every user-facing primitive.
+ * @brief Import the public profiling APIs from one module.
  *
- * Other modules import `bioseq.instrumentation` to receive the stable public
- * instrumentation surface. The facade preserves each leaf module's ownership.
- * It adds no state, initialization, or runtime dispatch of its own.
- *
- * @note Re-export order follows the public dependency-facing API order and
- * is intentionally independent of backend selection inside the leaf modules.
+ * Re-exports timing scopes, counters, allocation tracking, and summary APIs.
+ * @note Platform-specific counter selection, remains inside the PMU module.
  */
 export module bioseq.instrumentation;
 

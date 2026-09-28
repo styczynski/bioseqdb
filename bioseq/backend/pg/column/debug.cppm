@@ -1,5 +1,5 @@
 /**
  * @file debug.cppm
- * @brief Columnar storage diagnostic declarations.
+ * @brief Empty module reserved for columnar storage diagnostics.
  */
 export module bioseq.postgres.storage.debug;

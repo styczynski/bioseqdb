@@ -1,6 +1,6 @@
 /**
  * @file tracked_failures.cppm
- * @brief Tracked join, slice, and binding failure contracts.
+ * @brief Test cleanup of partial joins, slices, and alphabet binding.
  */
 module;
 
@@ -30,7 +30,7 @@ import bioseq.storage.layout;
 
 import :tree_ops_failure_factory;
 
-/// Copy, classify, and clear the current PostgreSQL error.
+/// Check the current PostgreSQL error code, then free and clear the error.
 [[nodiscard]] inline bool consume_expected_error(int expected_sqlstate,
                                                  MemoryContext destination_context) {
     MemoryContextSwitchTo(destination_context);
@@ -52,7 +52,7 @@ enum class tracked_join_failure_shape : std::uint8_t {
     transformed_binding,
 };
 
-/// Owned tree and source state for one tracked join failure.
+/// Input trees, source, data, and reference counts for one join failure test.
 struct tracked_join_failure_fixture {
     piece_tree_arena* arena;
     piece_edge left;
@@ -65,7 +65,7 @@ struct tracked_join_failure_fixture {
     std::uint32_t source_release_baseline;
 };
 
-/// Allocate the requested tracked join fixture.
+/// Build input trees that reach the requested join or binding failure path.
 [[nodiscard]] inline tracked_join_failure_fixture*
 make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
     auto* fixture =
@@ -170,7 +170,7 @@ make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
     return fixture;
 }
 
-/// Release a tracked join fixture and verify its baseline state.
+/// Free the test inputs and check that  source references and arena counts balance
 [[nodiscard]] inline bool
 destroy_tracked_join_failure_fixture(tracked_join_failure_fixture* fixture) {
     auto* source_state = fixture->source_state;
@@ -195,7 +195,7 @@ struct tracked_join_failure_observation {
     bool ledger_drained;
 };
 
-/// Memory-context callback state for tracked join cleanup.
+/// Reset callback state holding a join arena and its unfinished edge references.
 struct tracked_join_failure_guard {
     MemoryContextCallback callback;
     piece_tree_arena* destination_arena;
@@ -204,7 +204,7 @@ struct tracked_join_failure_guard {
     bool armed;
 };
 
-/// Release every armed tracked join token during context reset.
+/// Release tracked edges and the destination arena when the test context resets.
 inline void tracked_join_failure_reset(void* argument) noexcept {
     auto* guard = static_cast<tracked_join_failure_guard*>(argument);
     if (guard == nullptr || guard->observation == nullptr)
@@ -224,7 +224,7 @@ inline void tracked_join_failure_reset(void* argument) noexcept {
     }
 }
 
-/// Execute one tracked join failure and validate atomic cleanup.
+/// Inject a join or binding failure and check that cleanup restores the input references.
 [[nodiscard]] inline bool
 run_tracked_join_failure_case(piece_tree_injected_failure_point failure_point,
                               tracked_join_failure_shape shape) {
@@ -305,7 +305,7 @@ run_tracked_join_failure_case(piece_tree_injected_failure_point failure_point,
     return case_passed && fixture_destroyed;
 }
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Test cleanup after failures in reference acquisition, allocation, and join cwnstruction. */
 [[nodiscard]] inline bool run_tracked_join_failure_matrix() {
     using point = piece_tree_injected_failure_point;
     using shape = tracked_join_failure_shape;
@@ -339,7 +339,7 @@ run_tracked_join_failure_case(piece_tree_injected_failure_point failure_point,
 
 namespace {
 
-/// Execute one tracked slice failure for an existing source root.
+/// Fail after the first slice leaf is built and check that reset frees the partial result.
 [[nodiscard]] inline bool
 run_tracked_slice_failure_iteration(piece_edge source_root,
                                     piece_tree_arena& source_arena,
@@ -400,7 +400,7 @@ run_tracked_slice_failure_iteration(piece_edge source_root,
     return passed;
 }
 
-/// Validate tracked slice cleanup for the bounded source fixture.
+/// Repeat the slice  failure on one source tree to check for accumulated leaks.
 [[nodiscard]] inline bool run_tracked_slice_failure_matrix() {
     constexpr std::uint32_t repetitions = 64u;
     const std::uint64_t live_baseline = live_piece_tree_arenas;
@@ -438,7 +438,7 @@ run_tracked_slice_failure_iteration(piece_edge source_root,
            live_piece_tree_arenas == live_baseline;
 }
 
-/// Reject one invalid later literal without retaining partial output.
+/// Check that a bad later literal releases the already bound part of the tree.
 [[nodiscard]] inline bool
 run_invalid_later_literal_binding_iteration(piece_edge source_root,
                                             piece_tree_arena& source_arena,
@@ -486,7 +486,7 @@ run_invalid_later_literal_binding_iteration(piece_edge source_root,
     return passed;
 }
 
-/// Validate each later-literal binding rejection route.
+/// Repeatedly bind `AC` followed by invalid DNA4 letter `X` and check cleanup.
 [[nodiscard]] inline bool run_invalid_later_literal_binding_matrix() {
     constexpr std::uint32_t repetitions = 64u;
     const std::uint64_t live_baseline = live_piece_tree_arenas;
@@ -514,7 +514,7 @@ run_invalid_later_literal_binding_iteration(piece_edge source_root,
     return passed && live_piece_tree_arenas == live_baseline;
 }
 
-/// Validate bounded quarantine accounting without raising PostgreSQL errors.
+/// Check that cleanup records corruption and keeps the suspect arena out of further release.
 [[nodiscard]] inline bool run_piece_tree_quarantine_contract_noexcept() noexcept {
     piece_tree_quarantine_snapshot observed{};
     piece_tree_arena suspect{};
@@ -541,7 +541,7 @@ run_invalid_later_literal_binding_iteration(piece_edge source_root,
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Test corrupt-state reporting and cleanup after slice or alphabet-binding failures. */
 [[nodiscard]] inline bool run_piece_tree_error_atomic_matrix() {
     return run_piece_tree_quarantine_contract_noexcept() && run_tracked_slice_failure_matrix() &&
            run_invalid_later_literal_binding_matrix();

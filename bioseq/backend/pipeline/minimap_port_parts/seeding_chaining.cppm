@@ -1,6 +1,6 @@
 /**
  * @file pipeline/minimap_port_parts/seeding_chaining.cppm
- * @brief Seed lookup, chaining-region construction, and region selection.
+ * @brief Finds seed hits and turns chains into selected alignment regions.
  */
 module;
 
@@ -23,12 +23,9 @@ import bioseq.indexing.minimizer_index;
 
 export namespace bioseq::simd {
 
-// ============================================================================
-// Internal data structures
-// ============================================================================
-// Anchor and chain ownership resides in bioseq.chaining.core.
+// Seed batches use the anchor and arena types from bioseq.chaining.core.
 
-/** @brief One query's checked, non-overlapping slice of a canonical seed batch. */
+/** @brief A  query ordinal and its anchor range within a seed batch. */
 struct canonical_seed_job_span {
     std::uint32_t ordinal;
     std::size_t offset;
@@ -36,17 +33,18 @@ struct canonical_seed_job_span {
 };
 
 /**
- * @brief Move-only canonical host anchor ownership shared by all selected seeders.
+ * @brief Holds host anchors and the ranges belonging to each query.
  *
- * Anchors retain the existing arena allocation contract. Their context and
- * physical admission owner must outlive this batch and every borrowed job span.
+ * All seed backends produce this batch format Keep the chaining arena and
+ * its memory reservation alive until the batch and all borrowed ranges are
+ * finished. The batch can be moved, but cannot be copied.
  */
 struct canonical_seed_batch {
     bioseq::chaining::arena_slab<bioseq::chaining::anchor> anchors;
     std::vector<canonical_seed_job_span> jobs;
 };
 
-/** @brief Authenticate the complete job partition before any chaining consumes it. */
+/** Check that ordered query jobs cover every anchor exactly once. */
 [[nodiscard]] inline bool canonical_seed_jobs_match_submission(
     const canonical_seed_batch& batch,
     std::span<const std::uint32_t> submitted_ordinals) noexcept {
@@ -67,24 +65,19 @@ struct canonical_seed_batch {
     return prefix == batch.anchors.size();
 }
 
-// Alignment-region and logarithm helpers are owned by their alignment and
-// chaining modules.
+// Alignment regions and chain scores use helpers from  their own modules.
 
-// ============================================================================
-// Stage 1: Build target index from target minimizers
-// ============================================================================
+// Target-index setup is handled by the indexing modules.
 
-// Target index types and lookup concepts are owned by the indexing modules.
+// Lookup accepts the index types described by minimizer_lookup_index.
 
-// ============================================================================
-// Stage 2: Collect seed hits — look up query minimizers in target index
-// ============================================================================
+// Look up query minimizers in the target index to collect seed hits.
 
 /**
- * Append one borrowed packed target-position run for a single query
- * minimizer. Position width is resolved once by the caller, so a hash-major
- * uint32 posting remains packed through the seed loop and is widened only in
- * the register used to construct its anchor.
+ * Append anchors for one query minimizer's target hits. Decode each yarget
+ * position and strand, then choose the matching query-strand coordinate.
+ * Read 32-bit postings directly and widen each value only while building
+ * its anchor, so, no temporary 64-bit position array is needed.
  */
 template <std::unsigned_integral p_stored_position>
 inline void
@@ -113,7 +106,7 @@ append_seed_hits_from_position_span(std::span<const p_stored_position> target_hi
     }
 }
 
-/// Sort seed anchors into canonical reference/query order.
+/// Sort anchors by the shared strand, reference, and  query ordering.
 inline void sort_seed_hits(::bioseq::chaining::arena_slab<anchor>& anchors_out) {
     static const auto* _sort_desc =
         bioseq::instrumentation::register_static_region("collect_seed_hits_sort");
@@ -125,30 +118,16 @@ inline void sort_seed_hits(::bioseq::chaining::arena_slab<anchor>& anchors_out) 
 }
 
 /**
- * @brief Collect seed anchors by looking up query minimizers in the target index.
+ * @brief Find matching target minimizers and append anchors for chaining.
  *
- * Equivalent to collect_seed_hits() in map.c:518-554.
+ * Skip hashes with no hits or a count exceeding max_occ. Remaining hits
+ * supply reference positions and strand-adjusted query positions. Sort the
+ * output slab before returning.
  *
- * For each query minimizer, look up its hash in the target index. For each
- * hit, create an anchor encoding both reference and query positions.
- *
- * anchor encoding (same as minimap2):
- *   ref_bits: is_reverse<<63 | reference_id<<32 | ref_position
- *   query_bits: query_span<<32 | query_position
- *
- * Where for forward strand: ref_position = target_pos, query_position = query_pos
- * For reverse strand: set is_reverse bit, adjust query_position for reverse complement.
- *
- * @param query_minimizers Precomputed query minimizers
- * @param target_index     Target index to search
- * @param query_len        Length of query sequence
- * @param max_occ          Max occurrences to keep (filter high-frequency seeds)
- * @param kmer_size        K-mer length used for the encoded anchor span.
- * @param anchors_out      Output slab — sorted anchors are appended here.
- *                          Must be a live arena_slab rooted in the caller's
- *                          per-query `Arena::chain` scope. The kernel writes
- *                          directly into it via `push_back` and sorts in
- *                          place before returning.
+ * @param query_len Query length in bases.
+ * @param max_occ Nonnegative occurrence limit.
+ * @param kmer_size Span assigned to each anchor.
+ * @param anchors_out Live slab in the caller's chaining arena
  */
 template <class p_minimizer, minimizer_lookup_index p_index>
 void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
@@ -160,31 +139,18 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
     static const auto* _seed_hits_desc =
         bioseq::instrumentation::register_static_region("collect_seed_hits");
     auto _seed_hits_scope = bioseq::instrumentation::region(_seed_hits_desc);
-    // The caller is expected to pre-reserve the slab using the
-    // `estimated_anchor_count` helper from `bioseq::simd::pipe::detail`
-    // — that estimate is tighter than `query_minimizers.size() * 2` for very-short
-    // sequences (clamped by `shared_ceiling`) and identical for the common case.
-    // We still issue a defensive `reserve` here so the kernel works when invoked
-    // directly with a fresh slab; the call is a no-op when `cap_` already covers
-    // the requested capacity (see `arena_slab::reserve` short-circuit).
+    // Reserve an initial capacity for direct callers. An already-large slab
+    // keeps its allocation, and push_back can grow it if more hits are found.
     anchors_out.reserve(query_minimizers.size() * 2);
 
-    // Target-index lookup is the hot per-minimizer operation. We wrap the
-    // whole loop (not each lookup) to avoid profiler overhead dominating
-    // the measurement; the loop body also classifies/sorts anchors.
+    // Time the whole  lookup loop to keep per-minimizer profiler overhead low.
     {
         static const auto* _idx_lookup_desc =
             bioseq::instrumentation::register_static_region("target_index_lookup");
         auto _idx_lookup_scope = bioseq::instrumentation::region(_idx_lookup_desc);
-        // On the dna4 benchmark path every minimizer span equals the configured
-        // kmer size, so hoist that constant outside the lookup loop.
+        // Every seed in this call uses the configured k-mer span.
         const std::uint32_t query_span_value = static_cast<std::uint32_t>(kmer_size);
-        // Precompute the constant added to the negated forward_query_pos in the
-        // reverse-strand branch:
-        //   reverse_query_pos = query_len - (fwd + 1 - span) - 1
-        //                     = (query_len - 2 + span) - fwd
-        // Hoisting this addition out of the inner loop lets the compiler keep
-        // (sub fwd) as the only per-hit op for the reverse branch.
+        // Precompute the fixed part of the reverse-complement end coordinate.
         const sequence_size_t reverse_pos_base = query_len - 2 + query_span_value;
         if (max_occ < 0) [[unlikely]] {
             throw std::invalid_argument("collect_seed_hits requires a nonnegative max_occ");
@@ -203,26 +169,14 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
                     "after global occurrence pruning");
             }
 
-            // `pos_strand_encoded()` returns `(last_pos << 1) | strand` — the
-            // exact form `lookup()` packed into the positions array, so the
-            // per-hit `target_hit` lives in the same encoded space.
-            // — keep the FULL 64-bit encoded value. `pos_bits` is
-            // `ceil(log2(seq_len))` (up to 32 for a multi-Gbp sequence), so
-            // `(last_pos << 1) | strand` spans up to 33 bits; the old
-            // `static_cast<std::uint32_t>(...)` truncated any position >= 2^31. The
-            // query is small here, but mirroring the target-side fix below keeps
-            // both sides 64-bit-correct.
+            // Keep the encoded position and strand in 64 bits. A position at or
+            // above 2^31 needs an extra bit once the stranq is packed with it.
             const std::uint64_t query_pos_encoded = query_minimizer.pos_strand_encoded();
-            // Hoist the strand bit out of the inner per-hit loop — constant
-            // across `target_hits`.
+            // The query strand is shared by every target hit for this minimizer.
             const std::uint32_t query_strand_bit = static_cast<std::uint32_t>(query_pos_encoded & 1ULL);
             const sequence_size_t forward_query_pos =
                 static_cast<sequence_size_t>(query_pos_encoded >> 1);
-            // Reverse-strand position formula reduces to a single subtraction
-            // once `reverse_pos_base` is hoisted; pre-compute here so the
-            // branchless `csel` below picks between two register-resident
-            // 64-bit positions. (forward_query_pos is a k-mer start <= query_len-k,
-            // so reverse_pos_base - forward_query_pos never underflows.)
+            // Compute both  strand coordinates once for all hits of this minimizer.
             const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
             const auto contiguous32 = target_hits.contiguous_positions32();
@@ -255,25 +209,9 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
         }
     } // end target_index_lookup scope
 
-    // Establish the canonical `(ref_bits, query_bits, full query_position)`
-    // order. The primary reference-key pass remains the exact port of
-    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c; equal-reference
-    // runs are then comparison-sorted by `sort_seed_hits`. The
-    // 8-bit-per-pass MSD radix sort is faster than libc++ pdqsort by
-    // ~3-5x at the anchor populations we see (50 k - 1 M+ at LONG/XL/XXL)
-    // because it bypasses the comparison-based branch-predictor
-    // pessimisation pdqsort hits when the ref_position prefix is
-    // already monotonic — most of the work is just the 256-bucket
-    // counting scan, which the M1 LSU pipelines well.
-    //
-    // A SIMD-vectorised bit-by-bit MSD radix variant (Bramas / Möller /
-    // Keller, 2024 thesis) uses Highway's `CompressBlendedStore`. On
-    // NEON-128 / Apple M1 the SIMD partition
-    // is restricted to 2 u64 lanes per vector (vs. 8 on AVX-512) and
-    // each NEON BlendedStore lowers to a 3-step Load+Blend+Store —
-    // measured as 5–22 percentage points slower than this 8-bit MSD
-    // radix sort on the benchmark's LONG/VLONG/XL/XXL buckets. The SIMD
-    // variant becomes attractive again on AVX-512 hosts.
+    // Use the shared anchor sorter so every seeder gives chaining the same
+    // order. It groups strand/reference positions first, then resolves ties
+    // by the query key and full query position.
     sort_seed_hits(anchors_out);
 
     bioseq_log_lazy<logging_level::debug>([&anchors_out, &query_minimizers] {
@@ -287,25 +225,16 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
     });
 }
 
-// ============================================================================
-// Stage 3: Chaining through the selected chaining module
-// ============================================================================
-// compute_chaining_score is imported from bioseq.chaining.core
-// chain_anchors_scalar is imported from bioseq.chaining.scalar
-// chain_anchors_simd is reached through the selected fixed-target table.
-// chain_anchors_rmq is imported from bioseq.chaining.rmq
+// Scalar and RMQ chaining come from their chaining modules. SIMD
+// chaining uses the function table selected for the current CPU target.
 
-// ============================================================================
-// Stage 4: Convert chains to alignment regions (mm_gen_regs equivalent)
-// ============================================================================
+// Convert chains into alignment regions.
 
 /**
- * @brief Compute seeded match length and block length for a region.
+ * @brief Estimate matched and aligned lengths from chain seeds.
  *
- * Equivalent to mm_cal_fuzzy_len() in hit.c.
- *
- * match_length: approximate number of matching bases in seeded regions
- * block_length: approximate total aligned length in seeded regions
+ * Count seed coverage as approximate matches and the larger query/reference
+ * advances as block, length. These estimates are available before  base alignment
  */
 void compute_fuzzy_lengths(alignment_region& region, std::span<const anchor> anchors) {
     region.match_length = 0;
@@ -315,8 +244,7 @@ void compute_fuzzy_lengths(alignment_region& region, std::span<const anchor> anc
     }
 
     const std::int32_t anchor_begin = region.anchor_start;
-    // Accumulate in signed int64 (gaps are bounded position *deltas*, never
-    // absolute positions) then store into the sequence_size_t fields.
+    // Accumulate seed spans and the bounded gaps between adjacent anchors.
     std::int64_t match_length = static_cast<std::int32_t>(anchors[anchor_begin].query_span);
     std::int64_t block_length = match_length;
 
@@ -339,10 +267,10 @@ void compute_fuzzy_lengths(alignment_region& region, std::span<const anchor> anc
 }
 
 /**
- * @brief Set alignment coordinates from seed positions.
+ * @brief Derive a region's bounds and estimated lengths from its outer seeds.
  *
- * Equivalent to mm_reg_set_coor() in hit.c.
- * Derives query_start, query_end, ref_start, ref_end from first and last anchor.
+ * Store half-open reference and query ranges. Reverse-strand query bounds
+ * are converted back to positions on the forward quemy.
  */
 void set_region_coordinates(alignment_region& region,
                             std::span<const anchor> anchors,
@@ -355,11 +283,10 @@ void set_region_coordinates(alignment_region& region,
     const anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
     region.is_reverse = first_anchor.is_reverse != 0;
-    region.reference_id = 0; // : single-target codebase, reference_id always 0
+    region.reference_id = 0; // Each pipeline call searches one target.
 
-    // Reference coordinates. The absolute positions are full 64-bit; the
-    // intermediate `position + 1 - span` can be negative, so it is computed in
-    // signed int64 and clamped before being stored in the sequence_size_t field.
+    // Use signed arithmetic while extending the first seed to its start,
+    // then clamp at zero before storing the unsigned reference bound.
     const std::int64_t first_span = static_cast<std::int32_t>(first_anchor.query_span);
     std::int64_t ref_start = static_cast<std::int64_t>(first_anchor.ref_position) + 1 - first_span;
     const std::int64_t ref_end = static_cast<std::int64_t>(last_anchor.ref_position) + 1;
@@ -369,7 +296,7 @@ void set_region_coordinates(alignment_region& region,
     region.ref_start = static_cast<sequence_size_t>(ref_start);
     region.ref_end = static_cast<sequence_size_t>(ref_end);
 
-    // Query coordinates
+    // Derive query bounds in  chain orientation before converting the strand.
     std::int64_t raw_query_start =
         static_cast<std::int64_t>(first_anchor.query_position) + 1 - first_span;
     const std::int64_t raw_query_end = static_cast<std::int64_t>(last_anchor.query_position) + 1;
@@ -390,23 +317,12 @@ void set_region_coordinates(alignment_region& region,
 }
 
 /**
- * @brief Convert chains to alignment regions.
+ * @brief Create one region per chain, ordered by descending chain score.
  *
- * Equivalent to mm_gen_regs() in hit.c:54-90.
- *
- * Sorts chains by score (descending) and creates alignment_region records
- * with coordinates derived from the anchor positions.
- *
- * @param chains       Chains (sorted in place by score descending here).
- * @param anchors      Reordered anchor span — `chains[i].anchor_start`
- *                      indexes into this span.
- * @param query_len    Length of the query sequence (used to flip query
- *                      coordinates for reverse-strand chains).
- * @param regions_out  Output slab — one alignment_region per chain is constructed
- *                      via placement-new, so the slab destructor releases
- *                      `region.cigar` during unwind. Must be a fresh arena_slab.
- *                      The kernel calls `reserve_for_placement_new` and
- *                      `construct_at_back` once per chain.
+ * Sort chains in place and use their anchor ranges to set each region's
+ * coordinates. query_len converts reverse-strand query positions.
+ * regions_out must be a fresh arena slab. Construct its regions individually
+ * so their CIGAR storage is destroyed when the slab is released.
  */
 void generate_regions(std::span<chain> chains,
                       std::span<const anchor> anchors,
@@ -424,7 +340,7 @@ void generate_regions(std::span<chain> chains,
     }
 #endif
 
-    /// Order chains by descending score without capturing local state.
+    /// Order chains from highest score to lowest.
     struct chain_score_descending {
         [[nodiscard, gnu::always_inline]] inline bool
         operator()(const chain& left, const chain& right) const noexcept {
@@ -460,20 +376,15 @@ void generate_regions(std::span<chain> chains,
     });
 }
 
-// ============================================================================
-// Stage 5: Primary/secondary classification (mm_set_parent equivalent)
-// ============================================================================
+// Classify primary and secondary regions.
 
 /**
- * @brief Classify alignments as primary or secondary.
+ * @brief Assign secondary regions to overlapping primaries.
  *
- * Equivalent to mm_set_parent() in hit.c:127-188.
- *
- * An alignment is secondary if it overlaps significantly with a primary
- * on the query AND has insufficient unique (uncovered) sequence.
- *
- * Criterion: (overlap/min_interval) - (uncov/max_interval) > mask_level
- *            AND uncov <= mask_len
+ * Process regions in  priority order. A region becomes secondary when its
+ * adjusted query overlap exceeds mask_level and its uncovered length is at
+ * most mask_len. Otherwise it becomes another primary. Record competing
+ * scores and counts on the primary for mapping-quality estimation.
  */
 void classify_primary_secondary(std::span<alignment_region> regions,
                                 float mask_level,
@@ -496,11 +407,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
     }
 
-    // primary_indices holds indices of primary alignments. Reserve up
-    // front so the first push_back doesn't trigger a 1→2→4→… growth
-    // chain through `region_count` worth of pushes when the chains
-    // happen to be all primary. Sized at region_count (the upper bound
-    // — every region is primary in the degenerate case).
+    // Every region may become primary Reserve that upper bound, nce.
     alignment_result_vector<std::size_t> primary_indices;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     primary_indices.set_logical_bounds(
@@ -513,9 +420,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     primary_indices.push_back(0);
     regions[0].parent = 0;
 
-    // coverage_intervals is cleared+refilled on every secondary check,
-    // capped at primary_indices.size() entries. Pre-reserve at
-    // region_count too so the inner loop never triggers realloc.
+    // Reuse enough interval storage to compare against every primary.
     alignment_result_vector<std::uint64_t> coverage_intervals;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     coverage_intervals.set_logical_bounds(
@@ -532,7 +437,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         const std::int32_t current_query_end = current_region.query_end;
         std::int32_t uncovered_length = 0;
 
-        // Compute coverage from existing primaries
+        // Collect the parts of this query range covered by existing primaries.
         coverage_intervals.clear();
         for (const std::size_t primary_idx : primary_indices) {
             const alignment_region& primary_region = regions[primary_idx];
@@ -564,7 +469,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
             }
         }
 
-        // Test against each primary
+        // Find the first primary that meets the overlap  and uncovered-length rules.
         bool is_secondary = false;
         for (const std::size_t primary_idx : primary_indices) {
             alignment_region& primary_region = regions[primary_idx];
@@ -593,7 +498,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
                 current_region.parent = resolved_parent;
                 primary_region.secondary_score =
                     std::max(primary_region.secondary_score, current_region.score);
-                // Update secondary_dp_max for MAPQ (equivalent to hit.c:176)
+                // Record the strongest competing alignment for mapping-quality estimation.
                 if (current_region.has_alignment && primary_region.has_alignment &&
                     (primary_region.reference_id != current_region.reference_id ||
                      primary_region.ref_start != current_region.ref_start ||
@@ -624,19 +529,15 @@ void classify_primary_secondary(std::span<alignment_region> regions,
                                      region_count - primary_indices.size());
 }
 
-// ============================================================================
-// Stage 6: Filter secondary mappings (mm_select_sub equivalent)
-// ============================================================================
+// Keep the strongest secondary mappings.
 
 /**
- * @brief Filter secondary alignments by score ratio.
+ * @brief Keep primaries and up to best_n qualifying secondaries.
  *
- * Equivalent to mm_select_sub() in hit.c:257-277.
- *
- * Keep a secondary if:
- *   - score >= parent.score * pri_ratio, OR
- *   - score + min_diff >= parent.score
- *   - up to best_n secondaries total
+ * A secondary qualifies by its score ratio or by being within min_diff of
+ * its parent's score. Remove secondaries with identical parent coordinates.
+ * Compact survivors to the front and return their count. A nonpositive
+ * pri_ratio disables filtering.
  */
 [[nodiscard]] std::size_t filter_secondary_regions(std::span<alignment_region> regions,
                                                    float pri_ratio,
@@ -648,8 +549,8 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         return regions.size();
     }
 
-    // Use index-based filtering to avoid reading from moved-from objects.
-    // Mark each region as kept (true) or removed (false), then compact.
+    // Decide which regions survive before moving any of them, so parent
+    // lookups still read the original records.
     const std::size_t region_count = regions.size();
     std::size_t secondary_kept_count = 0;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -670,14 +571,14 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         const auto& region = regions[region_idx];
         const std::int32_t parent_idx = region.parent;
         if (parent_idx == region.region_id) {
-            // Primary — always keep
+            // Keep every  primary.
             keep[region_idx] = true;
         } else if (parent_idx >= 0 && parent_idx < static_cast<std::int32_t>(region_count)) {
             const auto& parent_region = regions[parent_idx];
             if ((region.score >= static_cast<std::int32_t>(parent_region.score * pri_ratio) ||
                  region.score + min_diff >= parent_region.score) &&
                 static_cast<std::int32_t>(secondary_kept_count) < best_n) {
-                // Not identical coordinates
+                // Suppress a secondary with the same query and target bounds as its parent.
                 const bool is_duplicate = region.query_start == parent_region.query_start &&
                                           region.query_end == parent_region.query_end &&
                                           region.reference_id == parent_region.reference_id &&
@@ -691,10 +592,9 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         }
     }
 
-    // Compact: move kept regions to front.  Span has no resize(); the caller
-    // observes the new effective size via the returned value.  Regions past
-    // `write_pos` are moved-from (empty CIGAR vector) — their destructors run
-    // when the owning storage (arena slab or vector) unwinds.
+    // Move survivors to the front and return the shorter range to the caller.
+    // The owning slab still destroys every constructed region, including
+    // rejected records and records whose CIGAR was moved to the front.
     std::size_t write_pos = 0;
     for (std::size_t region_idx = 0; region_idx < region_count; ++region_idx) {
         if (keep[region_idx]) {
@@ -705,7 +605,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         }
     }
 
-    // Re-index the surviving prefix.
+    // Assign consecutive IDs to surviviug regions.
     for (std::size_t region_idx = 0; region_idx < write_pos; ++region_idx) {
         regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
     }

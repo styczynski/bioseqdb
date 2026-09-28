@@ -43,7 +43,7 @@ inline constexpr std::uint64_t k_planned_generation_image_header_bytes = 4096u;
 /// Alignment shared by planned directory and manifest sections.
 inline constexpr std::uint64_t k_planned_generation_section_alignment = 8u;
 
-/// Checked addition used by whole-image storage planning.
+/// Add image sizes or offsets, returning arithmetic_overflow if they cannot fit.
 [[nodiscard]] constexpr std::expected<std::uint64_t, minimizer_generation_encoding_error>
 planned_storage_checked_add(std::uint64_t left, std::uint64_t right) noexcept {
     if (right > (std::numeric_limits<std::uint64_t>::max)() - left) {
@@ -52,7 +52,7 @@ planned_storage_checked_add(std::uint64_t left, std::uint64_t right) noexcept {
     return left + right;
 }
 
-/// Align one whole-image offset to the fixed section boundary.
+/// Round an image offset up to the section alignment, checking overflow.
 [[nodiscard]] constexpr std::expected<std::uint64_t, minimizer_generation_encoding_error>
 planned_storage_align_up(std::uint64_t value) noexcept {
     const std::uint64_t remainder = value % k_planned_generation_section_alignment;
@@ -60,7 +60,7 @@ planned_storage_align_up(std::uint64_t value) noexcept {
         value, remainder == 0u ? 0u : k_planned_generation_section_alignment - remainder);
 }
 
-/// Build the immutable byte layout offered to a planned generation sink.
+/// Calculate payload, directory, and manifest sizes and offsets before writing rows.
 [[nodiscard]] inline std::expected<grouped_soa_storage_plan_view,
                                    minimizer_generation_encoding_error>
 make_minimizer_generation_storage_plan(const grouped_soa_generation_options& options,
@@ -136,7 +136,8 @@ make_minimizer_generation_storage_plan(const grouped_soa_generation_options& opt
     };
 }
 
-/// Fold one canonical event into the replay checksum in fixed wire order.
+/// Add the event's hash and encoded position, as little-endian 64-bit values,
+/// to the checksum used to  compare producer scans.
 inline void update_canonical_event_checksum(crc64_ecma182_accumulator& checksum,
                                             const canonical_minimizer_event& event) noexcept {
     std::array<std::byte, 16> encoded{};
@@ -153,7 +154,7 @@ is_grouped_soa_payload_profile(const grouped_soa_minimizer_profile& profile) noe
            validate_grouped_soa_minimizer_profile(profile).has_value();
 }
 
-/// Compute a checked fixed-width payload byte count.
+/// Multiply element count by its stored width, rejecting zero width or overflow.
 [[nodiscard]] constexpr std::expected<std::uint64_t, minimizer_generation_encoding_error>
 checked_payload_byte_count(std::uint64_t element_count, std::uint64_t encoded_byte_width) noexcept {
     if (encoded_byte_width == 0 ||
@@ -163,7 +164,7 @@ checked_payload_byte_count(std::uint64_t element_count, std::uint64_t encoded_by
     return element_count * encoded_byte_width;
 }
 
-/// Return the number of fixed payload rows needed for an encoded extent.
+/// Count payload rows, including a final partial row when needed.
 [[nodiscard]] constexpr std::uint64_t
 grouped_soa_payload_chunk_count(std::uint64_t encoded_bytes) noexcept {
     constexpr std::uint32_t extent_payload_bytes = k_grouped_soa_extent_payload_bytes;
@@ -172,10 +173,10 @@ grouped_soa_payload_chunk_count(std::uint64_t encoded_bytes) noexcept {
            (encoded_bytes % extent_payload_bytes != 0 ? 1u : 0u);
 }
 
-/// grouped-SoA planning keeps the terminal prefix authoritative and derives the
-/// per-entry offset width before committing an extent. A hash group is indivisible:
-/// an ordinary entry is flushed before a widening group, while a heavy group
-/// owns the resulting wider entry by itself.
+/// Plan hash groups and position ranges without storing their events.
+/// Keep every hash group in one entry. Start a new entry when adding a group
+/// would exceed the target size or require wider prefix offsets. A large group
+/// can exceed the target size on its own.
 struct grouped_soa_plan_pass {
     std::uint64_t span = 0;
     std::uint64_t target_length = 0;
@@ -198,7 +199,7 @@ struct grouped_soa_plan_pass {
     std::uint64_t canonical_event_count = 0;
     crc64_ecma182_accumulator canonical_event_checksum{};
 
-    /// Commit the current hash partition to the directory plan.
+    /// Add the current partition's sizes, hash bounds, and addresses to the directorw.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> flush_partition() {
         if (partition_controls == 0)
             return {};
@@ -246,7 +247,7 @@ struct grouped_soa_plan_pass {
         return {};
     }
 
-    /// Compute the bytes required after adding a candidate hash group.
+    /// Calculate control and position bytes for  a proposed partition.
     [[nodiscard]] std::expected<std::uint64_t, minimizer_generation_encoding_error>
     prospective_partition_bytes(std::uint64_t controls, std::uint64_t positions) const noexcept {
         const auto layout =
@@ -263,7 +264,8 @@ struct grouped_soa_plan_pass {
         return layout->encoded_bytes + *position_bytes;
     }
 
-    /// Fold the current hash group into its selected partition.
+    /// Add the current hash group Start a new partition if adding it would
+    /// exceed the size target or require wider prefix offsets.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_group() {
         if (group_positions == 0)
             return {};
@@ -290,7 +292,8 @@ struct grouped_soa_plan_pass {
         return {};
     }
 
-    /// Validate and account for one canonical sorted event.
+    /// Check event order and bounds, then update group and segment counts.
+    /// If a count limit is exceeded, request another scan with, smaller segments.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const canonical_minimizer_event& event) {
         const std::uint64_t position = event.encoded_position >> 1u;
@@ -363,14 +366,14 @@ struct grouped_soa_plan_pass {
     }
 };
 
-/// Adapt the type-erased replay callback to the planning pass.
+/// Forward a producer callback to the planning pass.
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 receive_grouped_soa_plan_event(void* context, const canonical_minimizer_event& event) {
     return static_cast<grouped_soa_plan_pass*>(context)->accept(event);
 }
 
-/// Check that replay retains the planned scheme and producer identity.
-/// @tparam p_producer Replayable canonical event source.
+/// Check that the producer still reports the planned scheme and backend.
+/// @tparam p_producer Replayable source of sorted minimizer events.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline bool producer_identity_matches(const p_producer& producer,
                                                     minimizer_scheme_identity scheme,
@@ -378,10 +381,9 @@ template <grouped_soa_event_producer p_producer>
     return producer.scheme_identity() == scheme && producer.producer_backend_identity() == backend;
 }
 
-/// Bounded writer shared by the control and position replay passes.  It owns
-/// exactly one physical row, streams extent bytes into fixed 8064-byte chunks,
-/// and folds the sink-authoritative row CRC receipts into the generation
-/// payload checksum in write order.
+/// Stream an extent through one reusable 8,064-byte row buffer.
+/// Control and position passes share  this writer. After each sink write,
+/// add the returned row CRC to the generation checksum in write order.
 struct grouped_soa_payload_extent_writer {
     minimizer_generation_row_sink_ref sink{};
     crc64_ecma182_accumulator* payload_row_checksums = nullptr;
@@ -395,7 +397,7 @@ struct grouped_soa_payload_extent_writer {
     crc64_ecma182_accumulator extent_checksum{};
     bool active = false;
 
-    /// Start one extent with its exact byte and row counts.
+    /// Start an extent with the row address and planned byte and chunk counts.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     begin(minimizer_generation_row_sink_ref row_sink,
           crc64_ecma182_accumulator& generation_payload_checksums,
@@ -420,7 +422,7 @@ struct grouped_soa_payload_extent_writer {
         return {};
     }
 
-    /// Publish the currently buffered physical row.
+    /// Send the buffered row to the sink and include its CRC in the payload checksum.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> flush() {
         if (!active || payload_row_checksums == nullptr) {
             return std::unexpected(minimizer_generation_encoding_error::row_order);
@@ -448,7 +450,7 @@ struct grouped_soa_payload_extent_writer {
         return {};
     }
 
-    /// Append encoded extent bytes without exceeding the planned length.
+    /// Append bytes up to the planned extent length, flushing full rows as needed.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     append(std::span<const std::byte> bytes) {
         if (!active || written_bytes > expected_bytes ||
@@ -470,7 +472,7 @@ struct grouped_soa_payload_extent_writer {
         return {};
     }
 
-    /// Flush the extent and return its payload checksum.
+    /// Write the final partial row, check the planned totals, and return the extent CRC.
     [[nodiscard]] std::expected<std::uint64_t, minimizer_generation_encoding_error> finish() {
         if (auto flushed = flush(); !flushed) {
             return std::unexpected(flushed.error());
@@ -483,10 +485,9 @@ struct grouped_soa_payload_extent_writer {
     }
 };
 
-/// Replay pass which materializes one planned control extent at a time.  The
-/// entry image is bounded by the planner's partition target. Positions remain
-/// count-only in this pass.  Zero initialization makes every alignment suffix
-/// part of the persisted corruption contract.
+/// Build and write one control extenv at a time while replaying events.
+/// Store hashes, prefix offsets, and capped counts. Position values are counted
+/// for  this pass. Zero-filled storage also gives alignment padding a checked value
 struct grouped_soa_control_emit_pass {
     grouped_soa_generation_options options{};
     grouped_soa_minimizer_profile profile{};
@@ -509,7 +510,7 @@ struct grouped_soa_control_emit_pass {
     bool entry_open = false;
     bool group_open = false;
 
-    /// Check the control replay inputs before consuming an event.
+    /// Check the profile, segment span, plan pointers, and sink before control replay.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     validate_contract() const noexcept {
         if (entries == nullptr || payload_row_checksums == nullptr || sink.context == nullptr ||
@@ -521,7 +522,7 @@ struct grouped_soa_control_emit_pass {
         return {};
     }
 
-    /// Open the planned control extent selected by segment and hash.
+    /// Check the next planned entry and allocate its zero-filled control image.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     open_entry(std::uint64_t segment, std::uint64_t hash) {
         if (entry_open || entries == nullptr || entry_ordinal >= entries->size()) {
@@ -551,7 +552,7 @@ struct grouped_soa_control_emit_pass {
         return {};
     }
 
-    /// Encode the terminal prefix and count for the current hash group.
+    /// Store this group's hash, prefix endpoints, and count capped at max_occ_cap + 1.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_group() noexcept {
         if (!group_open)
             return {};
@@ -602,7 +603,7 @@ struct grouped_soa_control_emit_pass {
         return {};
     }
 
-    /// Publish the current control extent and record its checksum.
+    /// Finish and write the control extent, then save its CRC in the directory entry.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_entry() {
         if (!entry_open || entries == nullptr || entry_ordinal >= entries->size()) {
             return std::unexpected(minimizer_generation_encoding_error::replay_mismatch);
@@ -643,7 +644,7 @@ struct grouped_soa_control_emit_pass {
         return {};
     }
 
-    /// Encode one canonical event into the current control extent.
+    /// Check one replayed event  and count it toward the current hash group's control.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const canonical_minimizer_event& event) {
         if (auto valid = validate_contract(); !valid)
@@ -713,7 +714,7 @@ struct grouped_soa_control_emit_pass {
         return {};
     }
 
-    /// Publish the final control extent and verify replay cardinality.
+    /// Write any final, control extent and require every planned entry to be filled.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish() {
         if (auto valid = validate_contract(); !valid)
             return valid;
@@ -728,9 +729,9 @@ struct grouped_soa_control_emit_pass {
     }
 };
 
-/// Replay pass which streams segment-local positions directly into bounded
-/// rows.  A heavy hash can therefore own an arbitrarily large planned extent
-/// without creating a correspondingly large transient position buffer.
+/// Stream segment-local positions through the fixed row buffer.
+/// Even a hash with many positions uses the same buffer size while its rows
+/// are written one after another.
 struct grouped_soa_position_emit_pass {
     grouped_soa_generation_options options{};
     grouped_soa_minimizer_profile profile{};
@@ -752,7 +753,7 @@ struct grouped_soa_position_emit_pass {
     bool entry_open = false;
     bool group_open = false;
 
-    /// Check the position replay inputs before consuming an event.
+    /// Check the profile, segment span, pgan pointers, and sink before position replay.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     validate_contract() const noexcept {
         if (entries == nullptr || payload_row_checksums == nullptr || sink.context == nullptr ||
@@ -764,7 +765,7 @@ struct grouped_soa_position_emit_pass {
         return {};
     }
 
-    /// Open the planned position extent selected by segment and hash.
+    /// Check the  next planned entry and start writing its position extent.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     open_entry(std::uint64_t segment, std::uint64_t hash) {
         if (entry_open || entries == nullptr || entry_ordinal >= entries->size()) {
@@ -800,7 +801,7 @@ struct grouped_soa_position_emit_pass {
         return {};
     }
 
-    /// Finish the current position hash group.
+    /// Count the completed hash group and reset its position count.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_group() noexcept {
         if (!group_open)
             return {};
@@ -815,7 +816,7 @@ struct grouped_soa_position_emit_pass {
         return {};
     }
 
-    /// Publish the current position extent and record its checksum.
+    /// Finish the position extent, check counts, and save its CRC in the directory entry.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_entry() {
         if (!entry_open || entries == nullptr || entry_ordinal >= entries->size()) {
             return std::unexpected(minimizer_generation_encoding_error::replay_mismatch);
@@ -836,7 +837,8 @@ struct grouped_soa_position_emit_pass {
         return {};
     }
 
-    /// Encode one canonical event into the current position extent.
+    /// Check an event, convert its position to a segment-local value, and append
+    /// it with the original strand bit
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const canonical_minimizer_event& event) {
         if (auto valid = validate_contract(); !valid)
@@ -921,7 +923,7 @@ struct grouped_soa_position_emit_pass {
         return {};
     }
 
-    /// Publish the final position extent and verify replay cardinality.
+    /// Finish the last position extent and require every planned entry to be  filled.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish() {
         if (auto valid = validate_contract(); !valid)
             return valid;
@@ -936,10 +938,12 @@ struct grouped_soa_position_emit_pass {
     }
 };
 
-/// Replays planned control and position extents in payload order.
+/// Write all control extents, then all position extents, using two producer scans.
 struct grouped_soa_emit_pass {
-    /// Emit both payload planes and return the ordered row-checksum digest.
-    /// @tparam p_producer Replayable canonical event source.
+    /// Replay events for controls and positions, checking identity, event count,
+    /// and event checksum against the plan after each pass. Return the checksum
+    /// of row CRCs in write order. Errors may follow rows already sent to the sink.
+    /// @tparam p_producer Replayable source of sorted minimizer events.
     template <grouped_soa_event_producer p_producer>
     [[nodiscard]] static std::expected<std::uint64_t, minimizer_generation_encoding_error>
     run(p_producer& producer,
@@ -1023,8 +1027,10 @@ struct grouped_soa_emit_pass {
     }
 };
 
-/// Plan grouped-SoA geometry by replaying a stable producer.
-/// @tparam p_producer Replayable canonical event source.
+/// Scan events to plan grouped-SoA entries and their byte ranges.
+/// Halve the segment width and retry when count limits are exceeded. Preserve
+/// the successful scan's event count and checksum for later  eplay checks.
+/// @tparam p_producer Replayable source of sorted minimizer events.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<grouped_soa_generation_plan, minimizer_generation_encoding_error>
 plan_grouped_soa_minimizer_generation(p_producer& producer,
@@ -1072,8 +1078,8 @@ plan_grouped_soa_minimizer_generation(p_producer& producer,
         }
         return grouped_soa_generation_plan{
             .profile = *empty_profile,
-            /* Empty generations have no physical position geometry. Replay
-             * uses a non-zero sentinel while the manifest publishes zero. */
+            /* Empty generations store a zero segment span. Use one while
+             * invoking the, producer, which requires a nonzero scan span. */
             .position_segment_span_bp = 0u,
         };
     }
@@ -1134,8 +1140,8 @@ plan_grouped_soa_minimizer_generation(p_producer& producer,
     }
 }
 
-/// Emit a planned grouped-SoA payload through the selected sink.
-/// @tparam p_producer Replayable canonical event source.
+/// Check the plan and producer identity, then write the control and position rows.
+/// @tparam p_producer Replayable source of sorted minimizer events.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<std::uint64_t, minimizer_generation_encoding_error>
 emit_grouped_soa_minimizer_generation(p_producer& producer,
@@ -1151,7 +1157,8 @@ emit_grouped_soa_minimizer_generation(p_producer& producer,
     }
     return grouped_soa_emit_pass::run(producer, options, profile, plan, sink);
 }
-/// Build one authenticated fixed metadata row from exact encoded bytes.
+/// Copy a head or manifest into fixed row storage and compute its address-bound CRC.
+/// The encoded bytes must fit encoded_minimizer_fixed_row::storage.
 [[nodiscard]] inline encoded_minimizer_fixed_row make_fixed_row(const index_chunk_address& address,
                                                                 std::span<const std::byte> bytes) {
     encoded_minimizer_fixed_row row{

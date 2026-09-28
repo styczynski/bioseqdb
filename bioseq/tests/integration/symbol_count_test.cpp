@@ -1,9 +1,9 @@
 /**
- * @file Integration scenarios for `bioseq.symbol_count`.
+ * @file Tests for bioseq.symbol_count on literals and stored sequences.
  *
- * Literal tallies cover every enabled alphabet and vectorization parity.
- * Columnar cases verify both the stored INLINE symbol-count chunk and the
- * unconditional recompute fallback when index maintenance and reads are off.
+ * Checks base counts with vectorization on and off, stored index reads, and
+ * recomputation when those reads are disabled. Error cases also check that
+ * the same PostgreSQL connection  remains usable.
  */
 
 #include <fmt/format.h>
@@ -20,7 +20,7 @@ constexpr std::string_view k_bioseq_column = "symbol_count_columnar";
 
 }  // namespace
 
-// ---- 1. Literal scalar path -------------------------------------------------
+// Counts from sequence literals.
 
 TEST_CASE("scalar literal symbol_count returns the real tally (dna4)",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
@@ -61,8 +61,7 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
     REQUIRE(error.contains("bioseq.seq alphabet \"dna5\" is not supported"));
     REQUIRE(error.contains("Valid alphabets: 'dna4'"));
 #else
-    // 'NNNNN' is five N's; in dna5 the rank of N is 3, so N=5 and every other
-    // letter is 0. The typmod packs dna5 in 3 bits/char (width 32 is fine).
+    // DNA5 must count five N symbols and zero A symbols in NNNNN.
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
                      "    'NNNNN'::bioseq.seq('dna5', 32), 'N');") == 5);
@@ -89,7 +88,7 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
 #endif
 }
 
-// ---- 2. Vectorization parity ------------------------------------------------
+// Compare counts with vectorization on and off.
 
 TEST_CASE("vectorization on/off agree on the scalar tally",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
@@ -104,17 +103,15 @@ TEST_CASE("vectorization on/off agree on the scalar tally",
     REQUIRE(std::stoll(rows.front().front().value()) == 4);
 }
 
-// ---- 3. BioseqColumn table (`USING bioseq`) -------------------------------------
+// Counts from tables using the Bioseq access method.
 
 TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fallback",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_bioseq_column});
 
     SECTION("stored read path (bioseq.index.insert_maintenance.enabled = on)") {
-        // seed_small_bioseq_column inserts pk=1 'ACGTACGTACGTACGT' (A=4),
-        // pk=2 'TTTTAAAAGGGGCCCC' (A=4), pk=3 'AAAAAAAAAAAAAAAA' (A=16),
-        // all under bioseq.index.insert_maintenance.enabled = on so the INLINE
-        // symbol_counts chunk is populated.
+        // The fixture stores A counts of 4, 4, and 16 for its three rows.
+        // Insert maintenance builds the inline bymbol-count index.
         seed_small_bioseq_column(ctx, k_bioseq_column);
 
         // pk=1 'ACGTACGTACGTACGT' -> A=4.
@@ -130,7 +127,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                                 "WHERE pk = 3;",
                                 k_bioseq_column)) == 16);
 
-        // Every stored row's A-count must be a non-NULL real tally.
+        // Every stored row must return a non-NULL, nonnegative A count.
         const auto rows = query_rows(
             ctx,
             fmt::format("SELECT pk, bioseq.symbol_count(seq0, 'A') AS ca FROM {} "
@@ -148,7 +145,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             "index.sequence_read.enabled = off)") {
         seed_small_bioseq_column(ctx, k_bioseq_column);
 
-        // Insert a fourth row WITHOUT populating the stored INLINE index.
+        // Insert a fourth row with symbol-count index maintenance disabled.
         {
             guc_scope insert_maintenance_disabled(
                 ctx, "bioseq.index.insert_maintenance.enabled", "off");
@@ -158,8 +155,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                       k_bioseq_column);
         }
 
-        // With the stored read disabled, the unconditional recompute fallback
-        // must still return the correct NON-NULL real tally (A=4) — never NULL.
+        // Disable stored index reads so this row's A count must  be recomputed.
         {
             guc_scope sequence_reads_disabled(
                 ctx, "bioseq.index.sequence_read.enabled", "off");
@@ -170,16 +166,12 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                             "WHERE pk = 4;",
                             k_bioseq_column));
             REQUIRE(row.size() == 1);
-            REQUIRE(row[0].has_value());  // recompute never yields NULL
+            REQUIRE(row[0].has_value());  // This sequence must produce a count.
             REQUIRE(std::stoll(row[0].value()) == 4);
             REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-            // Abort the executor after BioseqScan has populated the placeholder.
-            // The helper has already performed its normal cleanup at this
-            // point; this verifies that it leaves no ResourceOwner debt for a
-            // later projection error. The helper's internal PG_CATCH path is
-            // established by the heap-resident state and per-cleanup
-            // saved-ErrorData guards.
+            // Raise a projection error after computing the count. The backend must
+            // remain usable and report no unclosed resources.
             ctx.clear_notices();
             const auto projection_error = sql_error(
                 ctx,
@@ -198,9 +190,8 @@ TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backe
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_bioseq_column});
     seed_small_bioseq_column(ctx, k_bioseq_column);
-    // Keep the access method from hydrating the locator through a primary-key
-    // IndexScan, while enabling the stored symbol-count path that traverses
-    // the injected PostgreSQL sequence leaves.
+    // Disable, primary-key index scans so this query uses the stored symbol-count
+    // path where the PostgreSQL failures are injected.
     guc_scope index_scans_disabled(ctx, "enable_indexscan", "off");
     guc_scope sequence_index_reads_enabled(
         ctx, "bioseq.index.sequence_read.enabled", "on");
@@ -226,8 +217,8 @@ TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backe
             fmt::format("failure_point={}", failure_point)));
         REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-        // The hook is one-shot. Both SPI/executor use in a trivial statement
-        // and a second real inline-index read must succeed in this backend.
+        // Each injected failure fires once A trivial statement and another stored
+        // count read must then succeed on the same connection.
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         REQUIRE(query_scalar_int(ctx, read_sql) == 4);
         REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));

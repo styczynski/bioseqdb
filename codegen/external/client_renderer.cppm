@@ -38,9 +38,9 @@ namespace bioseq::codegen::external {
   return result;
 }
 
-/// @brief Renders a parameter-location enum expression.
-/// @param location Normalized location.
-/// @return Generated C++ enum literal.
+/// @brief Writes a C++ expression for a parameter location.
+/// @param location Path, query or header location.
+/// @return Corresponding parameter_location enum expression.
 [[nodiscard]] auto location_literal(parameter_location location)
     -> std::string {
   switch (location) {
@@ -54,9 +54,9 @@ namespace bioseq::codegen::external {
   throw std::runtime_error("invalid parameter location");
 }
 
-/// @brief Renders a parameter-kind enum expression.
-/// @param kind Normalized scalar kind.
-/// @return Generated C++ enum literal.
+/// @brief Writes a C++ expression for a parameter type.
+/// @param kind Scalar type.
+/// @return Corresponding parameter_kind enum expression.
 [[nodiscard]] auto kind_literal(parameter_kind kind) -> std::string {
   switch (kind) {
   case parameter_kind::string:
@@ -71,9 +71,9 @@ namespace bioseq::codegen::external {
   throw std::runtime_error("invalid parameter kind");
 }
 
-/// @brief Renders a typed integration-fixture scalar as generated C++.
-/// @param value Parsed fixture value.
-/// @return C++ expression with an exact `parameter_scalar` alternative.
+/// @brief Writes a test value as a C++ expression with the correct type.
+/// @param value Parsed test value.
+/// @return Expression selecting the matching parameter_scalar alternative.
 [[nodiscard]] auto integration_scalar_literal(const integration_scalar &value)
     -> std::string {
   if (const auto *text = std::get_if<std::string>(&value)) {

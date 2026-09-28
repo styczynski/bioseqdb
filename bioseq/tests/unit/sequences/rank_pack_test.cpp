@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies rank packing across alphabets, widths, sinks, and adapters.
+ * @brief Compare rank packing with independently packed bytes across alphabets and storage widths.
  */
 
 #include <cstring>
@@ -17,33 +17,33 @@ import bioseq.storage.lazy_sequence;
 
 namespace {
 
-/** @brief Maps an alphabet to the matching packed-sequence metadata entry. */
+/** Select the packed-sequence alphabet entry used by a test. */
 template <class p_alphabet> struct alphabet_stdc_entry;
 
-/** @brief Supplies packed-sequence metadata for DNA4. */
+/** DNA4 entry for the test sequence type. */
 template <> struct alphabet_stdc_entry<seq::dna4> {
     using type = alphabet_entry<seq::dna4, "dna4">;
 };
 
-/** @brief Supplies packed-sequence metadata for DNA5. */
+/** DNA5 entry for the test sequence type. */
 template <> struct alphabet_stdc_entry<seq::dna5> {
     using type = alphabet_entry<seq::dna5, "dna5">;
 };
 
-/** @brief Supplies packed-sequence metadata for the 20-symbol amino-acid alphabet. */
+/** Entry for the 20-letter amino-acid alphabet. */
 template <> struct alphabet_stdc_entry<seq::aa20> {
     using type = alphabet_entry<seq::aa20, "aa20">;
 };
 
-/** @brief Supplies packed-sequence metadata for the 27-symbol amino-acid alphabet. */
+/** Entry for the 27-letter amino-acid alphabet. */
 template <> struct alphabet_stdc_entry<seq::aa27> {
     using type = alphabet_entry<seq::aa27, "aa27">;
 };
 
 /**
- * @brief Packed varlena type restricted to one alphabet and storage width.
- * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
+ * @brief Restrict a test sequence type to one alphabet and packed-word width.
+ * @tparam p_alphabet Sequence  alphabt.
+ * @tparam p_unit Packed word type.
  */
 template <class p_alphabet, class p_unit>
 using profile_stdc =
@@ -53,16 +53,13 @@ using profile_stdc =
                           supported_storage_unit_byte_widths<sizeof(p_unit)>>;
 
 /**
- * @brief Owns zeroed varlena buffers allocated by one packed profile.
- * @tparam p_stdc Packed varlena type returned by the allocator.
+ * @brief Keep allocated packed-sequence buffers alive for a test.
+ * @tparam p_stdc Header type returned by the allocator.
  */
 template <class p_stdc> struct stdc_test_arena {
     std::vector<std::unique_ptr<std::byte[]>> blocks;
 
-    /**
-     * @brief Creates an allocator that appends owned zeroed blocks.
-     * @return Callable compatible with packed-sequence factory allocation.
-     */
+    /** Return an allocator that stores each zeroed buffer in this arena. */
     [[nodiscard]] auto allocator() {
         return [this](std::size_t byte_count) -> p_stdc* {
             auto block = std::make_unique<std::byte[]>(byte_count);
@@ -75,10 +72,9 @@ template <class p_stdc> struct stdc_test_arena {
 };
 
 /**
- * @brief Requires byte-for-byte equality between packed unit spans.
- * @tparam p_unit Packed storage unit.
- * @param[in] actual Units produced by the implementation.
- * @param[in] expected Independent oracle units.
+ * @brief Require equal lengths and bytes in two packed-unit spans.
+ * @param[in] actual Packed units produced by the code under test.
+ * @param[in] expected Independently packed reference units.
  */
 template <class p_unit>
 void require_unit_bytes_equal(std::span<const p_unit> actual, std::span<const p_unit> expected) {
@@ -89,11 +85,11 @@ void require_unit_bytes_equal(std::span<const p_unit> actual, std::span<const p_
 }
 
 /**
- * @brief Packs ranks with an independent least-significant-symbol-first oracle.
+ * @brief Pack ranks independently, starting at the low bits of each word.
  * @tparam p_alphabet Alphabet defining bits per symbol.
- * @tparam p_unit Packed storage unit.
+ * @tparam p_unit Packed word type
  * @param[in] ranks Valid alphabet ranks.
- * @return Oracle packed units.
+ * @return Packed words with unused bits set to  zero.
  */
 template <class p_alphabet, class p_unit>
 [[nodiscard]] std::vector<p_unit> manual_pack(std::span<const std::uint8_t> ranks) {
@@ -108,10 +104,8 @@ template <class p_alphabet, class p_unit>
 }
 
 /**
- * @brief Converts ranks into alphabet symbols.
- * @tparam p_alphabet Destination alphabet.
- * @param[in] ranks Valid alphabet ranks.
- * @return Symbols in input order.
+ * @brief Convert valid ranks to alphabet symbols in the same order.
+ * @tparam p_alphabet Alphabet containing every input rank.
  */
 template <class p_alphabet>
 [[nodiscard]] std::vector<p_alphabet> letters_from_ranks(std::span<const std::uint8_t> ranks) {
@@ -123,10 +117,8 @@ template <class p_alphabet>
 }
 
 /**
- * @brief Converts ranks into their alphabet text representation.
- * @tparam p_alphabet Destination alphabet.
- * @param[in] ranks Valid alphabet ranks.
- * @return Text in input order.
+ * @brief Decode valid ranks to text in the same order.
+ * @tparam p_alphabet Alphabet containing every input rank.
  */
 template <class p_alphabet>
 [[nodiscard]] std::string text_from_ranks(std::span<const std::uint8_t> ranks) {
@@ -140,13 +132,13 @@ template <class p_alphabet>
 }
 
 /**
- * @brief Checks varlena receive, send, and type-dispatch behavior.
+ * @brief Check receive, send, and typed views against independent packed data.
  * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
+ * @tparam p_unit Packed word type.
  * @param[in] ranks Source ranks.
- * @param[in] expected Expected packed units.
- * @param[in] padding Expected trailing padding in symbols.
- * @param[in] expected_text Expected decoded text.
+ * @param[in] expected Reference packed words.
+ * @param[in] padding Unused symbol positions in the last word.
+ * @param[in] expected_text Reference text after decoding.
  */
 template <class p_alphabet, class p_unit>
 void require_stdc_io_oracle(std::span<const std::uint8_t> ranks,
@@ -154,7 +146,7 @@ void require_stdc_io_oracle(std::span<const std::uint8_t> ranks,
                             std::uint16_t padding,
                             std::string_view expected_text) {
     using stdc_type = profile_stdc<p_alphabet, p_unit>;
-    /// Read cursor over the independent packed-unit oracle.
+    /// Track the next reference word supplied to the receiver.
     struct cursor {
         std::span<const p_unit> units;
         std::size_t index{};
@@ -209,12 +201,15 @@ void require_stdc_io_oracle(std::span<const std::uint8_t> ranks,
 }
 
 /**
- * @brief Checks admitted materialization and permit lifetime for one profile.
+ * @brief Check repacked bytes and the memory budget,  reserved for them.
+ *
+ * Copy a slice into the requested word width, compare its bytes and padding,
+ * and check tlat destroying the owner returns its reservation.
  * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
+ * @tparam p_unit Packed word type.
  * @param[in] ranks Source ranks.
- * @param[in] expected Expected packed units.
- * @param[in] padding Expected trailing padding in symbols.
+ * @param[in] expected Reference packed words.
+ * @param[in] padding Unused symbol positions in the last word.
  */
 template <class p_alphabet, class p_unit>
 void require_admitted_oracle(std::span<const std::uint8_t> ranks,
@@ -309,10 +304,13 @@ void require_admitted_oracle(std::span<const std::uint8_t> ranks,
 }
 
 /**
- * @brief Checks invalid-rank handling and fixed-capacity boundaries.
+ * @brief Check rejected and skipped invalid ranks, plus fixed-buffer overflow.
+ *
+ * Try every split point so these results also hold when input arrives in
+ * two pieces.
  * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
- * @param[in] profile Diagnostic profile name.
+ * @tparam p_unit Packed word type.
+ * @param[in] profile Name included in failure diagnostics.
  */
 template <class p_alphabet, class p_unit>
 void require_invalid_and_capacity_matrix(std::string_view profile) {
@@ -419,10 +417,13 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
 }
 
 /**
- * @brief Exercises every short boundary and split point for one rank-pack profile.
+ * @brief Compare packing methods at every length through one word plus one symbol.
+ *
+ * Test all  two-piece splits at each length, then check invalid ranks and
+ * fixed-buffer overflow
  * @tparam p_alphabet Sequence alphabet.
- * @tparam p_unit Packed storage unit.
- * @param[in] profile Diagnostic profile name.
+ * @tparam p_unit Packed word type.
+ * @param[in] profile Name included in failure diagnostics.
  */
 template <class p_alphabet, class p_unit>
 void require_exhaustive_profile(std::string_view profile) {
@@ -541,8 +542,8 @@ void require_exhaustive_profile(std::string_view profile) {
 
 TEST_CASE("rank packing covers all configured profiles independently of PostgreSQL",
           "[component:bioseq][layer:unit][feature:sequence][resource:highway]") {
-    // The dna4/uint64 profile always covers the primary SIMD width. Expanded
-    // build profiles instantiate every supported alphabet and storage width.
+    // Always test DNA4 in 64-bit words. The expanded build also checks the
+    // other alphabets and all four word widths.
     require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)

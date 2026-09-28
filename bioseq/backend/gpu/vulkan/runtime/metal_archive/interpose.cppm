@@ -1,6 +1,6 @@
 /**
  * @file interpose.cppm
- * @brief Exposes the immutable Metal archive pipeline-creation scope.
+ * @brief Tracks Metal archive checks while a Vulkan pipeline is created.
  */
 module;
 
@@ -36,14 +36,14 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
-/// @brief Binds one Vulkan pipeline creation to an immutable Metal audit.
+/// @brief Collects the Metal checks belonging to one Vulkan pipeline creation.
 class metal_archive_pipeline_create_scope {
   public:
-    /// @brief Opens one immutable Metal audit scope for a Vulkan pipeline creation.
-    /// @param[in] required Whether a provider-backed archive receipt is mandatory.
-    /// @param[in] runtime_identity Selected Vulkan device and pipeline-cache identity.
-    /// @param[in] shader_key Shader variant entering pipeline creation.
-    /// @param[in] expected_entry_name Expected Metal entry-point name.
+    /// @brief Starts tracking one pipeline creation against the installed Metal archives.
+    /// @param[in] required Whether creation must produce an accepted archive record.
+    /// @param[in] runtime_identity Selected Vulkan device and driver details.
+    /// @param[in] shader_key Shader  variant being used.
+    /// @param[in] expected_entry_name Metal function the pipeline must use.
     metal_archive_pipeline_create_scope(bool required,
                                         const runtime_vulkan_device_identity& runtime_identity,
                                         shader_variant_key shader_key,
@@ -155,14 +155,14 @@ class metal_archive_pipeline_create_scope {
         active_scope_ = true;
     }
 
-    /// @brief Prevents copying active audit-scope ownership.
+    /// @brief Prevents copying an active pipeline-creation scope.
     metal_archive_pipeline_create_scope(const metal_archive_pipeline_create_scope&) = delete;
 
-    /// @brief Prevents copy assignment of active audit-scope ownership.
+    /// @brief Prevents copying an active scope by assignment.
     metal_archive_pipeline_create_scope&
     operator=(const metal_archive_pipeline_create_scope&) = delete;
 
-    /// @brief Fails closed when an active scope leaves without a consumed verdict.
+    /// @brief Records a process-wide failure if an active scope ends before finish().
     ~metal_archive_pipeline_create_scope() noexcept {
         if (!active_scope_ || active_ == nullptr)
             return;
@@ -191,16 +191,16 @@ class metal_archive_pipeline_create_scope {
         }
     }
 
-    /// @brief Checks whether setup admitted the next pipeline call.
-    /// @return Whether pipeline creation may proceed under this scope.
+    /// @brief Returns whether setup succeeded and pipeline creaion may proceed
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return failure_.empty() && (active_scope_ || !required_);
     }
 
-    /// @brief Closes the scope and validates the complete immutable archive audit.
-    /// @param[in] outer_result Vulkan pipeline-creation result.
-    /// @param[in] pipeline_create_ns Measured Vulkan pipeline-creation duration in nanoseconds.
-    /// @return Optional accepted audit, or the exact fail-closed diagnostic.
+    /// @brief Ends tracking and checks that this pipeline used the accepted archives.
+    /// @param[in] outer_result Result of vkCreateComputePipelines.
+    /// @param[in] pipeline_create_ns Time spent creating the pipeline, in nanoseconds.
+    /// @return Accepted creation details, an empty result if no archive scope was needed,
+    /// or an  error describing the failed check.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult outer_result, std::uint64_t pipeline_create_ns) {
         if (finished_) {
@@ -287,35 +287,30 @@ class metal_archive_pipeline_create_scope {
     std::shared_ptr<active_metal_archive_pipeline_scope> active_{};
 };
 #else
-/// @brief Leaves command-library interposition inactive on non-Apple runtimes.
+/// @brief Does nothing on platforms that do not use MoltenVK command libraries.
 void install_moltenvk_command_library_interpose() noexcept {}
-/// @brief Leaves pipeline interposition inactive on non-Apple runtimes.
+/// @brief Does nothing on platforms that do not use Metal archives.
 void install_metal_pipeline_archive_interpose(runtime_vulkan_device_identity) noexcept {}
 
-/// @brief Rejects immutable archive requirements on non-Apple runtimes.
+/// @brief Rejects required Metal archive checks on platforms without Metal.
 class metal_archive_pipeline_create_scope {
   public:
-    /// @brief Records whether immutable archive proof is required on a non-Apple runtime.
-    /// @param[in] required Whether a provider-backed archive receipt is mandatory.
-    /// The remaining arguments preserve the cross-platform constructor contract
-    /// but are intentionally unnamed and ignored on this platform.
+    /// @brief Records whether this non-Apple call would require Metal archive checks.
+    /// @param[in] required Whether the caller requires an archive record.
+    /// Installed Metal settings also make the checks required. Other constructor
+    /// arguments are unused on this platform.
     metal_archive_pipeline_create_scope(bool required,
                                         const runtime_vulkan_device_identity&,
                                         shader_variant_key,
                                         std::string) noexcept
         : required_(required || is_runtime_metal_archive_configuration_installed()) {}
 
-    /// @brief Checks whether no immutable Metal proof is required.
-    /// @return Whether pipeline creation may proceed on this non-Apple runtime.
+    /// @brief Returns whether creation, can proceed without Metal archive checks.
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return !required_;
     }
 
-    /// @brief Produces the non-Apple fail-closed verdict.
-    /// The Vulkan result is intentionally unnamed because the platform verdict
-    /// depends only on whether immutable Metal proof was required.
-    /// The measured creation duration is likewise irrelevant without Metal.
-    /// @return Empty audit when optional, otherwise the platform diagnostic.
+    /// @brief Returns an empty record if Metal checks were optional, or a  platform error.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult, std::uint64_t) const {
         if (required_) {

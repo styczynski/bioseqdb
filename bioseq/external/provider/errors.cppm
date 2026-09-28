@@ -1,6 +1,6 @@
 /**
  * @file external/provider/errors.cppm
- * @brief Bounded error categories and diagnostics for provider operations.
+ * @brief Provider errors with byte limits on diagnostic text.
  */
 module;
 
@@ -13,9 +13,8 @@ export module bioseq.external.provider.errors;
 
 import bioseq.external.provider.base;
 
-/// @brief Structured, owning, PostgreSQL-independent errors.
-// `external_error`
-// imports only `base` (never sink refs) so the dependency chain stays acyclic.
+/// Errors that own their diagnostic  text and can be used outside PostgreSQL.
+// Import only shared values so message sinks can use these errors.
 export namespace bioseq::external::provider {
 
 /// Stable categories for provider and transport failures.
@@ -35,7 +34,7 @@ enum class external_error_kind : std::uint8_t {
   provider_contract
 };
 
-/// Owning bounded diagnostic returned across provider boundaries.
+/// Provider error with owned text and optionfl request details.
 struct external_error {
   external_error_kind kind{};
   std::optional<provider_id> known_provider;

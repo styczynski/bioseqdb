@@ -1,6 +1,6 @@
 /**
  * @file sql_entity_handles_test.cppm
- * @brief Checks generated SQL entity handles and row-codec metadata at compile time.
+ * @brief Checks generated catalog handles and the fields used to convert SQL rows.
  */
 module;
 
@@ -26,7 +26,7 @@ import bioseq.postgres.table.sql_row_codecs;
 
 namespace {
 
-/** @return True when a generated handle exposes the expected stable identity. */
+/** @return Whether the, handle has the expected fixed-schema name and lookup methods. */
 template<class p_handle>
 [[nodiscard]] consteval bool generated_handle_contract(
         const p_handle& handle,

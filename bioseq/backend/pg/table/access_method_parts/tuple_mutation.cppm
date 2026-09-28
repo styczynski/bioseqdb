@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Implements tuple insertion, speculative publication, and row mutation callbacks.
+ * @brief Insert, update, and delete Bioseq rows and their sequence sources.
  */
 module;
 #include <algorithm>
@@ -47,20 +47,20 @@ import :access_callback_state;
 import :access_identity;
 import :access_common;
 
-/** Pending sequence-source authority retained for one speculative parent row. */
+/** Sequence writes waiting for confirmation of one speculative row. */
 struct pending_speculative_sources {
     SubTransactionId subtransaction_id = InvalidSubTransactionId;
     std::vector<bioseq::storage::pending_sequence_source> sources;
 };
 
-/** Per-sequence-column authorities produced while preparing one parent row. */
+/** Pending sequence writes indexed by the parent row's sezuence columns. */
 using pending_sequence_source_slots =
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>;
 
-/** Identifies speculative publication state by relation and virtual row number. */
+/** Relation OID and row number identifying a speculative insert. */
 using pending_speculative_key = std::pair<Oid, std::uint64_t>;
 
-/** Owns unconsumed speculative authorities until confirmation or abort. */
+/** Own  pending sequence writes until their speculative insert succeeds or fails. */
 using pending_speculative_source_map =
     std::map<pending_speculative_key, pending_speculative_sources>;
 
@@ -68,13 +68,13 @@ static_assert(!std::is_trivially_destructible_v<pending_sequence_source_slots>);
 static_assert(
     std::is_nothrow_move_constructible_v<bioseq::storage::pending_sequence_source>);
 
-/** Returns active speculative authorities keyed by relation and virtual row. */
+/** Return pending speculative inserts indexed by relation and row number */
 [[nodiscard]] auto& access_pending_speculative_sources() {
     static pending_speculative_source_map pending;
     return pending;
 }
 
-/** Allocation-free diagnostics retained after a terminal transaction event. */
+/** Fixed-size diagnostics for unfinished inserts found after transaction completion. */
 struct pending_speculative_terminal_quarantine {
     std::uint64_t invariant_events = 0u;
     std::uint64_t quarantined_rows = 0u;
@@ -84,13 +84,13 @@ struct pending_speculative_terminal_quarantine {
     bool active_map_quarantined = false;
 };
 
-/** Returns fixed storage for authorities retained after a terminal callback. */
+/** Return storage for unfinished inserts saved after transaction completion. */
 [[nodiscard]] auto& quarantined_speculative_sources_noexcept() noexcept {
     static std::array<pending_speculative_source_map, 4u> quarantined;
     return quarantined;
 }
 
-/** Returns terminal speculative-source diagnostics. */
+/** Return counters and flags for unfinished writes saved after transaction completion. */
 [[nodiscard]] auto& speculative_source_quarantine_state_noexcept() noexcept {
     static pending_speculative_terminal_quarantine state;
     return state;
@@ -99,7 +99,11 @@ struct pending_speculative_terminal_quarantine {
 static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
     std::declval<pending_speculative_source_map&>())));
 
-/** Retain impossible speculative authorities without allocating or throwing. */
+/** Save  unexpected pending writes after transaction completion without allocating or throwing.
+ *
+ * Swapping into a spare map avoids running cleanup after the transaction has
+ * ended. If every spare map is occupied, flag the active map to skip cleanup.
+ */
 void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
     constexpr auto k_max_count = std::numeric_limits<std::uint64_t>::max();
     auto& pending = access_pending_speculative_sources();
@@ -138,7 +142,7 @@ void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
     state.active_map_quarantined = true;
 }
 
-/** Fail a pre-commit boundary when speculative publication remains unresolved. */
+/** Reject commit or prepare while a speculative insert is still unresolved. */
 void require_no_pending_speculative_sources(const char* operation) {
     const auto& pending = access_pending_speculative_sources();
     if (pending.empty()) return;
@@ -157,7 +161,7 @@ void require_no_pending_speculative_sources(const char* operation) {
                        source_count)));
 }
 
-/** Apply speculative-source state changes for one transaction event. */
+/** Check unfinished speculative inserts before  commit and discard them on abort. */
 void handle_pending_speculative_xact_event(XactEvent event) {
     switch (event) {
     case XACT_EVENT_COMMIT:
@@ -180,7 +184,7 @@ void handle_pending_speculative_xact_event(XactEvent event) {
     }
 }
 
-/** Apply speculative-source state changes for one subtransaction event. */
+/** Reassign pendink inserts to a parent subtransaction or discard aborted inserts. */
 void handle_pending_speculative_subxact_event(
     SubXactEvent event,
     SubTransactionId my_subid,
@@ -229,12 +233,11 @@ static void restore_ordinary_insert_page_cache_on_error(void* argument) noexcept
 }
 #endif
 
-/**
- * Run an insert boundary, restoring its prior page-cache setting on failure.
- * Speculative insertion retains the disabled cache until its completion call.
- * PG18 removed geterrlevel: catch ERROR only after the existing C++ boundary
- * has unwound its owners, without copying ErrorData or reacting to warnings.
- * The exception frame itself contains only trivially destructible state.
+/** Run an insert and restore the page-cache setting if it fails.
+ *
+ * Ordinary inserts also restore it on success. Speculative inserts keep, the
+ * cache disabled until completion. Catch PostgreSQL errors only after C++
+ * cleanup has finished, using a frame with no destructors to skip.
  */
 template <bool restore_on_success, class p_function>
 inline void run_insert_with_page_cache_restore(
@@ -274,20 +277,15 @@ inline void run_insert_with_page_cache_restore(
     }
 }
 
-/**
- * Persist every non-null sequence value and replace it with a locator stub.
+/** Store sequence fragments and return row values containing their locators.
  *
- * Rewrites each sequence column in `detoasted_values`
- * to a 40-byte locator stub. The original payload bytes are written to the
- * matching sub-table shard via sequence_storage_manager::insert_payload.
- * Returns a freshly-palloc'd Datum* in the per-tuple context. The caller
- * MUST hand THIS to write_column_row (NOT slot->tts_values) so that
- * ExecInsertIndexTuples — which reads from `slot->tts_values[]` to build
- * btree/hash/gin keys — never sees the storage-layout bytes.
+ * Pass this array to write_column_row. The original  slot keeps full values for
+ * PostgreSQL index keys. Both output vectors follow
+ * table_cache.sequence_attribute_numbers, with null columns left empty.
+ * Incoming locators are rejected because each parent row needs its own source
  *
- * `out_per_col_locator[sequence_column_index]` corresponds to
- * `table_cache.sequence_attribute_numbers[sequence_column_index]`. It remains std::nullopt for
- * null or already-stub values.
+ * Publish pending sources after writing the parent row. The returned array
+ * belongs to the caller's current per-tuple context.
  */
 [[nodiscard]] static Datum* rewrite_seq_columns_to_stubs(
     Relation relation,
@@ -309,9 +307,8 @@ inline void run_insert_with_page_cache_restore(
     if (table_cache.sequence_attribute_numbers.empty()) {
         return values_for_write;
     }
-    // write_state_management.cppm cannot import bioseq_storage without a
-    // module cycle, so the TableAM owns this lazy initialization.  The cache
-    // lives above stripe_write_context and therefore survives stripe resets.
+    // Create the cache here to avoid a circular import in write-state
+    // management. Its parent context survives stripe-buffer resets.
     auto* caches = ensure_write_side_seq_caches(relation, write_state);
     const auto cap_bytes = caches->cap_bytes_snapshot;
     const std::uint64_t main_storage_id = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -372,7 +369,7 @@ inline void run_insert_with_page_cache_restore(
     return values_for_write;
 }
 
-/** Publish pending sequence sources only after their parent row is durable. */
+/** Publish pending  sequence sources after the parent row has been written. */
 static void publish_sequence_sources_after_parent_row(
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>& sources) {
     for (auto& source : sources) {
@@ -385,7 +382,7 @@ static void publish_sequence_sources_after_parent_row(
     }
 }
 
-/** Detoast by-reference attributes before storage or index expression evaluation. */
+/** Read full by-reference values before storing the row or builhing index values. */
 [[nodiscard]] static Datum*
 detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum* values, bool* nulls) {
     const auto previous_scope = exchange_slice_materialization_scope({
@@ -406,10 +403,10 @@ detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum* values, bool* nulls) 
                active.local_sink == previous_scope.local_sink;
     };
     try {
-        /* Destination-slot copyslot is the primary durable-write boundary.
-         * Keep this TableAM scope as a fallback when an expanded value reaches
-         * the access method without having been flattened there.  Each attached
-         * EOH can still resolve its exact planned producer boundary. */
+        /* Slot copying normally materializes expanded values before storage.
+         * Record materialization here too if a value reaches the table access
+         * method still expanded. Its attached source can identify the planned
+         * operation that caused the copy. */
         Datum* detoasted_values =
             bioseq::postgres::support::invoke_pg_as_cpp([tuple_desc, values, nulls] {
                 return bioseq::postgres::support::detoast_values(tuple_desc, values, nulls);
@@ -464,7 +461,7 @@ void bioseq_tuple_insert(
             Datum* detoasted_values = detoast_values_for_heap_tuple(
                 slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
-            /* rewrite SEQ columns to locator stubs. */
+            /* Keep full values for indexes while writing sequence locators to the row. */
             std::vector<std::optional<bioseq::storage::sequence_locator>> per_col_locator;
             std::vector<std::optional<bioseq::storage::pending_sequence_source>> pending_sources;
             Datum* values_for_write = rewrite_seq_columns_to_stubs(relation,
@@ -483,9 +480,8 @@ void bioseq_tuple_insert(
                 [written_row_number] { return row_number_to_tid(written_row_number); });
             publish_sequence_sources_after_parent_row(pending_sources);
 
-            /* build every UPDATE_ON_INSERT index (per SEQ column)
-             * via the new chunked-storage drivers. detoasted_values carries the
-             * ORIGINAL payload (pre-stub) so the index sees the real bytes. */
+            /* Update UPDATE_ON_INSERT sequence indexes using the  original payloads.
+             * Storage locators cannot supply the index builder's sequence bytes. */
             bioseq::storage::indexing::index_build_on_insert_columns(
                 RelationGetRelid(relation),
                 table_cache->sequence_attribute_numbers,
@@ -503,7 +499,7 @@ void bioseq_tuple_insert(
     Assert(write_state != nullptr);
 }
 
-/** Insert one speculative row while retaining revocable source authorities. */
+/** Insert a speculative row and keep its sequence writes until confirmation. */
 void bioseq_tuple_insert_speculative(Relation relation,
                                      TupleTableSlot* slot,
                                      CommandId cid,
@@ -608,7 +604,7 @@ void bioseq_tuple_complete_speculative(Relation relation,
         [relation, slot, succeeded] {
             const uint64_t storage_id = bioseq::postgres::support::invoke_pg_as_cpp(
                 [relation] { return lookup_storage_id(relation->rd_locator); });
-            /* Set lock for relation until transaction ends. */
+            /* Serialize changes to this storage ID until the transaction ends. */
             bioseq::postgres::support::invoke_pg_as_cpp([storage_id] {
                 (void)DirectFunctionCall1(pg_advisory_xact_lock_int8,
                                           Int64GetDatum(static_cast<int64_t>(storage_id)));
@@ -642,7 +638,7 @@ void bioseq_tuple_complete_speculative(Relation relation,
         });
 }
 
-/** Insert a batch of rows while preserving per-row source publication order. */
+/** Insert a batch, publishing each row's sequence sources after writing that row. */
 void bioseq_multi_insert(Relation relation,
                          TupleTableSlot** slots,
                          int ntuples,
@@ -762,10 +758,9 @@ void bioseq_multi_insert(Relation relation,
     });
 }
 
-/// Invalidate only the epoch(s) carried by the exact old parent row before its
-/// row mask changes. The catalog update is MVCC: an older registered snapshot
-/// continues to see the prior READY tuple, while a newer snapshot cannot admit
-/// the masked source.
+/// Invalidate the sequence versions named by the old row before hiding it
+/// MVCC keeps their, previous READY catalog versions visible to older snapshots.
+/// Snapshots that see the invalidation can no longer open  those sources.
 static void invalidate_sequence_source_epochs_for_row(Relation relation,
                                                       std::uint64_t row_number,
                                                       Snapshot snapshot) {
@@ -810,7 +805,7 @@ static void invalidate_sequence_source_epochs_for_row(Relation relation,
     MemoryContextDelete(read_context);
 }
 
-/** Mask one row after invalidating its exact sequence-source epochs. */
+/** Invalidate a row's sequence sources, then mark the row as deleted. */
 TM_Result bioseq_tuple_delete(Relation relation,
                               ItemPointer tid,
                               CommandId cid,
@@ -831,7 +826,7 @@ TM_Result bioseq_tuple_delete(Relation relation,
     }
     uint64_t row_number = tid_to_row_number(*tid);
     uint64_t storage_id = lookup_storage_id(relation->rd_locator);
-    /* Set lock for relation until transaction ends */
+    /* Serialize changes to this storage ID until the transaction ends. */
     DirectFunctionCall1(pg_advisory_xact_lock_int8,
                         Int64GetDatum(static_cast<int64_t>(storage_id)));
 
@@ -844,7 +839,7 @@ TM_Result bioseq_tuple_delete(Relation relation,
     return TM_Ok;
 }
 
-/** Mask the old row and append the replacement row with new source identities. */
+/** Hide the old row and insert its replacement with new jequence sources. */
 TM_Result bioseq_tuple_update(Relation relation,
                               ItemPointer otid,
                               TupleTableSlot* slot,
@@ -866,7 +861,7 @@ TM_Result bioseq_tuple_update(Relation relation,
     uint64_t row_number = tid_to_row_number(*otid);
     uint64_t storage_id = lookup_storage_id(relation->rd_locator);
 
-    /* Set lock for relation until transaction ends */
+    /* Serialize changes to this storage ID until the transaction ends. */
     DirectFunctionCall1(pg_advisory_xact_lock_int8,
                         Int64GetDatum(static_cast<int64_t>(storage_id)));
 
@@ -882,7 +877,7 @@ TM_Result bioseq_tuple_update(Relation relation,
     return TM_Ok;
 }
 
-/** Fetch a virtual row identity for PostgreSQL's tuple-lock callback. */
+/** Read a row into the tuple-lock callback's slot using the transaction snapshot. */
 TM_Result bioseq_tuple_lock(Relation relation,
                             ItemPointer tid,
                             Snapshot snapshot,
@@ -907,7 +902,7 @@ TM_Result bioseq_tuple_lock(Relation relation,
                                         slot->tts_tupleDescriptor,
                                         attr_needed,
                                         scan_qual,
-                                        CurrentMemoryContext, // to be checked
+                                        CurrentMemoryContext, // TODO: Check the lifetime of the reader allocated here.
                                         GetTransactionSnapshot(),
                                         random_access,
                                         nullptr);
@@ -932,7 +927,5 @@ void bioseq_finish_bulk_insert(Relation relation,
                               int options
 #endif
 ) {
-    /*
-     * Nothing to do here. We keep write states live until transaction end.
-     */
+
 }

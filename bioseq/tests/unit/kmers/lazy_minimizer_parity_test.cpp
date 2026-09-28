@@ -1,8 +1,10 @@
 /**
  * @file lazy_minimizer_parity_test.cpp
- * @brief Minimizer parity across resident and fragmented sequence views.
+ * @brief Compare minimizers from packed, fragmented, and composed sequence views.
  *
- * Fixtures cover several sequence lengths and fragment geometries.
+ * Check  fragment boundaries, ntHash results, and reads limited to the requested
+ * source interval. Sorting must also avoid readcng an entire composed source
+ * at once
  */
 
 #include <hwy/highway.h>
@@ -367,10 +369,9 @@ template <std::size_t p_kmer_size, std::size_t p_window_size>
 void require_bounded_nthash_oracle_parity(
         const std::vector<minimizer_record>& actual,
         const std::vector<minimizer_record>& expected) {
-    // The bounded ntHash kernel's eight logical streams append in stream
-    // order, while the scalar oracle walks windows chronologically. Sort both
-    // without uniquing: the comparator normalizes only order and still locks
-    // exact multiplicity.
+    // The ntHash kernel appends by stream, while the scalar reference follows
+    // window order. Sort both results but keep duplicates so equality also checks
+    // how many times each minimizer was emitted.
     REQUIRE(actual.size() == expected.size());
     REQUIRE(sorted_records(actual) == sorted_records(expected));
 }
@@ -620,8 +621,8 @@ void require_partial_source_read(const composite_source_state& source,
     REQUIRE(source.max_request <= 256u);
 }
 
-// Run the scalar minimizer kernel over an arbitrary sequence view and return
-// the sorted-unique (last_pos, kmer) pair set.
+// Run scalar minimizers on this sequence interval and return unique
+// position/hash pairs in sorted order.
 template <class p_sequence_view, class p_index>
 [[nodiscard]] std::vector<std::pair<std::size_t, std::uint64_t>>
 run_scalar(p_sequence_view& seq, p_index begin, p_index end, std::size_t w, std::size_t k) {
@@ -659,9 +660,9 @@ void check_parity(std::size_t n, std::uint64_t seed, std::size_t w, std::size_t 
 TEST_CASE("fragmented minimizer set equals all-in-RAM baseline (w=10,k=15)",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     for (std::size_t n : {64u, 96u, 200u, 257u, 1024u, 4096u}) {
-        check_parity<1>(n, 0x1111 + n, 10, 15);    // 32 letters / fragment (worst case)
-        check_parity<2>(n, 0x2222 + n, 10, 15);    // 64 letters / fragment
-        check_parity<32>(n, 0x3333 + n, 10, 15);   // 1024 letters / fragment (production)
+        check_parity<1>(n, 0x1111 + n, 10, 15);    // 32 letters per fragment
+        check_parity<2>(n, 0x2222 + n, 10, 15);    // 64 letters per fragment
+        check_parity<32>(n, 0x3333 + n, 10, 15);   // 1024 letters per fragment
     }
 }
 

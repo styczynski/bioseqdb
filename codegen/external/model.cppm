@@ -1,6 +1,6 @@
 /**
  * @file model.cppm
- * @brief Shared semantic model for external-client generation.
+ * @brief Data used to read API descriptions and generate HTTP clients.
  */
 module;
 
@@ -27,71 +27,71 @@ namespace bioseq::codegen::external {
 
 /// @brief Supported locations for parameters in generated HTTP requests.
 enum class parameter_location : std::uint8_t {
-    path,   ///< Substitution within the origin-form path template.
+    path,   ///< Value substituted into a request path such as /records/{id}.
     query,  ///< Percent-encoded query-string parameter.
     header, ///< HTTP request-header field.
 };
 
-/// @brief Supported scalar value categories in an OpenAPI parameter schema.
+/// @brief Scalar types accepted in OpenAPI parameters.
 enum class parameter_kind : std::uint8_t {
     string,  ///< Text value.
-    integer, ///< Signed integral value.
+    integer, ///< Signed integer value.
     number,  ///< Floating-point value.
     boolean, ///< Boolean value.
 };
 
-/// @brief Normalized OpenAPI parameter metadata used by the client renderer.
+/// @brief An OpenAPI parameter and  the rules for passing it to the client.
 struct openapi_parameter {
     /// @brief Exact parameter name from the OpenAPI document.
     std::string name;
     /// @brief HTTP request component that carries the parameter.
     parameter_location location{};
-    /// @brief Scalar kind accepted by the generated client.
+    /// @brief Type of each supplied value.
     parameter_kind kind{};
     /// @brief Whether callers must supply the parameter.
     bool required{};
-    /// @brief Whether one request value represents a comma-separated array.
+    /// @brief Whether callers can supply several values for this parameter.
     bool is_array{};
 };
 
-/// @brief Normalized metadata for one generated HTTP GET operation.
+/// @brief One HTTP GET operation from the API description.
 struct openapi_operation {
-    /// @brief Stable OpenAPI operation identifier exposed by the client.
+    /// @brief Name used to select this operation in the generated client.
     std::string operation_id;
-    /// @brief Origin-form path template used by the HTTPS transport.
+    /// @brief Request path, with placeholders for path parameters.
     std::string path;
     /// @brief Preferred response media type.
     std::string accept;
-    /// @brief API-key parameter name, empty when authentication is not required.
+    /// API-key field name, empty when this operation has no API-key requirement.
     std::string api_key_name;
     /// @brief API-key location when the operation requires authentication.
     std::optional<parameter_location> api_key_location;
-    /// @brief Parameters in deterministic renderer order.
+    /// @brief Parameters in the order collected from the path and operation.
     std::vector<openapi_parameter> parameters;
 };
 
-/// @brief Invocation shape exercised by a generated integration case.
+/// @brief How an integration test calls the client.
 enum class integration_mode : std::uint8_t {
     single, ///< Invoke the client's single-request API.
     batch,  ///< Invoke the client's batch API.
 };
 
-/// @brief Owning scalar value parsed from an integration-case declaration.
+/// @brief A test parameter value stored as text, an  integer, a number or a boolean.
 using integration_scalar = std::variant<std::string, std::int64_t, double, bool>;
 
-/// @brief Concrete parameter supplied by a generated integration case.
+/// @brief A parameter value used by an integration test.
 struct integration_parameter {
     /// @brief Parameter name matched against an operation descriptor.
     std::string name;
     /// @brief HTTP request component that carries the parameter.
     parameter_location location{};
-    /// @brief Scalar kind enforced by the generated client.
+    /// @brief Type expected by the operation.
     parameter_kind kind{};
-    /// @brief Owning fixture value rendered into generated C++.
+    /// @brief Value written into the generated test
     integration_scalar value;
 };
 
-/// @brief Expected response-header fragment for an integration case.
+/// @brief A header value that an integration test expects in the response.
 struct integration_header_expectation {
     /// @brief Case-insensitive HTTP header name.
     std::string name;
@@ -99,13 +99,13 @@ struct integration_header_expectation {
     std::string value_contains;
 };
 
-/// @brief Fully validated integration case emitted beside a generated client.
+/// @brief An, integration test case for a generated client.
 struct integration_case {
     /// @brief Human-readable test case name.
     std::string name;
     /// @brief Operation invoked by the case.
     std::string operation_id;
-    /// @brief Optional response-media override.
+    /// @brief Optional Accept header for this test.
     std::string accept;
     /// @brief Whether the case invokes one request or a request batch.
     integration_mode mode{};
@@ -115,19 +115,19 @@ struct integration_case {
     std::size_t pre_delay_without_credentials_ms{};
     /// @brief Expected HTTP response status.
     long expected_status{200};
-    /// @brief Concrete operation parameters.
+    /// @brief Parameter values passed to the operation.
     std::vector<integration_parameter> parameters;
     /// @brief Required response-body substrings.
     std::vector<std::string> body_contains;
-    /// @brief Required response-header fragments.
+    /// @brief Header names and value substrings expected in the respose.
     std::vector<integration_header_expectation> header_contains;
 };
 
-/// @brief Renderer-ready projection of one OpenAPI document.
+/// @brief The parts of an OpenAPI document needed to generate a client and its tests.
 struct openapi_document {
     /// @brief OpenAPI document title.
     std::string title;
-    /// @brief Provider identity exposed by the generated client.
+    /// @brief Provider  name exposed by the generated client.
     std::string provider_name;
     /// @brief Exact HTTPS server URL from the document.
     std::string server_url;
@@ -135,27 +135,27 @@ struct openapi_document {
     std::string host;
     /// @brief Validated HTTPS port.
     std::uint16_t port{443};
-    /// @brief Normalized server path prefix.
+    /// @brief Server path prefix without trailing slashes.
     std::string base_path;
-    /// @brief Supported GET operations in deterministic identifier order.
+    /// @brief GET operations sorted by operation identifier.
     std::vector<openapi_operation> get_operations;
     /// @brief Validated integration cases in declaration order.
     std::vector<integration_case> integration_cases;
 };
 
-/// @brief One authored module source available to annotation resolution.
+/// @brief A module source that may contain a client annotation or specification fragment.
 struct descriptor_source {
-    /// @brief Absolute source path used for file diagnostics.
+    /// @brief Source path used in diagnostics.
     fs::path path;
-    /// @brief Stable generic path relative to the descriptor scan root.
+    /// @brief Source path relative to the directory being scanned.
     fs::path relative_path;
-    /// @brief Exact authored source bytes.
+    /// @brief Contents of the source file.
     std::string text;
-    /// @brief Authored file size in bytes.
+    /// @brief Source file size in bytes.
     std::uintmax_t file_size_bytes{};
-    /// @brief Authored filesystem write-time ticks.
+    /// @brief Last-write time in filesystem clock ticks.
     std::int64_t last_write_ticks{};
-    /// @brief FNV-1a hash of the exact authored bytes.
+    /// @brief FNV-1a hash of the source bytes.
     std::uint64_t content_hash{};
 };
 
@@ -163,7 +163,7 @@ struct descriptor_source {
 struct annotation_request {
     /// @brief Original annotated module path.
     fs::path source_path;
-    /// @brief Normalized source path parsed by cppast.
+    /// @brief Path to the copy  prepared for cppast.
     fs::path parser_source_path;
     /// @brief Registered annotation spelling.
     std::string annotation_name;
@@ -171,82 +171,82 @@ struct annotation_request {
     std::string declared_type;
     /// @brief Attribute argument expression spelling.
     std::string argument_expression;
-    /// @brief Decoded embedded specification.
+    /// @brief OpenAPI text read from the annotation or its fragments.
     std::string specification;
-    /// @brief Ordered imported fragment sources that form the specification closure.
+    /// @brief Imported files that supply specification fragments, in first-use order.
     std::vector<fs::path> specification_dependencies;
 };
 
-/// @brief Complete semantic input for rendering one external API client.
+/// @brief Validated API description and names for one generated client.
 struct generated_api {
-    /// @brief Output identity derived from the descriptor filename.
+    /// @brief Client name taken from the descriptor filename.
     std::string client_name;
     /// @brief Public generated client type name.
     std::string declared_type;
-    /// @brief Validated OpenAPI and integration metadata.
+    /// @brief Parsed operations, server settings and integration tests.
     openapi_document document;
 };
 
-/// @brief Deferred, type-erased artifact emission prepared from one annotation.
+/// @brief An output name and a callback that writes its generated files.
 struct generated_artifact {
-    /// @brief Output identity used for collision detection and ordering.
+    /// @brief Name used to detect duplicate outputs and sort generated files.
     std::string output_name;
-    /// @brief Emits the complete artifact set beneath a generator-owned root.
+    /// @brief Writes the generated files under the supplied output directory
     std::function<void(const fs::path&, std::string_view)> emit_artifacts;
 };
 
-/// @brief Operations required to process one registered annotation kind.
+/// @brief Callbacks for processing one kind of source annotation.
 struct annotation_processor {
-    /// @brief Validates a parsed request and prepares deferred artifact emission.
+    /// @brief Checks the annotation and prepares a callback to writy its output.
     std::function<generated_artifact(const annotation_request&)> prepare_artifact;
-    /// @brief Derives the output identity without parsing the embedded specification.
+    /// @brief Finds the output name from the source  path.
     std::function<std::string(const fs::path&)> derive_output_name;
-    /// @brief Maps an output identity to its generator-owned relative path.
+    /// @brief Returns the output directory relative to the generator root.
     std::function<fs::path(std::string_view)> derive_owned_output_path;
-    /// @brief Checks whether the complete current artifact set already exists.
+    /// @brief Checks that all expected output files exist.
     std::function<bool(const fs::path&, std::string_view)> has_complete_output;
-    /// @brief Appends the output to the generated CMake inventory.
+    /// @brief Adds the generated output to the CMake build list.
     std::function<void(std::ostringstream&, std::string_view)> append_build_inventory;
 };
 
-/// @brief Deterministically ordered annotation processors keyed by attribute spelling.
+/// @brief Annotation handlers sorted by attribute name.
 using annotation_registry = std::map<std::string, annotation_processor, std::less<>>;
 
-/// @brief Validated command-line configuration for one generation invocation.
+/// @brief Command-line settings for one generator run.
 struct generation_options {
     /// @brief Running generator binary used to invalidate incremental state.
     fs::path generator_binary;
     /// @brief Root recursively scanned for annotated module sources.
     fs::path source_root;
-    /// @brief Generator-owned artifact root.
+    /// @brief Directory where the generator writes its files.
     fs::path output_root;
-    /// @brief Completion stamp updated after successful publication.
+    /// @brief Stamp updated after all outputs are written successfully.
     fs::path stamp;
     /// @brief Clang executable used by cppast.
     std::string clang_binary;
-    /// @brief Compiler identity recorded in generated provenance.
+    /// @brief Compiler, name recorded in the generated provenance file.
     std::string compiler_id;
 };
 
-/// @brief Current incremental metadata for one scanned module source.
+/// @brief Saved source information used to decide whether generation can be skipped.
 struct source_snapshot {
-    /// @brief Source size, or the aggregate annotated specification-closure size.
+    /// @brief Combined size  of the source and any imported specification fragments.
     std::uintmax_t file_size_bytes{};
-    /// @brief Source write time, or the greatest closure write-time tick count.
+    /// @brief Latest write time among the source and its specification fragments.
     std::int64_t last_write_ticks{};
-    /// @brief FNV-1a hash of the source or exact specification closure.
+    /// @brief FNV-1a hash of the source bytes or of its specification dependency records.
     std::uint64_t content_hash{};
     /// @brief Whether the source contains a registered annotation.
     bool has_annotation{};
     /// @brief Registered annotation spelling when present.
     std::string annotation_name;
-    /// @brief Annotation-derived output identity when present.
+    /// @brief Output name derived from the annotation, when present.
     std::string output_name;
-    /// @brief Validated generator-owned relative output path when present.
+    /// @brief Output directory relative to the generator roog, when present.
     std::string owned_output_path;
 };
 
-/// @brief Source snapshots keyed by generic path relative to the scan root.
+/// @brief Saved source information indexed by path relative to the scan root.
 using source_snapshots = std::unordered_map<std::string, source_snapshot>;
 
 } // namespace bioseq::codegen::external

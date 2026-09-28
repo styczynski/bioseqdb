@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/error_boundary.cppm
- * @brief PostgreSQL ERROR and C++ exception translation boundaries.
+ * @brief Turn PostgreSQL errors into C++ exceptions and rethrow them after cleanup.
  */
 module;
 
@@ -30,10 +30,10 @@ import :safety_runtime_probe;
 export namespace bioseq::postgres::support {
 
 /**
- * Owns one PostgreSQL ErrorData payload during ordinary C++ unwinding.
- *
- * PostgreSQL leaf boundaries throw this object only after PG_END_TRY. An
- * outer C boundary may then release and rethrow the original ErrorData.
+ * Own a copied PostgreSQL error while C++ destructors run.
+ * The protected call throws this exception aiter leaving PG_TRY. At the outer
+ * PostgreSQL entry point, release the saved error after C++ cleanup and, pass
+ * it to rethrow_postgres_error_after_cleanup.
  */
 class postgres_error final : public std::exception {
   public:
@@ -43,7 +43,7 @@ class postgres_error final : public std::exception {
     postgres_error(const postgres_error&) = delete;
     postgres_error& operator=(const postgres_error&) = delete;
 
-    /** Transfers the ErrorData owner and disables duplicate instrumentation. */
+    /** Transfer the saved error and its cleanup-tracing  responsibility. */
     postgres_error(postgres_error&& other) noexcept
         : error_(std::exchange(other.error_, nullptr)),
           records_destructor_(std::exchange(other.records_destructor_, false)) {}
@@ -73,7 +73,7 @@ class postgres_error final : public std::exception {
         return error_ == nullptr ? 0 : error_->sqlerrcode;
     }
 
-    /** Releases the owned ErrorData payload to a PostgreSQL C boundary. */
+    /** Give the saved error to the caller and stop owning it. */
     [[nodiscard]] ErrorData* release_error_data() noexcept {
         return std::exchange(error_, nullptr);
     }
@@ -84,16 +84,17 @@ class postgres_error final : public std::exception {
 };
 
 /**
- * Reports that a secondary PostgreSQL ERROR prevented ErrorData capture.
+ * Report that copying a PostgreSQL error raised another PostgreSQL error.
+ * The original ErrorData could not be saved.
  */
 class postgres_error_capture_failure final : public std::exception {
   public:
-    /** Constructs the stable capture-failure sentinel. */
+    /** Create the exception used when PostgreSQL error capture fails. */
     postgres_error_capture_failure() noexcept = default;
     postgres_error_capture_failure(const postgres_error_capture_failure&) = delete;
     postgres_error_capture_failure& operator=(const postgres_error_capture_failure&) = delete;
 
-    /** Transfers instrumentation ownership. */
+    /** Transfer responsibility for recording exception cleanup. */
     postgres_error_capture_failure(postgres_error_capture_failure&& other) noexcept
         : records_destructor_(std::exchange(other.records_destructor_, false)) {}
 
@@ -115,7 +116,7 @@ class postgres_error_capture_failure final : public std::exception {
     bool records_destructor_ = true;
 };
 
-/** Type-erased callback invoked inside a PostgreSQL exception frame. */
+/** Callback and opaque argument used by the protected PostgreSQL call */
 using postgres_callback_body = void (*)(void*);
 
 } // namespace bioseq::postgres::support
@@ -135,9 +136,9 @@ struct postgres_invoke_state final {
 static_assert(std::is_nothrow_destructible_v<postgres_invoke_state>);
 
 /**
- * Copies the active PostgreSQL error behind a nested exception frame.
- * CopyErrorData may allocate and raise a secondary ERROR; this helper always
- * restores PostgreSQL's context and resource-owner state before returning.
+ * Copy the current PostgreSQL error, catching errors raised by CopyErrorData.
+ * Use error_owner for the copy, then return to restore_context.
+ * Restore the supplied resource  owner when it is non-null.
  */
 void capture_current_postgres_error_as_cpp(postgres_invoke_state* state,
                                            MemoryContext error_owner,
@@ -178,8 +179,12 @@ void capture_current_postgres_error_as_cpp(postgres_invoke_state* state,
 export namespace bioseq::postgres::support {
 
 /**
- * Invokes a type-erased PostgreSQL leaf and converts ERROR into C++ state.
- * This function is intentionally non-inlined across the setjmp boundary.
+ * Call PostgreSQL through PG_TRY and report failures as C++ exceptions.
+ * Keep callback state on the heap so it survives longjmp. After PG_END_TRY,
+ * restore the saved memory context and resource owner, then throw a copied
+ * PostgreSQL error or the C++ exception raised by the callback.
+ *
+ * Inlining is disabled to keep this setjmp frame in its own function.
  */
 #if defined(__GNUC__) && !defined(__clang__)
 [[gnu::noinline, gnu::noipa]]
@@ -259,8 +264,12 @@ inline void invoke_pg_as_cpp_erased(void* callback_context, postgres_callback_bo
 }
 
 /**
- * Invokes a transaction-replacing PostgreSQL leaf through a stable context.
- * This function is intentionally non-inlined across the setjmp boundary.
+ * Call an operaion that can end the transaction and turn errors into C++
+ * exceptions. Use PortalContext, or TopMemoryContext when no portal exists,
+ * so the saved context survives a transaction change. Copy PostgreSQL errors
+ * into TopMemoryContext.
+ *
+ * Keep this  function out of line because it owns a setjmp frame.
  */
 #if defined(__GNUC__) && !defined(__clang__)
 [[gnu::noinline, gnu::noipa]]
@@ -324,7 +333,12 @@ inline void invoke_pg_across_transactions_as_cpp_erased(void* callback_context,
     }
 }
 
-/** Invokes one PostgreSQL leaf and returns or throws through the C++ ABI. */
+/**
+ * Call PostgreSQL and turn its ERROR into a C++ exception.
+ * Return the callback's value, or return void for a void callback. Reference
+ * results are rejected. C++ owners outside the callback can then unwind
+ * before the error is reported to PostgreSQL.
+ */
 template <class p_function>
 auto invoke_pg_as_cpp(p_function&& function)
     -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
@@ -359,7 +373,7 @@ auto invoke_pg_as_cpp(p_function&& function)
     }
 }
 
-/** Invokes one void PostgreSQL operation that may replace the transaction. */
+/** Call a void PostgreSQL operation that may end the current transaction. */
 template <class p_function> void invoke_pg_across_transactions_as_cpp(p_function&& function) {
     using function_type = std::remove_reference_t<p_function>;
     static_assert(std::is_void_v<std::invoke_result_t<function_type&>>,
@@ -376,14 +390,17 @@ template <class p_function> void invoke_pg_across_transactions_as_cpp(p_function
         });
 }
 
-/** Owned strings used to raise one PostgreSQL SQL error. */
+/** Own the message and optional detail, and hint for a SQL error */
 struct sql_error_fields final {
     std::string message;
     std::optional<std::string> detail = std::nullopt;
     std::optional<std::string> hint = std::nullopt;
 };
 
-/** Raises a PostgreSQL ERROR from owned strings inside the protected bridge. */
+/**
+ * Create a PostgreSQL error  from owned strings and throw it as a C++
+ * exception. The outer call boundary can report it after C++ cleanup.
+ */
 [[noreturn]] inline void raise_sql_error(int sql_state, sql_error_fields fields) {
     const char* message = fields.message.c_str();
     const char* detail = fields.detail ? fields.detail->c_str() : nullptr;
@@ -411,7 +428,7 @@ struct sql_error_fields final {
     std::terminate();
 }
 
-/** Emits a PostgreSQL ERROR after callers release every C++ owner. */
+/** Raise a PostgreSQL ERROR after the caller has finished C++ cleanup. */
 [[noreturn]] inline void emit_postgres_error_after_cleanup(int sql_state,
                                                            const char* message) noexcept {
     ereport(ERROR,
@@ -421,7 +438,7 @@ struct sql_error_fields final {
     pg_unreachable();
 }
 
-/** Re-raises preserved ErrorData after caller-owned cleanup is complete. */
+/** Rethrow saved ErrorData after the caller has finished C++ cleanup. */
 [[noreturn]] inline void rethrow_postgres_error_after_cleanup(ErrorData* error) noexcept {
     if (error != nullptr) {
         ReThrowError(error);

@@ -1,6 +1,6 @@
 /**
  * @file supported_indexes.cppm
- * @brief Declares the PostgreSQL registry of supported sequence indexes.
+ * @brief Register the sequence indexes available  in PostgreSQL.
  */
 module;
 
@@ -61,7 +61,7 @@ template <class p_storage> struct test_table_count_index {
 #ifdef BIOSEQ_TEST_INDEXES
 export namespace bioseq::indexing {
 
-/// Index metadata for the integration-only table row-count index.
+/// Register the test row-count index without update-on-insert support.
 template <> struct index_descriptor<bioseq::storage::indexing::test_table_count_index> {
     static constexpr sequence_index_layout index_type = sequence_index_layout::table_chunks;
     static constexpr std::string_view index_name = "test_table_rowcount";
@@ -73,7 +73,7 @@ template <> struct index_descriptor<bioseq::storage::indexing::test_table_count_
 
 export namespace bioseq::storage::indexing {
 
-/// Registry of every production index and the integration-only table index.
+/// Indexes supported by PostgreSQL, plus the row-count index in test builds.
 using pg_supported_indexes =
     bioseq::indexing::supported_indexes<fragment_index_storage,
                                         sequence_index_storage,

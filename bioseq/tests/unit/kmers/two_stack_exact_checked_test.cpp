@@ -1,8 +1,9 @@
 /**
  * @file two_stack_exact_checked_test.cpp
- * @brief Checked representation coverage for two-stack ntHash kernels.
+ * @brief Check two-stack minimizer results across packed formats and input boundaries.
  *
- * Biological comparisons retain chronological order, strand, and duplicates.
+ * Compare ordered records, including strand and duplicates. Also check rejected
+ * formats, position overflow, and rejected output buffers.
  */
 
 #include <catch2/catch_test_macros.hpp>

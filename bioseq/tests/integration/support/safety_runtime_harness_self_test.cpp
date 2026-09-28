@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_self_test.cpp
- * @brief Exercise local safety-protocol parsers and invariant checks.
+ * @brief Tests the harness's parsers and validation rules without starting PostgreSQL.
  */
 
 module;
@@ -53,7 +53,7 @@ import :scenario_support;
 
 namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Require an operation to fail with a diagnostic containing the marker.
+/// Require a runtime_error whose message contains the expected text.
 template <typename p_operation>
 void expect_failure(
         p_operation&& operation,
@@ -79,7 +79,7 @@ void expect_failure(
             diagnostic));
 }
 
-/// Exercise local protocol parsers and invariant checks without activation.
+/// Test local case validation and probe parsing with valid and deliberately invalid inputs.
 [[nodiscard]] int self_test(
         const command_line& command) {
     require_exact_options(command, {});

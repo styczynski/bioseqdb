@@ -1,6 +1,6 @@
 /**
  * @file record_decode.cppm
- * @brief Implements authenticated control and position record decoding.
+ * @brief Decodes checked index records and collects positions for  prepared query hashes.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_record_decode;
 
@@ -49,9 +49,9 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                                            : no_route;
     std::uint64_t transient = bioseq::common::saturating_mul(
         entry.control_element_count, sizeof(typename wire_ops::control_type));
-    // Keep every boundary in an intersected extent for strict per-control
-    // position-order validation. grouped-SoA stores query routes sparsely.
-    // admit the conservative all-routes peak before the one decode pass.
+    // Keep all control boundaries in each selected extent so position order can
+    // be checked within every hash. Reserve enough memory for all query routes
+    // before decoding, then reduce their storage if few controls match
     const std::uint64_t retained_control_count =
         selected_index == no_route ? 0u : entry.control_element_count;
     const std::uint64_t retained_control_width =
@@ -62,9 +62,9 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
     std::uint64_t retained =
         bioseq::common::saturating_mul(retained_control_count, retained_control_width);
     if constexpr (p_traits::global_controls_then_positions) {
-        // One dense u32 route image is always built.  Sparse conversion
-        // happens only below 50% density, so its peak is bounded by one
-        // additional dense-image worth of bytes.
+        // Build one query-route entry per control first. If fewer than half match,
+        // replace it with control/query pairs. Reserve room for both arrays
+        // during that conversion.
         const std::uint64_t dense_route_bytes =
             bioseq::common::saturating_mul(retained_control_count, sizeof(std::uint32_t));
         retained = bioseq::common::saturating_add(retained, dense_route_bytes);
@@ -73,12 +73,10 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
     const std::uint64_t additional = bioseq::common::saturating_add(transient, retained);
     const std::uint64_t transient_headroom = bioseq::common::saturating_mul(
         transient, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    /// Select exact-array or vector-growth headroom for retained control state.
+    /// Allow extra space for vector growth  when controls are stored in a vector.
     const std::uint64_t retained_headroom = [&retained]() noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
-            // grouped-SoA ends and route images are exact arrays. Their
-            // admitted peak is already represented by retained and must
-            // not receive vector growth headroom a second time.
+            // The fixed arrays already, have enough space reserved for their peak usage.
             return retained;
         } else {
             return bioseq::common::saturating_mul(
@@ -125,7 +123,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                                    true);
         return std::unexpected(minimizer_generation_encoding_error::admission);
     }
-    /// Decode controls and publish their query routes as one allocation transaction.
+    /// Decode controls and build their query routes within this memory reservation.
     const auto decoded_result = [this, &bytes, &entry, &selected_index, &projected, &headroom]()
         -> std::expected<void, minimizer_generation_encoding_error> {
         try {
@@ -152,8 +150,8 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                     dense_routes = std::make_unique_for_overwrite<std::uint32_t[]>(decoded->size());
                     std::fill_n(dense_routes.get(), decoded->size(), no_narrow_route);
                 }
-                // Publish both exact owners together only after every
-                // allocation succeeds, keeping failure stats exact.
+                // Attach both arrays after allocation succeeds so a failure leaves the
+                // reported memory totals consistent.
                 selected.control_state.position_ends = std::move(position_ends);
                 selected.route_state.dense_routes = std::move(dense_routes);
                 selected.control_state.control_count = decoded->size();
@@ -180,9 +178,8 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                 route_hash_probes += control_hash_probes;
                 const std::uint64_t begin = wire_ops::position_begin(control);
                 const std::uint64_t end = wire_ops::position_end(control);
-                // Both wire codecs already enforce this partition while
-                // decoding.  Recheck it at the retained-image boundary so
-                // position_begin does not need to survive per control.
+                // Check that consecltive controls cover consecutive position ranges.
+                // Keeping only each end offset is then enough to recover the ranges.
                 if (begin != expected_position_begin || end <= begin) {
                     return std::unexpected(minimizer_generation_encoding_error::control_range);
                 }
@@ -271,9 +268,8 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                     selected.route_state.dense_routes.reset();
                     selected.route_state.uses_sparse = true;
                 }
-                // Update stats once per decoded extent.  A counter write
-                // on every binary-search comparison would itself become
-                // material at hundreds of millions of controls.
+                // Update  the reader's comparison counts once per extent to avoid writing
+                // them during each binary search.
                 add_memory_stats_(protocol_memory_stats_.query_route_control_lookups,
                                   static_cast<std::uint64_t>(decoded->size()));
                 add_memory_stats_(protocol_memory_stats_.query_route_hash_probes,

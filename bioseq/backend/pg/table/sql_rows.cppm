@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Composite row models emitted for table-planning diagnostics and probes.
+ * SQL row types for aligner options and planner diagnostics.
  */
 module;
 
@@ -15,9 +15,8 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::table::composite_rows {
 
 /**
- * @brief Per-call aligner tuning options for the mmsearch similarity predicate.
- *
- * NULL fields inherit the corresponding session aligner setting.
+ * @brief Aligner settings for one mmsearch call.
+ * NULL fields use the corresponding session setting.
  *
  * @ingroup bioseq_sql_public_api
  */
@@ -76,7 +75,7 @@ struct teardown_diagnostics_row {
 
 static_assert(std::is_aggregate_v<teardown_diagnostics_row>);
 
-/** Planner-probe results for SliceProject-safe batch-join projections. */
+/** Test results for projections that a batched mmsearch join can safely read. */
 struct batch_join_projection_guard_probe_row {
     bool accepts_exact_helper;
     bool rejects_unrelated_phv;
@@ -91,7 +90,7 @@ struct batch_join_projection_guard_probe_row {
 
 static_assert(std::is_aggregate_v<batch_join_projection_guard_probe_row>);
 
-/** Planner-probe results for wrapper propagation around one owned match helper. */
+/** Test results for carrying a match helper through copied planner wrappers. */
 struct match_helper_wrapper_propagation_probe_row {
     bool exact_owner_found;
     bool clone_applied;
@@ -116,7 +115,7 @@ struct match_helper_wrapper_propagation_probe_row {
 
 static_assert(std::is_aggregate_v<match_helper_wrapper_propagation_probe_row>);
 
-/** Executor-probe results for translated target and slot attribute identities. */
+/** Test results for keeping match arguments tied to the correct  executor columns. */
 struct base_match_executor_translation_probe_row {
     bool target_offset_accepted;
     bool target_attno_disagreement_rejected;
@@ -133,7 +132,7 @@ struct base_match_executor_translation_probe_row {
 
 static_assert(std::is_aggregate_v<base_match_executor_translation_probe_row>);
 
-/** Scope-entry and scope-exit counters for match-owner finalization. */
+/** Counts of entered, exited, and still-active match finalization scopes. */
 struct match_owner_finalization_scope_diagnostics_row {
     std::int64_t scopes_entered;
     std::int64_t scopes_exited;

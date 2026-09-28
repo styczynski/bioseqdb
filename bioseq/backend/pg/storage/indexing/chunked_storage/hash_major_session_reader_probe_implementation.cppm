@@ -1,6 +1,6 @@
 /**
  * @file hash_major_session_reader_probe_implementation.cppm
- * @brief Implements the reader-owned diagnostic parallel-scan boundary.
+ * @brief Run the parallel scan diagnostic using an open index reader
  */
 module;
 

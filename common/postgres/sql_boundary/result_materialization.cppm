@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/result_materialization.cppm
- *
- * Composite and materialized-set result encoding for generated SQL
- * boundaries.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/result_materialization.cppm
+ * @brief Convert C++ rows into SQL composite values or materialized result sets.
  */
 module;
 
@@ -40,7 +35,7 @@ import :shape;
 
 export namespace bioseq::postgres::support {
 
-/** Invalid PostgreSQL tuple or set-result materialization contract. */
+/** The SQL result cannot be built  from the supplied call context or row description. */
 class result_materialization_error final
     : public std::runtime_error {
 public:
@@ -57,13 +52,13 @@ struct encoded_result_field final {
 
 namespace bioseq::postgres::support::detail {
 
-/** Scalar field type encoded directly through scalar_codec. */
+/** A type with a scalar_codec conversion, excluding an untyped Datum. */
 template<class p_value_type>
 concept typed_result_scalar =
     supported_scalar<std::remove_cvref_t<p_value_type>>
     && !std::same_as<std::remove_cvref_t<p_value_type>, Datum>;
 
-/** Owning or by-value type accepted as one non-null result field. */
+/** A C++ type accepted by the non-null field-encoding overloads. */
 template<class p_value_type>
 concept direct_result_field =
     typed_result_scalar<p_value_type>
@@ -93,7 +88,7 @@ struct optional_result_field<std::optional<p_element_type>>
     using value_type = p_element_type;
 };
 
-/** Any direct or optional field type accepted by row materialization. */
+/** A supported field value, optionally wrapped in std::optional for SQL NULL. */
 template<class p_value_type>
 concept encodable_result_field =
     direct_result_field<p_value_type>
@@ -103,13 +98,13 @@ concept encodable_result_field =
 template<class>
 inline constexpr bool unsupported_result_field_type = false;
 
-/** Primary and permitted alternative PostgreSQL OIDs for one C++ field. */
+/** The SQL type for a C++ field, with an optional second accepted type. */
 struct result_field_type_contract final {
     Oid primary{};
     Oid alternative{};
 };
 
-/** Return the PostgreSQL OID contract for one supported field type. */
+/** Choose the accepted SQL type OIDs for, a C++ field at compile time. */
 template<class p_field_type>
     requires encodable_result_field<p_field_type>
 [[nodiscard]] consteval result_field_type_contract
@@ -158,7 +153,7 @@ result_field_types() {
 
 export namespace bioseq::postgres::support {
 
-/** Encode one supported by-value scalar as a result-row field. */
+/** Encode a scalar feld and mark it non-null. */
 template<class p_scalar_type>
     requires detail::typed_result_scalar<p_scalar_type>
 [[nodiscard]] inline encoded_result_field encode_result_field(
@@ -175,9 +170,7 @@ template<class p_scalar_type>
     };
 }
 
-/**
- * Encode one owning text value as a result-row field.
- */
+/** Copy a C++ string into a SQL text  field. */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const std::string& value) {
     return {
@@ -186,9 +179,7 @@ template<class p_scalar_type>
     };
 }
 
-/**
- * Encode one owning JSONB value as a result-row field.
- */
+/** Parse owned JSON text into a SQL JSONB field. */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const jsonb_value& value) {
     return {
@@ -197,7 +188,7 @@ template<class p_scalar_type>
     };
 }
 
-/** Encode one owning BYTEA value as a result-row field. */
+/** Copy owned bytes into a SQL BYTEA field. */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const bytea_value& value) {
     return {
@@ -206,7 +197,7 @@ template<class p_scalar_type>
     };
 }
 
-/** Encode one owning bigint[] value as a result-row field. */
+/** Copy integer elements into a SQL bigint[] field */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const bigint_array& value) {
     return {
@@ -215,9 +206,7 @@ template<class p_scalar_type>
     };
 }
 
-/**
- * Encode one INTERVAL value as a result-row field.
- */
+/** Copy interval fields into a SQL INTERVAL value. */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const interval_value& value) {
     return {
@@ -226,9 +215,7 @@ template<class p_scalar_type>
     };
 }
 
-/**
- * Encode one nullable scalar or text value without a sentinel.
- */
+/** Encode an optional field, setting its SQL null flag when empty. */
 template<class p_value_type>
     requires detail::direct_result_field<p_value_type>
 [[nodiscard]] inline encoded_result_field encode_result_field(
@@ -243,9 +230,9 @@ template<class p_value_type>
 }
 
 /**
- * Encoded values, null flags, and PostgreSQL type contracts for one row.
+ * A row's Datums and null flags, with SQL types for checking its descriptor.
  *
- * @tparam p_field_types Ordered C++ field types in the result descriptor.
+ * @tparam p_field_types C++ field types in SQL column order.
  */
 template<class... p_field_types>
     requires (
@@ -253,7 +240,7 @@ template<class... p_field_types>
         && (detail::encodable_result_field<p_field_types> && ...))
 class encoded_result_row final {
 public:
-    /** Number of fields in this row contract. */
+    /** Number of fields in this row. */
     static constexpr std::size_t field_count =
         sizeof...(p_field_types);
 
@@ -297,7 +284,7 @@ public:
         return expected_type_oids_;
     }
 
-    /** Return whether one descriptor OID satisfies its field contract. */
+    /** Check whether this SQL type is accepted at the given field position. */
     [[nodiscard]] static constexpr bool accepts_type_oid(
             std::size_t index,
             Oid actual) noexcept {
@@ -326,8 +313,8 @@ private:
 };
 
 /**
- * Encode one result row while retaining its field types for descriptor
- * validation.
+ * Encode the fields of one row and keep their C++ types so the SQL result
+ * descriptor can be checked before  building tuples.
  */
 template<class... p_field_types>
     requires (
@@ -357,13 +344,13 @@ template<class... p_field_types>
 struct is_encoded_result_row<
     encoded_result_row<p_field_types...>> : std::true_type {};
 
-/** Type satisfying the encoded result-row storage contract. */
+/** A specialization of encoded_result_row, ignoring references and const. */
 template<class p_candidate_type>
 concept encoded_result_row =
     is_encoded_result_row<
         std::remove_cvref_t<p_candidate_type>>::value;
 
-/** Trait validating an encoder's compile-time column-name array. */
+/** Check that column_names is a string_view array with one entry per field. */
 template<
     class p_encoder_type,
     class p_encoded_row_type,
@@ -388,11 +375,11 @@ struct has_exact_result_column_names<
                   std::string_view,
                   p_encoded_row_type::field_count>>> {};
 
-/** Trait validating a row encoder and its encoded return type. */
+/** Check that a callable returns an encoded row and declares column names. */
 template<class p_encoder_type, class p_row_type, class = void>
 struct is_result_row_encoder : std::false_type {};
 
-/** Specialization validating an encoder's result type and column names. */
+/** Check the encoder's returned row type and column-name array size. */
 template<class p_encoder_type, class p_row_type>
 struct is_result_row_encoder<
     p_encoder_type,
@@ -406,7 +393,7 @@ struct is_result_row_encoder<
                   p_encoder_type&,
                   const p_row_type&>>> {};
 
-/** Callable that encodes one row and declares exact column names. */
+/** A row encoder with a column-name array matching its encoded field count. */
 template<class p_encoder_type, class p_row_type>
 concept result_row_encoder =
     is_result_row_encoder<
@@ -420,7 +407,7 @@ using encoded_result_row_t = std::remove_cvref_t<
         std::remove_reference_t<p_encoder_type>&,
         const p_row_type&>>;
 
-/** Require a complete fmgr call frame for result materialization. */
+/** Require a call frame with function metadata before constructing SQL results. */
 inline void require_result_call(FunctionCallInfo call) {
     if (call == nullptr || call->flinfo == nullptr) {
         throw result_materialization_error{
@@ -429,7 +416,7 @@ inline void require_result_call(FunctionCallInfo call) {
     }
 }
 
-/** Validate arity, names, dropped fields, and OIDs of one tuple descriptor. */
+/** Check column count, order, names and SQL types, and reject dropped columns. */
 template<
     encoded_result_row p_encoded_row_type,
     class p_encoder_type>
@@ -485,7 +472,7 @@ void validate_result_descriptor(
     }
 }
 
-/** Resolve and bless the composite descriptor for named output parameters. */
+/** Get the composite descriptor for named OUT parameters and regcster its row type. */
 [[nodiscard]] inline TupleDesc composite_result_descriptor(
         FunctionCallInfo call) {
     require_result_call(call);
@@ -508,13 +495,17 @@ void validate_result_descriptor(
         });
 }
 
-/** PostgreSQL state initialized for one materialized row set. */
+/** The PostgreSQL row  store and tuple descriptor for a result set. */
 struct result_materialization_context final {
     Tuplestorestate* tuplestore{};
     TupleDesc tuple_descriptor{};
 };
 
-/** Initialize PostgreSQL's materialized set-returning-function state. */
+/**
+ * Prepare a PostgreSQL row store for this set-returning call
+ * Require materialization support and a query memory context, then check the
+ * result descriptor against the encoder's columns.
+ */
 template<
     encoded_result_row p_encoded_row_type,
     class p_encoder_type>
@@ -560,7 +551,7 @@ initialize_result_materialization(FunctionCallInfo call) {
     };
 }
 
-/** Encode and append every C++ row to a PostgreSQL tuplestore. */
+/** Encode every C++ row and append it to PostgreSQL's result store. */
 template<
     class p_row_type,
     result_shape p_shape,
@@ -598,9 +589,7 @@ template<
 
 export namespace bioseq::postgres::support {
 
-/**
- * Form one composite Datum for a routine with named OUT parameters.
- */
+/** Build one SQL composite value from a routine's named OUT fields. */
 template<class p_row_type, class p_encoder_type>
     requires detail::result_row_encoder<p_encoder_type, p_row_type>
 [[nodiscard]] inline Datum encode_result(
@@ -630,9 +619,7 @@ template<class p_row_type, class p_encoder_type>
     return tuple;
 }
 
-/**
- * Materialize all rows returned by a RETURNS TABLE routine.
- */
+/** Store all rows from a RETURNS TABLE routine in PostgreSQL's result store. */
 template<class p_row_type, class p_encoder_type>
     requires detail::result_row_encoder<p_encoder_type, p_row_type>
 [[nodiscard]] inline Datum encode_result(
@@ -646,9 +633,7 @@ template<class p_row_type, class p_encoder_type>
         encoder_reference);
 }
 
-/**
- * Materialize all rows returned by a SETOF routine with named outputs.
- */
+/** Store all rows from a SETOF routine with named output columns. */
 template<class p_row_type, class p_encoder_type>
     requires detail::result_row_encoder<p_encoder_type, p_row_type>
 [[nodiscard]] inline Datum encode_result(

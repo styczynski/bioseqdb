@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/anchor_routes.cppm
- * @brief Explicit route selection for query-wave anchor preparation.
+ * @brief Select grouped scans, compact-direct lookup, or the test matcher.
  */
 module;
 

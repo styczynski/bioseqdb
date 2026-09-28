@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/read_assembly/build.cppm
- * @brief Scalar, Highway, and Vulkan direct minimizer bucket build routes.
+ * @brief Builds direct minimizer buckets using scalar, SIMD or Vulkan sketching.
  */
 module;
 
@@ -49,15 +49,14 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/** Builds a persisted direct minimizer bucket index for one sequence.
- *  Pass 0 collects globalised (kmer, encoded position) pairs and spills sorted runs.
- *  Pass 1 k-way merges runs into bucket images and writes the directory last.
- *  @param storage Chunked spill storage for external runs and bucket blobs.
- *  @param seq Lazy view of the indexed sequence bases.
- *  @param backend Sketch route used during minimizer collection.
- *  @param kernels SIMD or Vulkan minimizer kernels when the backend requires them.
- *  @param scalar_build_stats_out Optional per-build counters for scalar collection paths.
- *  @param alphabet_code Packed alphabet code forwarded to generation collection. */
+/**
+ * Build a saved minimizer index for one sequence with k=15 and w=10.
+ * Collect global hash/position pairs into sorted runs, merge them into buckets,
+ * then write the directory  after all buckets are stored. Memory pressure can
+ * split collection ranges or defer them to the calling thread
+ * kernels supplies the selected SIMD functions. scalar_build_stats_out optionally
+ * receives collection counts. alphabet_code identifies the input alphabet.
+ */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -100,11 +99,11 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     const sequence_size_t total_bp = seq.bp_size();
     const std::size_t nfrag = static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
 
-    // ---- Pass 0: collect globalised (kmer, encoded) pairs, spill sorted runs.
+    // Collect minimizers as global hash/position pairs and spill sorted runs.
     const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
     using pair_t = detail::sorted_pair_t;
     using detail::admitted_pair_run;
-    /** Maps a core base interval to the generation collection range for that span. */
+    /** Add the overlap needed to collect minimizers for one core range. */
     const auto make_core_range = [&seq](sequence_size_t core_lo, sequence_size_t core_hi) {
         auto range = make_generation_collection_range(seq, core_lo, core_hi, w, k);
         if (!range) {
@@ -112,7 +111,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
         return *range;
     };
-    /** Per-window worker payload: spilled pair runs, deferred ranges, stats, and errors. */
+    /** One worker's collected runs, deferred ranges, statistics and saved error. */
     struct worker_range_result {
         detail::admitted_vector_run<admitted_pair_run> runs;
         detail::admitted_vector_run<segment_unit_range> deferred_for_backend_spill;
@@ -121,7 +120,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         segment_unit_range error_range{};
     };
 
-    /** Releases admitted vector capacity before permit teardown on unwind paths. */
+    /** Free untransferred worker buffers before releasing their memory permits. */
     auto release_untransferred_results_noexcept =
         [](std::vector<worker_range_result>& results) noexcept {
             for (worker_range_result& result : results) {
@@ -133,11 +132,9 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    // under vulkan_segment the fused GPU sketch emits the
-    // window's minimizers on-device; the globalised (kmer, encoded_pos)
-    // pairs are sorted on the HOST, so there is no CPU minimizer COLLECT on
-    // this path. The scalar branch is unchanged.
-    /** Collects globalised minimizer pairs for one core interval through generation. */
+    // Vulkan selects minimizers on the GPU and sorts the resulting  global
+    // hash/position pairs on the host.
+    /** Collect global hash/position pairs whose positions fall inside this core. */
     auto collect_core_range_pairs =
         [&seq, backend, kernels, alphabet_code](sequence_size_t core_lo,
                                                 sequence_size_t core_hi,
@@ -166,7 +163,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    /** Admits scratch for a deferred segment, collects pairs, sorts, and spills one run. */
+    /** Reserve scrotch memory, collect a deferred range, then sort and spill its pairs. */
     auto collect_sort_and_spill_backend_scratch =
         [&backend,
          &storage,
@@ -182,9 +179,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 : bp;
         const std::uint64_t pair_preallocation_bytes =
             detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-        // The strict Vulkan segment leaf returns an owned pair run
-        // carrying its single scratch/result permit. Do not reserve
-        // that same GPU transaction again in this caller.
+        // The Vulkan helper reserves memory for its GPU work and returned pairs.
+        // This caller reserves only its own buffers.
         const std::uint64_t backend_scratch_bytes = 0u;
         const std::uint64_t maximum_collection_candidates = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(range.ce_u - range.cs_u), static_cast<std::uint64_t>(lpu));
@@ -232,8 +228,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 self(self, make_core_range(mid, range.core_hi_bp));
                 return;
             }
-            // Never bypass the configured cap with an "emergency"
-            // heap vector.  The caller can retry after pressure clears.
+            // Stop when even the minimum core cannot fit the memory budget.
             throw std::bad_alloc{};
         }
         admitted_pair_run scratch;
@@ -246,8 +241,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 "minimizers_per_sequence build: scratch pair capacity exceeded admission");
         }
         {
-            // Declared after `scratch`: collector capacity is destroyed
-            // before the shared permit can shrink or unwind.
+            // Destroy the collector before shrinking or releasing scratch's shared permit.
             sketch_collector collector;
             if (maximum_collector_sketches != 0u) {
                 if (maximum_collector_sketches >
@@ -286,7 +280,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                     "minimizers_per_sequence build: collection grew beyond admission");
             }
         }
-        // Backend scratch has returned; retain only exact pair capacity.
+        // The collector has been freed. Keep  the reservation for the pair vector only.
         if (!detail::finish_admitted_vector_run_transient(scratch)) {
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair collection exceeded admission");
@@ -299,7 +293,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         scratch.release_capacity_before_permit();
     };
 
-    /** Drains worker results into storage and replays deferred backend spill ranges. */
+    /** Move worker runs into spill storage and collect ranges deferred by memory pressure. */
     auto transfer_result_runs = [&capture_scalar_build_stats,
                                  &scalar_build_stats,
                                  &storage,
@@ -311,14 +305,11 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 try {
                     std::rethrow_exception(result.error);
                 } catch (const exact_simd_index_runtime_error&) {
-                    // Preserve the checked two_stack_nthash failure so the PG
-                    // SQL boundary can translate it to 0A000. Converting
-                    // it to index_corruption_panic would abort the backend
-                    // and hide the original unsupported shape/status.
+                    // Let the PostgreSQL error handler report the unsupported SIMD request
+                    // using the original status.
                     throw;
                 } catch (const packed_bounded_nthash_index_runtime_error&) {
-                    // Capability and memory-pressure rejection is an
-                    // operation failure, never persisted-index corruption.
+                    // Let the caller handle the bounded-kernel failure with its original status.
                     throw;
                 } catch (const std::exception& e) {
                     const std::string message =
@@ -356,7 +347,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         release_untransferred_results_noexcept(results);
     };
 
-    /** Memory-admitted collection for one window range, splitting or deferring on pressure. */
+    /** Collect a range, within its memory reservation, splitting or deferring it when space is short */
     auto collect_range_admitted =
         [&backend,
          &storage,
@@ -476,7 +467,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                                            "grew beyond admission");
                 }
             }
-            // Backend scratch has returned; only vector capacity remains.
+            // The collector has been freed. Keep only the pair vector's reservation.
             if (!detail::finish_admitted_vector_run_transient(run)) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: worker pair collection exceeded admission");
@@ -529,8 +520,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         static_cast<std::uint64_t>(frag_bp), static_cast<std::uint64_t>(sizeof(pair_t)));
     const std::size_t scalar_fragments_per_block = std::max<std::size_t>(
         1, run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
-    // one GPU window's local positions must fit the 28-bit
-    // field, so clamp the per-block fragment count when collecting on GPU.
+    // Limit GPU blocks so their local positions fit  the packed position fied.
     const std::size_t fragments_per_block =
         backend == minimizer_sketch_backend::vulkan_segment
             ? detail::gpu_fragments_per_block(scalar_fragments_per_block, frag_bp, 2u * window_span)
@@ -553,7 +543,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
     }
 
-    /** Collects every window range on the calling thread and transfers each result immediately. */
+    /** Collect ranges on the calling thread, transferring each result to storage immediately. */
     auto collect_serial = [&window_ranges, &collect_range_admitted, &transfer_result_runs]() {
         detail::admitted_vector_run<worker_range_result> admitted_results;
         if (!detail::ensure_admitted_vector_run_capacity(admitted_results, 1u)) {
@@ -569,9 +559,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     };
 
     auto& pool = bioseq::parallelism::global_pool::instance();
-    // Vulkan serialises window submissions through one runtime queue. Both
-    // host collectors are independent per range when the lazy scanner
-    // advertises worker sharing.
+    // Vulkan submits through one runtime queue. CPU ranges can run in parallel
+    // when the sequence scanner supports sharing between workers.
     const bool may_parallel_collect =
         backend != minimizer_sketch_backend::vulkan_segment &&
         bioseq::parallelism::has_parallel_tasks(pool.get_mode()) &&
@@ -609,7 +598,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
     }
 
-    // ---- Pass 1: k-way merge -> range-partitioned buckets + directory.
+    // Merge sorted runs into hash-range buckets and build their directory.
     detail::admitted_vector_run<direct_minimizer_bucket_directory_entry> admitted_dir;
     detail::admitted_vector_run<encoded_bucket_record> admitted_ob_buckets;
     detail::admitted_vector_run<std::uint64_t> admitted_ob_positions;
@@ -617,11 +606,11 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     std::vector<encoded_bucket_record>& ob_buckets = admitted_ob_buckets.pairs;
     std::vector<std::uint64_t>& ob_positions = admitted_ob_positions.pairs;
     std::uint64_t ob_lo = 0, ob_hi = 0;
-    std::size_t ob_body_bytes = 0; // k_encoded_bucket_bytes*nkmers + 8*npos
+    std::size_t ob_body_bytes = 0; // Bytes in the hash records and encoded positions, excluding the header.
     index_sub_key_t next_bucket_id = 0;
     std::uint64_t total_distinct = 0, total_positions = 0;
 
-    /** Serializes the open bucket accumulator to storage and appends one directory entry. */
+    /** Write the accumulated bucket and add its hash range to the directory. */
     auto flush_bucket = [&next_bucket_id,
                          &ob_body_bytes,
                          &storage,
@@ -684,7 +673,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         const std::size_t kmer_framed =
             k_encoded_header_bytes + k_encoded_bucket_bytes * 1 + sizeof(std::uint64_t) * pcount;
         if (kmer_framed > k_bucket_target_bytes) {
-            // Split the heavy-hitter key across standalone direct-bucket images.
+            // Store this frequent hash across several chunks under one bucket  key.
             if (!ob_buckets.empty())
                 flush_bucket();
             const index_sub_key_t sk = next_bucket_id++;
@@ -767,7 +756,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     if (!ob_buckets.empty())
         flush_bucket();
 
-    // ---- write directory LAST.
+    // Write the directory after every bucket has been stored.
     {
         const std::size_t dir_bytes = sizeof(direct_minimizer_bucket_directory) +
                                       sizeof(direct_minimizer_bucket_directory_entry) * dir.size();
@@ -797,7 +786,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             });
     }
 
-    // ---- Pass 2: cleanup.
+    // Save spill statistics when supported, then release the temporary runs.
     if constexpr (requires(p_storage& s) { s.snapshot_sorted_run_stats_before_release(); }) {
         storage.snapshot_sorted_run_stats_before_release();
     }
@@ -808,7 +797,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     }
 }
 
-/** Builds without scalar build stats. Delegates to the full build overload. */
+/** Build the index without returning scalar collection statistics. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -820,8 +809,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     build(storage, seq, backend, kernels, nullptr, alphabet_code);
 }
 
-// scalar-default overload delegates to the explicit backend.
-/** Builds with the scalar sketch backend and default alphabet binding. */
+// Use the scalar backend when none is specified.
+/** Build with scalar sketching and the default alphabet argument. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -829,7 +818,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     build(storage, seq, minimizer_sketch_backend::scalar, nullptr);
 }
 
-/** Clears persisted index chunks for the entity then runs a full build. */
+/** Check required SIMD functions, clear this entity's saved index, then build it again. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::rebuild(
@@ -852,7 +841,7 @@ inline void direct_minimizer_bucket_index<p_storage>::rebuild(
     build(storage, seq, backend, kernels, nullptr, alphabet_code);
 }
 
-/** Rebuilds with the scalar sketch backend and default alphabet binding. */
+/** Clear and rebuild the index with scalar  sketching. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::rebuild(

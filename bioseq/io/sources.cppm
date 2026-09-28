@@ -31,9 +31,8 @@ export import bioseq.io.source;
 
 export namespace bioseq::io {
 
-/// Strip the UTF-8 BOM `0xEF 0xBB 0xBF` if it appears at the start of
-/// `dst`. Returns the number of bytes the cursor should advance past
-/// (0 or 3). Used by every source's first `read_into` call.
+/// Returns three when the buffer starts with a complete UTF-8 BOM, otherwise zero.
+/// The caller removes those bytes or advances its, input view.
 [[nodiscard]] inline std::size_t strip_leading_bom(const std::uint8_t* dst,
                                                    std::size_t size) noexcept {
     if (size >= 3 && dst[0] == 0xEF && dst[1] == 0xBB && dst[2] == 0xBF) {
@@ -42,8 +41,8 @@ export namespace bioseq::io {
     return 0;
 }
 
-/// POSIX `read(2)`-backed source. Construct via `try_open` to surface
-/// open-time errors via `std::expected`.
+/// Reads bytes with POSIX `read(2)`. `try_open` returns open errors
+/// through `std::expected`.
 class posix_read_source {
   public:
     /// Construct a closed source without an owned file descriptor.
@@ -96,7 +95,7 @@ class posix_read_source {
         return source;
     }
 
-    /// Read at most `cap` bytes, stripping a leading UTF-8 BOM once.
+    /// Reads at most `cap` bytes and removes a complete BOM from the first read.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_fd < 0) {
             _last_error_message = "posix_read_source: file descriptor closed";
@@ -157,10 +156,8 @@ class posix_read_source {
 /// Mapping-backed source returned alongside its initial magic-byte probe.
 struct mmap_source;
 
-/// Result of `mmap_source::try_open` when extended with magic-byte
-/// sniffing. Carries the freshly-mapped source plus the
-/// 2-byte magic check + total file size so the dispatcher can route
-/// gzipped files to the parallel decoder without a second `open`.
+/// A mapped soure with its file size and gzip magic-byte result.
+/// This lets source selection reuse the open mapping for gzip decoding.
 struct mmap_source_with_magic;
 
 /// `mmap(2)`-backed source. `read_into` copies mapped bytes into a slab.
@@ -211,15 +208,13 @@ class mmap_source {
     [[nodiscard]] static std::expected<mmap_source, std::string>
     try_open(std::string_view path, const reader_options& options);
 
-    /// Magic-byte-aware open. Reads the first 2 bytes via
-    /// `pread(2)` after `fstat` and returns the source bundled with
-    /// the gzip-magic flag and the file size. Used by the dispatcher
-    /// to route gzipped files to the parallel decoder without a
-    /// second `open`.
+    /// Maps the file and checks its first two bytes for gzip magic.
+    /// Returns the mapping and file size together, allowing the reader to
+    /// select a decoder without reopening the file.
     [[nodiscard]] static std::expected<mmap_source_with_magic, std::string>
     try_open_with_magic(std::string_view path, const reader_options& options);
 
-    /// Copy at most `cap` mapped bytes, stripping a leading UTF-8 BOM once.
+    /// Copies at most `cap` bytes and removes a complete BOM from  the first read.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         const std::size_t available = (_cursor < _size) ? (_size - _cursor) : 0;
         const std::size_t copy_size = std::min(cap, available);
@@ -240,16 +235,14 @@ class mmap_source {
         return source_read_result{scaled, _cursor >= _size, false};
     }
 
-    /// Return the most recent mapping or read diagnostic.
+    /// Returns this source's diagnostic string Open errors are returned by `try_open`.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }
 
-    /// Direct view of the mapped region. Used by the zero-copy mmap
-    /// batch pipeline to
-    /// hand the parser the whole file in one contiguous span without
-    /// the slab refill / `make_room` memmove overhead. The leading
-    /// UTF-8 BOM is stripped from the returned `(ptr, size)` pair.
+    /// Borrows the complete mapping and marks it consumed by `read_into`.
+    /// Excludes a leading UTF-8 BOM if it has not been checked by an earlier read
+    /// or view. Use the pointer only while this source owns the mapping.
     [[nodiscard]] std::pair<const std::uint8_t*, std::size_t> direct_view() noexcept {
         const std::uint8_t* base = static_cast<const std::uint8_t*>(_addr);
         std::size_t total = _size;
@@ -288,9 +281,7 @@ class mmap_source {
     std::string _last_error_message;
 };
 
-/// Magic-byte sniff result. The reader dispatcher uses
-/// this to route gzipped files to the parallel decoder. Aggregate so
-/// `std::expected` can move-construct it from designated-init.
+/// Mapping, file size, and gzip detection result used to select the input source.
 struct mmap_source_with_magic {
     mmap_source source;
     bool is_gzipped = false;
@@ -358,9 +349,7 @@ mmap_source::try_open_with_magic(std::string_view path, const reader_options& op
     return out;
 }
 
-/// `gzread`-backed source. Uses zlib. zlib's `gzopen` transparently
-/// handles plain (non-gzipped) files too, so this source doubles as a
-/// "POSIX with auto-decompression".
+/// Reads gzip or plain files through zlib. Compressed files are decoded by gzread.
 class gzip_source {
   public:
     /// Construct a closed source without a zlib handle.

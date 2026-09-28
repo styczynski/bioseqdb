@@ -1,6 +1,6 @@
 /**
  * @file index_parts/scan_execution.cppm
- * @brief Defines ordinary scan dispatch, admitted waves, and extra-query intersection.
+ * @brief Align buffered scan rows and apply extra mmsearch filters.
  */
 module;
 
@@ -25,14 +25,9 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// Production scans read locators and slices through the statement source
+// provider. Test settings can fetch full payloads first, then use an in-memory
+// sequence or a synthetic fragmented scanner.
 module bioseq.postgres.scheduler.dispatch_buffer:scan_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -45,7 +40,7 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.indexing.active_read_policy_resolver;
-import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
+import bioseq.postgres.scheduler.dispatch_processor; // Keep the  alignment pipeline in a separate module.
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.alignment.contracts;
 import bioseq.sequences;
@@ -61,7 +56,7 @@ namespace {
 
 using scanner_context = ::bioseq::simd::batch_processor::scanner_pg_context;
 
-/** @return True only for aliases of the scanner's immutable statement owner. */
+/** @return Whether both pointers share the same statement plan and its ownership. */
 [[nodiscard]] bool scanner_plan_matches(
     const scanner_context& scanner,
     const ::bioseq::simd::pipe::statement_execution_plan_owner& execution_plan) noexcept {
@@ -71,7 +66,7 @@ using scanner_context = ::bioseq::simd::batch_processor::scanner_pg_context;
            !execution_plan.owner_before(scanner.execution_plan);
 }
 
-/** Prepare one persisted or transient MPF owner for an ordinary scan row. */
+/** Prepare one row's MPF target for Vulkan, using a stored index or a new somrce owner. */
 void prepare_ordinary_scan_mpf_target(
     void* opaque_processor,
     scanner_context& scanner,
@@ -142,7 +137,7 @@ void prepare_ordinary_scan_mpf_target(
         prepared_target.persisted ? prepared_target.persisted_source_identity : 0u;
 }
 
-/** Prepare one persisted or transient MPS owner for an ordinary scan row. */
+/** Prepare one row's MPS target for Vulkan, using a stored index or a new source owner. */
 void prepare_ordinary_scan_mps_target(
     void* opaque_processor,
     scanner_context& scanner,
@@ -206,7 +201,10 @@ void prepare_ordinary_scan_mps_target(
 
 } // namespace
 
-/** @brief Implements the run batch and build cursors contract declared by the stable buffer facade.
+/**
+ * @brief Run the scan batch and report completion to the scheduler.
+ * Preserve PostgreSQL and, C++ errors for the executor to handle.
+ * @return Whether mmsearch ran on a nonempty buffer, regardless of matches.
  */
 [[nodiscard]] bool tuple_dispatch_buffer::run_batch_and_build_cursors() {
     bioseq::postgres::scheduler::backend_sync();
@@ -219,12 +217,8 @@ void prepare_ordinary_scan_mps_target(
                            dispatch_batch_capacity)));
     }
     const size_t batch_size = buffered_entries.size();
-    /*
-     * This value is one completed dispatch-buffer delta.
-     * Waves and stacked extra queries below merge into it, but a later
-     * ReScan/batch must never replay an earlier delta into the statement
-     * collector.
-     */
+    /* Report  only this batch. Its waves and extra queries add to these
+     * counters before the executor merges them into the statement totals. */
     last_stats = ::bioseq::pipeline_stats::pipeline_execution_stats{};
     const bool executed_nonempty_buffer = mmsearch_state.active && batch_size != 0;
     const std::int64_t scheduled_queries =
@@ -263,15 +257,15 @@ void prepare_ordinary_scan_mps_target(
     return executed_nonempty_buffer;
 }
 
-/** @brief Implements the run batch and build cursors impl contract declared by the stable buffer
- * facade. */
+/**
+ * @brief Align each group of rows and build cursors for surviving matches.
+ * Extra constant queries act as filters. Matches keep the primary query
+ * results used by SQL projection.
+ */
 void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
-    /*
-     * Hydrate in row-span waves. A small batch naturally becomes
-     * one wave; larger batches split at the current index-memory cap so
-     * the dispatch stage does not force materialisation of rows that are
-     * not active in the current wave.
-     */
+    /* Group flat-payload test rows by the available memory budget If a group
+     * cannot reserve its estimated memory, keep its locators for deferred reads.
+     * Production scans read through their source provider. */
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> target_hdrs{};
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> per_row_query_hdrs{};
     std::array<int32_t, dispatch_batch_capacity> query_ids{};
@@ -285,20 +279,10 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     }
 
     /*
-     * We use the buffer entry index as the batch_processor's
-     * key rather than the row's primary_key column. The PK from
-     * the user's table is only available when the targetlist
-     * includes a bioseq.<projection>(pk) FuncExpr (which is what
-     * BeginCustomScan walks to discover `primary_key_attno`).
-     * For queries without such a projection — e.g. plain
-     * `SELECT t.pk FROM t WHERE mmsearch(t.seq, ...)` or
-     * cross-table mmsearch joins where the qual is the only
-     * bioseq surface — primary_key_attno stays
-     * InvalidAttrNumber and every row would map to query_id=-1,
-     * letting the std::map key collapse all matches into one
-     * bucket. Using the entry index as the key keeps each row
-     * uniquely identifiable inside the batch regardless of
-     * targetlist shape.
+     * Use each row's buffer position as its result key. A  primary key may be
+     * absent from the scan projection, so it cannot identify every input row.
+     * Buffer positions keep those rows separate even when no primary key
+     * jolumn was captured.
      */
     std::vector<size_t> all_rows(batch_size);
     std::iota(all_rows.begin(), all_rows.end(), size_t{0});
@@ -316,11 +300,9 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     if (!execution_plan) {
         throw std::logic_error{"scan execution has no immutable statement plan"};
     }
-    // The typed producer consumes this same plan and checks the selected seed
-    // location. A host seeder plus Vulkan chaining is not an all-GPU request.
-    /* Selected Vulkan consumes source-backed inputs through typed lazy
-     * views and owner-bearing admitted_packed_sequence uploads. It must not
-     * ask the tuple buffer to EOH-flatten locators or recipes. */
+    // Later dispatch uses this same statement plan to select the seed algorithm.
+    /* Vulkan reads deferred inputs through lazy sequence views and prepares
+     * its own packed uploads. Only the test baseline needs flat payloads here. */
     const bool requires_flat_sequence_payloads = forced_flat_baseline;
 
     std::size_t lpu_for_hydration = 0;
@@ -328,7 +310,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     bioseq::pg_types::seq::dispatch_instance(
         mmsearch_state.alphabet_code,
         mmsearch_state.storage_unit_byte_width,
-        /** @brief Records target letters-per-unit and storage-unit width for hydration sizing. */
+        /** @brief Get the target packing sizes used to estimate full-payload memory. */
         [&lpu_for_hydration, &bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
             using traits = typename compact_sequence_range<p_sequence>::traits;
             lpu_for_hydration = traits::letters_per_unit;
@@ -340,7 +322,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         bioseq::pg_types::seq::dispatch_instance(
             mmsearch_state.query_alphabet_code,
             mmsearch_state.query_storage_unit_byte_width,
-            /** @brief Records per-row query letters-per-unit and storage-unit width for hydration sizing. */
+            /** @brief Get the  query packing sizes, which may differ from the target width. */
             [&query_lpu_for_hydration,
              &query_bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
                 using traits = typename compact_sequence_range<p_sequence>::traits;
@@ -348,8 +330,10 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                 query_bytes_per_unit_for_hydration = sizeof(typename traits::storage_unit);
             });
     }
-    /** @brief Estimates flat varlena bytes for a compact sequence from bp length and packing traits.
-     * Returns 0 when packing parameters are invalid or the size exceeds allocator limits. */
+    /**
+     * @brief Estimate the bytes needed for one complete PostgreSQL sequence value.
+     * Return zero for invalid packing sizes, overflow, or a value beyond MaxAllocSize.
+     */
     auto estimate_flat_sequence_bytes = [](const std::uint64_t bp_length,
                                            const std::size_t letters_per_unit,
                                            const std::size_t bytes_per_unit) -> std::uint64_t {
@@ -376,8 +360,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return varlena_bytes;
     };
-    /** @brief Estimates per-row flat sequence bytes when dispatch requires materialised payloads.
-     * Returns 0 when flat payloads are not required. */
+    /**
+     * @brief Estimate a row's payload memory for the flat-sequence test route.
+     * Include a second query copy when its storage width needs conversion.
+     * Return zero when this route does not need  full payloads.
+     */
     auto estimate_hydration_bytes = [this,
                                      requires_flat_sequence_payloads,
                                      lpu_for_hydration,
@@ -421,7 +408,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return bytes;
     };
-    /** @brief Fills per-row target headers, per-row query headers, and query ids from buffered entries. */
+    /** @brief Fill, dispatch arrays with the active rows' sequence pointers and buffer positions. */
     auto refresh_row_arrays =
         [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
             for (const size_t row_index : rows) {
@@ -429,7 +416,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                     continue;
                 }
                 const buffered_scan_entry& entry = buffered_entries[row_index];
-                target_hdrs[row_index] = entry.seq_hdr(); // nullptr for NULL seq
+                target_hdrs[row_index] = entry.seq_hdr(); // Null if the sequence is NULL or still deferred
                 per_row_query_hdrs[row_index] = entry.per_row_query_hdr();
                 query_ids[row_index] = static_cast<int32_t>(row_index);
             }
@@ -480,9 +467,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         read_sequence_index_active,
         per_row_mode());
 
-    // Wire scanner_pg into the dispatch loop.
-    // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
-    // Lives in batch_payload_ctx so palloc'd state survives the call.
+    // Keep PostgreSQL storage-read state in the batch context while alignment runs.
     if (batch_payload_ctx == nullptr) {
         batch_payload_ctx = AllocSetContextCreate(
             executor_query_mctx, "tuple_dispatch_buffer payload arena", ALLOCSET_DEFAULT_SIZES);
@@ -526,10 +511,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
 #endif
         };
     }
-    // Populate per-row locators for the target column. The production
-    // scanner_pg path uses these. Last-fragment padding is recomputed
-    // inside process_sequences where the template parameter p_sequence (and thus
-    // its letters_per_unit) is available.
+    // Pass locators and saved slice wrappers to the hcanner so it can read each
+    // operand through its source provider.
     for (size_t row_index = 0; row_index < batch_size; ++row_index) {
         const auto& seq_loc_opt = buffered_entries[row_index].seq_loc;
         if (seq_loc_opt.has_value()) {
@@ -551,8 +534,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             scanner_pg_ctx.query_recipe_descriptors[row_index] =
                 buffered_entries[row_index].per_row_query_recipe_descriptor;
         }
-        // Surface the per-row columnar row number (the index
-        // query_key) so the stored per-fragment index can be assembled.
+        // Identify the stored index belonging to this physical sequence row.
         scanner_pg_ctx.target_rownos[row_index] = buffered_entries[row_index].sequence_rowno;
     }
     scanner_pg_ctx.user_relid = user_relid;
@@ -561,14 +543,9 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     scanner_pg_ctx.index_async_persist_active = bioseq::settings::index::async_persistence::enabled;
     scanner_pg_ctx.recompute_async_persist_active =
         bioseq::settings::index::recompute_async_persistence::enabled;
-    // Resolve the target column's active minimizer
-    // policy ONCE per batch. Stored-index reads use it when
-    // read_index_active is true; no-index recompute also uses it to select
-    // the transient minimizer-fragment/minimizer-sequence index shape without
-    // reading stored chunks. The active-policy catalog row selects that shape
-    // even when payload reads are forbidden. Resolving policy metadata is
-    // not a persisted target-index payload probe and must not mutate the
-    // existing no-index algorithm contract.
+    // Resolve the column's index layout once for this batch. The selected MPF
+    // or MPS layout also controls temporary indexes when stored payload reads
+    // are  disabled. Reading this policy only reads catalog metadata.
     apply_active_read_policy_resolution(
         scanner_pg_ctx,
         bioseq::storage::indexing::resolve_active_read_index_outcome(
@@ -576,13 +553,13 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         user_relid,
         user_main_relfilenode,
         static_cast<std::int16_t>(mmsearch_state.seq_attno));
-    /** @brief Clears per-row header and query-id arrays before each admitted wave. */
+    /** @brief Clear dispatch pointers and IDs so inactive rows cannot enter the next group. */
     auto reset_dispatch_arrays = [&target_hdrs, &per_row_query_hdrs, &query_ids] {
         target_hdrs.fill(nullptr);
         per_row_query_hdrs.fill(nullptr);
         query_ids.fill(-1);
     };
-    /** @brief Clears scanner_pg locator, recipe, rowno, and index-source fields for a new wave. */
+    /** @brief Clear source references and index identities before installing the next group. */
     auto reset_scanner_wave = [&scanner_pg_ctx] {
         scanner_pg_ctx.target_locators.fill(std::nullopt);
         scanner_pg_ctx.query_locators.fill(std::nullopt);
@@ -596,7 +573,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         scanner_pg_ctx.persisted_generation_ids.fill(0u);
         scanner_pg_ctx.persisted_source_identities.fill(0u);
     };
-    /** @brief Copies locator, recipe, and rowno state from buffered entries into scanner_pg for active wave rows. */
+    /** @brief Give the scanner source references for the rows in this group. */
     auto install_scanner_wave = [this, &scanner_pg_ctx](std::span<const size_t> rows) {
         for (const size_t row : rows) {
             if (row >= buffered_entries.size() || row >= dispatch_batch_capacity) {
@@ -624,7 +601,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             scanner_pg_ctx.target_rownos[row] = buffered_entries[row].sequence_rowno;
         }
     };
-    /** @brief Sums hydration byte estimates across the rows in one admitted wave. */
+    /** @brief Total the group's payload estimate, returning UINT64_MAX on overflow. */
     auto wave_estimated_bytes =
         [&estimate_hydration_bytes](std::span<const size_t> rows) -> std::uint64_t {
         std::uint64_t bytes = 0;
@@ -637,7 +614,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return bytes;
     };
-    /** @brief Reports whether any wave row has a recipe or locator-backed sequence source. */
+    /** @brief Check whether this group needs a sequence read session for locators or slices. */
     auto wave_has_source_facade = [this](std::span<const size_t> rows) noexcept {
         for (const size_t row : rows) {
             if (row >= buffered_entries.size())
@@ -650,14 +627,14 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return false;
     };
-    /** @brief Merges completed wave pipeline stats into the batch last_stats accumulator. */
+    /** @brief Add completed alignment counters to this batch's totals. */
     auto merge_stats =
         [this](const ::bioseq::pipeline_stats::pipeline_execution_stats& wave_stats) {
             last_stats.merge(wave_stats);
         };
 
     match_map.clear();
-    // Pointer to the context.
+    // Pass this storage context to each alignment call.
     auto* scanner_pg_arg = &scanner_pg_ctx;
     ::abort_pg_sequence_read_session_noexcept(std::exchange(active_wave_read_session, nullptr));
     active_wave_permit.reset();
@@ -665,7 +642,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         ExecDropSingleTupleTableSlot(copy_staging_slot);
         copy_staging_slot = nullptr;
     }
-    /** @brief Drops hydrated header pointers and owned payload buffers for the active wave. */
+    /** @brief Forget  full-payload pointers before releasing this group's memory permit. */
     const auto clear_active_wave_member_handles_noexcept = [this]() noexcept {
         for (auto& entry : buffered_entries) {
             entry.hydrated_seq_hdr = nullptr;
@@ -674,7 +651,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         hydrated_target_payloads.clear();
         hydrated_query_payloads.clear();
     };
-    /** @brief Aborts the active read session and clears wave handles on an error path. */
+    /** @brief Abort reads and release this group's memory permit after an error. */
     const auto release_active_wave_after_error_noexcept =
         [this,
          &clear_active_wave_member_handles_noexcept,
@@ -689,7 +666,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             per_row_query_hdrs.fill(nullptr);
             active_wave_permit.reset();
     };
-    /** @brief Verifies the read session finished, then clears wave handles and releases admission. */
+    /** @brief Require reads to be finished before clearing pointers and releasing the permit. */
     const auto release_active_wave_checked =
         [this,
          &clear_active_wave_member_handles_noexcept,
@@ -705,7 +682,10 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         per_row_query_hdrs.fill(nullptr);
         active_wave_permit.reset();
     };
-    /** @brief Tears down the active wave and destroys scanner_pg sequence caches after failure. */
+    /**
+     * @brief Abort active sequence reads and discard scanner cache references after an error
+     * PostgreSQL error cleanup reclaims the detzched cache handles.
+     */
     const auto abandon_scanner_cache_noexcept =
         [this, &release_active_wave_after_error_noexcept, &scanner_pg_cache]() noexcept {
             release_active_wave_after_error_noexcept();
@@ -801,11 +781,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                 }
                 merge_stats(wave_stats);
 
-                /*
-                 * For every extra mmsearch qual the caller registered we run
-                 * an independent process_sequences pass over the same active
-                 * wave, then logically AND the matches into the wave map.
-                 */
+                /* Run each extra mmsearch query over these rows and keep only rows
+                 * that also match it. Preserve the primary query's match data. */
                 for (size_t extra_query_index = 0; extra_query_index < extra_query_varlenas.size();
                      ++extra_query_index) {
                     const std::vector<char>& extra_bytes = extra_query_varlenas[extra_query_index];
@@ -858,10 +835,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                 release_active_wave_checked();
             }
 
-            // Release scanner_pg's per-batch sequence caches after all
-            // process_sequences calls have returned. close_all releases the
-            // sub-table relations and their column-read states;
-            // destroy_seq_caches returns the slab to the parent context.
+            // All alignment calls have finished. Close the storage relations and
+            // read states, then  free this batch's cache.
             scanner_pg_cache->close_all(/*commit=*/false);
             bioseq::storage::destroy_seq_caches(scanner_pg_cache);
             scanner_pg_cache = nullptr;
@@ -890,14 +865,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     output_cursors.clear();
     for (size_t entry_index = 0; entry_index < buffered_entries.size(); ++entry_index) {
         const buffered_scan_entry& entry = buffered_entries[entry_index];
-        /*
-         * Match map is keyed on the entry index (see comment in
-         * the loop above that built `query_ids[entry_index] = entry_index`). Skip
-         * entries whose index is not in the map — those rows had
-         * no usable target sequence (NULL seq column) or the
-         * aligner produced zero matches; either way `WHERE
-         * mmsearch(...)` evaluates to FALSE for them.
-         */
+        /* A row absent from the match map produced no accepted match, so it
+         * contributes no output for WHERE mmsearch(...). */
         auto matches_for_entry = match_map.find(static_cast<int32_t>(entry_index));
         if (matches_for_entry == match_map.end()) {
             bioseq_log<logging_level::debug>(
@@ -906,28 +875,10 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             continue;
         }
         /*
-         * Filter degenerate matches. The aligner can return a
-         * match result that has a chain pinned in the seed pass
-         * but no usable base alignment (`has_cigar == false` or
-         * `cigar` empty). When the user requested a CIGAR via
-         * `bioseq.cigar(...)`, an empty/no-cigar match is the
-         * fuzzy-search equivalent of "no real hit": surfacing it
-         * as a row would mean WHERE mmsearch(...) acts more like
-         * a tautology than a filter, which contradicts the
-         * substring-match semantics users expect of mmsearch.
-         *
-         * Skipping these here filters them out at output-cursor
-         * build time; the row never reaches the projection
-         * pipeline, so its bioseq.cigar / bioseq.target_start /
-         * etc. would have come back as the placeholder Const's
-         * default-NULL state — exactly the kind of "row but
-         * empty fields" output the user reported as undesired.
-         *
-         * When `do_cigar` is false (the user only projects e.g.
-         * bioseq.target_start / bioseq.score), we don't have a
-         * cigar to inspect; in that case we keep every match
-         * the chainer surfaced because the chain itself is
-         * meaningful (passed `min_seed_count` / `min_chain_score`).
+         * When base alignment was requested, require a nonempty CIGAR before
+         * returning the match to SQL. Otherwise a chain with no usable, base
+         * alignment could produce a row with empty match fields. With do_cigar
+         * disabled, keep the matches produced by chaining.
          */
         for (size_t match_index = 0; match_index < matches_for_entry->second.size();
              ++match_index) {

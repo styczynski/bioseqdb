@@ -1,6 +1,6 @@
 /**
  * @file pack_search.cppm
- * @brief Compile-time membership, position, and uniqueness queries for packs.
+ * @brief Finds types and values in template packs and checks for duplicates.
  */
 module;
 
@@ -25,17 +25,13 @@ template <class p_needle_type, class... p_haystack_types>
 }
 
 /**
- * @brief Type trait reporting whether a tuple contains a type.
- * @tparam p_needle_type Type to find.
- * @tparam p_tuple_type Tuple type to search.
+ * @brief Checks whether a tuple contains a type. Other types give false.
  */
 template <class p_needle_type, class p_tuple_type>
 struct contains_type_in_tuple : std::false_type {};
 
 /**
- * @brief Specializes tuple membership for an explicit element pack.
- * @tparam p_needle_type Type to find.
- * @tparam p_element_types Tuple element types to search.
+ * @brief Checks the tuple element types for a match.
  */
 template <class p_needle_type, class... p_element_types>
 struct contains_type_in_tuple<
@@ -71,10 +67,9 @@ template <class p_needle_type, class... p_haystack_types>
 }
 
 /**
- * @brief Finds the first index of a required type in a pack.
- * @tparam p_needle_type Type to find.
- * @tparam p_haystack_types Types to search.
- * @return First matching index.
+ * @brief Returns the first matching type infex.
+ *
+ * A missing type causes a compile-time error.
  */
 template <class p_needle_type, class... p_haystack_types>
 [[nodiscard]] consteval std::size_t index_of_type_pack_checked() noexcept {
@@ -85,17 +80,13 @@ template <class p_needle_type, class... p_haystack_types>
 }
 
 /**
- * @brief Type trait holding the first index of a type in a tuple.
- * @tparam p_needle_type Type to find.
- * @tparam p_tuple_type Tuple type to search.
+ * @brief Finds a type in a tuple, reporting a compile-time error if absent
  */
 template <class p_needle_type, class p_tuple_type>
 struct index_of_type_in_tuple;
 
 /**
- * @brief Specializes checked tuple indexing for an explicit element pack.
- * @tparam p_needle_type Type to find.
- * @tparam p_element_types Tuple element types to search.
+ * @brief Looks up a, type in the tuple element  pack.
  */
 template <class p_needle_type, class... p_element_types>
 struct index_of_type_in_tuple<
@@ -116,10 +107,7 @@ inline constexpr std::size_t index_of_type_v =
     index_of_type_in_tuple<p_needle_type, p_tuple_type>::value;
 
 /**
- * @brief Reports whether a structural value occurs in a value pack.
- * @tparam p_needle_value Value to find.
- * @tparam p_haystack_values Values to search.
- * @return `true` when `p_needle_value` occurs at least once.
+ * @brief Checks whether any value in the pack equals `p_needle_value`.
  */
 template <auto p_needle_value, auto... p_haystack_values>
 [[nodiscard]] consteval bool contains_value_pack() noexcept {
@@ -127,10 +115,9 @@ template <auto p_needle_value, auto... p_haystack_values>
 }
 
 /**
- * @brief Finds the first index of a required structural value in a pack.
- * @tparam p_needle_value Value to find.
- * @tparam p_haystack_values Values to search.
- * @return First matching index.
+ * @brief Returns the first matching value index.
+ *
+ * A missing value causes a compile-time error.
  */
 template <auto p_needle_value, auto... p_haystack_values>
 [[nodiscard]] consteval std::size_t index_of_value_pack() noexcept {
@@ -149,12 +136,10 @@ template <auto p_needle_value, auto... p_haystack_values>
 namespace detail_pack_search {
 
 /**
- * @brief Reports whether one tuple element differs from every following element.
- * @tparam p_element_index Index of the element being compared.
- * @tparam p_tuple_type Tuple whose element types are inspected.
- * @tparam p_following_offsets Zero-based offsets after `p_element_index`.
- * @param[in] following_offsets Compile-time sequence selecting following elements.
- * @return `true` when the selected element type occurs nowhere later in the tuple.
+ * @brief Checks that this tuple element has a different type from every later one.
+ * @tparam p_element_index Element being checked.
+ * @tparam p_tuple_type Tuple to inspect.
+ * @param[in] following_offsets Zero-based offsets after that element.
  */
 template <std::size_t p_element_index, class p_tuple_type,
           std::size_t... p_following_offsets>
@@ -172,11 +157,8 @@ template <std::size_t p_element_index, class p_tuple_type,
 }
 
 /**
- * @brief Reports whether all selected tuple elements have distinct types.
- * @tparam p_tuple_type Tuple whose element types are inspected.
- * @tparam p_element_indices Tuple indices to use as first-occurrence candidates.
- * @param[in] element_indices Compile-time sequence selecting tuple elements.
- * @return `true` when no selected element type occurs later in the tuple.
+ * @brief Checks that each selected tuple type appears nowhere later in the tuple.
+ * @param[in] element_indices Tuple positions to check.
  */
 template <class p_tuple_type, std::size_t... p_element_indices>
 [[nodiscard]] consteval bool unique_types_in_tuple_impl(
@@ -205,9 +187,7 @@ inline constexpr bool unique_types_in_tuple_v =
         std::make_index_sequence<std::tuple_size_v<p_tuple_type>>{});
 
 /**
- * @brief Reports whether every value in a pack is distinct.
- * @tparam p_values Structural values to inspect.
- * @return `true` when every pack position holds a distinct value.
+ * @brief Checks whether all values in the pack are different.
  */
 template <auto... p_values>
 [[nodiscard]] consteval bool unique_values_pack() noexcept {

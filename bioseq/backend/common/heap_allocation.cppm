@@ -1,6 +1,6 @@
 /**
  * @file heap_allocation.cppm
- * @brief Source-derived plans and measured extents for native heap allocations.
+ * @brief Estimates heap allocation  size before allocation and measures it afterwards.
  */
 module;
 
@@ -26,18 +26,18 @@ export namespace bioseq::common::heap_allocation_detail {
 struct heap_allocation_plan {
     /// Bytes passed to malloc.
     std::size_t allocator_request_bytes = 0u;
-    /// Maximum allocator-reported retained extent admitted before malloc.
+    /// Upper bound reserved for the allocator-reported size before calling malloc.
     std::size_t allocation_requirement_bytes = 0u;
 };
 
 /**
- * Return the allocator request and a pre-admission bound for its reported
- * retained extent. Darwin uses malloc_good_size for the allocator request;
- * Apple libmalloc-715.140.5 magazine_large.c:562 permits a cached large extent
- * strictly below twice that request. The supported GNU/Linux x86-64 and AArch64
- * LP64 builds use native glibc ptmalloc. Other C runtimes and replacement
- * allocators expose no matching pre-allocation retained-extent contract and are
- * rejected.
+ * Heap size estimates depend on the platform allocator. Darwin uses
+ * malloc_good_size and allows for a cached large block below twice that
+ * request (Apple libmalloc-715.140.5, magazine_large.c:562). Supported glibc
+ * LP64 builds account for allocator alignment and page rounding.
+ *
+ * The glibc path rejects replacement allocators because these bounds assume
+ * its native allodator. Builds with other runtimes are unsupported.
  */
 #if defined(__GLIBC__) && defined(__LP64__) && \
     (defined(__x86_64__) || defined(__aarch64__))
@@ -80,8 +80,8 @@ struct heap_allocation_plan {
     };
 #elif defined(__GLIBC__) && defined(__LP64__) && \
     (defined(__x86_64__) || defined(__aarch64__))
-    // Symbol bindings and the host base-page size are process invariants; do
-    // not repeat loader lookup or sysconf for every admitted map node.
+    // Cache loader lookups and the host page  size. They stay fixed for
+    // this process, so each allocation can reuse the result
     static const bool supported_allocator = has_supported_glibc_allocator();
     if (!supported_allocator) {
         throw std::runtime_error(
@@ -97,11 +97,9 @@ struct heap_allocation_plan {
     }
     static_assert(sizeof(void*) == 8u && sizeof(std::size_t) == 8u);
     static_assert(alignof(long double) <= 2u * sizeof(std::size_t));
-    // Native ptmalloc may use configured huge pages instead of the system
-    // page. Its sysmalloc gate uses a huge page only when hp_pagesize <= nb.
-    // request2size rounds bytes by less than MINSIZE on this LP64 ABI, so
-    // bytes + MINSIZE bounds that otherwise private page size. Keep this
-    // pre-allocation bound conservative, then shrink to malloc_usable_size.
+    // The huge-page size is private to glibc, so use a bound based on the
+    // request. Reserve room for allocator padding and page rounding, then
+    // account for the measured size after allocation.
     constexpr std::size_t minimum_chunk_bytes = 4u * sizeof(std::size_t);
     const auto huge_page_bound = bioseq::common::checked_add(bytes, minimum_chunk_bytes);
     const auto mmap_overhead = huge_page_bound
@@ -125,7 +123,7 @@ struct heap_allocation_plan {
 #endif
 }
 
-/** Plan a payload, an optional prefix, and the worst-case alignment padding. */
+/** Estimates space for the payload, optional prefix and alignment padding. */
 [[nodiscard]] inline heap_allocation_plan plan_aligned_heap_allocation(
     std::size_t bytes,
     std::size_t alignment,
@@ -147,7 +145,7 @@ struct heap_allocation_plan {
     return plan_heap_allocation(*request);
 }
 
-/** Borrow the aligned payload inside a known allocation without reallocating. */
+/** Finds an aligned payload inside an allocation, or returns nullptr if it will not fit. */
 [[nodiscard]] inline void* aligned_heap_payload(
     void* allocation,
     std::size_t allocation_bytes,
@@ -164,7 +162,7 @@ struct heap_allocation_plan {
     return std::align(alignment, bytes, payload, available_bytes);
 }
 
-/** Return the retained extent reported by the allocator owning `allocation`. */
+/** Returns the  size reported by the allocator for this allocation. */
 [[nodiscard]] inline std::size_t allocator_reported_bytes(void* allocation) noexcept {
     if (allocation == nullptr) {
         return 0u;
@@ -179,7 +177,11 @@ struct heap_allocation_plan {
 #endif
 }
 
-/** Allocate and measure storage without constructing or touching its payload. */
+/**
+ * Allocates storage and checks its reported size against the plan.
+ * Returns nullptr on failure and sets allocation_bytes to zero. The payload
+ * is left uninitialized.
+ */
 [[nodiscard]] inline void* allocate_measured(const heap_allocation_plan& plan,
                                             std::size_t& allocation_bytes) noexcept {
     allocation_bytes = 0u;
@@ -201,7 +203,7 @@ struct heap_allocation_plan {
     return allocation;
 }
 
-/** Allocate and initialize the complete allocator-reported retained extent. */
+/** Allocates storage, measures it and zeroes every byte reported by the allocator. */
 [[nodiscard]] inline void* allocate_and_touch(const heap_allocation_plan& plan,
                                               std::size_t& allocation_bytes) noexcept {
     void* allocation = allocate_measured(plan, allocation_bytes);

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Generates fixed-target packed-sequence iteration probes.
+ * @brief Tests packed-sequence iteration for each compiled CPU target.
  */
 
 #ifndef BIOSEQ_TEST_INDEXES
@@ -20,7 +20,7 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Records lane coverage and rank values from one SIMD iteration.
+ * @brief Compares SIMD callbacks with scalar ranks and checks source coverage.
  * @tparam p_range Compact-sequence range under test.
  */
 template<class p_range>
@@ -42,15 +42,13 @@ private:
     bool valid_{true};
 
     /**
-     * @brief Records one target-local callback invocation.
-     * @tparam p_simd_tag Highway descriptor type.
-     * @tparam p_mask Highway mask type.
-     * @tparam p_vector Highway vector type.
-     * @tparam p_offsets Lane-offset collection type.
-     * @param[in] simd_tag Active descriptor.
-     * @param[in] mask Valid input lanes.
-     * @param[in] incoming Packed ranks for the callback.
-     * @param[in] offsets Source storage offsets for each lane.
+     * @brief Checks active callback lanes against the scalar sequence.
+     *
+     * Records each lane's starting position and numbez of symbols seen.
+     * @param[in] simd_tag SIMD lane type and  width.
+     * @param[in] mask Lanes containing valid ranks.
+     * @param[in] incoming One rank per lane.
+     * @param[in] offsets Starting storage-unit offset for each lane.
      */
     template<class p_simd_tag,
              class p_mask,
@@ -86,8 +84,8 @@ private:
 
 public:
     /**
-     * @brief Creates a receipt with scalar ranks derived from the source.
-     * @param[in] source Sequence range retained for the probe lifetime.
+     * @brief Saves the source and reads its scalar ranks for comparison.
+     * @param[in] source Sequence that must outlive this test object.
      */
     explicit iteration_receipt(const range_type& source)
         : source_(source) {
@@ -146,8 +144,10 @@ public:
     }
 
     /**
-     * @brief Returns whether callbacks exactly and continuously cover the source.
-     * @return `true` when values and coverage match the scalar sequence.
+     * @brief Checks rank values and gap-free coverage of the source.
+     *
+     * Overlapping lane ranges are allowed. When the requested context, is
+     * longer than the sequence, no callbacks should have run.
      */
     [[nodiscard]] auto valid() const -> bool {
         if (!valid_) return false;
@@ -206,12 +206,11 @@ template<class p_alphabet>
 }
 
 /**
- * @brief Checks immediate and delayed iteration across boundary contexts.
- * @tparam p_range Compact-sequence range type.
- * @param[in] range Sequence range to iterate.
+ * @brief Tests context lengths around sequence boundaries and several callback delays.
+ * @param[in] range Sequence to iterate.
  * @param[in,out] cases_run Number of checks attempted.
- * @param[in,out] cases_passed Number of successful checks.
- * @return `true` when every context is covered correctly.
+ * @param[in,out] cases_passed Number of checks passed.
+ * @return True when every test covers the expected ranks.
  */
 template<class p_range>
 [[nodiscard]] auto run_context_matrix(

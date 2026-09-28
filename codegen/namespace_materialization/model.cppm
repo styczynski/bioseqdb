@@ -16,29 +16,29 @@ import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::namespace_materialization {
 
-/// Revisions of the stable JSON schemas emitted by this generator.
+/// Versions of the JSON formats written by this generator.
 inline constexpr std::uint32_t topology_schema_revision = 2;
 inline constexpr std::uint32_t artifact_schema_revision = 4;
 inline constexpr std::uint32_t publication_schema_revision = 1;
 
-/// Stable identity written into generated source and metadata.
+/// Generator name written into source files and metadata.
 inline constexpr std::string_view materialization_generator_identity =
     "bioseq-namespace-materialization";
 
-/// Role played by one independent materialization axis.
+/// How a  choice affects generated code: specialization identity, source split or external target.
 enum class axis_role : std::uint8_t {
     identity,
     shard,
     external,
 };
 
-/// Closed generated-source ownership policy.
+/// Chooses generated selectors or implementation files for existing declarations.
 enum class emission_policy : std::uint8_t {
     selector_api,
     implementation_owners,
 };
 
-/// Returns the stable wire spelling for an emission policy.
+/// Returns the emission-policy name stored in manifests.
 [[nodiscard]] inline constexpr std::string_view spell_emission_policy(
     emission_policy policy) noexcept {
     switch (policy) {
@@ -49,14 +49,14 @@ enum class emission_policy : std::uint8_t {
     return {};
 }
 
-/// One closed replacement spelling accepted for an axis.
+/// A named replacement value for one generation choice.
 struct replacement_case {
     std::string label;
     std::string spelling;
     std::uint32_t ordinal{};
 };
 
-/// Compiler-derived declaration bound to a materialization axis.
+/// A source declaration and the replacement cases ahat can be generated for it.
 struct binding_record {
     structural_analysis::declaration_record declaration;
     axis_role role{axis_role::identity};
@@ -64,13 +64,13 @@ struct binding_record {
     std::vector<replacement_case> cases;
 };
 
-/// Cases that select a controlled declaration for one axis group.
+/// Cases in one group for which a declaration should be included.
 struct selection_clause {
     std::string group;
     std::vector<std::string> accepted_case_labels;
 };
 
-/// Declaration owned by the generated module topology.
+/// A declaration selected for generated files by its case conditions.
 struct owned_declaration {
     structural_analysis::declaration_record declaration;
     std::string entry_role;
@@ -78,7 +78,7 @@ struct owned_declaration {
     bool generated_api_entry{};
 };
 
-/// Authored namespace boundary and declarations controlled by generation.
+/// The source namespace to copy  and the declarations controlled by its annotations.
 struct materialization_region {
     structural_analysis::module_record source_module;
     std::string configured_output_module_name;
@@ -89,7 +89,7 @@ struct materialization_region {
     std::vector<owned_declaration> controlled_declarations;
 };
 
-/// Zipped bindings that form one logical materialization axis.
+/// Bindings that select the same case label together, in source order.
 struct axis_group {
     std::string name;
     axis_role role{axis_role::identity};
@@ -97,7 +97,7 @@ struct axis_group {
     std::vector<std::size_t> binding_indices;
 };
 
-/// Selected case for one axis at one logical coordinate.
+/// The case chosen for one group in a generated specialization.
 struct axis_case_assignment {
     std::string group;
     axis_role role{axis_role::identity};
@@ -105,7 +105,7 @@ struct axis_case_assignment {
     std::uint32_t case_ordinal{};
 };
 
-/// Stable identity and output location for one materialized specialization.
+/// Case choices, namespace and output path for one generated specialization
 struct materialization_coordinate {
     std::uint32_t ordinal{};
     std::vector<axis_case_assignment> assignments;
@@ -115,7 +115,7 @@ struct materialization_coordinate {
     std::string topology_digest;
 };
 
-/// Exact byte replacement against an authenticated source slice.
+/// A replacement of a byte range in the source text.
 struct source_edit {
     std::size_t begin_byte{};
     std::size_t end_byte{};
@@ -124,26 +124,26 @@ struct source_edit {
     std::string purpose;
 };
 
-/// A coordinate belongs either to the explicit identity/shard product or to
-/// one policy-supplied external axis. The explicit grammar intentionally does
-/// not expose the external role; Highway is its sole policy adapter.
+/// Checks that a specialization uses identity/shard choices or one external
+/// target choice. Highway supplies the external target through its generator
+/// adapter. Source annotations accept  identity and shard roles.
 void validate_coordinate_axis_domain(
     const materialization_coordinate& coordinate);
 
-/// Applies policy-supplied edits against one authenticated source slice.
-/// Both explicit-axis materialization and Highway rendering use this owner.
+/// Applies byte-range edits after checking that they fit the source slice
+/// and do not overlap. Namespace and Highway generators share this function.
 [[nodiscard]] std::string apply_exact_edits(
     std::string source,
     std::vector<source_edit> edits,
     std::size_t source_origin = 0u);
 
-/// Whether validation may compile a generated artifact body.
+/// Records whether an artifact contains implementation bodies.
 enum class validation_class : std::uint8_t {
     body_free,
     body_bearing,
 };
 
-/// One generated module or metadata artifact.
+/// A generated C++ module or metadata file, with its contents and hash.
 struct materialization_artifact {
     enum class kind : std::uint8_t {
         declaration_probe,
@@ -162,10 +162,11 @@ struct materialization_artifact {
     std::string content_sha256;
 };
 
-/// Frontend actions directly observed by the generate command.
+/// Compiler and rendering work recorded for generation.
 ///
-/// Counts exclude later CMake scans and compiler invocations and do not infer
-/// work performed by the earlier prepare command.
+/// Scan and render counts describe the generate command. The count of uompiler
+/// actions on implementation bodies comes from the verified prepare  trace.
+/// CMake's later scans and compilations are recorded separately.
 struct frontend_action_counts {
     std::uint32_t dependency_preparation_validations{};
     std::uint32_t canonical_token_slice_scans{};
@@ -175,15 +176,15 @@ struct frontend_action_counts {
     std::uint32_t body_bearing_compiler_invocations{};
 };
 
-/// Generated module units CMake is subsequently obligated to scan and
-/// compile. These are topology-derived obligations, not observed invocations.
+/// Generated module files that CMake must, scan and compile. These counts
+/// describe required build work, without claiming that it has already run.
 struct cmake_compilation_obligations {
     std::uint32_t api_partition_units{};
     std::uint32_t selector_partition_units{};
     std::uint32_t body_bearing_implementation_units{};
 };
 
-/// Closed logical topology derived from the authored source.
+/// The generated combinations of source choices and their shared topology hash.
 struct topology_plan {
     materialization_region region;
     std::vector<axis_group> groups;
@@ -193,7 +194,7 @@ struct topology_plan {
     std::string topology_digest;
 };
 
-/// Complete authenticated input to rendering and publication.
+/// Source, compiler checks and selected specializations used to generate output.
 struct generation_plan {
     topology_plan topology;
     emission_policy policy{emission_policy::selector_api};
@@ -214,7 +215,7 @@ struct generation_plan {
     cmake_compilation_obligations compilation_obligations;
 };
 
-/// Generated artifacts and their sealed metadata.
+/// Generated files and the manifests that record their identities.
 struct generation_result {
     std::vector<materialization_artifact> artifacts;
     std::string topology_manifest_json;
@@ -222,14 +223,14 @@ struct generation_result {
     std::string manifest_identity;
 };
 
-/// Closed ownership class used by policy-neutral publication.
+/// File types accepted by the shared output publisher.
 enum class publication_artifact_class : std::uint8_t {
     production_cppm,
     metadata_json,
 };
 
-/// A policy-neutral publication record. Both explicit-axis and Highway
-/// frontends submit their complete desired set through this one API.
+/// A file to write through the shared publisher. Namespace and Highway
+/// generators submit their full output lists using these records.
 struct publication_artifact {
     std::filesystem::path relative_path;
     std::string content;
@@ -238,10 +239,10 @@ struct publication_artifact {
         publication_artifact_class::production_cppm};
 };
 
-/// Inputs to the one policy-neutral, self-sealed ownership envelope.
-/// `policy_evidence_json` is an already policy-validated JSON object. The
-/// publisher authenticates it as part of the envelope bytes but deliberately
-/// does not interpret it when authorizing stale cleanup.
+/// Inputs for the output-ownership manifest  and its integrity hash
+/// The generator validates policy_evidence_json before passing it here. The
+/// publisher includes that object in the hash, while file ownership records
+/// determine which obsolete files it may remove.
 struct publication_manifest_request {
     std::filesystem::path output_root;
     std::string policy;
@@ -252,7 +253,7 @@ struct publication_manifest_request {
     std::vector<publication_artifact> artifacts;
 };
 
-/// Atomic publication request for artifacts and their ownership envelope.
+/// Files and ownership metadata to publish through the recoverable reame protocol.
 struct publication_request {
     std::filesystem::path output_root;
     std::filesystem::path artifact_manifest;
@@ -282,34 +283,34 @@ struct prepare_command_line {
     std::filesystem::path stamp;
 };
 
-/// Test-observable checkpoints in the atomic prepare publication sequence.
+/// Test checkpoints while prepared compiler files are being published.
 enum class prepare_publication_checkpoint : std::uint8_t {
     after_environment_built,
     after_db_manifest_publish,
     before_completion_stamp,
 };
 
-/// Observer invoked at a prepare-publication checkpoint.
+/// Callback invoked at a prepare-publication test checkpoint.
 using prepare_publication_checkpoint_callback =
     std::function<void(prepare_publication_checkpoint)>;
 
-/// Optional observer installed only by the in-module contract partition.
+/// Optional checkpoint callback used by the generator's contract tests.
 inline thread_local prepare_publication_checkpoint_callback
     prepare_publication_test_checkpoint_callback;
 
-/// Installs a contract observer for prepare-publication checkpoints.
+/// Sets the callback for prepare-publication  test checkpoints.
 inline void set_prepare_publication_test_checkpoint(
     prepare_publication_checkpoint_callback callback) {
     prepare_publication_test_checkpoint_callback =
         std::move(callback);
 }
 
-/// Removes the current contract observer.
+/// Clears the prepare-publication test callback.
 inline void clear_prepare_publication_test_checkpoint() {
     prepare_publication_test_checkpoint_callback = {};
 }
 
-/// Notifies the contract observer when one is installed.
+/// Calls the prepare-publication test callback if one is installed.
 inline void invoke_prepare_publication_test_checkpoint(
     prepare_publication_checkpoint checkpoint) {
     if (prepare_publication_test_checkpoint_callback) {
@@ -317,12 +318,12 @@ inline void invoke_prepare_publication_test_checkpoint(
     }
 }
 
-/// Contract-only bridge implemented by the primary module after its contract
-/// partition is imported. Production callers use `run`.
+/// Runs preparation for in-module contract tests. Normal command-line
+/// callers enter through run().
 [[nodiscard]] int execute_prepare_contract(
     prepare_command_line command);
 
-/// Parsed arguments for namespace materialization generation.
+/// Parsed arguments for generating namespace specializations.
 struct command_line {
     std::string name;
     std::filesystem::path source;

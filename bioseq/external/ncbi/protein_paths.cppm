@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/protein_paths.cppm
- * @brief NCBI protein endpoint fragments.
+ * @brief NCBI prokaryote gene downloads selected by protein accession.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:protein_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Protein accession download path entries. */
+/** @brief Prokaryote gene package requests using RefSeq protein accessions. */
 inline constexpr std::string_view protein_download_paths =
     R"bioseq_openapi(  /protein/accession/{accessions}/download:
     get:

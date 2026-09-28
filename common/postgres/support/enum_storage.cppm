@@ -11,22 +11,20 @@ export namespace bioseq::postgres::support {
 struct postgres_enum_registration_access;
 
 /**
- * Owns the stable integer cell used by a PostgreSQL enum setting.
+ * Keep an enum setting in an integer cell whose address stays fied.
+ * Ordinary C++ code reads the enum value. Generated PostgreSQL code registers
+ * the integer cell through postgres_enum_registration_access.
  *
- * This module deliberately has no PostgreSQL dependency. Ordinary consumers
- * construct and read the typed value; generated PostgreSQL support performs
- * registration through postgres_enum_registration_access.
- *
- * @tparam p_enum Enum with an `int` wire representation.
+ * This module has no PostgreSQL dependency.
+ * @tparam p_enum Enum whose underlying type is int.
  */
 template <class p_enum>
     requires std::is_enum_v<p_enum> && std::same_as<std::underlying_type_t<p_enum>, int>
 class postgres_enum_storage final {
   public:
     /**
-     * @brief Initializes the stable wire cell from a typed enum value.
-     *
-     * @param[in] initial_value Initial setting value.
+     * @brief Store the initial enum value.
+     * @param[in] initial_value Initial setting  value.
      */
     constexpr explicit postgres_enum_storage(p_enum initial_value) noexcept
         : wire_value_{static_cast<int>(initial_value)} {}
@@ -35,9 +33,8 @@ class postgres_enum_storage final {
     postgres_enum_storage& operator=(postgres_enum_storage const&) = delete;
 
     /**
-     * @brief Returns the typed value currently held by PostgreSQL.
-     *
-     * @return Current enum setting value.
+     * @brief Read the current setting as its enum type.
+     * @return Current enum value.
      */
     [[nodiscard]] constexpr p_enum get_value() const noexcept {
         return static_cast<p_enum>(wire_value_);
@@ -51,21 +48,18 @@ class postgres_enum_storage final {
 };
 
 /**
- * Narrow one-shot access used by generated PostgreSQL registration support.
- *
- * A registrar receives the stable integer cell. Completion is recorded only
- * after the registrar returns, so an ordinary C++ exception leaves the
- * storage eligible for a deliberate retry.
+ * Give generated registration code access to the setting's integer cell.
+ * Mark it registered after the registrar returns. If registration throws a
+ * C++ exception, a later call can retry.
  */
 struct postgres_enum_registration_access final {
     /**
-     * @brief Registers a typed enum cell exactly once.
+     * Register the setting unless it has already been registered.
      *
-     * @tparam p_enum Enum stored in the wire cell.
-     * @tparam p_registrar Registration adapter accepted by the PostgreSQL
-     * boundary.
-     * @param[in,out] storage Stable setting storage with static lifetime.
-     * @param[in] registrar Adapter that registers the integer wire cell.
+     * @tparam p_enum Enum stored in the integer cell.
+     * @tparam p_registrar Type with register_variable(int*).
+     * @param[in,out] storage Setting storage that must remain alive after  registration
+     * @param[in] registrar Registers the cell with PostgreSQL.
      */
     template <class p_enum, class p_registrar>
         requires requires(p_registrar const& registrar, int* wire_value) {
@@ -95,7 +89,7 @@ enum class unsupported_underlying_type_probe : unsigned char {
 };
 
 struct enum_registrar_probe {
-    /** @brief Accepts the stable wire cell for the compile-time access check. */
+    /** Accept an integer cell so the registration interface can be checked at compile time. */
     void register_variable(int*) const {}
 };
 
@@ -111,7 +105,7 @@ concept has_public_wire_value = requires(p_storage& storage) { storage.wire_valu
 
 using valid_probe_storage = postgres_enum_storage<valid_enum_probe>;
 
-/** @brief Confirms that construction preserves the typed enum value. */
+/** Check at compile time that the initial enum value can be read back. */
 consteval bool initial_value_round_trips() {
     valid_probe_storage storage{valid_enum_probe::second};
     return storage.get_value() == valid_enum_probe::second;

@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/sequence_tool_paths.cppm
- * @brief EBI Search sequence-tool endpoint fragments.
+ * @brief OpenAPI definitions for searching sequence-tool results through EBI.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:sequence_tool_paths;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Sequence-tool result and help path entries. */
+/** Paths for mapping a sequence-tool job to search entries and listing supported tool settings. */
 inline constexpr std::string_view sequence_tool_paths =
     R"bioseq_openapi(  "/{domain}/seqtoolresults":
     get:

@@ -1,11 +1,11 @@
 /**
  * @file
- * @brief Defines pipeline-description dispatch without importing custom-scan runtimes.
+ * @brief Describes an existing alignment pln using its PostgreSQL sequence alphabet.
  */
 module;
 
-// Resolve global allocation declarations before importing the shared pipeline's
-// owner-allocating templates and the standard-library module.
+// Declare global allocation functions before importing pipeline templates
+// and the standard-library module.
 #include <new>
 
 export module bioseq.postgres.table:custom_scan_runtime_pipeline_contracts;
@@ -16,7 +16,7 @@ import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 
-/** @brief Describe an executor's pipeline without constructing another statement owner. */
+/** @brief Describes the existing execution plan for its alphabet and query-sketch route. */
 export [[nodiscard]] inline bioseq::simd::pipe::pipeline_description
 describe_pipeline_for_pg_alphabet(
     const bioseq::simd::pipe::statement_execution_plan_owner& execution_plan,

@@ -678,7 +678,7 @@ inline void require_failure(
 }  // namespace contract_test_detail
 
 /**
- * Runs the current SQL generator contracts.
+ * Runs the SQL generator contract tests.
  */
 inline void run_generator_contract_self_tests() {
     bioseq::codegen::structural_analysis::run_preparation_contract_self_tests();

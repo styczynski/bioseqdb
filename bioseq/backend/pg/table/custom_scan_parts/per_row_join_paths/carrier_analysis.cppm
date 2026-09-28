@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Analyzes descendant helper ownership and path metadata.
+ * @brief Finds helper results available below a  join and checks where paths may use them.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,7 +39,13 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Counts descendant base scans that can supply one match-helper identity. */
+    /**
+     * @brief Counts base scans in this path tree that can supply a match helper.
+     *
+     * Match the heler against each scan's target expression or source columns.
+     * Record invalid owner data and unsupported path wrappers so callers can
+     * reject an uncertain match.
+     */
     void per_row_analyze_descendant_base_helper_owner(Path* path,
                                                       FuncExpr* helper,
                                                       per_row_base_helper_ownership& ownership) {
@@ -131,7 +137,13 @@ export {
         }
     }
 
-    /** @brief Collects helper identities supplied uniquely by descendant custom paths. */
+    /**
+     * @brief Collects candidate helpers that this path can obtain from one descendant scan.
+     *
+     * Check both inherited join owners and base scans. An owner must expose the
+     * complete helper  expression in its output. Skip candidates with no supplier
+     * and reject ambiguous ownership or unsupported path wrappers.
+     */
     [[nodiscard]] bool per_row_collect_available_path_helpers(Path* path,
                                                               List* candidate_helpers,
                                                               List* validated_inherited_helpers,
@@ -183,7 +195,7 @@ export {
         return true;
     }
 
-    /** @brief Tracks whether an expression references unavailable match helpers. */
+    /** @brief Tracks helper calls found in an expression and whether their results are available. */
     struct per_row_path_helper_audit {
         bioseq_stub_oids const* oids = nullptr;
         List* available = NIL;
@@ -191,9 +203,9 @@ export {
         bool unavailable = false;
     };
 
-    /** @brief Validates helper and placeholder references against a supplied identity list. */
+    /** @brief Checks complete helper calls and PlaceHolderVars against the available expressions. */
     struct per_row_path_helper_audit_visitor {
-        /** @brief Audits the current expression node and stops at an unavailable helper. */
+        /** @brief Stops when a helper or its whole PlaceHolderVar is unavailable. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_path_helper_audit& audit) const {
@@ -228,7 +240,7 @@ export {
         }
     };
 
-    /** @brief Checks one expression against available helper identities and reports their use. */
+    /** @brief Checks that an expression uses only available helper results and reports whether it uses any. */
     [[nodiscard]] bool
     per_row_expression_uses_available_helpers(Node* expression, List* available, bool& saw_helper) {
         per_row_path_helper_audit audit{&get_cached_stub_oids(), available, false, false};
@@ -238,7 +250,12 @@ export {
         return !audit.unavailable;
     }
 
-    /** @brief Checks that relevant pathkey equivalence members use only available helpers. */
+    /**
+     * @brief Checks that sorting expressions use only helpers available  in this path.
+     *
+     * Inspect, equivalent expressions whose relations fit within the path's
+     * relation set. Skip members that require relations outside it
+     */
     [[nodiscard]] bool
     per_row_pathkeys_use_available_helpers(Path* scope, List* pathkeys, List* available) {
         if (pathkeys == NIL)
@@ -264,10 +281,10 @@ export {
         return true;
     }
 
-    /** @brief Checks recursively that opaque path metadata contains no match helper. */
+    /** @brief Checks that path metadata has supported node shapes and contains no match helpers. */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata);
 
-    /** @brief Tests whether a node tag is supported by the metadata expression walker. */
+    /** @brief Checks whether the expression walker supports this metadata node type. */
     [[nodiscard]] bool per_row_path_metadata_node_is_walkable(const NodeTag tag) noexcept {
         switch (tag) {
         case T_Var:
@@ -356,7 +373,7 @@ export {
         }
     }
 
-    /** @brief Tests whether a metadata node tag can be accepted without recursion. */
+    /** @brief Recognizes scalar metadata and scalar lists that cannot contain helper expressions. */
     [[nodiscard]] bool per_row_path_metadata_node_is_scalar(const NodeTag tag) noexcept {
         return tag == T_Integer || tag == T_Float || tag == T_Boolean || tag == T_String ||
                tag == T_BitString || tag == T_IntList || tag == T_OidList || tag == T_XidList;
@@ -368,9 +385,9 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Recursively audits expression-like path metadata for helper references. */
+    /** @brief Checks nested path metadata for match helpers and unsupported nde types. */
     struct per_row_path_metadata_audit_visitor {
-        /** @brief Classifies the current metadata node and controls recursive traversal. */
+        /** @brief Visits supported metadata nodes and stops on a helper or unknown node type. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_path_metadata_audit& audit) const {
@@ -408,7 +425,13 @@ export {
         }
     };
 
-    /** @brief Checks recursively that opaque path metadata contains no match helper. */
+    /**
+     * @brief Checks that path metadata contains no match helpers.
+     *
+     * Inspect lists and both expressions in RestrictInfo records. Scalar values
+     * are safe. Reject unknown node types because the walker cannot prove  that
+     * they contain no helper calls.
+     */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata) {
         if (metadata == nullptr)
             return true;
@@ -437,7 +460,7 @@ export {
         return !audit.invalid;
     }
 
-    /** @brief Checks that every RestrictInfo clause and or-clause contains no helper. */
+    /** @brief Checks that restriction clauses and their OR forms contain no helpers or unsupported nodes. */
     [[nodiscard]] bool per_row_restrictinfo_list_has_no_helper(List* restrictions) {
         for (Node* item : postgres_list<Node>(restrictions)) {
             RestrictInfo* restriction = try_cast_pg_node<RestrictInfo>(item);
@@ -451,7 +474,13 @@ export {
         return true;
     }
 
-    /** @brief Reconstructs sort-group references from the processed target list by occurrence. */
+    /**
+     * @brief Recovers sort/group references from PostgreSQL's processed target list.
+     *
+     * Match equal expressions in occurrence order, using each target entry once.
+     * Reject a path that omits a duplicate needed to carry a nonzero sort/group
+     * reference.
+     */
     [[nodiscard]] bool per_row_authoritative_sortgrouprefs(PlannerInfo* root,
                                                            List* expressions,
                                                            std::vector<Index>& results) {
@@ -475,9 +504,8 @@ export {
             if (selected != nullptr)
                 consumed = lappend(consumed, selected);
         }
-        /* If this PathTarget names an expression group, it must contain enough
-         * stable occurrences to carry every authoritative nonzero ref in that
-         * group.  Otherwise choosing which duplicate owns the ref is ambiguous. */
+        /* Equal expressions can have separate sort/group references. Reject
+         * this target if it lacks an occurrence needed for one of those refs. */
         for (TargetEntry* entry : postgres_list<TargetEntry>(root->processed_tlist)) {
             if (entry == nullptr || entry->expr == nullptr || entry->ressortgroupref == 0 ||
                 list_member_ptr(consumed, entry))

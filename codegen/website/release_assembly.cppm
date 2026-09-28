@@ -14,14 +14,12 @@ import :serialization;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Immutable multi-release assembly. Combines separately validated site roots,
-// orders their release identifiers numerically, and regenerates the aggregate
-// manifest without coupling rendering to historical inputs.
+// Parses release numbers and sorts them for the multi-version website.
 namespace bioseq::codegen::website {
 
-/// @brief Parses a dotted release path component into numeric parts.
-/// @param path_component Release directory name such as v0.1.
-/// @return The numeric parts for stable numeric (never lexical) ordering.
+/// @brief Extracts numeric parts from a  release directory name
+/// @param path_component Release directory name, such as v0.1.
+/// @return Numbers used to sort releases by version.
 [[nodiscard]] std::vector<std::uint32_t> parse_release_components(std::string_view path_component) {
     std::vector<std::uint32_t> parts;
     std::size_t index = 0;

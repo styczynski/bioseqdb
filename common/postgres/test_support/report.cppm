@@ -42,7 +42,7 @@ enum class sql_transcript_status {
     failed,
 };
 
-/// @brief Literal SQL plus bounded result/error evidence captured by a session.
+/// @brief A SQL command with its result sample, error fields and elapsed time.
 struct sql_transcript_entry {
     std::uint64_t ordinal{};
     std::string session;
@@ -60,7 +60,7 @@ struct sql_transcript_entry {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Catch case/section associated with process-wide report observations.
+/// @brief The Catch test case and section attached to report entries.
 struct execution_case_context {
     std::string test_case;
     std::string section;
@@ -113,25 +113,25 @@ inline void append_crash_transcript(const sql_transcript_entry& entry) noexcept 
 
 export namespace bioseq::postgres_test {
 
-/// @brief Enables fixture-owned process evidence for an integration runner.
+/// @brief Turns automatic SQL and leanup reporting on or off for fixtures.
 inline void set_automatic_observation_collection_enabled(bool enabled) noexcept {
     report_state_detail::access_automatic_collection_state().store(enabled,
                                                                    std::memory_order_relaxed);
 }
 
-/// @brief Returns whether fixtures should attach the process report collectors.
+/// @brief Returns whether fixtures should collect reports automatically.
 [[nodiscard]] inline bool is_automatic_observation_collection_enabled() noexcept {
     return report_state_detail::access_automatic_collection_state().load(std::memory_order_relaxed);
 }
 
-/// @brief Updates the active Catch context inherited by SQL/cleanup observers.
+/// @brief Sets the test case and section used by later report entries.
 inline void set_execution_case_context(execution_case_context context) {
     auto& state = report_state_detail::process_context();
     std::scoped_lock lock(state.mutex);
     state.current = std::move(context);
 }
 
-/// @brief Clears the active Catch context outside test execution.
+/// @brief Tries to clear the current test case and section.
 inline void clear_execution_case_context() noexcept {
     try {
         set_execution_case_context({});
@@ -139,17 +139,26 @@ inline void clear_execution_case_context() noexcept {
     }
 }
 
-/// @brief Returns a stable copy of the active process report context.
+/// @brief Copies the current test case and section under a lock.
 [[nodiscard]] inline execution_case_context current_execution_case_context() {
     auto& state = report_state_detail::process_context();
     std::scoped_lock lock(state.mutex);
     return state.current;
 }
 
-/// @brief Thread-safe executor/observer for literal SQL transcripts.
+/**
+ * Collects SQL commands and  their outcomes in append order. A mutex
+ * protects the transcript, so separate connections can report to it from
+ * different threads. Callers must still control access to each connection.
+ */
 class sql_transcript : public bioseq::libpq::command_observer {
   public:
-    /// @brief Executes SQL, records bounded rows/errors, and preserves exceptions.
+    /**
+     * Runs SQL and records a limited sample of its result, or its error
+     * An attached instance of this observer handles recording itself to avoid
+     * duplicate entries. Otherwise this wrapper records the outcome and
+     * rethrows command errors after recording them.
+     */
     [[nodiscard]] bioseq::libpq::command_result execute(
         bioseq::libpq::client_connection& connection,
         std::string_view session,
@@ -219,7 +228,7 @@ class sql_transcript : public bioseq::libpq::command_observer {
         }
     }
 
-    /// @brief Appends a manually constructed transcript entry.
+    /// @brief Assigns the next  ordinal and appends a transcript entry.
     void append(sql_transcript_entry entry) {
         std::scoped_lock lock(mutex_);
         entry.ordinal = next_ordinal_++;
@@ -227,13 +236,13 @@ class sql_transcript : public bioseq::libpq::command_observer {
         entries_.push_back(std::move(entry));
     }
 
-    /// @brief Returns an ordinal-ordered snapshot.
+    /// @brief Copies the transcript in append order.
     [[nodiscard]] std::vector<sql_transcript_entry> entries() const {
         std::scoped_lock lock(mutex_);
         return entries_;
     }
 
-    /// @brief Clears transcript state before a new run.
+    /// @brief Clears the transcript and restarts etry numbering.
     void clear() {
         std::scoped_lock lock(mutex_);
         entries_.clear();
@@ -326,13 +335,13 @@ class sql_transcript : public bioseq::libpq::command_observer {
     std::uint64_t next_ordinal_{};
 };
 
-/// @brief Returns the run-owned collector installed by PostgreSQL fixtures.
+/// @brief Returns the process-wide SQL transcript used by fixtures.
 [[nodiscard]] inline sql_transcript& process_sql_transcript() {
     static sql_transcript transcript;
     return transcript;
 }
 
-/// @brief Attaches process transcript capture to one test connection.
+/// @brief Tries to attach the process transcript when collection is enabled.
 inline void attach_process_sql_transcript(bioseq::libpq::client_connection& connection,
                                           std::string_view session) noexcept {
     try {
@@ -344,17 +353,18 @@ inline void attach_process_sql_transcript(bioseq::libpq::client_connection& conn
     }
 }
 
-/// @brief Clears SQL evidence before a new native Catch session.
+/// @brief Clears the process SQL transcript before a test run.
 inline void clear_process_sql_transcript() {
     process_sql_transcript().clear();
 }
 
-/// @brief Returns the run's ordinal-ordered SQL evidence.
+/// @brief Copies the process SQL transcript in append order.
 [[nodiscard]] inline std::vector<sql_transcript_entry> process_sql_transcript_entries() {
     return process_sql_transcript().entries();
 }
 
-/// @brief Truncates crash-resilient transcript evidence for one case.
+/// @brief Rewrites the, supervision journal from the  current SQL transcript.
+/// Journal errors are ignored.
 inline void initialize_supervision_report_journals() noexcept {
     try {
         const auto directory = supervision_state_directory();
@@ -373,7 +383,8 @@ inline void initialize_supervision_report_journals() noexcept {
     }
 }
 
-/// @brief Loads all complete transcript journal rows after a runner crash.
+/// @brief Reads SQL journal rows that have the expected fields.
+/// Malformed rows are skipped. Result samples are absent from this journal.
 [[nodiscard]] inline std::vector<sql_transcript_entry>
 load_supervision_sql_transcript(const std::filesystem::path& directory) {
     std::ifstream input(directory / "sql-transcript.tsv");
@@ -447,14 +458,14 @@ load_supervision_sql_transcript(const std::filesystem::path& directory) {
     return entries;
 }
 
-/// @brief One command-line argument after runner-owned sensitivity classification.
+/// @brief A command-line argument with a caller-supplied redaction flag.
 struct invocation_argument {
     std::string name;
     std::string value;
     bool sensitive{};
 };
 
-/// @brief Source-neutral Catch case/section outcome supplied by runner glue.
+/// @brief A test case or section result supplied by the test runner.
 struct test_case_result {
     std::string test_case;
     std::string section;
@@ -463,7 +474,7 @@ struct test_case_result {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Timed acceptance stage associated with the active Catch context.
+/// @brief Duration and status of a stage within a test case or section.
 struct stage_timing {
     std::uint64_t ordinal{};
     std::string test_case;
@@ -473,7 +484,7 @@ struct stage_timing {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Artifact digest/path evidence embedded in the native report.
+/// @brief Source and staged extension paths and hashes recorded in the report.
 struct artifact_observation {
     std::string name;
     std::filesystem::path preinstalled_stage_root;
@@ -491,20 +502,20 @@ struct artifact_observation {
     std::string staged_control_sha256;
 };
 
-/// @brief Resource peaks/sizes sampled by the native runner.
+/// @brief Memory peaks and file sizes collected  during a test run.
 struct integration_resource_summary {
     std::uint64_t peak_rss_bytes{};
     std::uint64_t observed_temp_bytes{};
     resource_usage_samples postgres;
 };
 
-/// @brief No-throw teardown verdict supplied after cluster cleanup.
+/// @brief Cleanup result and any explanation of failure.
 struct cleanup_summary {
     bool succeeded{};
     std::string detail;
 };
 
-/// @brief One case-associated private-cluster teardown observation.
+/// @brief Cleanup results and resource measurements for one cluster.
 struct cleanup_observation {
     std::uint64_t ordinal{};
     std::string test_case;
@@ -515,7 +526,7 @@ struct cleanup_observation {
     integration_resource_summary resources;
 };
 
-/// @brief Complete source-neutral JSON model for a native integration run.
+/// @brief Data written to the integration test JSON report
 struct integration_run_report {
     std::uint32_t schema_revision{1};
     std::string executable;
@@ -532,7 +543,7 @@ struct integration_run_report {
     cleanup_summary cleanup;
 };
 
-/// @brief Converts a staged extension inventory into report evidence.
+/// @brief Copies staged extension paths and hashes into report records.
 [[nodiscard]] inline std::vector<artifact_observation>
 collect_artifact_observations(const extension_stage_layout& stage) {
     std::vector<artifact_observation> items;
@@ -634,7 +645,7 @@ template <class p_range, class p_writer>
 
 export namespace bioseq::postgres_test {
 
-/// @brief Durably replaces the watchdog snapshot of native test-case results.
+/// @brief Saves test results for the watchdg and reports whether the file is durable.
 [[nodiscard]] inline bool
 publish_supervision_test_case_results(std::span<const test_case_result> items) noexcept {
     return report_snapshot_detail::publish(
@@ -649,7 +660,7 @@ publish_supervision_test_case_results(std::span<const test_case_result> items) n
         });
 }
 
-/// @brief Loads one complete, bounded test-case snapshot or returns nullopt.
+/// @brief Reads a test-result snapshot, returning nullopt on missing or invalid data.
 [[nodiscard]] inline std::optional<std::vector<test_case_result>>
 load_supervision_test_case_results(const std::filesystem::path& directory) noexcept {
     try {
@@ -696,7 +707,7 @@ load_supervision_test_case_results(const std::filesystem::path& directory) noexc
     }
 }
 
-/// @brief Durably replaces the watchdog snapshot of completed stage timings.
+/// @brief Saves recorded stage timings for the watchdog and reports durability.
 [[nodiscard]] inline bool
 publish_supervision_stage_timings(std::span<const stage_timing> items) noexcept {
     return report_snapshot_detail::publish("stages.snapshot.tsv",
@@ -713,7 +724,7 @@ publish_supervision_stage_timings(std::span<const stage_timing> items) noexcept 
                                            });
 }
 
-/// @brief Loads one complete, bounded stage-timing snapshot or returns nullopt.
+/// @brief Reads a stage-timing snapshot, returning nullopt on missing  or invalid data.
 [[nodiscard]] inline std::optional<std::vector<stage_timing>>
 load_supervision_stage_timings(const std::filesystem::path& directory) noexcept {
     try {
@@ -763,7 +774,7 @@ load_supervision_stage_timings(const std::filesystem::path& directory) noexcept 
     }
 }
 
-/// @brief Durably replaces the watchdog snapshot of staged artifacts.
+/// @brief Saves artifact records for the watchdog and reports durability.
 [[nodiscard]] inline bool
 publish_supervision_artifact_observations(std::span<const artifact_observation> items) noexcept {
     return report_snapshot_detail::publish(
@@ -788,7 +799,7 @@ publish_supervision_artifact_observations(std::span<const artifact_observation> 
         });
 }
 
-/// @brief Loads one complete, bounded artifact snapshot or returns nullopt.
+/// @brief Reads an artifact snapshot, returning nullopt on missing or invalid data.
 [[nodiscard]] inline std::optional<std::vector<artifact_observation>>
 load_supervision_artifact_observations(const std::filesystem::path& directory) noexcept {
     try {
@@ -845,7 +856,8 @@ load_supervision_artifact_observations(const std::filesystem::path& directory) n
     }
 }
 
-/// @brief Samples runner peak RSS and exact bytes below selected temp roots.
+/// @brief Reads the runner memory peak and sums file sizes under the given roots.
+/// Inaccessible entries may be skipped, and files can, change during the scan.
 [[nodiscard]] inline integration_resource_summary
 capture_integration_resources(std::span<const std::filesystem::path> temp_roots = {}) {
     integration_resource_summary report;
@@ -921,7 +933,7 @@ struct stage_state {
 
 export namespace bioseq::postgres_test {
 
-/// @brief Records one completed or interrupted timed stage.
+/// @brief Tries to record a stage duration and update the watchdog snapshot.
 inline void
 record_stage_timing(std::string_view stage,
                     std::chrono::milliseconds duration,
@@ -941,7 +953,7 @@ record_stage_timing(std::string_view stage,
     }
 }
 
-/// @brief Clears stage timing evidence before a native Catch session.
+/// @brief Clears recorded stage timings and restarts their numbering.
 inline void clear_stage_timings() noexcept {
     try {
         auto& state = report_state_detail::process_stages();
@@ -952,14 +964,15 @@ inline void clear_stage_timings() noexcept {
     }
 }
 
-/// @brief Returns stage timings in observation order.
+/// @brief Copies stage timings in the order they were recorded.
 [[nodiscard]] inline std::vector<stage_timing> stage_timings() {
     auto& state = report_state_detail::process_stages();
     std::scoped_lock lock(state.mutex);
     return state.items;
 }
 
-/// @brief RAII stage timer that records interruption during unwinding.
+/// @brief Records elapsed time on destruction.
+/// A stage  is interrupted unless mark_completed() was called.
 class scoped_stage_timing {
   public:
     explicit scoped_stage_timing(std::string stage)
@@ -977,7 +990,7 @@ class scoped_stage_timing {
                             std::move(context_));
     }
 
-    /// @brief Marks the timed stage as normally completed.
+    /// @brief Marks the stage complete. Timing continues until destruction.
     void mark_completed() noexcept {
         completed_ = true;
     }
@@ -989,7 +1002,7 @@ class scoped_stage_timing {
     bool completed_{};
 };
 
-/// @brief Records exact source/staged artifact evidence for one fixture.
+/// @brief Tries to append a fixture's artifact records and update the watchdog snapshot.
 inline void record_artifact_observations(const extension_stage_layout& stage) noexcept {
     try {
         std::vector<artifact_observation> items = collect_artifact_observations(stage);
@@ -1003,7 +1016,7 @@ inline void record_artifact_observations(const extension_stage_layout& stage) no
     }
 }
 
-/// @brief Clears staged-artifact evidence before a native Catch session.
+/// @brief Clears the stored artifact records before a test run.
 inline void clear_artifact_observations() noexcept {
     try {
         auto& state = report_state_detail::process_artifacts();
@@ -1013,14 +1026,14 @@ inline void clear_artifact_observations() noexcept {
     }
 }
 
-/// @brief Returns source/staged artifact evidence in fixture order.
+/// @brief Copies artifact records in the order they were added.
 [[nodiscard]] inline std::vector<artifact_observation> artifact_observations() {
     auto& state = report_state_detail::process_artifacts();
     std::scoped_lock lock(state.mutex);
     return state.items;
 }
 
-/// @brief Records one no-throw private-cluster cleanup and resource sample.
+/// @brief Tries to record cluster cleanup results and resource measurements.
 inline void record_cleanup_observation(const std::filesystem::path& root,
                                        bool succeeded,
                                        std::string_view detail,
@@ -1040,7 +1053,7 @@ inline void record_cleanup_observation(const std::filesystem::path& root,
     }
 }
 
-/// @brief Clears teardown evidence before a new native Catch session.
+/// @brief Clears clanup records and restarts their numbering.
 inline void clear_cleanup_observations() noexcept {
     try {
         auto& state = report_state_detail::process_cleanup();
@@ -1051,14 +1064,14 @@ inline void clear_cleanup_observations() noexcept {
     }
 }
 
-/// @brief Returns an ordinal-ordered cleanup snapshot.
+/// @brief Copies cleanup records in the order they were added
 [[nodiscard]] inline std::vector<cleanup_observation> cleanup_observations() {
     auto& state = report_state_detail::process_cleanup();
     std::scoped_lock lock(state.mutex);
     return state.observations;
 }
 
-/// @brief Aggregates all observed fixture teardowns into one run verdict.
+/// @brief Reports success only when at least one cleanup was recorded and all succeeded.
 [[nodiscard]] inline cleanup_summary summarize_cleanup() {
     const std::vector<cleanup_observation> observations = cleanup_observations();
     if (observations.empty()) {
@@ -1091,7 +1104,8 @@ inline void clear_cleanup_observations() noexcept {
                                      " private-cluster cleanup(s) completed"};
 }
 
-/// @brief Combines client peak RSS with the largest observed fixture tree.
+/// @brief Combines recorded resource peaks, sample counts and stage measurements.
+/// Uses the largest observed size or memory peak, and sums sample counts.
 [[nodiscard]] inline integration_resource_summary summarize_resources() {
     integration_resource_summary aggregate = capture_integration_resources();
     for (const cleanup_observation& observation : cleanup_observations()) {
@@ -1124,7 +1138,8 @@ inline void clear_cleanup_observations() noexcept {
 
 namespace bioseq::postgres_test::report_detail {
 
-/// @brief Writes one correctly escaped JSON string.
+/// @brief Writes a quoted JSON string, escaping quotes, backslashes and control bytes.
+/// Other bytes pass  through unchanged, so callers must supply valid UTF-8.
 inline void write_string(std::ostream& output, std::string_view value) {
     constexpr std::string_view k_hex{"0123456789abcdef"};
     output.put('"');
@@ -1282,7 +1297,12 @@ inline void write_resource_sampling(std::ostream& output, const resource_usage_s
 
 export namespace bioseq::postgres_test {
 
-/// @brief Atomically and durably publishes a native integration JSON report.
+/**
+ * Writes the integration report as JSON and publishes it with a durable
+ * file replacement. Arguments marked sensitive are redacted. Failures
+ * throw, including cases where the replacement became visible but its
+ * directory could not be synced.
+ */
 inline void write_integration_run_report(const std::filesystem::path& path,
                                          const integration_run_report& report) {
     const std::filesystem::path absolute_path = std::filesystem::absolute(path);
@@ -1663,7 +1683,7 @@ inline void write_integration_run_report(const std::filesystem::path& path,
         absolute_path,
         std::as_bytes(std::span{serialized.data(), serialized.size()}),
         bioseq::common::durable_file_io::publication_options{
-            .mode = 0666}); // Preserve ofstream mode before umask.
+            .mode = 0666}); // Request ordinary output-file permissions, subject to umask.
     if (!published.has_value()) {
         const bioseq::common::durable_file_io::file_error& error = published.error();
         throw std::runtime_error("cannot durably publish integration report: operation " +

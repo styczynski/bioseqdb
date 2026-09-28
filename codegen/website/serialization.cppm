@@ -20,11 +20,9 @@ module bioseq.codegen.website:serialization;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Canonical JSON emission (§5.1). Uses the Boost.JSON already built for the
-// website-enabled Jinja2Cpp component for every plan/manifest/search/tooltip/
-// coverage artifact. Object keys are inserted in a fixed schema order by the
-// caller; this unit guarantees the terminal newline and the HTML-context
-// safety post-pass for <, >, &, U+2028, and U+2029.
+// Writes website JSON with Boost.JSON. Callers insert object keys in a fixed
+// order Artifact serialization adds a final newline and escapes characters
+// that could interfere with embedding JSON in HTML.
 namespace bioseq::codegen::website {
 
 /// @brief Escapes JSON text that may be embedded in an HTML context.
@@ -56,9 +54,9 @@ namespace bioseq::codegen::website {
     return result;
 }
 
-/// @brief Serializes a Boost.JSON value into canonical HTML-safe artifact text.
-/// @param value Fully-built JSON value with keys already in schema order.
-/// @return Canonical serialization ending in exactly one newline.
+/// @brief Serializes JSON with escapes suitable for embedding in HTML.
+/// @param value JSON value with keys already in the desired schema order.
+/// @return Serialized JSON ending in one newline.
 [[nodiscard]] std::string serialize_canonical(const boost::json::value& value) {
     std::string serialized = boost::json::serialize(value);
     std::string safe = apply_html_safe_escapes(serialized);
@@ -301,12 +299,11 @@ void require_artifact_schema(
     }
 }
 
-/// @brief One website-public SQL entity projected from the generated SQL
-/// manifest.
+/// @brief Documentation for a public SQL entity from the generated manifest.
 ///
-/// `stable_identity` remains relocation-stable for provenance and cross-schema
-/// tests. `installed_identity` is the exact live-catalog/page identity for the
-/// selected extension schema.
+/// stable_identity uses $extension for  the configurable schema.
+/// installed_identity replaces it with the schema used by this installation,
+/// so catalog checks and reference pages can find the installed object.
 struct sql_manifest_public_entity {
     std::string stable_identity;
     std::string installed_identity;
@@ -321,7 +318,7 @@ struct sql_manifest_public_entity {
     std::vector<parameter_description> parameters;
 };
 
-/// @brief Website-facing projection of the generated SQL manifest.
+/// @brief SQL manifest data needed for catalog checks and website documentation.
 struct sql_manifest_public_projection {
     std::string extension_name;
     std::string extension_schema;
@@ -333,11 +330,11 @@ struct sql_manifest_public_projection {
     std::vector<std::string> restricted_sequence_names;
 };
 
-/// @brief Reads the website-public set from a generated SQL manifest.
+/// @brief Reads public SQL documentation and identity lists from a manifest.
 ///
-/// Visibility comes only from `public_documentation`. Transitional install
-/// owners are rejected if they claim visibility: only natural annotated
-/// declarations may publish SQL documentation.
+/// Requires the annotated-C++ manifest format and checks identity uniqueness
+/// and schema substitution. Public types and functions must have a brieg.
+/// Only entries marked public_documentation become website entities.
 [[nodiscard]] sql_manifest_public_projection
 parse_sql_manifest_public_projection(
         std::string_view text,
@@ -469,8 +466,7 @@ parse_sql_manifest_public_projection(
         };
     const auto identity_kind_for_manifest_kind =
         [](std::string_view kind) noexcept -> std::string_view {
-            // The stable-identity grammar has exactly one spelling exception;
-            // every other manifest kind remains byte-for-byte unchanged.
+            // The identity uses guc-value where the manifest kind uses guc_value.
             return kind == "guc_value" ? "guc-value" : kind;
         };
     const auto qualified_name =
@@ -740,9 +736,9 @@ namespace {
 
 }  // namespace
 
-/// @brief Serializes the current website plan artifact canonically.
-/// @param plan Fully-built plan aggregate.
-/// @return Canonical HTML-safe JSON ending in one newline.
+/// @brief Serializes a website plan after checking its format versions.
+/// @param plan Parsed tutorials and build inputs.
+/// @return JSON with HTML-safe escapes and  a final newline.
 [[nodiscard]] std::string serialize_site_plan(const site_plan& plan) {
     require_processing_contract(
         plan.schema,
@@ -850,10 +846,10 @@ namespace {
 
 }  // namespace
 
-/// @brief Serializes the C++ structural/documentation entity index (§11.3).
-/// @param entities Canonical merged public entities.
-/// @param clang_version The Clang version the structural pass was linked against.
-/// @return Canonical HTML-safe JSON ending in one newline.
+/// @brief Serializes C++ declarations and their documentation.
+/// @param entities Public entities with, structural and Doxygen data merged.
+/// @param clang_version Clang version used for the structural scan.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_cpp_reference_entities(
     const std::vector<reference_entity>& entities, std::string_view clang_version) {
     boost::json::object root;
@@ -868,9 +864,9 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Serializes the SQL catalog entity index (§12.2).
-/// @param entities Documented SQL entities captured from the live catalog.
-/// @return Canonical HTML-safe JSON ending in one newline.
+/// @brief Serializes SQL entity records.
+/// @param entities SQL entities for a reference index or catalog inventory.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_sql_entities(
     const std::vector<reference_entity>& entities) {
     boost::json::object root;
@@ -886,10 +882,9 @@ namespace {
 
 namespace {
 
-// HTML/attribute-escapes a plain-text value (§14 plain_text projection). Because
-// Jinja2Cpp performs no automatic escaping, plain-text bindings must already carry
-// HTML entities so a value containing <, >, &, or a quote cannot break out of its
-// element/attribute context when the template emits it verbatim.
+// Escape text before binding it to a template. Jinja2Cpp does not escape
+// values automatically, so angle brackets, ampersands, and quotes must become
+// HTML entities before insertion into text or an attribute
 [[nodiscard]] std::string html_escape(std::string_view value) {
     std::string out;
     out.reserve(value.size());
@@ -908,25 +903,22 @@ namespace {
 
 }  // namespace
 
-/// @brief Quotes a JSON string literal safe to embed in an HTML-context artifact.
+/// @brief Encodes a string as JSON with escapes for embedding in HTML.
 ///
-/// Applies only the JSON-in-HTML escaping for <, >, &, U+2028, U+2029. The decoded
-/// value is emitted verbatim, so this is for trusted fragments (already-sanitized
-/// HTML) and raw data artifacts — never for a plain-text template binding.
-/// @param value Text to encode.
+/// The decoded string keeps its original characters. Use  this for data or
+/// already-rendered HTML. Use json_text when a template will display plain text.
+/// @param value String to encode.
 /// @return A double-quoted JSON string literal.
 [[nodiscard]] std::string json_quote(std::string_view value) {
     return apply_html_safe_escapes(boost::json::serialize(boost::json::value(value)));
 }
 
-/// @brief Quotes a JSON string literal whose decoded value is HTML-safe (§14).
+/// @brief HTML-escapes plain text, then encodes it as a JSON string.
 ///
-/// HTML/attribute-escapes the plain text first, so the value a template emits
-/// verbatim already carries entities. Use for every untrusted plain-text/URL
-/// binding (titles, descriptions, names, hrefs); use json_quote only for trusted
-/// HTML fragments.
-/// @param value Plain (untrusted) text.
-/// @return A double-quoted JSON string literal of the HTML-escaped value.
+/// Use this for text and attrhbute values that templates insert directly,
+/// including titles, names, and URLs. It escapes quotes but does not check URLs.
+/// @param value Plain text to display.
+/// @return A double-quoted JSON string containing the HTML-escaped value.
 [[nodiscard]] std::string json_text(std::string_view value) {
     return json_quote(html_escape(value));
 }
@@ -954,11 +946,9 @@ namespace {
     return result;
 }
 
-// Projects an entity onto a template view whose plain-text fields are already
-// HTML-escaped (§14). Distinct from serialize_entity, which keeps raw values for
-// the on-disk data artifact; this view is bound straight into a page context and
-// so must be safe for verbatim template emission. route_path is a same-origin
-// path built by the generator and is attribute-escaped for safety.
+// Build the entity data used directly by templates. Escape text and route
+// attributes here because Jinja2Cpp inserts them as supplied. Saved entity
+// JSON uses serialize_entity and keeps the original text.
 [[nodiscard]] boost::json::value serialize_entity_view(const reference_entity& entity) {
     boost::json::object object;
     object["canonical_id"] = html_escape(entity.canonical_id);
@@ -983,7 +973,7 @@ namespace {
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
-    // SQL attributes / C++ qualifiers (§12.3), sorted for deterministic output.
+    // Emit SQL attributes and C++ qualifiers in map order.
     if (!entity.attributes.empty()) {
         boost::json::array attributes;
         for (const auto& [name, value] : entity.attributes) {
@@ -1027,16 +1017,16 @@ namespace {
 
 }  // namespace
 
-/// @brief Serializes one documented entity view object (HTML-escaped) for a page.
-/// @param entity Canonical documented entity.
-/// @return The HTML-safe JSON object text for a single-entity page context.
+/// @brief Serializes an entity for use  in a page template.
+/// @param entity Documented entity.
+/// @return A JSON object with its text and attribute values HTML-escaped.
 [[nodiscard]] std::string serialize_reference_entity(const reference_entity& entity) {
     return apply_html_safe_escapes(boost::json::serialize(serialize_entity_view(entity)));
 }
 
-/// @brief Serializes a documented-entity view array (HTML-escaped) for an index.
-/// @param entities Canonical documented entities.
-/// @return The HTML-safe JSON array text for an entity-index page context.
+/// @brief Serializes entities for an index page template.
+/// @param entities Documented entities in display order.
+/// @return A JSON array with text and attribute values HTML-escaped.
 [[nodiscard]] std::string serialize_reference_entity_array(
     const std::vector<reference_entity>& entities) {
     boost::json::array items;
@@ -1047,11 +1037,11 @@ namespace {
         boost::json::serialize(boost::json::value(std::move(items))));
 }
 
-/// @brief Serializes executed landing slots to the `examples.<slot>` context.
+/// @brief Builds the examples.<slot> data used by landing-page templates.
 ///
-/// Shape consumed by the landing partials: each slot has `visible_sql` and a
-/// nullable `result` with typed `columns[]` and `rows[][].{is_null,text}`. Every
-/// plain-text value is HTML-escaped at the source; there is no autoescape (§14).
+/// Each slot contains visible_sql and a table result, or null when no table
+/// was captured. Columns include display types, and each cell keeps its NULL
+/// flag and, text. Escape the text here because templates insert it directly
 [[nodiscard]] std::string serialize_landing_examples(
     const std::vector<landing_example_view>& slots) {
     boost::json::object root;
@@ -1116,8 +1106,8 @@ namespace {
     return std::nullopt;
 }
 
-// Inverse of node_kind_name; unknown spellings are rejected so a stale/tampered
-// artifact cannot silently degrade to an unexpected node kind (§5.1).
+// Read a node-kind name from saved JSON. Reject unknown names so an
+// unsupported node cannot silently turn into another  kind of content.
 [[nodiscard]] content_node_kind node_kind_from_name(std::string_view name) {
     using kind = content_node_kind;
     if (name == "document") return kind::root;
@@ -1155,8 +1145,8 @@ namespace {
     return entity_query_domain::any;
 }
 
-// Inverse of serialize_node; optional keys default to empty just as the serializer
-// omits them when empty, so the round-trip is exact.
+// Restore a saveb content node. Missing optional fields stay empty, matching
+// the fields serialize_node omits when writing it.
 [[nodiscard]] content_node deserialize_node(const boost::json::value& value) {
     const boost::json::object& object = value.as_object();
     content_node node;
@@ -1181,8 +1171,8 @@ namespace {
     return node;
 }
 
-// Inverse of serialize_example. setup/teardown are read when present so the plan
-// round-trips; the site_model projection stores examples with those fields cleared.
+// Read an example from a plan or site model. Plans contain setup and teardown.
+// Execution clears those fields before saving the site model.
 [[nodiscard]] sql_example deserialize_example(const boost::json::value& value) {
     const boost::json::object& object = value.as_object();
     sql_example example;
@@ -1216,8 +1206,8 @@ namespace {
     return query;
 }
 
-// Inverse of serialize_tutorial. Rebuilds the resolved content forest, examples,
-// entity queries, and previous/next links the render stage binds without a DB.
+// Restore tutorial content, examples, and navigation links so rendering can
+// use the saved model without a database.
 [[nodiscard]] tutorial deserialize_tutorial(const boost::json::value& value) {
     const boost::json::object& object = value.as_object();
     tutorial item;
@@ -1245,7 +1235,7 @@ namespace {
     return item;
 }
 
-// Inverse of serialize_entity (the full reference_entity projection, §11.3).
+// Restore the  entity fields written by serialize_entity.
 [[nodiscard]] reference_entity deserialize_one_entity(const boost::json::object& object) {
     reference_entity entity;
     entity.canonical_id = std::string(object.at("canonical_id").as_string());
@@ -1309,9 +1299,8 @@ namespace {
     return entity;
 }
 
-// Semantic (non-HTML-escaped) projection of an executed landing slot for the
-// private site_model. The render stage re-escapes via serialize_landing_examples,
-// so these stored values are the raw result text (§180 semantic projection).
+// Save a landing slot with its original result text. HTML escaping happens
+// later in serialize_landing_examples when rendering the page.
 [[nodiscard]] boost::json::value serialize_landing_view(const landing_example_view& slot) {
     boost::json::object object;
     object["slot"] = slot.slot;
@@ -1377,12 +1366,12 @@ namespace {
 
 }  // namespace
 
-/// @brief Parses a cpp_entities/sql_entities artifact back into the model (§11.3).
+/// @brief Reads a saved C++ or SQL entity index.
 ///
-/// Reconstructs the complete persisted entity projection, including detailed and
-/// per-parameter documentation plus the SQL-to-C++ implementation relationship.
-/// @param text Canonical entity-index JSON text.
-/// @return The documented entities in the array's stored order.
+/// Restores documentation, parameter descriptions, and SQL-to-C++ links after
+/// checking the artifact schema and revision.
+/// @param text Entity-index JSON.
+/// @return Entities in their stored order.
 [[nodiscard]] std::vector<reference_entity> deserialize_reference_entities(std::string_view text) {
     const boost::json::value root = parse_json_value(text);
     const boost::json::object& object = root.as_object();
@@ -1418,16 +1407,13 @@ namespace {
     return entities;
 }
 
-/// @brief Serializes the resolved, database-independent site model (§180).
+/// @brief Saves the site data needed to render without PostgreSQL.
 ///
-/// Schema bioseq.website.site_model revision 1: the private artifact `website execute`
-/// writes (mode 0600) and `website render` consumes without a cluster. It carries
-/// only normalized semantic projections — resolved tutorial/landing trees, executed
-/// visible-result models, the entity graph with base-independent routes, coverage,
-/// and server/extension provenance — never setup/teardown SQL, credentials, OIDs,
-/// timings, or machine paths, so the same model renders at two base paths.
-/// @param model Fully resolved site model.
-/// @return Canonical JSON ending in one newline.
+/// Stores resolved tutorials and landing results with reference entities,
+/// coverage, and build inputs. The caller must clear setup and  teardown SQL
+/// before saving. Routes remain independent of the deployment base path.
+/// @param model Resolved site model with execution-only data nemoved
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_site_model(const site_model& model) {
     require_processing_contract(
         model.schema,
@@ -1534,10 +1520,9 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Parses the current site-model artifact, rejecting a wrong
-/// schema so a stale/tampered artifact cannot silently render (§5.1, §184).
-/// @param text Canonical site_model JSON text.
-/// @return The resolved site model.
+/// @brief Reads a site, model and checks its schema and processing versions.
+/// @param text Saved site-model JSON.
+/// @return The model used to render pages without a database.
 [[nodiscard]] site_model deserialize_site_model(std::string_view text) {
     const boost::json::value document = parse_json_value(text);
     const boost::json::object& object = document.as_object();
@@ -1663,11 +1648,11 @@ namespace {
     return model;
 }
 
-/// @brief Serializes the current Clang source-graph closure (§11.3).
-/// @param clang_version The Clang version the scan was linked against.
-/// @param roots Configured primary module names (the closure seeds).
-/// @param closure Reachable Bioseq-owned units, sorted by module name.
-/// @return Canonical JSON ending in one newline.
+/// @brief Serializes modules reachable through exported imports.
+/// @param clang_version Clang version used for the scan.
+/// @param roots Primary modules from which the scan starts.
+/// @param closure Reachable modules, sorted by module name.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_source_graph(
     std::string_view clang_version,
     const std::vector<std::string>& roots,
@@ -1720,11 +1705,11 @@ namespace {
     return std::string(object.at(key).as_string());
 }
 
-/// @brief Reads the owned output route set from a current manifest (§16).
-/// @param text Manifest JSON text.
-/// @param expected_schema Exact current schema identity.
-/// @param expected_revision Exact current numeric schema revision.
-/// @return The manifest's declared output routes (leading-slash), in stored order.
+/// @brief Reads output routes from a manifest with  the expected schema.
+/// @param text Manifest JSON.
+/// @param expected_schema Required schema name.
+/// @param expected_revision Required schema revision.
+/// @return Output route keys in their stored order.
 [[nodiscard]] std::vector<std::string> manifest_output_routes(
     std::string_view text,
     std::string_view expected_schema,
@@ -1741,14 +1726,14 @@ namespace {
     return routes;
 }
 
-/// @brief Serializes the immutable multi-version assembled manifest (§16).
-/// @param primary_version The primary (newest) version label.
-/// @param ordered_versions All version labels, newest first.
-/// @param base_path Normalized base path used to build version routes.
+/// @brief Serializes the manifest for a site containing several versions.
+/// @param primary_version Primary version label.
+/// @param ordered_versions Version labels, newest first.
+/// @param base_path Normalized base path for version routes.
 /// @param input_manifest_hashes SHA-256 of each input site-manifest.json.
 /// @param input_success_hashes SHA-256 of each input `<root>.success` marker.
-/// @param outputs Every assembled output route and its SHA-256, except itself.
-/// @return Canonical JSON ending in one newline.
+/// @param outputs Output routes and hashes, excluding this manifest.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_release_manifest(
     std::string_view primary_version,
     const std::vector<std::string>& ordered_versions,
@@ -1785,17 +1770,15 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Builds a full page render context from the site view and page fields.
+/// @brief Combines site fields and page data for a template.
 ///
-/// Produces {"site":..,"nav":..,"page":..[,<collection_key>:..]} as one HTML-safe
-/// JSON object. `page_object` and `collection_json` are pre-serialized JSON text
-/// (built by the caller from json_quote / serialize_reference_entity_array), so no raw
-/// string is ever concatenated unescaped into the context (§14).
-/// @param site Resolved site-wide fields (base-path-aware URLs and labels).
-/// @param page_object JSON object text for the per-page `page` binding.
-/// @param collection_key Optional extra top-level key (for example "entities").
-/// @param collection_json JSON value text for that key; ignored when key empty.
-/// @return The serialized page context ready for render_page_template.
+/// Adds site, nav, and page objects, plus an optional named collection.
+/// Callers prepare text escaping for template bindings before this step.
+/// @param site Site labels and URLs, with  the base path applied to internal links.
+/// @param page_object JSON object for the page binding.
+/// @param collection_key Extra top-level key, or empty to omit it.
+/// @param collection_json JSON value for that key
+/// @return JSON context for render_page_template.
 [[nodiscard]] std::string build_page_context(
     const site_view& site,
     std::string_view page_object,
@@ -1831,12 +1814,10 @@ namespace {
     nav_object["tutorials"] = site.tutorials_url;
     nav_object["reference"] = site.reference_url;
 
-    // Synthesize the inert SEO JSON-LD (§15.5) from the page's own title/
-    // description/canonical. It is a serialized-JSON string bound as page.jsonld so
-    // the single application/ld+json block emits data, never executable script; no
-    // datePublished/dateModified is included (no deterministic source metadata). The
-    // primary @type follows the page_type hint (WebSite/TechArticle/WebPage); a
-    // BreadcrumbList is added under @graph when the page carries a breadcrumb trail.
+    // Build page.jsonld frm the page title, description, and canonical URL.
+    // The page kind selects WebSite, TechArticle, or WebPage. Include a
+    // BreadcrumbList when the page has breadcrumbs. Publication dates are
+    // omitted because the input has no fixed dates to use.
     boost::json::value page_value = parse_json_value(page_object);
     if (page_value.is_object()) {
         boost::json::object& page_object_ref = page_value.as_object();
@@ -1907,14 +1888,13 @@ namespace {
     return apply_html_safe_escapes(boost::json::serialize(root));
 }
 
-/// @brief Serializes the content-addressed per-version entity tooltip set (§12.4).
+/// @brief Serializes entity details for link tooltips.
 ///
-/// Richer than the search index: each record carries the normalized signature and
-/// route so a hovered entity link can show a summary/signature card without a
-/// second request. The file is named by its own SHA-256 (§16), so its bytes are
-/// immutable and long-cacheable.
-/// @param entities Canonical documented entities for the version.
-/// @return Canonical HTML-safe JSON ending in one newline.
+/// Each record contains a summary, signature, and route, with  parameter and
+/// return information. The renderer names this file by its SHA-256 so browsers
+/// can cache it until its contents change.
+/// @param entities Documented entities for this, version.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_reference_tooltips(
     const std::vector<reference_entity>& entities) {
     boost::json::object root;
@@ -1946,10 +1926,10 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Serializes the versions manifest consumed by the header selector (§16).
-/// @param version_labels Version path components, newest first.
-/// @param base_path Normalized base path used to build each version route.
-/// @return Canonical HTML-safe JSON ending in one newline.
+/// @brief Serializes version links for the header selector.
+/// @param version_labels Version labels, newest first.
+/// @param base_path Normalized base path for each version route.
+/// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_release_catalog(
     const std::vector<std::string>& version_labels, std::string_view base_path) {
     boost::json::object root;
@@ -1968,12 +1948,9 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Serializes the documentation-coverage report (§11.4).
-/// @param public_total Number of public entities considered.
-/// @param documented_total Number with a non-empty summary.
-/// @param missing_summary Public entities missing docs (non-fatal warnings).
-/// @param fatal_missing Required/tutorial-referenced entities missing docs.
-/// @return Canonical JSON ending in one newline.
+/// @brief Converts entity IDs into a JSON array for coverage reports.
+/// @param ids Entity identities in report order.
+/// @return A JSON array of strings.
 [[nodiscard]] boost::json::array serialize_id_array(
     const std::vector<std::string>& ids) {
     boost::json::array array;

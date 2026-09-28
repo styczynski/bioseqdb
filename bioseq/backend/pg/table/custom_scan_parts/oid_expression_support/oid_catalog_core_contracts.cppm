@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares catalog OID values without importing PostgreSQL implementation headers.
+ * @brief Defines the SQL function and type OIDs needed by custom scans.
  */
 module;
 extern "C" {
@@ -61,13 +61,13 @@ export struct bioseq_stub_oids {
     Oid seq_cast_oid;
 };
 
-/** @brief Return the complete backend-local Bioseq catalog identity set. */
+/** @brief Returns this backend's Bioseq OIDs, looking up required objects as needed. */
 export [[nodiscard]] const bioseq_stub_oids& get_cached_stub_oids();
 
-/** @brief Return cached OIDs only when the extension catalog surface is complete. */
+/** @brief Returns Bioseq OIDs, or null when required extension objects are unavailable. */
 export [[nodiscard]] const bioseq_stub_oids* try_get_cached_stub_oids();
 
-/** @brief Tests whether an OID names a match-result projection function. */
+/** @brief Checks whether the function is a  match-result helper such as score or cigar. */
 export [[nodiscard]] constexpr bool
 is_bioseq_projection_funcid(const Oid funcid, const bioseq_stub_oids& o) noexcept {
     return funcid == o.score_oid || funcid == o.dp_score_oid || funcid == o.query_len_oid ||

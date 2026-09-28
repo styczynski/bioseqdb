@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates join placeholder, setrefs, and plan-construction contracts.
+ * @brief Exports the plan builders and output-binding helpers for custom joins.
  */
 export module bioseq.postgres.table:custom_scan_join_plan;
 

@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/writer.cppm
- * @brief Ordered hash-major stream emission and publication metadata assembly.
+ * @brief Write minimizers in hash order and prepare generation metadata.
  */
 module;
 
@@ -25,12 +25,12 @@ export namespace bioseq::indexing {
 using hash_major_minimizer_append_logical_bytes_fn = bool (*)(
     void*, hash_major_minimizer_stream_kind, std::span<const std::byte>);
 
-/** @brief Non-owning append callback for the three logical output streams. */
+/** @brief Borrowed callback for appending directory, control, and posting bytes. */
 struct hash_major_minimizer_logical_stream_sink_ref {
     void* context = nullptr;
     hash_major_minimizer_append_logical_bytes_fn append_bytes = nullptr;
 
-    /// Append bytes to the selected logical stream through the borrowed callback.
+    /// Append bytes, returning false if the sink is missing or rejects the write.
     [[nodiscard]] bool append(
             hash_major_minimizer_stream_kind kind,
             std::span<const std::byte> bytes) const {
@@ -38,7 +38,7 @@ struct hash_major_minimizer_logical_stream_sink_ref {
     }
 };
 
-/** @brief Decoded and byte-exact encoded publication metadata. */
+/** @brief The generation head and manifest, both as fields and encoded bytes. */
 struct hash_major_minimizer_encoded_metadata {
     hash_major_minimizer_head head{};
     hash_major_minimizer_manifest manifest{};
@@ -46,7 +46,13 @@ struct hash_major_minimizer_encoded_metadata {
     encoded_hash_major_minimizer_manifest encoded_manifest{};
 };
 
-/** @brief Streaming hash-major encoder that emits ordered authenticated streams. */
+/**
+ * @brief Write hash groups as checksummed control and posting streams.
+ *
+ * Hashes and  each hash's encoded positions must arrive in increasing order.
+ * A block's postings reach the sink before its controls and directory entry.
+ * finish returns the metadata that the calle needs to publish the generation.
+ */
 class hash_major_minimizer_logical_encoder {
 private:
     hash_major_minimizer_generation_options options_{};
@@ -76,7 +82,7 @@ private:
     bool hash_open_ = false;
     bool finished_ = false;
 
-    /// Map a persisted stream kind to its zero-based accounting slot.
+    /// Map one of, the three stream kinds to its checksum and byte-count array index
     [[nodiscard]] static constexpr std::size_t stream_index_(
             hash_major_minimizer_stream_kind kind) noexcept {
         return static_cast<std::size_t>(kind) - 1u;
@@ -103,7 +109,7 @@ private:
         return {};
     }
 
-    /// Publish buffered posting bytes without changing their encoded order.
+    /// Send buffered postings to the sink in their original order.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     flush_posting_buffer_() {
         if (posting_buffer_bytes_ == 0u) return {};
@@ -117,7 +123,7 @@ private:
         return {};
     }
 
-    /// Add little-endian posting bytes to stream and current-block authentication state.
+    /// Buffer encoded postings and update the stream and block checksums.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     append_posting_bytes_(std::span<const std::byte> bytes) {
         const std::size_t index = stream_index_(
@@ -142,7 +148,7 @@ private:
         return {};
     }
 
-    /// Seal and publish the current control block after its postings are visible.
+    /// Finish the current block and write its postings, controls, and directory entry.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     finish_block_() {
         using namespace hash_major_minimizer_detail;
@@ -184,10 +190,8 @@ private:
             || expected_posting_bytes != block_posting_bytes) {
             return std::unexpected(hash_major_minimizer_error::count);
         }
-        // Publication order is postings first, then the control/directory
-        // authority that makes those bytes discoverable.  In particular, a
-        // partial final posting row must not remain buffered while metadata
-        // for this block becomes externally visible.
+        // Flush  the last partial posting buffer before writing metadata that
+        // points to it. The sink must receive those bytes first.
         if (auto flushed = flush_posting_buffer_(); !flushed) {
             return flushed;
         }
@@ -236,9 +240,8 @@ private:
     }
 
 public:
-    /// Bind generation metadata and a caller-owned append sink for ordered emission.
-    ///
-    /// The sink callback and its context must remain valid through `finish()`.
+    /// Set the generation settings and the sink used for all stream writes.
+    /// Keep the callback and its context alive through finish().
     hash_major_minimizer_logical_encoder(
             hash_major_minimizer_generation_options options,
             hash_major_minimizer_logical_stream_sink_ref sink)
@@ -252,9 +255,9 @@ public:
     hash_major_minimizer_logical_encoder& operator=(
         const hash_major_minimizer_logical_encoder&) = delete;
 
-    /// Begin one strictly increasing hash group with its exact posting count.
-    ///
-    /// @return Success, or a state, count, ordering, or storage-profile error before emission.
+    /// Start a hash group with a positive exact posting count.
+    /// The hash must follow the previous group in increasing order. Starting
+    /// a new block can write the completed block and report a sink error.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> begin_hash(
             std::uint64_t hash,
             std::uint64_t exact_count) {
@@ -286,10 +289,9 @@ public:
         return {};
     }
 
-    /// Append one encoded position to the open hash group in strictly increasing order.
-    ///
-    /// The low bit stores strand and the remaining bits store a global base-pair coordinate.
-    /// A sink failure can leave an already accepted prefix externally visible.
+    /// Append the  next encoded position for the current hash in increasing order.
+    /// The low bit is the strand and the other bits are the global coordinate.
+    /// A write failure can leave an earlier prefix in the sink.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_posting(
             std::uint64_t encoded_position) {
         if (!hash_open_ || current_written_count_ >= current_expected_count_) {
@@ -350,10 +352,9 @@ public:
         return {};
     }
 
-    /// Append one complete hash group from a borrowed ordered position span.
-    ///
-    /// A failure can leave a prefix buffered or published and the encoder must not be reused
-    /// unless the returned state permits the caller to complete the open group.
+    /// Append a whole hash group from an ordered postion span.
+    /// An error can leave a partial group buffered or written to the sink
+    /// Continue only when the error allows the unfinished group to be completed.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_hash(
             std::uint64_t hash,
             std::span<const std::uint64_t> positions) {
@@ -368,10 +369,9 @@ public:
         return end_hash();
     }
 
-    /// Seal all streams and return byte-exact manifest and head publication metadata.
-    ///
-    /// Posting bytes precede their control and directory authority. The returned head is the
-    /// final atomic publication record. A sink failure can leave unpublished stream bytes.
+    /// Finish the streams and return the encoded manifest and generation head.
+    /// The, caller publishes the head after storing the manifest. A  write
+    /// failure can leave stream bytes in the sink without a published head.
     [[nodiscard]] std::expected<
         hash_major_minimizer_encoded_metadata, hash_major_minimizer_error>
     finish() {

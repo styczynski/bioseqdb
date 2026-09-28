@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Manages parallel scan DSM state and publishes the stable executor callbacks.
+ * @brief Shares parallel scan state  and defines column-scan executor callbacks.
  */
 module;
 extern "C" {
@@ -64,7 +64,7 @@ export {
 
     inline constexpr std::uint32_t k_parallel_column_scan_revision = 3u;
 
-    /** @brief Returns a validated worker counter slot in the parallel scan DSM region. */
+    /** @brief Returns a worker counter slot, or null if its shared-memory layout is invalid. */
     [[nodiscard]] slice_dsm_worker_header*
     bioseq_column_parallel_counter_slot(parallel_column_scan_handle pscan,
                                         std::uint32_t slot_index,
@@ -86,7 +86,7 @@ export {
             static_cast<Size>(slot_index) * pscan->slot_stride);
     }
 
-    /** @brief Estimates DSM bytes for the serialized snapshot and per-worker counters. */
+    /** @brief Estimates shared memory needed for the scan snapshot and counters for the leader and workers. */
     Size bioseq_column_estimate_dsm_custom_scan(CustomScanState* node, ParallelContext* pcxt) {
         scan_state* bioseq_scan_state = scan_state::from_custom_scan_state(node);
         if (pcxt == nullptr || pcxt->nworkers < 0) {
@@ -104,7 +104,7 @@ export {
         return add_size(counters_offset, mul_size(slot_count, slot_stride));
     }
 
-    /** @brief Initializes the leader's parallel scan DSM layout and serialized snapshot. */
+    /** @brief Saves the leader's snapshot and prepares shared stripe allocation and worker counters. */
     void bioseq_column_initialize_dsm_custom_scan(CustomScanState* node,
                                                   ParallelContext* pcxt,
                                                   void* coordinate) {
@@ -131,13 +131,10 @@ export {
         std::memset(
             reinterpret_cast<char*>(pscan) + counters_offset, 0, mul_size(slot_count, slot_stride));
 
-        /*
-         * Serialize scan snapshot for workers so they see changes
-         * if we have flushed stripe / row_mask during this scan.
-         */
+        /* Give workers the snapshot held by this scan. */
         SerializeSnapshot(bioseq_scan_state->snapshot, pscan->snapshot_data);
 
-        /* Stripe numbers are starting from index 1 */
+        /* Stripe IDs start at 1. */
         pg_atomic_init_u64(&pscan->next_stripe_id, 1);
 
         if (parallel_leader_participation)
@@ -174,7 +171,7 @@ export {
             bioseq_scan_state->parallel_scan = nullptr;
     }
 
-    /** @brief Restores a worker snapshot and rebinds snapshot-dependent scan resources. */
+    /** @brief Restores the leader's snapshot in a worker and attaches its source provider and buffer to it. */
     void bioseq_column_initialize_worker_custom_scan(CustomScanState* node,
                                                      shm_toc* toc,
                                                      void* coordinate) {
@@ -211,7 +208,7 @@ export {
         runtime.buffer.replace_executor_snapshot(bioseq_scan_state->snapshot);
     }
 
-    /** @brief Deparses storage-pushdown clauses for EXPLAIN output. */
+    /** @brief Formats pushed-down filters as an SQL expresson for EXPLAIN. */
     const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses) {
         Expr* conjunction;
 
@@ -232,7 +229,7 @@ export {
                                   show_implicit_cast);
     }
 
-    /** @brief Deparses the projected column list for EXPLAIN output. */
+    /** @brief Formats projected columns for EXPLAIN, with a message when no columns are read. */
     const char* bioseq_column_projected_columns_str(List* context, List* projected_columns) {
         if (list_length(projected_columns) == 0) {
             return "<columnar optimized out all columns>";
@@ -262,7 +259,7 @@ export {
         for (int bms_member : needed_attr_set) {
             Relation bioseq_column_relation = scan_state->ss_currentRelation;
 
-            /* neededAttrSet already represents 0-indexed attribute numbers */
+            /* The attribute bitmap uses zero-based  column numbers. */
             Form_pg_attribute column_form =
                 bioseq::postgres::support::tuple_descriptor_attribute(RelationGetDescr(bioseq_column_relation), bms_member);
             if (column_form->attisdropped) {
@@ -273,11 +270,8 @@ export {
                                   bms_member + 1,
                                   RelationGetRelationName(bioseq_column_relation));
             } else if (column_form->attnum <= 0) {
-                /*
-                 * collect_needed_column_attributes should have already thrown for
-                 * system columns. Similarly, it should have already expanded
-                 * whole-row references to individual attributes.
-                 */
+                /* The collector expands whole-row references and omits ctid/tableoid.
+                 * It rejects unsupported system columns before this, point. */
                 bioseq_report<logging_level::error, logging_target::postgres>()
                     .with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
                     .with_message("cannot explain column with attrNum={} "
@@ -288,11 +282,7 @@ export {
                                   RelationGetRelationName(bioseq_column_relation));
             }
 
-            /*
-             * varlevelsup is used to figure out the (query) level of the Var
-             * that we are investigating. Since we are dealing with a particular
-             * relation, it is useless here.
-             */
+            /* These Vars refer to the current query's scan relation. */
             Index varlevelsup = 0;
 
             CustomScan* custom_scan =
@@ -310,7 +300,7 @@ export {
         return var_list.release();
     }
 
-    /** @brief Builds a deparse context from the PlanState available to EXPLAIN callbacks. */
+    /** @brief Builds the expression-printing context from the plan inside a PlanState. */
     List* set_deparse_context_planstate(List* dpcontext, Node* node, List* ancestors) {
         PlanState* ps = reinterpret_cast<PlanState*>(node);
         return set_deparse_context_plan(dpcontext, ps->plan, ancestors);

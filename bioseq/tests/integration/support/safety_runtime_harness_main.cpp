@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_main.cpp
- * @brief Dispatch the standalone SQL-boundary safety evidence protocol.
+ * @brief Command-line entry point for PostgreSQL runtime-safety tests.
  */
 
 #include <cstdio>
@@ -10,7 +10,7 @@ import bioseq.tests.integration.safety_runtime_harness_support;
 
 using namespace bioseq::tests::integration::safety_runtime_harness;
 
-/// Dispatch one standalone runtime-evidence protocol command.
+/// Run the requested harness command and report failures on stderr.
 int main(int argc, char** argv) {
     try {
         const command_line command =

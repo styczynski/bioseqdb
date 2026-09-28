@@ -1,6 +1,6 @@
 /**
  * @file fragment_handle_implementation.cppm
- * @brief Constructs PostgreSQL index handles behind the declaration-only module interface.
+ * @brief Create index storage handles and their child memory contexts.
  */
 module;
 
@@ -41,10 +41,9 @@ namespace bioseq::storage::indexing {
                                                             std::uint64_t sequence_rowno,
                                                             seq_caches* caches,
                                                             MemoryContext mctx) {
-    // The returned handle owns an open child MemoryContext. Normal callers
-    // must invoke close_checked(); failure paths must invoke
-    // abandon_after_pg_error_noexcept() before destruction. The destructor is
-    // deliberately zero-PostgreSQL and asserts this ownership transition.
+    // The handle owns this child memory context. Call close_checked() on success
+    // or abandon_after_pg_error_noexcept() after a PostgreSQL error. Its destructor
+    // checks that the context pointer has been cleared.
     fragment_storage_handle storage;
     storage.db_oid_ = db;
     storage.tablespace_oid_ = spc;

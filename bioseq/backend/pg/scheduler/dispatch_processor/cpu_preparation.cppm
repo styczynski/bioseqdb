@@ -1,6 +1,6 @@
 /**
  * @file cpu_preparation.cppm
- * @brief Implements typmod-specific admitted CPU query preparation.
+ * @brief Build query minimizers while accounting for their stored memory.
  */
 module;
 
@@ -40,7 +40,10 @@ import bioseq.parallelism.memory_admission;
 
 namespace bioseq::simd::cpu_preparation_detail {
 
-/** @return True after absorbing one independently admitted physical query owner. */
+/**
+ * @brief Save a prepared query and transfer its memory permit to the query collection.
+ * @return False if its layout, ordinal, or memory accounting cannot be accepted.
+ */
 [[nodiscard]] bool try_commit_physical_query_sketch(
     batch_processor::cpu_prepared_query_sketch&& prepared,
     std::vector<batch_processor::cpu_prepared_query_sketch>& retained_queries,
@@ -106,7 +109,7 @@ namespace bioseq::simd::cpu_preparation_detail {
     return true;
 }
 
-/** Append decoded hashes after admitting the replacement vector allocation. */
+/** Append decoded query hashes after reserving memory for any vector growth. */
 template <class p_hash>
 [[nodiscard]] bool append_physical_query_hashes(
     const ::bioseq::minimizers::minimizer_physical_batch_view records,
@@ -184,7 +187,10 @@ template <class p_hash>
     return destination.size() == required;
 }
 
-/** Prepare one query in the concrete record selected before instantiation. */
+/**
+ * Build a query sketch in the selected minimizer record format. Keep its
+ * memory permit with the records and return a status explaining  any failure
+ */
 template <class p_alphabet>
 [[nodiscard]] batch_processor::cpu_preparation_status prepare_physical_query_sketch_view(
     const bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -254,8 +260,8 @@ template <class p_alphabet>
                 return batch_processor::cpu_preparation_status::validation_failed;
             }
             auto released = std::move(collector).release_owned_storage();
-            // These ordered locals own the released pair immediately: every
-            // return below destroys the vector before its adjacent permit.
+            // Declare the permit first so every return destroys the records before
+            // releasing their memory allowance.
             bioseq::parallelism::memory_permit storage_permit = std::move(released.second);
             std::vector<p_record> physical_records = std::move(released.first);
             const std::uint64_t measured =
@@ -283,7 +289,7 @@ template <class p_alphabet>
         });
 }
 
-/** Select and authenticate the fixed PG query-cache record before mutation. */
+/** Choose a supported query record format for this alphabet, width, and minimizer settings. */
 template <class p_alphabet, std::size_t p_width>
 [[nodiscard]] ::bioseq::minimizers::minimizer_physical_layout_selection
 select_cpu_query_execution_layout(const minimizer_algorithm requested_algorithm,
@@ -306,7 +312,12 @@ select_cpu_query_execution_layout(const minimizer_algorithm requested_algorithm,
     return selection;
 }
 
-/** @brief Appends one lazy query view to a prepared sketch representation. */
+/**
+ * @brief Add this query's minimizers to the shared query collection.
+ * Store full records for the legacy format, or append hashes and keep the
+ * original records for the selected format. Reserve emory, before growing
+ * either collection.
+ */
 template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_sketch_view(
     const bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -495,7 +506,7 @@ void append_cpu_prepared_query_sketch_view(
     }
 }
 
-/** @brief Adapts one flat compact query into admitted CPU preparation. */
+/** @brief Sketch a flat PostgreSQL query through the shared lazy-sequence interface. */
 template <class p_alphabet, std::size_t p_width, class p_destination_value>
 void append_cpu_prepared_query_sketch(
     const bioseq::pg_types::seq& header,
@@ -529,7 +540,7 @@ void append_cpu_prepared_query_sketch(
         retained_query_bytes);
 }
 
-/** @brief Adapts one recipe-backed query into admitted CPU preparation. */
+/** @brief Sketch an expanded query  through its read session, without flattening it first. */
 template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_recipe_sketch(
     const Datum recipe,
@@ -567,7 +578,10 @@ void append_cpu_prepared_query_recipe_sketch(
         retained_query_bytes);
 }
 
-/** @return The terminal state of independently admitted query preparation. */
+/**
+ * @brief Prepare one flat query with its own memory permit, for parallel preparation.
+ * @return The preparation status. Successful records and their permit go to destination.
+ */
 template <class p_alphabet, std::size_t p_width>
 [[nodiscard]] batch_processor::cpu_preparation_status prepare_independently_admitted_query_sketch(
     const bioseq::pg_types::seq& header,
@@ -592,7 +606,7 @@ template <class p_alphabet, std::size_t p_width>
                                               destination);
 }
 
-/** @return The immutable callable table for one alphabet and storage width. */
+/** @return Query-preparation functions for one alphabet and storage-unit width. */
 template <class p_alphabet, std::size_t p_width>
 [[nodiscard]] const batch_processor::cpu_preparation_typmod_operations& typmod_ops() noexcept {
     static constexpr batch_processor::cpu_preparation_typmod_operations operations{

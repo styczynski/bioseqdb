@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/lists.cppm
- * @brief Pointer-sized range adapters for PostgreSQL and intrusive lists.
+ * @brief Iterate and update PostgreSQL lists, or follow nodes linked by next pointers.
  */
 module;
 
@@ -56,7 +56,7 @@ template <class p_element> class postgres_list_iterator final {
         return cell_ == other.cell_;
     }
 
-    /** Returns whether this iterator has reached the range sentinel. */
+    /** Return whether iteration has reached the end of the list */
     [[nodiscard]] bool operator==(const std::default_sentinel_t&) const noexcept {
         return cell_ == nullptr;
     }
@@ -67,11 +67,12 @@ template <class p_element> class postgres_list_iterator final {
 };
 
 /**
- * Pointer-sized mutable view over a PostgreSQL List of pointers.
+ * Wrap a PostgreSQL pointer list for C++ iteration and updates.
+ * The wrapper stores one List pointer and leaves its allocation alive when
+ * destroyed. Call clear to free the list cells, or release to hand the list
+ * to another owner. The  pointed-to objects are never freed here.
  *
- * @tparam p_element Pointee type stored in each PostgreSQL list cell.
- * The view never frees automatically; explicit mutation methods mirror the
- * ownership conventions of PostgreSQL's List API.
+ * @tparam p_element Type of object stored in each list cll.
  */
 template <class p_element> class postgres_list final {
   public:
@@ -86,7 +87,7 @@ template <class p_element> class postgres_list final {
         return postgres_list_iterator<p_element>{list_};
     }
 
-    /** Returns the range sentinel iterator. */
+    /** Return the iterator that marks the end of the list. */
     [[nodiscard]] postgres_list_iterator<p_element> end() const noexcept {
         return {};
     }
@@ -96,7 +97,7 @@ template <class p_element> class postgres_list final {
         return list_;
     }
 
-    /** Returns the number of cells; PostgreSQL treats NIL as size zero. */
+    /** Return the number of cells, or zero for NIL. */
     [[nodiscard]] int size() const noexcept {
         return list_length(list_);
     }
@@ -111,70 +112,70 @@ template <class p_element> class postgres_list final {
         return static_cast<p_element*>(list_nth(list_, element_index));
     }
 
-    /** Returns the const pointer stored at @p element_index. */
+    /** Return the selected element as a pointer to const. */
     [[nodiscard]] const p_element* operator[](std::size_t element_index) const {
         return static_cast<p_element*>(list_nth(list_, element_index));
     }
 
-    /** Returns the first pointer; the list must be non-empty. */
+    /** Return the first pointer from a non-empty list. */
     [[nodiscard]] p_element* get_first() {
         return static_cast<p_element*>(list_nth(list_, 0));
     }
 
-    /** Returns the first const pointer; the list must be non-empty. */
+    /** Return the first element as a pointer to const. The list must be non-empty. */
     [[nodiscard]] const p_element* get_first() const {
         return static_cast<p_element*>(list_nth(list_, 0));
     }
 
-    /** Returns the second pointer; the list must contain two cells. */
+    /** Return the second pointer. The list must contain at least two cells. */
     [[nodiscard]] p_element* get_second() {
         return static_cast<p_element*>(list_nth(list_, 1));
     }
 
-    /** Returns the second const pointer; the list must contain two cells. */
+    /** Return the  second element as a pointer to const. At least two cells are required. */
     [[nodiscard]] const p_element* get_second() const {
         return static_cast<p_element*>(list_nth(list_, 1));
     }
 
-    /** Returns the third pointer; the list must contain three cells. */
+    /** Return the third pointer. The list must contain at least three cells. */
     [[nodiscard]] p_element* get_third() {
         return static_cast<p_element*>(list_nth(list_, 2));
     }
 
-    /** Returns the third const pointer; the list must contain three cells. */
+    /** Return the third element as a pointer to const. At least three cells are required. */
     [[nodiscard]] const p_element* get_third() const {
         return static_cast<p_element*>(list_nth(list_, 2));
     }
 
-    /** Returns the last pointer; the list must be non-empty. */
+    /** Return the last pointer from a non-empty list */
     [[nodiscard]] p_element* get_last() {
         return static_cast<p_element*>(llast(list_));
     }
 
-    /** Returns the last const pointer; the list must be non-empty. */
+    /** Return the last element as a pointer to const. The list must be non-empty. */
     [[nodiscard]] const p_element* get_last() const {
         return static_cast<p_element*>(llast(list_));
     }
 
-    /** Appends @p element and retains PostgreSQL's possibly new list head. */
+    /** Appends @p element and updates the stored list head, if PostgreSQL moves it. */
     postgres_list& append(p_element* element) {
         list_ = lappend(list_, element);
         return *this;
     }
 
-    /** Prepends @p element and retains PostgreSQL's possibly new list head. */
+    /** Prepends @p element and updates the stored list head if PostgreSQL moves it. */
     postgres_list& prepend(p_element* element) {
         list_ = lcons(element, list_);
         return *this;
     }
 
-    /** Appends the cells of @p other, consuming them per list_concat. */
+    /** Append the pointers from @p other, leaving that list intact. */
     postgres_list& concatenate(List* other) {
         list_ = list_concat(list_, other);
         return *this;
     }
 
-    /** Appends the cells viewed by @p other per PostgreSQL list_concat. */
+    /** Append the pointers from @p other, leaving that list  intact. */
     postgres_list& concatenate(const postgres_list& other) {
         list_ = list_concat(list_, other.list_);
         return *this;
@@ -190,17 +191,17 @@ template <class p_element> class postgres_list final {
         return postgres_list{list_concat_copy(list_, other.list_)};
     }
 
-    /** Returns the pointer-equality intersection with @p other. */
+    /** Return entries also present in @p other, comparing nodes with PostgreSQL equal(). */
     [[nodiscard]] postgres_list make_intersection(const postgres_list& other) const {
         return postgres_list{list_intersection(list_, other.list_)};
     }
 
-    /** Returns elements absent from @p other under pointer equality. */
+    /** Return entries absent frm @p other, comparing nodes with PostgreSQL equal(). */
     [[nodiscard]] postgres_list make_difference(const postgres_list& other) const {
         return postgres_list{list_difference(list_, other.list_)};
     }
 
-    /** Removes and returns the first pointer; the list must be non-empty. */
+    /** Remove and return the first pointer from a non-empty list. */
     [[nodiscard]] p_element* pop_front() {
         p_element* first = get_first();
         list_ = list_delete_first(list_);
@@ -276,7 +277,7 @@ class postgres_integer_list_iterator final {
         return cell_ == other.cell_;
     }
 
-    /** Returns whether this iterator has reached the range sentinel. */
+    /** Return whether iteration has reached the end of the list. */
     [[nodiscard]] bool operator==(const std::default_sentinel_t&) const noexcept {
         return cell_ == nullptr;
     }
@@ -286,7 +287,11 @@ class postgres_integer_list_iterator final {
     const List* list_ = nullptr;
 };
 
-/** Pointer-sized mutable view over a PostgreSQL List of integers. */
+/**
+ * Wrap a PostgreSQL integer list for C++ iteration and updates.
+ * Destruction leaves the list alive. Call clear to free its cells or release
+ * to pass the list to another owner.
+ */
 class postgres_integer_list final {
   public:
     /** Constructs an empty integer-list view. */
@@ -300,7 +305,7 @@ class postgres_integer_list final {
         return postgres_integer_list_iterator{list_};
     }
 
-    /** Returns the range sentinel iterator. */
+    /** Return the iterator that marks the end of the list. */
     [[nodiscard]] postgres_integer_list_iterator end() const noexcept {
         return {};
     }
@@ -320,19 +325,19 @@ class postgres_integer_list final {
         return list_ == nullptr;
     }
 
-    /** Appends @p element and retains PostgreSQL's possibly new list head. */
+    /** Appends @p element and updates the stored list head  if PostgreSQL moves it. */
     postgres_integer_list& append(int element) {
         list_ = lappend_int(list_, element);
         return *this;
     }
 
-    /** Appends and consumes cells from @p other per list_concat. */
+    /** Append the integers from @p other, leaving that list intact. */
     postgres_integer_list& concatenate(List* other) {
         list_ = list_concat(list_, other);
         return *this;
     }
 
-    /** Appends cells viewed by @p other per PostgreSQL list_concat. */
+    /** Append the integers from @p other, leaving that list intact. */
     postgres_integer_list& concatenate(const postgres_integer_list& other) {
         list_ = list_concat(list_, other.list_);
         return *this;
@@ -349,7 +354,7 @@ class postgres_integer_list final {
         return postgres_integer_list{list_concat_copy(list_, other.list_)};
     }
 
-    /** Returns the last integer; the list must be non-empty. */
+    /** Return the last integer from a non-empty list. */
     [[nodiscard]] int get_last() const noexcept {
         return llast_int(list_);
     }
@@ -422,7 +427,7 @@ template <class p_node> class intrusive_list_iterator final {
         return current_ == other.current_;
     }
 
-    /** Returns whether this iterator has reached the range sentinel. */
+    /** Return whether iteration has reached the end of the list. */
     [[nodiscard]] bool operator==(const std::default_sentinel_t&) const noexcept {
         return current_ == nullptr;
     }
@@ -442,7 +447,7 @@ template <class p_node> class intrusive_list final {
         return intrusive_list_iterator<p_node>{head_};
     }
 
-    /** Returns the range sentinel iterator. */
+    /** Return the iterator that marks the end of the list */
     [[nodiscard]] intrusive_list_iterator<p_node> end() const noexcept {
         return {};
     }

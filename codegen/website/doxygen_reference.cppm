@@ -15,30 +15,27 @@ module bioseq.codegen.website:doxygen_reference;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Doxygen XML reader (§11.2). pugixml is the sole XML parser and stays in this
-// unit's global module fragment. Doxygen owns documentation-comment parsing;
-// this stage projects its compound/member XML onto reference_entity records
-// and typed content_node trees that entity_index later merges with the Clang
-// structural index. Doxygen text is escaped and reconstructed through the typed
-// renderer downstream; it never becomes trusted arbitrary HTML.
+// Reads Doxygen XML witw pugixml and converts descriptions into website
+// reference entries and content trees. The reference index matches them to
+// Clang declarations. Later rendering escapes the text before producing HTML.
 namespace bioseq::codegen::website {
 
-/// @brief One compound reference discovered in a Doxygen index.xml.
+/// @brief Namespace, class, or other entry listed in Doxygen index.xml.
 struct doxygen_compound_ref {
     std::string refid;
     std::string kind;
     std::string name;
 };
 
-/// @brief Typed conversion of a Doxygen description element.
+/// @brief Converted Doxygen content and warnings about unsupported elements.
 struct doxygen_description_result {
     std::vector<content_node> nodes;
     std::vector<diagnostic> diagnostics;
 };
 
-/// @brief Parses a Doxygen index.xml into its compound inventory.
+/// @brief Reads the entries listed in Doxygen index.xml.
 /// @param xml Raw index.xml text.
-/// @return The listed compounds in document order.
+/// @return The listed entries in document order
 [[nodiscard]] std::vector<doxygen_compound_ref> parse_doxygen_compound_index(std::string_view xml) {
     pugi::xml_document document;
     const pugi::xml_parse_result result =
@@ -61,8 +58,8 @@ struct doxygen_description_result {
 
 namespace {
 
-// Doxygen punctuation entity element → exact Unicode text (§11.2). Encoded as
-// UTF-8 bytes so goldens carry the same characters Doxygen 1.9.8 emits.
+// Converts Doxygen punctuation tags to their Unicode characters.
+// UTF-8 bytes keep the  output independent of the, source-file encoding.
 [[nodiscard]] std::optional<std::string_view> punctuation_replacement(
     std::string_view name) {
     if (name == "ndash") { return std::string_view("\xE2\x80\x93"); }  // U+2013
@@ -74,8 +71,7 @@ namespace {
     return std::nullopt;
 }
 
-// External links must be http/https; file:, javascript:, data:, and
-// protocol-relative URLs are rejected (§11.2).
+// Allow external links only when they start with http:// or https://.
 [[nodiscard]] bool is_safe_external_url(std::string_view url) {
     if (url.starts_with("//")) {
         return false;
@@ -214,7 +210,7 @@ std::vector<content_node> convert_children(
         return node;
     }
 
-    // Simple wrapping elements: map the tag, then convert mixed content.
+    // Convert the formatting tag, then preserve its text and child elements.
     if (name == "para") {
         node.kind = content_node_kind::paragraph;
     } else if (name == "emphasis") {
@@ -241,11 +237,11 @@ std::vector<content_node> convert_children(
         node.kind = content_node_kind::strong_text;
     } else if (name == "parameternamelist" || name == "parameterdescription"
                || name == "briefdescription" || name == "detaileddescription") {
-        node.kind = content_node_kind::paragraph;  // transparent container
+        node.kind = content_node_kind::paragraph;  // group the description content
     } else {
         report(context, "unknown_element",
                "unknown Doxygen XML element <" + name + "> at " + xml_path);
-        node.kind = content_node_kind::paragraph;  // passthrough: never drop text
+        node.kind = content_node_kind::paragraph;  // keep text from unsupported elements
     }
     node.children = convert_children(element, xml_path, context);
     return node;
@@ -265,7 +261,7 @@ std::vector<content_node> convert_children(
     return out;
 }
 
-// Truncates a derived summary at a Unicode-safe sentence/length boundary.
+// Shortens a summary at the first sentence or at a complete UTF-8 character.
 [[nodiscard]] std::string truncate_summary(std::string_view text) {
     static constexpr std::size_t max_bytes = 200;
     if (const std::size_t sentence = text.find(". ");
@@ -285,10 +281,10 @@ std::vector<content_node> convert_children(
 
 }  // namespace
 
-/// @brief Converts a Doxygen description XML fragment into a typed node tree.
-/// @param xml A single <briefdescription>/<detaileddescription> element text.
-/// @param owning_entity Qualified entity name used in unknown-tag diagnostics.
-/// @return The converted nodes and any element diagnostics.
+/// @brief Converts Doxygen description XML into a content tree.
+/// @param xml One briefdescription or detaileddescription element.
+/// @param owning_entity Qualified name to include in  conversion warnings.
+/// @return Parsed nodes and warnings about unsupported elements or unsafe links.
 [[nodiscard]] doxygen_description_result parse_doxygen_content(
     std::string_view xml, std::string_view owning_entity) {
     pugi::xml_document document;
@@ -305,9 +301,9 @@ std::vector<content_node> convert_children(
     return output;
 }
 
-/// @brief Extracts the plain-text brief description of a memberdef/compounddef.
-/// @param node Doxygen definition node.
-/// @return Flattened brief text, or empty when undocumented.
+/// @brief Reads text from the briefdescription paragraphs.
+/// @param node Doxygen memberdef or compounddef node.
+/// @return Joined paragraph text, or empty when no brief is present.
 [[nodiscard]] std::string extract_doxygen_brief(const pugi::xml_node& node) {
     const pugi::xml_node brief = node.child("briefdescription");
     if (!brief) {
@@ -370,9 +366,9 @@ namespace {
 
 }  // namespace
 
-/// @brief Derives an entity summary from brief, else the first detailed para.
+/// @brief Uses the brief description as the summary, flling back to detailed text.
 /// @param node Doxygen definition node.
-/// @return The brief text, or a Unicode-safe-truncated first detailed paragraph.
+/// @return The brief, or a shortened first nonempty detailed paragraph.
 [[nodiscard]] std::string derive_summary_text(const pugi::xml_node& node) {
     if (std::string brief = extract_doxygen_brief(node); !brief.empty()) {
         return brief;
@@ -386,9 +382,9 @@ namespace {
     return {};
 }
 
-/// @brief Parses one Doxygen compound XML file into documented entities.
-/// @param xml Raw compound XML text (for example a namespace or class file).
-/// @return The compound plus its documented members, with typed documentation.
+/// @brief Reads reference entries from a Doxygen compound XML file.
+/// @param xml Raw XML for a namespace, class, or another compound.
+/// @return Compound entries and their members with any available documentation.
 [[nodiscard]] std::vector<reference_entity> parse_doxygen_entities(std::string_view xml) {
     pugi::xml_document document;
     const pugi::xml_parse_result result =

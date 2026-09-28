@@ -1,6 +1,6 @@
 /**
  * @file layout_test.cpp
- * @brief Tests persisted minimizer image layout planning and validation.
+ * @brief Checks section offsets, alignment, and size limits in stored index images.
  */
 
 #include <sys/mman.h>

@@ -1,6 +1,6 @@
 /**
  * @file external/providers/uniprot.cppm
- * @brief UniProt provider planning, retrieval, and response parsing.
+ * @brief Read UniProtKB protein metadata into catalog rows.
  */
 module;
 
@@ -48,35 +48,36 @@ using prov::external_error_kind;
 using prov::make_external_error;
 using prov::provider_id;
 
-/// Returns the normalized UniProt provider identity.
+/// Return the provider ID used for UniProt rows and errors.
 inline prov::provider_id uniprot_provider_id() noexcept {
     return {.value = "uniprot"};
 }
 
-/// Copies an identifier into the provider-wide bounded representation.
+/// Copy an identifier, truncating it at  the shared byte limit.
 inline prov::bounded_string<prov::maximum_identifier_bytes>
 uniprot_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// Validated UniProt request plan containing no credentials.
+/// UniProt lookup or search request and its row limit.
 struct uniprot_plan {
     prov::query_target target{prov::query_target::catalog};
     std::string operation_id{"searchCursor"};
     std::string accession;  // Set when an accession-equality predicate is present.
-    std::string query{"*"}; // UniProtKB free-text/organism search expression.
+    std::string query{"*"}; // UniProtKB text, or organism search expression.
     std::optional<std::uint64_t> limit;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the plan and its strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         return sizeof(uniprot_plan) + operation_id.capacity() + accession.capacity() +
                query.capacity();
     }
 
-    /// Returns the deterministic execution identity for this plan.
+    /// Hash the operation, accession, and query for plan identification.
+    /// The target and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        // Mix one plan component into the stable execution fingerprint.
+        // Add one text field to the plan hash.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -95,10 +96,10 @@ struct uniprot_plan {
     }
 };
 
-/// Executes one validated UniProt request plan.
+/// Fetch one UniProt response and send catalog rows to a consumer.
 class uniprot_session {
   public:
-    /// Opens a session over borrowed runtime services and an owning plan.
+    /// Own the plan while borrowing the memory context and worker  pool.
     uniprot_session(const context::context& memory,
                     const bioseq::parallelism::global_pool& pool,
                     uniprot_plan plan)
@@ -108,7 +109,7 @@ class uniprot_session {
     uniprot_session(uniprot_session&&) noexcept = default;
     uniprot_session& operator=(uniprot_session&&) noexcept = default;
 
-    /// Runs the request and emits normalized provider messages.
+    /// Fetch one entry or one search page and emit protein catalog rows.
     std::expected<prov::provider_statistics, external_error>
     run(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
@@ -124,7 +125,7 @@ class uniprot_session {
                               .location = api::parameter_location::query,
                               .value = std::string_view{plan_.query}});
             if (plan_.limit.has_value()) {
-                // UniProtKB search caps the page size at 500.
+                // Request at most 500 entries in this search page.
                 const std::uint64_t capped = *plan_.limit > 500U ? 500U : *plan_.limit;
                 params.push_back({.name = "size",
                                   .location = api::parameter_location::query,
@@ -132,8 +133,7 @@ class uniprot_session {
             }
         }
 
-        // The generated operations already default to application/json. Request
-        // it explicitly so a JSON body is returned regardless of the default.
+        // Request JSON exlicitly because the row parser expects a JSON response.
         auto response = client.get_with_accept(plan_.operation_id, params, "application/json");
         if (!response.has_value()) {
             return std::unexpected(make_external_error(external_error_kind::transport,
@@ -159,7 +159,7 @@ class uniprot_session {
         return stats;
     }
 
-    /// Requests cooperative session cancellation.
+    /// Ask the search-result emission loop to stop.
     void request_stop() noexcept {
         if (stop_) {
             stop_->store(true);
@@ -167,7 +167,7 @@ class uniprot_session {
     }
 
   private:
-    /// Normalizes one accession result or cursor page into protein catalog rows.
+    /// Read a direct accession response or one search page into catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -217,7 +217,7 @@ class uniprot_session {
         return {};
     }
 
-    /// Maps one absence-tolerant UniProtKB entry into a catalog row.
+    /// Emit one UniProtKB catalog row, leaving missing metadata unset.
     std::expected<void, external_error> emit_entry(const bioseq::external::json::value& entry,
                                                    prov::provider_message_sink_ref sink) {
         namespace json = bioseq::external::json;
@@ -255,7 +255,7 @@ class uniprot_session {
             }
         }
 
-        // proteinDescription.recommendedName.fullName.value
+        // Use the recommended full protein name as the catalog title.
         if (const json::value* description = entry.find_member("proteinDescription")) {
             if (const json::value* recommended = description->find_member("recommendedName")) {
                 if (const json::value* full_name = recommended->find_member("fullName")) {
@@ -302,7 +302,7 @@ class uniprot_session {
 
 static_assert(prov::external_api_session_compatible<uniprot_session>);
 
-/// UniProt adapter implementing the external provider contract.
+/// Provider adapter for UniProtKB catalog metadata.
 struct uniprot_provider {
     static constexpr auto id = bioseq::common::templating::compile_time_string("uniprot");
     static constexpr auto name = bioseq::common::templating::compile_time_string("UniProt");
@@ -313,7 +313,7 @@ struct uniprot_provider {
     /// Session executing a prepared request plan.
     using session_type = uniprot_session;
 
-    /// Returns statically available UniProt capabilities.
+    /// Return the UniProt features advertised by this adapter
     static prov::provider_capabilities make_potential_capabilities() {
         prov::provider_capabilities caps;
         caps.flags.set(static_cast<std::size_t>(prov::provider_capability::catalog_search));
@@ -324,17 +324,17 @@ struct uniprot_provider {
         return caps;
     }
 
-    /// Returns the request-policy profiles owned by this adapter.
+    /// Return an empty list of  request-policy profiles.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
-    /// Returns the locator-policy profiles owned by this adapter.
+    /// Return an empty list of URL-policy profiles.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
-    /// Estimates the bounded resources required by one UniProt plan.
+    /// Estimate plan and buffer sizes for a UniProt request.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,
@@ -347,7 +347,8 @@ struct uniprot_provider {
         return estimate;
     }
 
-    /// Lowers a normalized query into a validated UniProt plan.
+    /// Choose an accession lookup or text search for catalog metadata.
+    /// Taxonomy and sequence targets return unsupported_capability.
     static std::expected<uniprot_plan, external_error>
     plan(const prov::normalized_external_query& query,
          const prov::provider_capability_snapshot&,
@@ -363,8 +364,7 @@ struct uniprot_provider {
         }
         if (query.target == prov::query_target::sequence ||
             query.target == prov::query_target::sequence_chunk) {
-            // Protein sequence materialization is explicitly unsupported and
-            // is surfaced by the PostgreSQL bridge as SQLSTATE 0A000.
+            // Sequence rows are not implemented by this adapter.
             return std::unexpected(
                 make_external_error(external_error_kind::unsupported_capability,
                                     uniprot_provider_id(),
@@ -372,8 +372,8 @@ struct uniprot_provider {
                                     "UniProt protein sequence retrieval is not implemented"));
         }
 
-        // Catalog lowering: an accession-equality predicate lowers to a single
-        // getByAccession fetch. Otherwise use a free-text or organism searchCursor.
+        // An accession filter selects getByAccession. Otherwise searchCursor uses
+        // the first text filter, adding organism_name: for an organism search.
         std::string accession;
         std::string search_query;
         for (const auto& node : query.predicates) {
@@ -410,7 +410,7 @@ struct uniprot_provider {
         return plan;
     }
 
-    /// Opens an execution session for a validated plan.
+    /// Open a session that owns a copy of the plan.
     static std::expected<uniprot_session, external_error>
     open(context::context& worker_memory,
          const bioseq::parallelism::global_pool& pool,

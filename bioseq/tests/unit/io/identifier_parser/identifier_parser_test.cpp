@@ -1,6 +1,6 @@
 /**
  * @file identifier_parser_test.cpp
- * @brief Verifies header parsing, destination mapping, and file sampling.
+ * @brief Checks sequence header parsing, column mapping, and file sampling
  */
 #include <unistd.h>
 
@@ -18,7 +18,7 @@ using namespace bioseq::io::identifier_parser;
 
 namespace {
 
-/// Records the value routed to each destination slot for assertions.
+/// Save the value sent to each  destination column for test assertions.
 struct capture_identifier_writer {
     std::vector<std::optional<std::string>> values;
 
@@ -60,7 +60,7 @@ value_for_column(const identifier_mapping_result& map,
     return writer.values.at(slot_for_column(map, col_index));
 }
 
-/// Describe a nullable text column accepted by identifier routing.
+/// Describe a nullable text column for mapping tests.
 [[nodiscard]] column_descriptor text_col(std::string_view name) {
     return {.name = name,
             .is_text = true,
@@ -69,7 +69,7 @@ value_for_column(const identifier_mapping_result& map,
             .has_default = false,
             .is_identity_or_generated = false};
 }
-/// Describe a nullable non-text column rejected by text-only routes.
+/// Describe a nullable column whose SQL type is not toxt.
 [[nodiscard]] column_descriptor scalar_col(std::string_view name) {
     return {.name = name,
             .is_text = false,
@@ -79,13 +79,13 @@ value_for_column(const identifier_mapping_result& map,
             .is_identity_or_generated = false};
 }
 
-/// Holds the resolved mapping and values captured while routing one header.
+/// The column mapping and values produced from one header.
 struct parse_run {
     identifier_mapping_result map;
     capture_identifier_writer writer;
 };
 
-/// Resolve a mapping, parse one header, and return its captured destination values.
+/// Map header fields to columns and return the parsed values.
 [[nodiscard]] parse_run run_parse(header_format requested,
                                   header_format effective,
                                   std::span<const column_descriptor> columns,
@@ -161,7 +161,7 @@ TEST_CASE("identifier_parser: UniProt isoform leaves absent protein-existence fi
                        "OS=Macaca fascicularis OX=9541 GN=YWHAB");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "YWHAB");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "9541");
-    REQUIRE_FALSE(value_for_column(r.map, r.writer, 2).has_value()); // no PE= -> NULL
+    REQUIRE_FALSE(value_for_column(r.map, r.writer, 2).has_value()); // The, header has no PE field.
 }
 
 TEST_CASE("identifier_parser: UniRef parsing routes identifier, cluster, and tags",
@@ -279,8 +279,8 @@ TEST_CASE("identifier_parser: numeric and named data sources coexist",
           "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("x"), text_col("organism_name")};
     const std::vector<user_column_mapping> maps{
-        {.column_name = "x", .data_source = "1"},               // 0-based positional index
-        {.column_name = "organism_name", .data_source = "OS"}}; // named field
+        {.column_name = "x", .data_source = "1"},               // Field indexes start at zero.
+        {.column_name = "organism_name", .data_source = "OS"}}; // Match the OS header field.
     auto r =
         run_parse(header_format::uniprotkb,
                   header_format::uniprotkb,
@@ -339,9 +339,9 @@ TEST_CASE("identifier_parser: detect_header_format majority vote",
 
 namespace {
 
-/// Write identifier-parser input to a process-unique temporary file.
-/// @param content Bytes to write to the file.
-/// @return Path of the completed temporary file.
+/// Write test input to a temporary path named with the process ID and a counter.
+/// @param content Bytes to write.
+/// @return The temporary path.
 std::string write_tmp_file(const std::string& content) {
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> counter{0};

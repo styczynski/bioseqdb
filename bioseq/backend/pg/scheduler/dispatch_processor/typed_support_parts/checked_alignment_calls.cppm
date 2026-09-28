@@ -32,7 +32,7 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Raises a captured typed-dispatch failure through a PostgreSQL-safe leaf. */
+/** Reports a PostgreSQL error as a C++ exception so stack cleanup can run. */
 [[noreturn]] inline void raise_typed_dispatch_pg_error_as_cpp(const int sqlstate,
                                                               const char* message,
                                                               const char* detail = nullptr,
@@ -70,7 +70,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
         "runtime or select a non-Vulkan algorithm before dispatch.");
 }
 
-/** Reports a selector-level Vulkan capability boundary, never a runtime failure. */
+/** Reports an unsupported combination of Vulkan algorithms. */
 [[noreturn]] inline void raise_vulkan_tuple_capability_pg_error() {
     raise_typed_dispatch_pg_error_as_cpp(
         ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -150,7 +150,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
         "recompute or scalar fallback.");
 }
 
-/** Copies a diagnostic into a fixed buffer and returns its byte length. */
+/** Copies as much diagnostic text as fits, adds a null terminator, and returns the copied length. */
 template <std::size_t p_capacity>
 [[nodiscard]] inline std::size_t copy_pg_error_detail(std::array<char, p_capacity>& destination,
                                                       const char* source) noexcept {
@@ -168,7 +168,11 @@ template <std::size_t p_capacity>
     return size;
 }
 
-/** Runs an aligner callable and maps typed runtime failures to PostgreSQL errors. */
+/**
+ * Runs an aligner and reports known execution failures as PostgreSQL errors.
+ * Saves the diagnostic before leaving  the catch block so exception cleanup
+ * finishes before the error is reported. Other C++ exceptions pass through.
+ */
 template <class p_function>
 [[nodiscard]] match_result_collection run_aligner_pg_checked(std::string_view stage,
                                                              p_function&& fn) {
@@ -221,7 +225,7 @@ template <class p_function>
     __builtin_unreachable();
 }
 
-/** Calls the segmented aligner through the PostgreSQL error boundary. */
+/** Runs segmented alignment and translates its known failures to PostgreSQL errors. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_segmented_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -230,7 +234,7 @@ template <class... p_arguments>
         });
 }
 
-/** Calls the fragment-index aligner through the PostgreSQL error boundary. */
+/** Runs alignment with a fragment index and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection
 minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
@@ -240,7 +244,7 @@ minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
         });
 }
 
-/** Calls the generated-physical fragment-index aligner through the PostgreSQL boundary. */
+/** Runs alignment with the selected fragment record format and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection
 minimap_port_fragment_index_physical_pg_checked(p_arguments&&... args) {

@@ -1,6 +1,6 @@
 /**
  * @file sequence_adapters.cppm
- * @brief One-shot sequence encode and decode adapters.
+ * @brief Encodes and decodes complete compact sequences.
  */
 module;
 
@@ -32,18 +32,17 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 
-// ============================================================================
-// One-shot adapters over the streaming encoder and decoder primitives.
-// ============================================================================
+// Whole-sequence adapters for the streaming codecs.
 
-/// One-shot scalar encoder. Adapter around `encode_body_chunk_scalar`.
-/// The default maps unknown bytes to the alphabet's default rank, matching
-/// the permissive SQL literal parser.
-/// @tparam p_destination_configuration Target compact-sequence configuration.
-/// @tparam p_policy Unknown-byte handling for non-alphabet ASCII.
-/// @param input Character bytes to encode (need not be NUL-terminated).
-/// @param length Number of input bytes to encode.
-/// @return Packed sequence with padding metadata from `finalize_encode_state`.
+/**
+ * Encodes text into an owned packed sequence with the scalar codec.
+ *
+ * The default policy maps unrecognized bytes to N for dna5 and rank zero
+ * for other alphabets. The drop policy omits them.
+ * @param input Input character buffer.
+ * @param length Number of bytes to read.
+ * @return Packed sequence with its final padding recorded.
+ */
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
@@ -87,13 +86,16 @@ encode_sequence_scalar(
     return sequence_type::from_packed(std::move(packed), padding);
 }
 
-/// One-shot SIMD encoder. Adapter around `encode_body_chunk` —
-/// dispatches to the dna4/dna5 SIMD pipeline when applicable.
-/// @tparam p_destination_configuration Target compact-sequence configuration.
-/// @tparam p_policy Unknown-byte handling for non-alphabet ASCII.
-/// @param input Character bytes to encode (need not be NUL-terminated).
-/// @param length Number of input bytes to encode.
-/// @return Packed sequence with padding metadata from `finalize_encode_state`.
+/**
+ * Encodes text into  an owned packed sequence using the selected codec.
+ *
+ * dna4 and dna5 use SIMD lookup, which assumes DNA text and can mistake some
+ * ivalid bytes for letters. Other alphabets use the scalar codec. Unused lookup
+ * entries default to N for dna5 and rank zero for other alphabets.
+ * @param input Input character buffer
+ * @param length Number of bytes to read.
+ * @return Packed sequence with its final padding recorded.
+ */
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
@@ -137,15 +139,13 @@ encode_sequence_simd(
     return sequence_type::from_packed(std::move(packed), padding);
 }
 
-/// One-shot scalar decoder. Adapter around
-/// `decode_words_to_ascii_scalar` for `is_sequence_custom_alphabet`
-/// shapes (which expose packed storage through `read_cptr`).
-/// For other `supports_compact_sequence_range` shapes (e.g.
-/// `compact_sequence_range<std::vector<seq::dna4>>`), falls back to
-/// the iterator-based path so the function works for every range.
-/// @tparam p_source_configuration Source compact-sequence configuration.
-/// @param sequence Input packed sequence view.
-/// @return ASCII string with one byte per logical letter.
+/**
+ * Decodes a compact sequence to a string with the, scalar codec.
+ *
+ * Custom-alphabet and standard-layout instances expose their packed words
+ * directly. Other sequence configurations are read through their rank iterator.
+ * The returned  string contains only logical letters, without padding.
+ */
 template <class p_source_configuration>
 requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_scalar(
@@ -186,14 +186,13 @@ requires supports_compact_sequence_range<p_source_configuration>
     }
 }
 
-/// One-shot SIMD decoder. Adapter around `decode_words_to_ascii` —
-/// SIMD path engages for `(dna4, uint64, 2, 32)` and
-/// `(dna5, uint8, 3, 2)`. Everything else uses the scalar bit-walk.
-/// Falls back to the iterator-based scalar path for non-custom-alphabet
-/// ranges.
-/// @tparam p_source_configuration Source compact-sequence configuration.
-/// @param sequence Input packed sequence view.
-/// @return ASCII string with one byte per logical letter.
+/**
+ * Decodes a compact sequence to a string using the selected codec.
+ *
+ * The SIMD decoder supports dna4 in uint64_t words and dna5 with two ranks
+ * per byte. Other packed layouts use scalar decoding. Configurations without
+ * direct packed storage are read through their rank iterator.
+ */
 template <class p_source_configuration>
 requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_simd(

@@ -1,6 +1,6 @@
 /**
  * @file adapters.cppm
- * @brief Public grouped-SoA prepared-reader lookup adapters.
+ * @brief Opens savd grouped indexes for a prepared set of query hashes.
  */
 module;
 
@@ -40,48 +40,45 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Lookup result containing the global count and any retained positions.
+/// Occurrence count and stored target positions for one prepared query hash.
 struct grouped_soa_query_lookup {
-    /// Total authenticated occurrences across every selected extent.
+    /// Total occurrences counted across  the selected index extents.
     std::uint64_t global_occurrence_count = 0;
-    /// Whether all counted positions were retained under `max_occ`.
+    /// False when the count exceeds max_occ and the positions are unavailable.
     bool positions_complete = true;
-    /// Reader-owned positions, valid until the reader is destroyed.
+    /// Positions borrowed from the reader. Invalidated when it releases its storage.
     std::span<const std::uint64_t> positions{};
 };
 
-/// Reader-owned stats for the grouped-SoA cold-load memory path.  In
-/// particular, `position_append_growth_reservations == 0` proves that payload
-/// ingestion did not re-run live memory admission (and its OS probes) while
-/// appending individual retained positions.
+/// Memory and routing statistics collected while loading a grouped index.
+/// A zero position_append_growth_reservations count means appending positions
+/// needed no further memory reservations.
 struct grouped_soa_query_reader_memory_stats {
-    /// Number of full owned-capacity ledger reconciliations.
+    /// Number of checks that sum the reader's allocated buffers.
     std::uint64_t capacity_accounting_passes = 0;
-    /// Number of attempts to allocate the final position array.
+    /// Number of attempts to prepare the final position array
     std::uint64_t global_position_storage_preparations = 0;
     /// Number of successful final position-array allocations.
     std::uint64_t global_position_storage_allocations = 0;
     /// Admission requests made while appending decoded positions.
     std::uint64_t position_append_growth_reservations = 0;
-    /// Number of authenticated positions retained for lookup.
+    /// Number of target positions stored for lookup.
     std::uint64_t retained_position_count = 0;
-    /// Exact allocated array elements. For grouped-SoA this equals the retained
-    /// count. The exported capacity name remains stable for E2E SQL.
+    /// Number of elements allocated in the final position array. Equal to the stored count.
     std::uint64_t retained_position_capacity = 0;
-    /// Width of each compact query-state record in bytes.
+    /// Bytes used for each query's occurrence count.
     std::uint64_t query_record_size_bytes = 0;
-    /// Number of live compact query-state records.
+    /// Number of  query hashes tracked by the reader.
     std::uint64_t query_record_count = 0;
-    /// Allocated compact query-state record count.
+    /// Number of allocated query-count entries.
     std::uint64_t query_record_capacity = 0;
-    /// Bytes owned by compact query-state records.
+    /// Bytes allocated for, query counts, position offsets and write counts.
     std::uint64_t query_record_capacity_bytes = 0;
-    /// Bytes owned by per-query position offsets.
+    /// Bytes allocated for positions owned by individual query records.
     std::uint64_t query_record_position_capacity_bytes = 0;
-    /// Exact bucket-implied query suffixes plus high-bit radix offsets. The
-    /// aggregate SQL key retains this stable name and exact owner equation.
+    /// Bytes used by the compact query hashes and the oadix-bucket offsets.
     std::uint64_t query_hash_capacity_bytes = 0;
-    /// Query-routing bytes released after route construction.
+    /// Bytes released from the temporary full query-hash array after routing was built.
     std::uint64_t released_query_hash_capacity_bytes = 0;
     /// Number of high hash bits used by the radix route.
     std::uint64_t query_route_radix_bits = 0;
@@ -91,38 +88,38 @@ struct grouped_soa_query_reader_memory_stats {
     std::uint64_t query_route_radix_nonempty_bucket_count = 0;
     /// Largest query count assigned to one radix bucket.
     std::uint64_t query_route_radix_max_bucket_size = 0;
-    /// Directory controls considered during query routing.
+    /// Control hashes looked up in the prepared query set.
     std::uint64_t query_route_control_lookups = 0;
-    /// Query hashes tested against routed control ranges.
+    /// Hash comparisons made while finding controls in the prepared query set.
     std::uint64_t query_route_hash_probes = 0;
-    /// Query-to-control range matches retained by routing.
+    /// Control hashes found in the prepared query set.
     std::uint64_t query_route_matches = 0;
     /// Control records decoded from accepted rows.
     std::uint64_t decoded_control_records = 0;
-    /// Decoded controls retained because a query selected them.
+    /// Control boundaries kept from extents selected  by the query.
     std::uint64_t retained_selected_control_records = 0;
-    /// In-memory width of one selected-control record in bytes.
+    /// Bytes in the selected_control type used by this reader.
     std::uint64_t selected_control_size_bytes = 0;
-    /// Peak bytes retained for selected-control records.
+    /// Peak bytes allocated for selected control boundaries and query routes.
     std::uint64_t retained_selected_control_capacity_bytes = 0;
-    /// Current bytes retained by selected-control ownership.
+    /// Current bytes allocated for selected control boundaries and query routes.
     std::uint64_t current_selected_control_capacity_bytes = 0;
     /// Bytes owned by encoded and decoded directory storage.
     std::uint64_t directory_capacity_bytes = 0;
-    /// Bytes owned by directory-ordinal routing metadata.
+    /// Bytes used to map directory entries to selected extents.
     std::uint64_t ordinal_route_capacity_bytes = 0;
     /// Bytes owned by the selected-extent vector.
     std::uint64_t selected_extent_capacity_bytes = 0;
-    /// Exact final position-array bytes, excluding allocator headroom.
+    /// Bytes in the final position array, excluding extra memory reserved for allocation.
     std::uint64_t global_position_capacity_bytes = 0;
-    /// Bytes owned by control-payload decode scratch.
+    /// Bytes reserved in the temporary control-payload buffer.
     std::uint64_t control_payload_capacity_bytes = 0;
-    /// Sum of all currently owned capacities.
+    /// Total bytes recorded for the reader's allocated buffers.
     std::uint64_t owned_capacity_bytes = 0;
-    /// Whether any reported counter saturated.
+    /// True if a statistics counter overflowed or a memory-accounting check failed.
     bool saturated = false;
 
-    /// Return whether the component capacities sum to the owned-byte total.
+    /// Check that the component byte counts add up to the reported total  without overflow
     [[nodiscard]] bool retained_layout_equation_holds() const noexcept {
         using bioseq::common::saturating_add;
         std::uint64_t accounted = directory_capacity_bytes;
@@ -139,9 +136,9 @@ struct grouped_soa_query_reader_memory_stats {
     }
 };
 
-/// Backend-independent scalar grouped-SoA reader. The facade consumes the same
-/// grouped_soa_directory_view/address authority as the prepared readers
-/// and accepts only the grouped-SoA layout.
+/// Loads a saved grouped-SoA index for a fixed set of query hashes. It checks
+/// metadata and row checksums, counts occurrences, then keeps positions only
+/// for hashes withiw max_occ. Results become available after finish().
 class prepared_grouped_soa_query_reader
     : private minimizer_prepared_reader_detail::trait_driven_prepared_query_core<
           minimizer_prepared_reader_detail::codec_traits<
@@ -154,7 +151,7 @@ class prepared_grouped_soa_query_reader
     prepared_grouped_soa_query_reader() = default;
 
   public:
-    /// Transfer an admitted reader while invalidating the source protocol state.
+    /// Transfer the reader and mark the source unusable.
     prepared_grouped_soa_query_reader(prepared_grouped_soa_query_reader&& other) noexcept
         : protocol_core(std::move(static_cast<protocol_core&>(other))) {
         other.mark_protocol_moved_from();
@@ -163,7 +160,8 @@ class prepared_grouped_soa_query_reader
     prepared_grouped_soa_query_reader(const prepared_grouped_soa_query_reader&) = delete;
     prepared_grouped_soa_query_reader& operator=(const prepared_grouped_soa_query_reader&) = delete;
 
-    /// Begin a reader for a sorted unique 32-bit canonical query-hash set.
+    /// Prepare a reader for sorted, unique 32-bit query hashes.
+    /// The saved hash width must be 32 bits and max_occ must fit the saved occurrence limit.
     [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
                                        minimizer_generation_encoding_error>
     begin(bioseq::parallelism::memory_admission_controller& admission,
@@ -209,7 +207,8 @@ class prepared_grouped_soa_query_reader
         return reader;
     }
 
-    /// Begin a reader for a sorted unique query-hash set.
+    /// Prepare a reader for sorted, unique  query hashes and validate the saved index settings.
+    /// max_occ must fit the occurrence limit recorded in the index.
     [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
                                        minimizer_generation_encoding_error>
     begin(bioseq::parallelism::memory_admission_controller& admission,
@@ -255,10 +254,9 @@ class prepared_grouped_soa_query_reader
         return reader;
     }
 
-    /// Legacy fixed-K15 canonical-query overload. The input must
-    /// already be strictly sorted and unique by `kmer()`. It is validated while
-    /// copying once into the reader-owned compact hash image, avoiding the
-    /// caller's temporary vector, permit, and a second sort/unique.
+    /// Prepare directly from minimap_sketch_data records sorted uniquely by kmer().
+    /// The reader copies and checks their hashes, so the caller needs no separate
+    /// hash, vector. The saved hash width must be 32 bits.
     [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
                                        minimizer_generation_encoding_error>
     begin(bioseq::parallelism::memory_admission_controller& admission,
@@ -303,24 +301,25 @@ class prepared_grouped_soa_query_reader
         return reader;
     }
 
-    /// Authenticate and consume one callback-scoped generation row.
+    /// Check and consume a generation row while its borrowed bytes are valid.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const minimizer_generation_row_view& row) {
         return this->accept_protocol_row(row);
     }
 
-    /// Consume one authenticated generation-row receipt.
+    /// Consume a row with a previously checked checksum.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const validated_minimizer_generation_row_receipt& receipt) {
         return this->accept_protocol_row(receipt);
     }
 
-    /// Finish ordered ingestion and make successful lookups available.
+    /// Check that every expected row and query position arrived, then enable lookup.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish() {
         return this->finish_query_protocol();
     }
 
-    /// Return the prepared result for one query hash.
+    /// Return a prepared hash's count  and positions. Before finish(), or for an
+    /// unpreared hash, return an empty result.
     [[nodiscard]] grouped_soa_query_lookup lookup(std::uint64_t hash) const noexcept {
         const auto found = this->lookup_protocol(hash);
         return grouped_soa_query_lookup{
@@ -330,16 +329,16 @@ class prepared_grouped_soa_query_reader
         };
     }
 
-    /// Return the captured failure snapshot for an unsuccessful begin operation.
+    /// Return the saved details of a failed memory reservation or allocation.
     [[nodiscard]] const grouped_soa_query_admission_stats&
     admission_failure_stats() const noexcept {
         return this->protocol_admission_failure_stats();
     }
 
-    /// Direct seed-consumer surface. A hash that
-    /// was not part of the immutable query union is a caller error rather than
-    /// an authenticated absence.  This keeps minimap_port on the native
-    /// persisted representation and prevents representation conversion.
+    /// Return the position spans used by seed collection The hash must have been
+    /// supplied to begin(), and finish() must have succeeded. A hash above max_occ
+    /// returns its count with positions marked unavailable. Invalid use throws
+    /// persisted_minimizer_lookup_error.
     [[nodiscard]] minimizer_lookup_spans lookup_spans(std::uint64_t hash) const {
         if (!ready()) {
             throw persisted_minimizer_lookup_error("grouped-SoA persisted lookup is not ready");
@@ -363,7 +362,7 @@ class prepared_grouped_soa_query_reader
         return minimizer_lookup_spans::contiguous(found.positions);
     }
 
-    /// Return whether row ingestion has failed closed.
+    /// Return whether a read error has made this reader unusable.
     [[nodiscard]] bool failed() const noexcept {
         return this->protocol_failed_;
     }
@@ -373,22 +372,22 @@ class prepared_grouped_soa_query_reader
         return this->protocol_ready_ && !this->protocol_failed_;
     }
 
-    /// Return the authenticated target length.
+    /// Return the target length  from the checked manifest.
     [[nodiscard]] std::uint64_t target_length() const noexcept {
         return this->manifest_.target_length;
     }
 
-    /// Return the authenticated generation identity without copying it.
+    /// Borrow the checked generation manifest.
     [[nodiscard]] const minimizer_generation_manifest& generation_manifest() const noexcept {
         return this->manifest_;
     }
 
-    /// Return bytes retained by the active memory permit.
+    /// Return the bytes currently reserved by the reader's memory permit.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return this->permit_.bytes();
     }
 
-    /// Return exact ownership and ingestion counters for this reader.
+    /// Return the reader's memory totals and loading statistics.
     [[nodiscard]] grouped_soa_query_reader_memory_stats memory_stats() const noexcept {
         using bioseq::common::saturating_add;
         const auto& ledger = this->protocol_owned_bytes_;

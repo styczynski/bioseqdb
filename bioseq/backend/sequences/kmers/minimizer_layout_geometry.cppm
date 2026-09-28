@@ -1,6 +1,6 @@
 /**
  * @file minimizer_layout_geometry.cppm
- * @brief Target-neutral physical-record geometry shared by dispatch and codegen.
+ * @brief Calculates minimizer record widths for runtime selection and code generation.
  */
 module;
 
@@ -26,7 +26,10 @@ export namespace bioseq::minimizers {
                                               : 128u;
 }
 
-/** Return checked position bits, without conflating them with biological k. */
+/**
+ * Return  the bits needed for positions in a sequnce of up to maximum_sequence_bp symbols.
+ * Uses at least one bit and throws std::length_error above 2^63 symbols.
+ */
 [[nodiscard]] constexpr std::uint8_t minimizer_position_requirement(
     const std::uint64_t maximum_sequence_bp) {
     if (maximum_sequence_bp > (std::uint64_t{1u} << 63u)) {
@@ -36,7 +39,11 @@ export namespace bioseq::minimizers {
         maximum_sequence_bp > 1u ? maximum_sequence_bp - 1u : 1u));
 }
 
-/** Select a lower anchor, storage-transition endpoint, or terminal record. */
+/**
+ * Choose a supported position-field size that covers the required bits.
+ * Buckets end where the record needs a wider integer, with 63 bits as the
+ * final bucket The smallest bucket starts at physical_kmer_size.
+ */
 [[nodiscard]] constexpr std::uint8_t minimizer_position_bucket(
     const std::uint8_t required_position_log2,
     const std::size_t physical_kmer_size) {
@@ -57,7 +64,7 @@ export namespace bioseq::minimizers {
     return 63u;
 }
 
-/** Select legacy fixed-u32 hash records without truncating a 32-bit hash. */
+/** Choose a 15-, 28- or 63-bit position field while keeping a full 32-bit hash. */
 [[nodiscard]] constexpr std::uint8_t minimizer_fixed_u32_position_bucket(
     const std::uint8_t required_position_log2) {
     if (required_position_log2 > 63u) {

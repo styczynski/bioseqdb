@@ -1,6 +1,6 @@
 /**
  * @file external/tests/provider/core_test.cpp
- * @brief Provider model, query, budget, and pack contract tests.
+ * @brief Check bounded values, error details, and provider memory budgets.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -85,9 +85,8 @@ TEST_CASE("identity views and enum text mapping",
 }
 
 namespace {
-// Helper: a sequence/metadata budget request over `providers` with `transfers`
-// in-flight transfers and the given delivery mode. The span aliases the caller's
-// array, which must outlive every make() call below.
+// Build a budget request with the chosen providers and transfer count.
+// The  provider array must remain alive while the request is used.
 external_budget_request make_budget_request(std::span<const provider_id> providers,
                                             std::size_t transfers,
                                             sequence_delivery_mode delivery) {
@@ -109,14 +108,14 @@ TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
     const std::array<provider_id, 1> one{provider_id{.value = "ncbi"}};
     const std::array<provider_id, 2> two{provider_id{.value = "ncbi"},
                                          provider_id{.value = "ucsc"}};
-    constexpr std::uint64_t k_huge_allocation = std::uint64_t{1} << 40;  // 1 TiB: always fits
+    constexpr std::uint64_t k_huge_allocation = std::uint64_t{1} << 40;  // 1 TiB, enough for these test requests
 
-    // Baseline: one provider, one transfer, chunked-record sequence delivery.
+    // Start with one provider and one transfer delivering sequence chunks.
     const auto seq = external_execution_budget::make(
         make_budget_request(one, 1, sequence_delivery_mode::chunked_records),
         k_huge_allocation);
     REQUIRE(seq.has_value());
-    // Sequence delivery reserves each simultaneous working-memory category.
+    // Sequence dglivery reserves parser, decoder, archive, and transfer buffers.
     REQUIRE(seq->transfer_carry_bytes > 0);
     REQUIRE(seq->parser_scratch_bytes > 0);
     REQUIRE(seq->decoder_bytes > 0);
@@ -133,9 +132,7 @@ TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
     REQUIRE(meta->archive_metadata_bytes == 0);
     REQUIRE(meta->materialized_record_bytes == 0);
 
-    // Adding a provider raises the peak by exactly one per-provider block
-    // (private context + metadata page + staging) — proves the ×producer_count
-    // multiplier and that nothing else scaled with provider count.
+    // A second provider adds its own context, metadata page, and, staging buffer.
     const auto two_prov = external_execution_budget::make(
         make_budget_request(two, 1, sequence_delivery_mode::chunked_records),
         k_huge_allocation);
@@ -146,8 +143,7 @@ TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
     REQUIRE(two_prov->reserved_capacity_bytes - seq->reserved_capacity_bytes ==
             per_provider_block);
 
-    // Adding an in-flight transfer raises the peak by exactly one carry buffer
-    // — proves the ×transfer_count multiplier on curl carry only.
+    // A second concurrent transfer adds one carry buffer
     const auto two_xfer = external_execution_budget::make(
         make_budget_request(one, 2, sequence_delivery_mode::chunked_records),
         k_huge_allocation);
@@ -155,8 +151,7 @@ TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
     REQUIRE(two_xfer->reserved_capacity_bytes - seq->reserved_capacity_bytes ==
             static_cast<std::uint64_t>(seq->transfer_carry_bytes));
 
-    // Materialized-record delivery reserves the final datum once, on top of the
-    // otherwise-identical sequence peak.
+    // Whole-record delivery also reserves space for the final sequence value.
     const auto mat = external_execution_budget::make(
         make_budget_request(one, 1, sequence_delivery_mode::materialized_record),
         k_huge_allocation);
@@ -180,7 +175,7 @@ TEST_CASE("owning_external_budget_allocation::make keeps reserves disjoint",
     const auto request =
         make_budget_request(providers, 2, sequence_delivery_mode::chunked_records);
 
-    // Enough for both per-slot fixed reserves plus a real shared gate pool.
+    // Leave room for  both providers' fixed buffers and the shared byte pool.
     const std::uint64_t admitted = 128U * 1024U * 1024U;
     const auto owned = owning_external_budget_allocation::make(
         request, std::span<const provider_plan_estimate>{}, admitted);
@@ -191,15 +186,14 @@ TEST_CASE("owning_external_budget_allocation::make keeps reserves disjoint",
     for (const external_slot_budget& slot : view.slots) {
         sum_fixed = bioseq::common::saturating_add(sum_fixed,
                                                    slot.fixed_reserved_bytes);
-        // Each slot floor includes page, staging, carry, and context storage.
+        // Each slot reserves buffers beyond its private context.
         REQUIRE(slot.fixed_reserved_bytes >
                 static_cast<std::uint64_t>(view.aggregate.private_context_bytes));
     }
-    // Disjoint-reserve invariant: the fixed reserves alone fit under the permit,
-    // leaving headroom for the shared gate.
+    // The combined fixed reserves must fit within the memory permit.
     REQUIRE(sum_fixed <= admitted);
 
-    // When the permit cannot even cover the per-slot fixed reserves, reject.
+    // Reject a permit too small for the required reserves.
     const auto starved = owning_external_budget_allocation::make(
         request, std::span<const provider_plan_estimate>{}, 1U * 1024U * 1024U);
     REQUIRE_FALSE(starved.has_value());

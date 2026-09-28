@@ -68,7 +68,7 @@ constexpr std::string_view alignment_query{"SELECT target_sample.id, "
     return lhs >= rhs ? lhs - rhs : rhs - lhs;
 }
 
-/// @brief Reads one required unsigned metric from Cache Storage diagnostics.
+/// Read the unsigned, number after a required Cache Storage label.
 [[nodiscard]] std::uint64_t diagnostic_metric(std::string_view diagnostic, std::string_view label) {
     const std::size_t label_offset = diagnostic.find(label);
     if (label_offset == std::string_view::npos) {
@@ -88,7 +88,7 @@ constexpr std::string_view alignment_query{"SELECT target_sample.id, "
     return value;
 }
 
-/// @brief Compares ordered libpq text-row streams byte for byte.
+/// Compare resunt sizes, NULL flags and text bytes in row order.
 [[nodiscard]] bool byte_identical(const bioseq::libpq::command_result& lhs,
                                   const bioseq::libpq::command_result& rhs) {
     if (lhs.row_count() != rhs.row_count() || lhs.column_count() != rhs.column_count()) {
@@ -160,12 +160,11 @@ void configure_canonical_cpu_path(bioseq::libpq::client_connection& connection) 
                                 "SET bioseq.index.sequence_read.enabled = on");
 }
 
-/// @brief Detects cache staging files and propagates every filesystem error.
-///
-/// Production cache writers use the `.partial` suffix for both block files and
-/// manifest staging files.  The throwing filesystem overloads are intentional:
-/// an unreadable or disappearing subtree cannot establish that no
-/// temporary cache artifact remains.
+/**
+ * Check recursively for cache files with the .partial suffix.
+ * Let filesystem errors fail the check, since an unreadable directory cannot
+ * show that all temporary files have been removed.
+ */
 [[nodiscard]] bool has_cache_temporary_file(const std::filesystem::path& root) {
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::recursive_directory_iterator{root}) {
@@ -207,11 +206,8 @@ wait_for_production_cache_readiness(bioseq::libpq::client_connection& admin,
                                         "SELECT bioseq_cache.invalidate_all(); "
                                         "SELECT bioseq_cache.reset_stats()",
                                         30s);
-            // invalidate_all() retires the probe generation immediately, but
-            // production janitor cleanup is deliberately asynchronous.  The
-            // public entries() diagnostic may therefore retain the retired
-            // row for a later sweep; physical disappearance is not part of
-            // the invalidation contract and is not cache-readiness evidence.
+            // Invalidation retires the probe generation. The janitor removes it  later,
+            // so entries() may still show a retired row when the cache is ready.
             return ready;
         },
         deadline,
@@ -237,10 +233,8 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
             context.data_directory,
             bioseq::postgres_test::host_qualification_requirements{
                 .test_case = bioseq::postgres_test::current_execution_case_context().test_case,
-                // Bioseq's admission tickets, streamed sequence
-                // storage, and spillable index runs own memory
-                // safety. Record host RAM as evidence without an
-                // unrelated fixed-capacity rejection.
+                // Record host RAM without imposing a fixed minimum for this test.
+                // Bioseq applies its memory budgets while loading and processing sequences.
                 .minimum_total_ram_bytes = 0,
                 .minimum_available_ram_bytes = 0,
                 .minimum_data_available_bytes = minimum_data_space,

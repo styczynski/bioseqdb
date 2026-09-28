@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Public command boundary for external-client generation.
+ * @brief Handles commands for generating external API clients.
  */
 module;
 
@@ -20,8 +20,8 @@ import :tests.contract;
 
 export namespace bioseq::codegen::external {
 
-/// @brief Runs the pure parser and renderer contract tests.
-/// @return Zero on success, or one after emitting the failure diagnostic.
+/// @brief Runs parser and renderer tests.
+/// @return 0 on success, or 1 after printing an error.
 inline int run_self_tests() {
     try {
         run_generator_contract_self_tests();
@@ -32,10 +32,10 @@ inline int run_self_tests() {
     }
 }
 
-/// @brief Runs external-client generation behind the process diagnostic boundary.
+/// @brief Generates clients and reports failures to stderr.
 /// @param argument_count Argument count including the executable name.
-/// @param argument_values Mutable C argument vector supplied by the launcher.
-/// @return Zero on success, or one after emitting the failure diagnostic.
+/// @param argument_values Process argument array.
+/// @return 0 on success, or 1 after rinting an error.
 inline int generate_clients(int argument_count, char** argument_values) {
     try {
         return generate_external_clients(

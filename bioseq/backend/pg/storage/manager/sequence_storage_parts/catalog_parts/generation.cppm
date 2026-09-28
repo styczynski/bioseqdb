@@ -1,6 +1,6 @@
 /**
  * @file generation.cppm
- * @brief Minimizer-generation catalog schema validation.
+ * @brief Check the schemas of minimizer storage and cleanup catalogs.
  */
 module;
 
@@ -83,30 +83,25 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter; // ceil_log2 used in letters_per_unit_for
+import bioseq.common.seqan_adapter; // ceil_log2 for calculating letters per storage unit.
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-// The PG-free bucket math and sequence_locator value live in their own
-// module so the unit-test TU can link them without the Postgres backend.
-// Re-exported here so existing `import bioseq_storage` consumers are unchanged.
+// Bucket calculations and sequence_locator are, independent of PostgreSQL
+// so unit tests can use them.
 import bioseq.storage.layout;
 
 export import :sequence_storage_catalog_source;
 
 export namespace bioseq::storage {
-// The descriptor catalog owns required relation locator attributes and two
-// partial indexes, so the generic eight-column sidecar validator cannot
-// describe it. Keep this cold schema authority next to the existing
-// PostgreSQL-owned sequence-source catalog contracts; generation-image
-// lifecycle code consumes the exported entry point without importing a second
-// tuple-shape authority.
+// The generation storage catalog has its own columns and partial indexes.
+// Check them here before opening or publishing a  generation.
 namespace minimizer_generation_catalog_detail {
 
-/// Supported canonical defaults in generation catalog descriptors.
+/// Column defaults allowed by the generation catalogs.
 enum class default_kind : std::uint8_t {
     none,
     zero_int2,
@@ -154,10 +149,10 @@ inline constexpr std::array<std::string_view, 4> k_reaper_check_expressions{{
     "pass >= 0",
 }};
 
-/// Raise one generation-catalog schema contract violation.
-/// @param catalog Logical catalog name copied into the error detail.
-/// @param detail Contract description copied into the error detail.
-/// @throws PostgreSQL ERROR unconditionally.
+/// Report a generation catalog schema mismatch as a PostgreSQL error.
+/// @param catalog Catalog name for the error.
+/// @param detail Failed schema check.
+/// @throws A C++ exception carrying the PostgreSQL error.
 [[noreturn]] inline void contract_error(const std::string_view catalog,
                                         const std::string_view detail) {
     const std::string owned_catalog{catalog};
@@ -172,11 +167,11 @@ inline constexpr std::array<std::string_view, 4> k_reaper_check_expressions{{
     pg_unreachable();
 }
 
-/// Check an attribute default against its canonical expression.
-/// @param relation Open relation containing the attribute.
-/// @param expected Expected attribute descriptor.
-/// @param expected_default_kind Canonical default category.
-/// @return Whether the analyzed default has the required constant form.
+/// Check that a column default is the required constant.
+/// @param relation Open table.
+/// @param expected Column descriptor.
+/// @param expected_default_kind Required default, or none.
+/// @return True when the parsed default matches.
 [[nodiscard]] inline bool
 exact_default(Relation relation,
               const bioseq::postgres::support::row_descriptor_field& expected,
@@ -211,15 +206,15 @@ exact_default(Relation relation,
     return false;
 }
 
-/// Validate relation identity, access method and every attribute descriptor.
-/// @tparam p_attribute_count Number of fixed attributes in the catalog.
-/// @param relation Open catalog relation held by the caller.
-/// @param expected_relation_oid Required relation OID.
-/// @param expected_name Required unqualified relation name.
-/// @param attributes Fixed attribute descriptors in physical order.
-/// @param defaults Required default category for each attribute.
-/// @param expected_check_count Exact number of CHECK constraints.
-/// @throws PostgreSQL ERROR when any relation or attribute contract differs.
+/// Check catalog identity, columns and constraint counts.
+/// @tparam p_attribute_count Column count
+/// @param relation Open catalog.
+/// @param expected_relation_oid Required table OID.
+/// @param expected_name Catalog name for errors.
+/// @param attributes Required columns in storage order.
+/// @param defaults Whether each column requires a default.
+/// @param expected_check_count Required CHECK count.
+/// @throws A PostgreSQL error on a mismatch.
 template <std::size_t p_attribute_count>
 inline void
 validate_relation_shape(Relation relation,
@@ -280,11 +275,11 @@ validate_relation_shape(Relation relation,
     }
 }
 
-/// Parse and analyze one canonical CHECK expression for comparison.
-/// @param relation_name Unqualified catalog name used for name resolution.
-/// @param expression SQL expression text owned by the compiled contract.
-/// @return PostgreSQL expression node allocated in the current memory context.
-/// @throws PostgreSQL ERROR when parsing or analysis does not yield one expression.
+/// Parse  a required CHECK expression in the catalog's tablz context.
+/// @param relation_name Catalog table name.
+/// @param expression SQL expression to parse.
+/// @return Expression node allocated in the current memory context.
+/// @throws A PostgreSQL error if parsing fails.
 [[nodiscard]] inline Node* analyze_expected_check_expression(const std::string_view relation_name,
                                                              const std::string_view expression) {
     const std::string sql =
@@ -311,12 +306,12 @@ validate_relation_shape(Relation relation,
     });
 }
 
-/// Require exactly the configured canonical CHECK expressions.
-/// @tparam p_check_count Number of required expressions.
-/// @param relation Open catalog relation held by the caller.
-/// @param relation_name Unqualified relation name used for expression analysis.
-/// @param expected_checks Canonical SQL expressions, independent of catalog order.
-/// @throws PostgreSQL ERROR when the set of analyzed expressions differs.
+/// Compare the table's CHECK expressions with the required set.
+/// @tparam p_check_count Required expression count.
+/// @param relation Open catalog.
+/// @param relation_name Table used to parse expressions.
+/// @param expected_checks Required SQL expressions, in any order.
+/// @throws A PostgreSQL error on a mismatch.
 template <std::size_t p_check_count>
 inline void
 validate_check_expressions(Relation relation,
@@ -354,10 +349,10 @@ validate_check_expressions(Relation relation,
     }
 }
 
-/// Match a partial-index predicate against one exact state constant.
-/// @param index Open index relation held by the caller.
-/// @param expected_state Required `state` value in the predicate.
-/// @return Whether the predicate is the canonical integer equality.
+/// Check that a partial index selects rows with the required state.
+/// @param index Open index.
+/// @param expected_state Required state value.
+/// @return True for the expected smallint equality expression.
 [[nodiscard]] inline bool exact_state_predicate(Relation index, const std::int16_t expected_state) {
     List* predicate = bioseq::postgres::support::invoke_pg_as_cpp(
         [index] { return RelationGetIndexPredicate(index); });
@@ -385,17 +380,17 @@ validate_check_expressions(Relation relation,
            DatumGetInt16(constant->constvalue) == expected_state;
 }
 
-/// Validate one authoritative index identity, key and predicate contract.
-/// @tparam p_key_count Number of fixed index key attributes.
-/// @param index Open index relation held with `AccessShareLock` by the caller.
-/// @param expected_table_oid Required base-table OID.
-/// @param expected_name Required index relation name.
-/// @param expected_primary Required primary-index flag.
-/// @param expected_unique Required uniqueness flag.
-/// @param keys Required attribute numbers in key order.
-/// @param key_types PostgreSQL types used to derive canonical operator classes.
-/// @param expected_state Required partial-predicate state, or no predicate.
-/// @return Whether identity, flags, keys, operator classes, and predicate match.
+/// Check a catalog index's name, keys, flags and optional state filter.
+/// @tparam p_key_count Key count.
+/// @param index Open index.
+/// @param expected_table_oid Required table.
+/// @param expected_name Required index name.
+/// @param expected_primary Primary-key flag.
+/// @param expected_unique Uniqueness  flag.
+/// @param keys Column numbers in key order.
+/// @param key_types Types used to check operator classes.
+/// @param expected_state State filter, or none.
+/// @return True when the index matches.
 template <std::size_t p_key_count>
 [[nodiscard]] inline bool exact_index(Relation index,
                                       const Oid expected_table_oid,
@@ -442,9 +437,9 @@ template <std::size_t p_key_count>
     return true;
 }
 
-/// Validate every authoritative generation-storage index.
-/// @param storage Open descriptor catalog held with `AccessShareLock`.
-/// @throws PostgreSQL ERROR unless exactly the three canonical indexes exist.
+/// Check the primary, live-generation and, retired-generation indexes.
+/// @param storage Open storage catalog held with AccessShareLock.
+/// @throws A PostgreSQL error if an index differs or the set has changed.
 inline void validate_storage_indexes(Relation storage) {
     using row = minimizer_generation_storage_catalog_row;
     using codec = minimizer_generation_storage_codec;
@@ -552,9 +547,9 @@ inline void validate_storage_indexes(Relation storage) {
     }
 }
 
-/// Validate every authoritative generation-reaper index.
-/// @param reaper Open reaper-state catalog held with `AccessShareLock`.
-/// @throws PostgreSQL ERROR unless the canonical primary index is the only index.
+/// Check that the cleanup catalog has only its expected primary index.
+/// @param reaper Open cleanup catalog held with AccessShareLock.
+/// @throws A PostgreSQL error on a mismatch.
 inline void validate_reaper_indexes(Relation reaper) {
     using row = minimizer_generation_reaper_catalog_row;
     using codec = minimizer_generation_reaper_codec;
@@ -586,13 +581,10 @@ inline void validate_reaper_indexes(Relation reaper) {
 
 } // namespace minimizer_generation_catalog_detail
 
-/// Fail closed when either installation-local catalog authority drifts. This
-/// is intentionally a cold publication/open guard, not a per-anchor check.
-/// @throws PostgreSQL ERROR when either catalog, constraint set, or index set
-/// differs from the compiled schema contract.
-///
-/// Both catalog relations and each inspected index are held with
-/// `AccessShareLock` only for the duration of validation.
+/// Check generation storage and cleanup catalogs beore opening or publishing an index
+/// Validate their columns, CHECK expressions and indexes. Hold AccessShareLock
+/// on the tables and inspected indexes during validation, then  release the locks.
+/// @throws A PostgreSQL error if either catalog is missing or has an unexpected schema.
 inline void validate_minimizer_generation_storage_catalogs_pg() {
     using namespace minimizer_generation_catalog_detail;
     const Oid namespace_oid = bioseq::postgres::support::invoke_pg_as_cpp(

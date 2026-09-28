@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/admission.cppm
- * @brief Shared-counter memory and file admission arithmetic with permits.
+ * @brief Reserves cache space within memory and filesystem limits.
  */
 module;
 
@@ -27,14 +27,12 @@ enum class admission_error : std::uint8_t {
 };
 
 /**
- * PostgreSQL 17 DSA obtains storage in 4-KiB pages and keeps allocator
- * metadata outside the caller's payload.  Admission deliberately rounds each
- * allocation to a page and reserves one additional metadata page.  This is a
- * conservative accounting contract, not an estimate of returned payload.
+ * The DSA budget uses 4-KiB accounting pages. It rounds the total payload
+ * up to a page and adds one page per allocation for allocator overhead
  */
 inline constexpr std::uint64_t k_dsa_accounting_page_bytes = 4ULL << 10U;
 
-/** Return a checked conservative reservation for one or more DSA allocations. */
+/** Calculates a DSA reservation with room for page rounding and allocator overhead. */
 [[nodiscard]] inline std::expected<std::uint64_t, admission_error>
 conservative_dsa_reservation_bytes(std::uint64_t payload_bytes,
                                    std::uint64_t allocation_count = 1) noexcept {
@@ -56,10 +54,9 @@ conservative_dsa_reservation_bytes(std::uint64_t payload_bytes,
 }
 
 /**
- * Account a bootstrap arena and its fixed allocations exactly once.  The
- * allocator arena already contains the payloads, so the admission baseline is
- * the larger of the arena reservation and the sum of conservative allocation
- * reservations, never their sum.
+ * Accounts for  the initial DSA arena and its fixed allocations. The
+ * arena already contains these allocations, so, use the larger of the
+ * arena size and their estimated space to avoid counting them twice.
  */
 [[nodiscard]] inline std::expected<std::uint64_t, admission_error>
 conservative_fixed_dsa_reservation_bytes(
@@ -100,7 +97,7 @@ concept cache_memory_budget = requires(const p_budget_type budget) {
 template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
 class basic_cache_admission;
 
-/** Move-only ownership of bytes held against a shared reservation counter. */
+/** Owns a cache-space reservation and returns it when destroyed. Ownership can be moved. */
 template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
 class cache_permit {
   public:
@@ -128,33 +125,33 @@ class cache_permit {
         release();
     }
 
-    /** Return the bytes currently owned by this permit. */
+    /** Returns the number of bytes held by this permit. */
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
     }
 
-    /** Return whether this permit remains attached to an admission owner. */
+    /** Reports whether this permit is attached to a reservation counter, including a zero-byte permit. */
     [[nodiscard]] explicit operator bool() const noexcept {
         return admission_ != nullptr;
     }
 
-    /** Return excess bytes to the counter while retaining the smaller permit. */
+    /** Releases excess bytes when the requested size is smaller. */
     void shrink_to(std::uint64_t bytes) noexcept;
 
-    /** Acquire the delta needed to grow this permit. */
+    /** Resizes the reservation, checking the budget before adding bytes. */
     [[nodiscard]] bool grow_to(std::uint64_t bytes) noexcept;
 
-    /** Release all currently owned bytes exactly once. */
+    /** Returns the reserved bytes and detaches the  permit. Repeated calls do nothing. */
     void release() noexcept;
 
-    /** Transfer an admitted reservation into a separately tracked owner. */
+    /** Detaches the permit and returns its byte count. The caller must arrange to release those bytes. */
     [[nodiscard]] std::uint64_t disown() noexcept {
         admission_ = nullptr;
         return std::exchange(bytes_, 0);
     }
 
   private:
-    /** Transfer ownership and clear the source permit. */
+    /** Takes the other permit's reservation and clears that permit. */
     void move_from(cache_permit& other) noexcept {
         admission_ = std::exchange(other.admission_, nullptr);
         bytes_ = std::exchange(other.bytes_, 0);
@@ -164,7 +161,7 @@ class cache_permit {
     std::uint64_t bytes_ = 0;
 };
 
-/** Admission controller sharing one atomic-like counter across all producers. */
+/** Limits cache reservations using a shared byte counter and a memory budget. */
 template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
 class basic_cache_admission {
   public:
@@ -173,7 +170,7 @@ class basic_cache_admission {
     basic_cache_admission(p_counter_type& counter, const p_budget_type& budget) noexcept
         : counter_(counter), budget_(budget) {}
 
-    /** Reserve bytes without overcommitting the current shared ceiling. */
+    /** Reserves bytes if the memoqy budget allows them and the system is not under pressure. */
     [[nodiscard]] std::expected<permit_type, admission_error>
     try_reserve(std::uint64_t bytes) noexcept {
         if (budget_.under_pressure()) {
@@ -198,12 +195,12 @@ class basic_cache_admission {
         }
     }
 
-    /** Return the currently shared reserved-byte count. */
+    /** Returns the total bytes held in the shared reservation counter. */
     [[nodiscard]] std::uint64_t reserved_bytes() const noexcept {
         return counter_.load();
     }
 
-    /** Return pressure from the supplied live budget policy. */
+    /** Reports memory pressure from the supplied budget. */
     [[nodiscard]] bool under_pressure() const noexcept {
         return budget_.under_pressure();
     }
@@ -211,7 +208,7 @@ class basic_cache_admission {
   private:
     friend class cache_permit<p_counter_type, p_budget_type>;
 
-    /** Apply the cache's 25-percent physical-memory ceiling when available. */
+    /** Caps the cache at a quarter of total memory when that size is known, and at  the available budget */
     [[nodiscard]] std::uint64_t budget_ceiling() const noexcept {
         const std::uint64_t allocatable = budget_.allocatable_bytes();
         if constexpr (requires { budget_.total_bytes(); }) {
@@ -228,7 +225,7 @@ class basic_cache_admission {
         return allocatable;
     }
 
-    /** Return bytes after a permit shrinks/releases. */
+    /** Returns released bytes to the shared counter. */
     void release_bytes(std::uint64_t bytes) noexcept {
         if (bytes != 0) {
             counter_.subtract(bytes);
@@ -277,7 +274,7 @@ void cache_permit<p_counter_type, p_budget_type>::release() noexcept {
     bytes_ = 0;
 }
 
-/** File-capacity/free-space admission policy. */
+/** Checks cache-file limits and the free space that must remain on disk. */
 struct file_admission_policy {
     /** Return the smaller of 128 GiB and ten percent of filesystem capacity. */
     [[nodiscard]] static constexpr std::uint64_t
@@ -285,16 +282,16 @@ struct file_admission_policy {
         return std::min(k_maximum_file_cache_bytes, filesystem_capacity / 10u);
     }
 
-    /** Preserve the larger of 10 GiB and ten percent free space. */
+    /** Returns the free-space minimum: the larger of 10 GiB and ten percent of filesystem capacity. */
     [[nodiscard]] static constexpr std::uint64_t
     free_floor_bytes(std::uint64_t filesystem_capacity) noexcept {
         return std::max(k_minimum_file_free_bytes, filesystem_capacity / 10u);
     }
 
     /**
-     * Validate one prospective file reservation against an explicit free
-     * floor.  Callers may lower the floor only for isolated test policy; actual
-     * availability and the ten-percent capacity ceiling always remain active.
+     * Checks whether a reservation fits the cache limit and leaves the
+     * requested amount of disk space free. Tests can supply a smaller
+     * free-space minimum while keeping the capacity and availability checks.
      */
     [[nodiscard]] static constexpr bool
     can_reserve_with_free_floor(std::uint64_t reserved_file_bytes,
@@ -308,7 +305,7 @@ struct file_admission_policy {
                filesystem_available - requested_bytes >= free_floor;
     }
 
-    /** Validate one production file reservation with checked arithmetic. */
+    /** Checks a file reservation using the,  normal cache limit and free-space minimum. */
     [[nodiscard]] static constexpr bool can_reserve(std::uint64_t reserved_file_bytes,
                                                     std::uint64_t requested_bytes,
                                                     std::uint64_t filesystem_capacity,

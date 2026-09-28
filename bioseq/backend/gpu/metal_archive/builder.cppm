@@ -1,6 +1,6 @@
 /**
  * @file metal_archive/builder.cppm
- * @brief Exec-clean command protocol for Metal archive construction.
+ * @brief Command-line interface for building Metal archives and capturing MoltenVK source.
  */
 module;
 
@@ -20,9 +20,9 @@ namespace bioseq::gpu::metal_archive {
 namespace {
 
 /**
- * @brief Writes exact protocol bytes while retrying interrupted system calls.
- * @param[in] descriptor Open output file descriptor.
- * @param[in] bytes Protocol bytes to write.
+ * @brief Writes the transcript, retrying partial writes and interrupted calls.
+ *
+ * Stops if wriping fails for another reason.
  */
 void write_process_output(
         const int descriptor,
@@ -45,13 +45,13 @@ void write_process_output(
 } // namespace
 
 /**
- * @brief Runs the archive-builder command protocol for a process entry point.
+ * @brief Runs the archive-builder or command-source capture command.
  *
- * @param[in] argument_count Number of command-line arguments, including the
- * executable name.
- * @param[in] arguments Mutable null-terminated command-line argument array.
- * @return `0` after the exact success sentinel, `1` after qualification
- * failure, or `2` for invalid arguments.
+ * Arguments are checked before calling the helper. The  transcript is written
+ * to standard output, and success requires exactly one `RESULT:` marker with
+ * `RESULT: ok` at the end.
+ * @return Zero for success, one for a failed build or capture, or two for
+ *         invalid arguments.
  */
 export int run_binary_archive_builder(
         const int argument_count,

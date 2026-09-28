@@ -1,4 +1,7 @@
-/** @file Edit, options, policy, and Vulkan mmsearch scenarios. */
+/**
+ * @file mmsearch_edit_options_policy_vulkan_test.cpp
+ * @brief Tests edit filters, aligner options, index policies, and Vulkan execution.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -340,9 +343,8 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'simd_minimap2_reference';");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 10;");
-    // The shared 24-base terminal contexts preserve both k=15/w=10 terminal
-    // minimizer windows; these literals delimit one measured 64-base mandatory
-    // fill, whose two endpoint anchors are intentional fixture admission.
+    // Matching bases at both ends provide seed anchors around the edited
+    // middle. Allow a two-seed chain so this fixture reaches the edit filter.
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_seed_count = 2;");
 
     const std::string query_literal = format_literal(
@@ -535,9 +537,8 @@ TEST_CASE("Raw and folded Const aligner options retain ownership",
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
-    // Composite input contains one value followed by the remaining 35 NULL
-    // fields.  A typed composite literal is a raw Const at parse time; the
-    // CASE/function spelling reaches the same Const through planner folding.
+    // Test both  a composite constant and options folded to a constant from
+    // CASE. Each sets kmer_size to 15 and leaves the other 35 fields NULL.
     std::string raw_options = "(15";
     raw_options.append(35u, ',');
     raw_options.push_back(')');
@@ -850,8 +851,8 @@ TEST_CASE("active-read policy preserves configured versus authoritative no-row s
         return std::stoll(*row[column]);
     };
 
-    // An authoritative zero-row result selects the transient minimizers_per_fragment
-    // shape, but its source must not be relabelled as a configured row.
+    // With no active policy row, use the per-fragment default and record
+    // that the choice came from the missing row.
     exec_sqlf(ctx,
         "UPDATE bioseq_internal.index_policy SET is_active_read = false "
         "WHERE user_relid = '{}'::regclass;",
@@ -869,9 +870,8 @@ TEST_CASE("active-read policy preserves configured versus authoritative no-row s
     REQUIRE(authoritative[6].value_or("")
         == "authoritative_no_row_default");
 
-    // Setting the same physical minimizers_per_fragment choice creates an explicit configured-row
-    // source. The algorithm name may match the default; the attestation source
-    // and both resolver/dispatch counters still must differ.
+    // Explicitly selecting the same index must report configured_row, so
+    // diagnostics distinguish the user setting from the default.
     exec_sqlf(ctx,
         "SELECT bioseq.set_active_read_index('{}'::regclass, "
         "'minimizers_per_fragment');",
@@ -998,9 +998,8 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.recompute_async_persistence.enabled;") == "on");
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "off");
 
-    // No minimizers_per_fragment recompute producer is available, so queue
-    // rejection creates neither external payloads nor asynchronous rows, and
-    // both constructor/writer entry counters stay exactly zero.
+    // Recomputing for this query must leave the persisted index empty and
+    // never enter the external-file constructor or  writer.
     REQUIRE(index_table_row_count(
         ctx, "minimizers_per_fragment", k_missing_index) == 0);
     const auto producer = query_one(

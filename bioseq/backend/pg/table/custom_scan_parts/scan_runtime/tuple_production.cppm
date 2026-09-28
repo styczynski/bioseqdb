@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns residual-row evaluation and scalar or vector tuple production.
+ * @brief Filters input rows and produces scalar, ventor or alignment results.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -12,9 +12,8 @@ module;
 #include <exception>
 #include <new>
 
-// Clang 22 must see libc++'s allocation declarations before deserializing
-// header-backed dependency BMIs; otherwise deferred logging allocations can
-// crash code generation in std::__libcpp_allocate.
+// Include libc++ allocation declarations before header-based module dependencies.
+// Clang 22 can otherwise crash in std::__libcpp_allocate when generating logging code
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -60,15 +59,11 @@ using namespace bioseq::postgres::support;
 namespace {
 
     /**
-     * @brief Builds the next projected vector batch for a VectorAgg parent.
+     * @brief Builds a projected vector batch for a VectorAgg parent.
      *
-     * VectorAgg consumes one vector_column_storage pointer per projected attribute.
-     * The ordinary scan path extracts scalar rows, so build a projected
-     * vector batch explicitly when the planner attached VectorAgg.
-     * @param bioseq_scan_state Custom scan state with vector slots and compiled vector qualifiers.
-     * @param access_mtd Child access-method fetch callback.
-     * @param recheck_mtd Recheck callback for lossy index predicates.
-     * @return Virtual vector result slot holding one projected batch, or an empty slot at EOF.
+     * Applies vector filters, then checks remaining scalar filters and projects each
+     * surviving row  into the result vector. Skips batches with no survivors.
+     * @return A vector result slot, or an empty slot when the input ends.
      */
     static TupleTableSlot* next_vectorized_aggregate_batch(scan_state* bioseq_scan_state,
                                                            ExecScanAccessMtd access_mtd,
@@ -166,12 +161,12 @@ static TupleTableSlot* inner_custom_exec_scan(scan_state* bioseq_scan_state,
                                                ExecScanAccessMtd access_mtd,
                                                ExecScanRecheckMtd recheck_mtd);
 
-/** @brief Installs executor placeholders once and advances the base-scan state machine. */
+/** @brief Prepares result placeholders on first use and produces the next scan result. */
 TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
                                  ExecScanAccessMtd access_mtd,
                                  ExecScanRecheckMtd recheck_mtd) {
 
-    // Testing custom exec scan
+    // Trace base-scan execution.
     bioseq_log<logging_level::debug>("[bioseq] pg: CustomExecScan() entered");
 
     ScanState* node = reinterpret_cast<ScanState*>(&bioseq_scan_state->custom_scan_state.ss);
@@ -189,9 +184,7 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
 
-        /* INT4: byval, len=4, no collation. Used for the int32_t match_result
-         * fields (dp_score, mapq, chain_score, dp_max_score, seed_count,
-         * secondary_chain_score). */
+        /* Scores and MAPQ use PostgreSQL int4 values stored directly in Datum. */
         const auto int_placeholder = []() {
             return makeConst(INT4OID,
                              -1,
@@ -201,11 +194,8 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
                              /*constisnull=*/true,
                              /*constbyval=*/true);
         };
-        /* INT8: byval on LP64 (pg_type.typbyval for bigint is 't'), len=8.
-         * Used for the eight sequence_size_t (uint64) coordinate/length
-         * fields (query_len … block_length) so positions in sequences longer
-         * than INT32_MAX are not truncated. Matches the SQL
-         * DDL where those eight projections RETURN BIGINT. */
+        /* Sequence positions, lengths and edit distance use bigint so values
+         * above INT32_MAX keep their full range. */
         const auto bigint_placeholder = []() {
             return makeConst(
                 INT8OID,
@@ -269,10 +259,8 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
         runtime.placeholder_consts.divergence_node = float_placeholder();
         runtime.placeholder_consts.cigar_node = text_placeholder();
 
-        /*
-         * Reset only the slot buffer; keep the mmsearch_context that
-         * BeginCustomScan configured earlier for this scan.
-         */
+        /* Clear buffered rows while keeping the mmsearch configuration
+         * prepared by BeginCustomScan. */
         runtime.buffer.clear_slots();
 
         const bioseq_stub_oids& oids_snapshot = get_cached_stub_oids();
@@ -314,10 +302,9 @@ TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
         scan_state* state = scan_state::from_custom_scan_state(node);
         bioseq_scan_runtime& runtime = bioseq_runtime(state);
         if (runtime.mmsearch_null_input && !runtime.match_evaluated_submission) {
-            /* A raw target with a NULL owned query is statement-empty.  An
-             * evaluated target must still run once for every residual-admitted row
-             * before strict NULL semantics discard the result, so only the raw
-             * owner may bypass the table scan here. */
+            /* A raw target with a NULL query produces no matches. Evaluated
+             * operands still need their SQL side effects, so those scans must read
+             * and evaluate rows that  pass the remaining filters. */
             if (runtime.alignment_registration.is_registered()) {
                 bioseq::postgres::table::alignment_execution::mark_alignment_pass_fully_drained(
                     runtime.alignment_registration);
@@ -365,17 +352,12 @@ TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
 }
 
 /**
- * @brief Evaluates one row's residual qual and any expression-backed mmsearch operands.
+ * @brief Checks a row's filters, then evaluates its configured mmsearch operands.
  *
- * Evaluate the residual frontier and, when configured, both mmsearch operand
- * ExprStates while only their physical sources are promoted. The scan slot is
- * restored on normal completion, C++ unwind, and PostgreSQL longjmp before a
- * caller can buffer it.
- * @param runtime Scan runtime with mmsearch operand ExprStates and pre-eval source flags.
- * @param slot Input tuple whose locator-backed sources may be promoted for evaluation.
- * @param qual Residual qual ExprState, or nullptr when no qual is installed.
- * @param expression_context Executor context supplying per-tuple memory and evaluation state.
- * @return Qual pass flag plus evaluated target and optional query datums for buffered submission.
+ * Makes only the required sequence sources readable during evaluation. Restores
+ * the original slot values before returning or propagating either a PostgreSQL
+ * or C++ error, so the caller can safely buffer the row.
+ * @return The filter result and evaluated tabget and query values, with NULL flags.
  */
 [[nodiscard]] mmsearch_row_evaluation
 evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
@@ -455,14 +437,13 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
 }
 
 /**
-     * @brief Runs the base scan's scalar or vectorized write/drain state machine.
-     * Routes VectorAgg parents through vector batch projection. Otherwise runs the scalar or
-     * vectorized fetch path, buffers mmsearch-qualified rows, and drains projected match output.
-     * @param bioseq_scan_state Writable scan, buffer, and vectorization state for the node.
-     * @param access_mtd Child access-method fetch callback.
-     * @param recheck_mtd Recheck callback for lossy index predicates.
-     * @return The next projected row or vector batch, or an empty slot at end of scan.
-     */
+ * @brief Produces the next row or vector batch from the base scan.
+ *
+ * Ordinary rows are filtered and projected immediately. With mmsearch, collects
+ * a batch, runs alignment and returns one projected row per accepted, match.
+ * VectorAgg uses its own batch projection path
+ * @return A result slot, or an empty slot  when all input and buffered matches are consumed.
+ */
     static TupleTableSlot* inner_custom_exec_scan(scan_state* bioseq_scan_state,
                                                   ExecScanAccessMtd access_mtd,
                                                   ExecScanRecheckMtd recheck_mtd) {
@@ -481,30 +462,17 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
             return next_vectorized_aggregate_batch(bioseq_scan_state, access_mtd, recheck_mtd);
         }
 
-        /*
-         * Two-stage state machine:
-         *
-         *   Writing stage: pull tuples from the access method, run qual,
-         *                      buffer passing tuples via buffer.submit_scan.
-         *                      When source is exhausted, run batch processor
-         *                      and transition.
-         *   Reading stage: drain buffered output entries, setting
-         *                      placeholder const nodes from match_results and
-         *                      projecting via ExecProject.
-         *
-         * buffer.has_finished_writing() flips from false → true at the
-         * transition.
-         */
+        /* Alternate between collecting input and returning alignment results.
+         * Run a batch when it fills or the source ends. While draining it, update
+         * helper placeholders for each match before projecting its row. */
         for (;;) {
-            /* ---- Reading stage: drain buffered output ---- */
+            /* Return buffered matches. */
             if (runtime.buffer.has_finished_writing()) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: Inner_CustomExecScan() draining output cursor");
-                /* The parent has consumed the previously returned result before it
-                 * invokes this scan again.  Drop that tuple-visible EOH first, then
-                 * release every detoasted locator and source-backed output allocated
-                 * in the ordinary executor per-tuple context.  Buffered MinimalTuple
-                 * slots and match_results have independent lifetimes. */
+                /* The parent has consumed the previous result. Clear its slot before
+                 * resetting per-row memory. Buffered input rows and match results remain
+                 * alive for the rest of this batch. */
                 ExecClearTuple(node->ps.ps_ResultTupleSlot);
                 ResetExprContext(econtext);
                 econtext->ecxt_scantuple = nullptr;
@@ -521,8 +489,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                             "returning empty slot (EOF)");
                         return ExecClearTuple(node->ps.ps_ResultTupleSlot);
                     }
-                    /* A capacity rollover completed. Drop only that physical
-                     * batch and resume the still-live access-method scan. */
+                    /* This batch is drained. Clear it and  resume reading the table. */
                     runtime.buffer.clear_slots();
                     continue;
                 }
@@ -532,35 +499,26 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                     (runtime.edit_exclusive_upper_bound <= 0 ||
                      next->match->edit_distance >=
                          static_cast<std::uint64_t>(runtime.edit_exclusive_upper_bound))) {
-                    /* SneakySnake is only a lower-bound gate.  Every survivor is
-                     * aligned, and this exact comparison is the authoritative SQL
-                     * predicate (strict `<`, including the boundary case). */
+                    /* The prefilter can only reject impossible matches. Apply the exact
+                     * edit-distance bound here, including rejection at the strict < boundary. */
                     InstrCountFiltered1(node, 1);
                     continue;
                 }
 
-                /*
-                 * Update every placeholder Const from the match_result. The
-                 * subsequent ExecProject reads the current constvalue of
-                 * every Const node referenced in newtargetlist.
-                 */
+                /* Supply this match's values to the placeholders used by ExecProject. */
                 populate_placeholder_consts(runtime.placeholder_consts, *next->match);
 
-                /*
-                 * symbol_count placeholders are independent of match_result;
-                 * they are resolved from meta_sidecar by (relid, rowno) so
-                 * we populate them alongside the per-match fields.
-                 */
+                /* symbol_count belongs to the input row. Look it up by row number
+                 * separtely from the alignment result. */
                 populate_symbol_count_placeholders(runtime.placeholder_consts,
                                                    node->ss_currentRelation,
                                                    next->sequence_rowno,
                                                    bioseq_scan_state->snapshot,
                                                    runtime.aligner_state.read_sequence_index);
 
-                /* The alignment path retains locator stubs in its buffered row. Promote
-                 * only for this output projection, then restore the stable locator so a
-                 * second match from the same row never points into a reset per-tuple
-                 * context. */
+                /* Make sources readable for this projection, then put their original
+                 * locators back. Another match from the same buffered row must survive
+                 * the next reset of per-row memory. */
                 const mmsearch_source_restore source_restore =
                     capture_mmsearch_sources(runtime,
                                              next->scan_slot_copy,
@@ -571,11 +529,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 MemoryContext saved_context = CurrentMemoryContext;
                 ErrorData* volatile projection_pg_error = nullptr;
 #if PG_VERSION_NUM >= 190000
-                // PG19 specializes simple projections for the advertised scan
-                // slot. The dispatch buffer owns a MinimalTuple, not the
-                // CustomScan's original virtual slot. Keep specialization,
-                // but compile it for the actual input and restore plan metadata
-                // on every exit, including PostgreSQL's non-C++ error path.
+                // PG19 specializes projections for the input slot type. Compile  against
+                // the buffer's MinimalTuple slot and restore the scan metadata on every exit
                 const auto saved_scan_ops = node->ps.scanops;
                 const auto saved_scan_desc = node->ps.scandesc;
                 const bool saved_scan_ops_set = node->ps.scanopsset;
@@ -588,9 +543,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 };
 #endif
 
-                /* PostgreSQL ERROR skips C++ destructors. Keep the immutable restore
-                 * snapshot outside the setjmp region and restore the locator slot on
-                 * normal return, C++ unwind, and PG longjmp alike. */
+                /* PostgreSQL ERROR skips C++ destructors. Save original slot values
+                 * before PG_TRY, then restore them on success and both error paths. */
                 PG_TRY();
                 {
                     try {
@@ -603,8 +557,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                             promoted_source_count != 0u);
                         bioseq::storage::inject_mmsearch_output_after_promotion_failure_for_test();
 
-                        /* Re-install the buffered scan slot as the current scan
-                         * tuple so Var references resolve off the right row. */
+                        /* Resolve projection Vars against the buffered input row. */
                         econtext->ecxt_scantuple = next->scan_slot_copy;
 
 #if PG_VERSION_NUM >= 190000
@@ -656,12 +609,10 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 return projected;
             }
 
-            /* ---- Writing stage ---- */
+            /* Collect input rows. */
             TupleTableSlot* slot = nullptr;
 
-            /*
-             * Scalar fetch path: pull one scan tuple and run qual on it.
-             */
+            /* Fetch one scalar row. Filters run after both fetch paths meet below. */
             if (!bioseq_scan_state->vectorization.is_enabled) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
@@ -680,15 +631,10 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                     continue; /* Next iteration enters the reading stage. */
                 }
             }
-            /*
-             * Vectorized fetch path: pull a vector slot, apply vectorized
-             * qual mask, then extract a single scalar tuple per iteration
-             * until the vector is exhausted.
-             */
+            /* Apply vector filters to a batch, then extract its surviving rows
+             * one at a time for the remaining scan work. */
             else {
-                /*
-                 * First vector pull or after previous vector drained.
-                 */
+                /* Fetch a, vector when no rows remain in the current one. */
                 if (bioseq_scan_state->vectorization.pending_row_number == 0) {
                     bioseq_log<logging_level::debug>("[bioseq] pg: Inner_CustomExecScan() "
                                                      "vectorized fetch (initial vector pull)");
@@ -760,41 +706,27 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                     bioseq_scan_state->vectorization.row_index++;
                 }
 
-                /*
-                 * Vector exhausted without finding a kept row: go back to
-                 * pull another vector or finalize.
-                 */
+                /* No surviving  row remains in this vector. Fetch another batch. */
                 if (!row_found)
                     continue;
             }
 
-            /* Every fetched input row owns a fresh expression/root arena.  BSS3
-             * promotion and the authoritative operand ExprStates retain only until
-             * submit_scan_evaluated copies their small EOH wrappers into the batch
-             * arena. */
+            /* Give each input row fresh expression memory. Evaluated submission
+             * copies the sequence wrappers it needs into the batch before this memory
+             * is reset for the nept row. */
             ResetExprContext(econtext);
             econtext->ecxt_scantuple = slot;
 
-            /*
-             * The scan runs with defer_seq_hydration=true, so `slot`
-             * carries 40-byte locator stubs. When there is an mmsearch qual the
-             * row is buffered (submit_scan captures the locator; the batch path
-             * bulk-hydrates per bucket), so we leave the stub in place. Without an
-             * mmsearch qual the row is projected immediately below, so hydrate the
-             * SEQ columns now (force=true overrides the defer flag) — this covers
-             * both the scalar and vectorized convergence and is the analogue of
-             * the inline hydration bioseq_getnextslot performs on non-deferred
-             * scan paths.
-             */
+            /* Ordinary scans need loaded sequence values for immediate projection.
+             * Alignment and lazy-source scans keep locators until their own consumers
+             * request the sequence data. */
             if (!runtime.buffer.mmsearch_active() && !runtime.locator_passthrough &&
                 !runtime.lazy_source_projection) {
                 hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
             }
-            /* A non-mmsearch scan projects immediately and may promote every BSS3
-             * source.  Alignment scans instead retain stable locators in their
-             * buffered row.  Evaluated operand leaves are promoted temporarily at
-             * their ExprState boundary below; output-only sources are promoted once
-             * per match_result under the PG_TRY restoration boundary above. */
+            /* A lazy source without mmsearch can prepare its  bound sequences now.
+             * Alignment scans promote them temporarily during operand evaluation or
+             * once per output match, preserving the buffered locators between uses. */
             if (runtime.lazy_source_projection && !runtime.locator_passthrough &&
                 !runtime.buffer.mmsearch_active()) {
                 promote_slice_project_sources(bioseq_scan_state,
@@ -805,11 +737,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                                               slot->tts_tupleDescriptor);
             }
 
-            /*
-             * Place the current tuple into the expr context and run the
-             * non-vectorized qual (e.g. mmsearch()). Both scalar and
-             * vectorized paths converge here.
-             */
+            /* Apply remaining scalar filters to rows from either fetch path.
+             * Owned mmsearch calls run through the alignment buffer separately */
             bioseq_log<logging_level::debug>(
                 "[bioseq] pg: Inner_CustomExecScan() applying qual filter");
             mmsearch_row_evaluation mmsearch_evaluation{};
@@ -855,8 +784,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                     }
                 } else {
                     if (runtime.mmsearch_null_input) {
-                        /* A NULL global Const/Param leaves the buffer inactive.  An
-                         * evaluated target still has SQL effects and must run once. */
+                        /* A NULL constant or parameter disables alignment, but an evaluated
+                         * target still runs once for each row that passes the filters. */
                         if (runtime.match_evaluated_submission &&
                             runtime.match_target_expr_state != nullptr) {
                             bool ignored_null = false;
@@ -865,24 +794,12 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                         }
                         continue;
                     }
-                    /*
-                     * No WHERE mmsearch(...) qual installed -> there is nothing
-                     * to batch. Project the scan tuple to the CustomScan target
-                     * list so the output slot layout matches what an outer Result
-                     * node expects. PlanCustomPath filters this target list to
-                     * plain Vars plus bioseq-owned placeholders; ordinary
-                     * expressions such as seq::text and bioseq.len(seq) remain in
-                     * the outer Result and evaluate against this projected tuple.
-                     */
+                    /* Without alignment  work, project the row immediately into the scan
+                     * output layout expected by its parent. */
                     bioseq_log<logging_level::debug>(
                         "[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual");
 
-                    /*
-                     * symbol_count fast-path requires the row number; the
-                     * access method set it on slot->tts_tid above. Convert
-                     * once per projected row rather than stashing a
-                     * (relid, rowno) in shared state.
-                     */
+                    /* Use the input row's TID to locate its symbol counts. */
                     {
                         int64_t row_number = -1;
                         if (ItemPointerIsValid(&slot->tts_tid)) {

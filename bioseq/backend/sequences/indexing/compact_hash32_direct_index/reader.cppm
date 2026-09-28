@@ -1,6 +1,6 @@
 /**
  * @file reader.cppm
- * @brief Reads selected direct hash32 posting spans without full scans.
+ * @brief Read the target positions selected by a direct-index query plan
  */
 export module bioseq.indexing.compact_hash32_direct_index:reader;
 
@@ -9,17 +9,15 @@ import :wire_format;
 
 export namespace bioseq::indexing {
 
-/// Visit every posting selected by a validated occurrence-preserving compact plan.
+/// Read selected target positions in selection order and call visitor for each.
+/// Check each selection against the image's membership and descriptor data
+/// before reading, it. A later error can occur after earlier callbacks have run.
 ///
-/// Revalidates the plan against the bound image, decodes positions in selection order,
-/// and stops before exposing data when any descriptor or span violates the image contract.
-/// The image and plan remain owned by the caller for the duration of the call.
-///
-/// @param view Open compact image whose bytes remain readable during traversal.
-/// @param plan Plan produced for the same image and runtime occurrence limit.
-/// @param context Opaque value passed unchanged to `visitor`.
-/// @param visitor Callback invoked once per decoded posting.
-/// @return Traversal counts, or a fail-closed validation or callback error.
+/// @param view Checked compact image, kept alive and unchanged during the call.
+/// @param plan Query plan for  this image and occurrence limit.
+/// @param context Value passed unchanged to visitor.
+/// @param visitor Callback returning true to continue, or false to stop with an error.
+/// @return Counts of visited spans and positions, or an error.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_view& view,
                                            const compact_hash32_query_plan& plan,
@@ -208,11 +206,10 @@ visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_vie
     return stats;
 }
 
-/// Authenticate and bind an accepted-only plan to its direct-index view once.
-/// The returned accessor is a constant-time receipt for subsequent range
-/// visits: it snapshots the validated view and accounting while aliasing the
-/// immutable selection storage.  Binding is the only operation that scans all
-/// selections to recompute the plan authentication seal.
+/// Check an accepted-hash plan against its image and prepare it for range visits.
+/// Recompute the plan checksum once here. Later visits kheck the saved binding
+/// without scanning every selection again. Keep the image and plan alive and
+/// unchanged while using the returned accessor.
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_range_accessor,
                                    direct_inverted_index_error>
 bind_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_index_view& view,
@@ -333,14 +330,13 @@ bind_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_ind
     };
 }
 
-/// Expose both strand spans for the caller-specified half-open selection range
-/// in one typed, inlinable callback per selection.  The accessor performs the
-/// whole-plan authentication only at bind time. Every range visit rechecks its
-/// constant-size binding receipt and validates the selected descriptor/span
-/// geometry.  Global selection ordinals are preserved so concatenating
-/// adjacent visits is exactly equivalent to one full visit.
+/// Visit selections in [selection_begin, selection_end), calling  visitor once
+/// per hash with its nonempty strand spans. Check descriptor and span bounds
+/// without decoding every position. Selection ordinals keep their original
+/// plan indices, so callers can process adjacent ranges separately.
 ///
-/// @tparam p_visitor Callable accepting one `compact_hash32_selection_posting_spans` value.
+/// @tparam p_visitor Callback accepting compact_hash32_selection_posting_spans
+/// and returning true to continue, or false to stop with an error.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
                                    direct_inverted_index_error>
@@ -514,10 +510,10 @@ visit_compact_hash32_direct_index_selection_span_range(
     return stats;
 }
 
-/// Whole-plan traversal API. Its statistics remain
-/// unchanged. Internally it binds once and delegates to the ranged visitor.
+/// Check the plan once, then visit all accepted hashes and their strand spans.
 ///
-/// @tparam p_visitor Callable accepting one `compact_hash32_selection_posting_spans` value.
+/// @tparam p_visitor Callback accepting compact_hash32_selection_posting_spans
+/// and returning true to continue, or false to stop with an error
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
                                    direct_inverted_index_error>
@@ -531,9 +527,9 @@ visit_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_in
         *accessor, 0u, accessor->selection_count(), std::forward<p_visitor>(visitor));
 }
 
-/// Callback adapter over the bulk span visitor. Plan authentication, dense
-/// descriptor binding, and span bounds are shared with the bulk API. Only this
-/// adapter performs one indirect call per decoded posting.
+/// Decode the selected spans and call visitor once per target position.
+/// Use the bulk span  visitor for plan and range checks, then validate each
+/// position's strand and coordinate before passing it to the callback.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_view& view,
                                            const compact_hash32_unique_query_plan& plan,
@@ -587,17 +583,15 @@ visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_vie
 
 export namespace bioseq::indexing {
 
-/// Visit every posting selected by a validated hash-major direct-index plan.
+/// Read positions selected from the direct index's hash table.
+/// Check each position's strand, target bounds, and optional fragment assignmen
+/// before calling visitor. Earlier callbacks remain visible if a later check fails.
 ///
-/// Each encoded position is checked against its strand, target coordinates, and optional
-/// fragment assignment before the callback receives it. The image and plan are borrowed for
-/// the call.
-///
-/// @param view Open direct-index image supplying the persisted posting bytes.
-/// @param plan Plan produced for the same image header and posting width.
-/// @param context Opaque value passed unchanged to `visitor`.
-/// @param visitor Callback invoked once per decoded posting.
-/// @return Traversal counts, or a fail-closed plan, bounds, or callback error.
+/// @param view Checked image, kept alive, and unchanged during the call.
+/// @param plan Query plan for the same image header and posting width.
+/// @param context Value passed unchanged to visitor.
+/// @param visitor Callback returning true to continue, or false to stop with an  error.
+/// @return Counts of visited spans and positions, or an error.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_direct_inverted_index_postings(const direct_inverted_index_view& view,
                                      const direct_index_query_plan& plan,

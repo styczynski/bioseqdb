@@ -1,6 +1,6 @@
 /**
  * @file minimizer_diagnostics.cppm
- * @brief Ready-minimizer inspection, probes, and integration fixture SQL routines.
+ * @brief Inspect stored minimizer indexes and build or read them in SQL tests.
  */
 module;
 
@@ -74,8 +74,9 @@ using bioseq::pg::detail::fixed_hex_u64;
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Validates a source-bound ready minimizer generation without reading
- * payload extents or enabling live generation reads.
+ * @brief Check a published minimizer generation against its source sequence.
+ * Validate its metadata and return the vource locator, layout and algorithm
+ * settings. This inspection leaves the stored minimizer payload unread.
  */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::inspect_ready_minimizer_generation_row>
@@ -208,8 +209,10 @@ static void validate_minimizer_fixture_parameters(const std::int64_t sequence_ro
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Builds and publishes an authenticated minimizer generation for one
- * explicit sketch backend without opening a read session.
+ * @brief SQL test entry point for  building a minimizer generation.
+ * Return source identity, checksums and write counts after publication
+ * The layout checks currently prevent a successful call: this wrapper accepts
+ * layouts 3 and 4, but the builder requires layout 5.
  */
 bioseq::postgres::support::table_rows<bioseq::postgres::sql_rows::build_minimizer_fixture_row>
 build_minimizer_fixture(Oid source_table,
@@ -275,8 +278,10 @@ build_minimizer_fixture(Oid source_table,
 }
 
 /**
- * @brief Opens an authenticated minimizer-generation read session and returns
- * payload validation, lookup, scan, and cache counters.
+ * @brief SQL test entry point for checking a minimizer generation and its source.
+ * Return payload checksums, lookup results, read counts and cache counts.
+ * The layout checks currently prevent a successful call: this wrapper accepts
+ * layouts 3 and 4, but the  reader requires layout 5.
  */
 bioseq::postgres::support::table_rows<bioseq::postgres::sql_rows::read_minimizer_fixture_row>
 read_minimizer_fixture(Oid source_table,
@@ -360,8 +365,9 @@ read_minimizer_fixture(Oid source_table,
 }
 
 /**
- * @brief Scans one complete minimizer generation through the requested sketch
- * backend and returns payload and scan counters without decoding payload bytes.
+ * @brief Stream a complete stored minimizer generation for an I/O test.
+ * Check its expected backend and layout, then return byte counts, checksums
+ * and scan counts. Treat payload bytes as opaque during this scan.
  */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::scan_grouped_soa_minimizer_generation_test_row>
@@ -417,8 +423,9 @@ scan_grouped_soa_minimizer_generation_test(Oid source_table,
 }
 
 /**
- * @brief Builds and publishes a ready PostgreSQL-backed minimizer-fragment
- * generation without changing active routing or metadata age.
+ * @brief Build, a stored minimizer-fragment index for one sequence in a SQL test.
+ * Publish and verify the generation, then return build and backend counters.
+ * Keep the active index choice and last-update timestamp unchanged.
  */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::build_ready_minimizer_fragment_generation_row>
@@ -538,9 +545,9 @@ build_ready_minimizer_fragment_generation(Oid source_table,
 }
 
 /**
- * @brief Builds and publishes a ready PostgreSQL-backed minimizer-sequence
- * generation, releases its spill runs, and leaves active routing and metadata
- * age unchanged.
+ * @brief Build a stored wkole-sequence minimizer  index for a SQL test.
+ * Publish and verify the generation, release temporary sort runs, and return
+ * build counters. Keep the active index choice and update timestamp unchanged.
  */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::build_ready_minimizer_sequence_generation_row>

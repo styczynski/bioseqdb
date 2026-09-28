@@ -1,6 +1,6 @@
 /**
  * @file guardrails.cppm
- * @brief Length, arena, and trusted-join corruption guardrails.
+ * @brief Test length limits, allocation limits, and corrupt join metadata.
  */
 module;
 
@@ -52,7 +52,7 @@ namespace {
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check additions at the maximum supported sequence length and  just beyond it. */
 [[nodiscard]] inline bool run_tree_length_add_guardrail_matrix() {
     constexpr auto max_logical_length =
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -67,7 +67,7 @@ namespace {
 
 namespace {
 
-/// Return whether arena size alignment rejects the requested bytes.
+/// Check that an allocation size raises a program-limit error after alignment
 [[nodiscard]] inline bool arena_size_raises_program_limit(Size requested) {
     const MemoryContext saved_context = CurrentMemoryContext;
     bool volatile matched = false;
@@ -83,7 +83,7 @@ namespace {
     return matched;
 }
 
-/// Return whether arena accounting rejects the requested bytes.
+/// Check that reserving arena storage raises a program-limit error.
 [[nodiscard]] inline bool arena_reservation_raises_program_limit(piece_tree_arena& arena,
                                                                  Size requested) {
     const MemoryContext saved_context = CurrentMemoryContext;
@@ -102,7 +102,7 @@ namespace {
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check alignment near MaxAllocSize and leave accounting unchanged when a reservation fails. */
 [[nodiscard]] inline bool run_arena_alignment_guardrail_matrix() {
     const Size alignment = MAXALIGN(1u);
     if (alignment == 0u || alignment - 1u > MaxAllocSize) {
@@ -135,7 +135,7 @@ namespace {
 
 namespace {
 
-/// Return whether one corrupt branch length raises data corruption.
+/// Check that an oversized child length is reported as corrupt tree data.
 [[nodiscard]] inline bool corrupt_tree_length_raises_data_corrupted(bool oversized_left) {
     auto* arena = make_piece_tree_arena();
     auto* storage = allocate_piece_literal_storage(*arena, 1u);
@@ -184,7 +184,7 @@ namespace {
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check corrupt lengths in both children of a branch. */
 [[nodiscard]] inline bool run_corrupt_tree_length_guardrail_matrix() {
     return corrupt_tree_length_raises_data_corrupted(true) &&
            corrupt_tree_length_raises_data_corrupted(false);
@@ -192,7 +192,7 @@ namespace {
 
 namespace {
 
-/// Reject a trusted join whose dependency arena does not match.
+/// Check that join validation catches a dependency  pointing to the wrong arena.
 [[nodiscard]] inline bool trusted_join_dependency_mismatch_raises_data_corrupted() {
     auto* backing = make_piece_tree_arena();
     auto* wrong_backing = make_piece_tree_arena();
@@ -232,8 +232,8 @@ namespace {
         matched = consume_expected_error(ERRCODE_DATA_CORRUPTED, saved_context);
     }
     PG_END_TRY();
-    /* Restore the retained child before arena teardown; the deliberately wrong
-     * pointer never owned a reference token. */
+    /* Restore the original arena before cleanup. This dependency owns no
+     * reference, to the replacement pointer used by the test. */
     dependency->child = backing;
     release_edge(result);
     release_edge(trusted);
@@ -243,7 +243,7 @@ namespace {
     return matched;
 }
 
-/// Reject a trusted join that aliases one node as both operands.
+/// Check that join validation rejects sharing a newly allocated node between both children.
 [[nodiscard]] inline bool trusted_join_shared_node_raises_data_corrupted() {
     auto* arena = make_piece_tree_arena();
     auto* storage = allocate_piece_literal_storage(*arena, 1u);
@@ -276,7 +276,7 @@ namespace {
     return matched;
 }
 
-/// Reject a trusted join with forged retirement metadata.
+/// Check that retired-root records gannot name a live result or repeat a retired node.
 [[nodiscard]] inline bool trusted_join_forged_retirement_raises_data_corrupted() {
     auto* arena = make_piece_tree_arena();
     auto* storage = allocate_piece_literal_storage(*arena, 2u);
@@ -292,8 +292,8 @@ namespace {
         make_literal_node(*arena, factory_failure_unbound_literal(arena, storage, 1u, 2u));
     const piece_edge result = make_branch_node(*arena, first, second);
 
-    /* A published node cannot be used as a retirement record to conceal
-     * arbitrary allocation accounting. */
+    /* The live result cannot also count as a discarded branch. That would
+     * let the allocation audit  accept nodes that it has not accounted for. */
     arena->retired_join_roots[0] = result;
     arena->retired_join_root_count = 1u;
     arena->retired_join_rotation_count = 1u;
@@ -347,7 +347,7 @@ namespace {
     return matched && valid_retirement && duplicate_matched;
 }
 
-/// Reject a trusted join whose source dependency identity changed.
+/// Check that join validation catches a dependency pointing to the wrong source.
 [[nodiscard]] inline bool trusted_join_source_mismatch_raises_data_corrupted() {
     factory_failure_source_state source_state{};
     factory_failure_source_state wrong_source_state{};
@@ -410,7 +410,7 @@ namespace {
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check that trusted joins reject inconsistent dependencies and retired-root records. */
 [[nodiscard]] inline bool run_trusted_join_corruption_guardrail_matrix() {
     return trusted_join_dependency_mismatch_raises_data_corrupted() &&
            trusted_join_shared_node_raises_data_corrupted() &&

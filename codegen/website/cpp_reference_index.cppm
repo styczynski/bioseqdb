@@ -15,13 +15,12 @@ import bioseq.codegen.structural_analysis;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Clang structural/export index, module-graph side. The shared structural module
-// owns the Clang pass and its compiler-neutral POD model. This partition projects
-// that model into reference_entity / pg_entrypoint_candidate so entity_index and
-// the build pipeline continues to see only website model types.
+// Converts the shared Clang scanner results into website reference
+// entries and module imports. Later website stages use these model types
+// without depending on Clang objects.
 namespace bioseq::codegen::website {
 
-/// @brief Result of the Clang structural pass over the reachable public units.
+/// @brief Public C++ declarations collected by Clang for reference pages.
 struct cpp_reference_index {
     std::vector<reference_entity> entities;
     std::vector<pg_entrypoint_candidate> pg_entrypoints;
@@ -163,16 +162,16 @@ namespace structural = ::bioseq::codegen::structural_analysis;
 
 }  // namespace
 
-/// @brief Reports the Clang release this generator is linked against.
-/// @return The CLANG_VERSION_STRING for the §11.3 exact-version pin.
+/// @brief Reports the Clang  release linked into this generator.
+/// @return The version string used to check the configured compiler version.
 [[nodiscard]] std::string linked_clang_release() {
     return structural::linked_clang_release();
 }
 
-/// @brief Runs the structural pass over in-memory module source (test entry).
+/// @brief Collects public declarations from in-memory C++ source for tests.
 /// @param code A self-contained C++ module translation unit.
-/// @param extra_args Compiler arguments (for example -std=c++26).
-/// @return The exported/public entities the pass records.
+/// @param extra_args Compiler arguments, such as -std=c++26.
+/// @return Exported declarations used for reference pages.
 [[nodiscard]] cpp_reference_index scan_cpp_reference_source(
     std::string_view code, const std::vector<std::string>& extra_args) {
     structural::structural_index index;
@@ -183,10 +182,10 @@ namespace structural = ::bioseq::codegen::structural_analysis;
     return from_structural_index(index);
 }
 
-/// @brief Runs the Clang 22 structural/export index over reachable interfaces.
-/// @param reachable_units Source-relative public interface files to parse.
-/// @param compile_database Path to the Clang-produced compile_commands.json.
-/// @return The structural index of exported/public entities.
+/// @brief Collects public C++ declarations from the selected module interfaces.
+/// @param reachable_units Public interface files to parse.
+/// @param compile_database Path to the Clang compilation database.
+/// @return Exported declarations used for reference pages.
 [[nodiscard]] cpp_reference_index scan_cpp_reference_units(
     const std::vector<std::filesystem::path>& reachable_units,
     const std::filesystem::path& compile_database) {
@@ -202,10 +201,10 @@ namespace structural = ::bioseq::codegen::structural_analysis;
     return from_structural_index(index);
 }
 
-/// @brief Scans each reachable unit's provided module and import edges (§11.3).
-/// @param reachable_units Module interface files to scan.
-/// @param compile_database Path to the Clang-produced compile_commands.json.
-/// @return One module_graph_unit per scanned interface unit.
+/// @brief Collects the module and import information for each selected interface.
+/// @param reachable_units Module interface files to  scan.
+/// @param compile_database Path to the Clang compilation database.
+/// @return One module_graph_unit per scanned interface.
 [[nodiscard]] std::vector<module_graph_unit> scan_module_graph(
     const std::vector<std::filesystem::path>& reachable_units,
     const std::filesystem::path& compile_database) {
@@ -220,10 +219,10 @@ namespace structural = ::bioseq::codegen::structural_analysis;
     return result;
 }
 
-/// @brief Scans one in-memory unit's provided module and import edges (tests).
+/// @brief Collects module imports from in-memory source for tests.
 /// @param code A self-contained C++ module translation unit.
-/// @param extra_args Compiler arguments (for example -std=c++26).
-/// @return The single scanned unit's module/edge record.
+/// @param extra_args Compiler arguments, such as -std=c++26.
+/// @return The source module and its imports.
 [[nodiscard]] module_graph_unit scan_module_graph_from_code(
     std::string_view code, const std::vector<std::string>& extra_args) {
     return unit_from_structural(

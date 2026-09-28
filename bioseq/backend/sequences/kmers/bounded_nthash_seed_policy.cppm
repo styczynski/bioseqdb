@@ -1,6 +1,6 @@
 /**
  * @file bounded_nthash_seed_policy.cppm
- * @brief Data-only alphabet registration for the bounded ntHash kernel.
+ * @brief Supplies one ntHash seed for each supported alphabet symbol.
  */
 module;
 
@@ -12,16 +12,16 @@ import bioseq.common.seqan_adapter;
 export namespace bioseq::minimizers {
 
 /**
- * @brief Rank-ordered ntHash seeds for an admitted nucleotide alphabet.
+ * @brief Defines ntHash seeds in alphabet rank order.
  *
- * The primary template is intentionally incomplete. Supporting another
- * alphabet requires only one data specialization plus the ordinary generated
- * alphabet/owner registration; the SIMD lookup algorithm remains unchanged.
+ * Add a specialization to supply another nucleotide alphabet's seeds, then
+ * register that alphabet with the kernel generator. The SIMD lookup uses
+ * these tables and the alphabet's cmplement operation.
  */
 template<class p_alphabet>
 struct bounded_nthash_seed_policy;
 
-/** Existing SeqAn DNA4 rank order: A, C, G, T. */
+/** SeqAn DNA4 rank order: A, C, G, T. */
 template<>
 struct bounded_nthash_seed_policy<seq::dna4> final {
     inline static constexpr std::array<std::uint32_t, 4> forward_seeds{
@@ -32,7 +32,7 @@ struct bounded_nthash_seed_policy<seq::dna4> final {
     };
 };
 
-/** Existing SeqAn DNA5 rank order: A, C, G, N, T. */
+/** SeqAn DNA5 rank order: A, C, G, N, T. */
 template<>
 struct bounded_nthash_seed_policy<seq::dna5> final {
     inline static constexpr std::array<std::uint32_t, 5> forward_seeds{
@@ -44,7 +44,7 @@ struct bounded_nthash_seed_policy<seq::dna5> final {
     };
 };
 
-/** Registered nucleotide alphabet with a finite byte-rank seed table. */
+/** Requires a nucleotide  alphabet of at most 256 symbols with one seed per rank. */
 template<class p_alphabet>
 concept bounded_nthash_seeded_alphabet =
     seqan3::nucleotide_alphabet<p_alphabet>

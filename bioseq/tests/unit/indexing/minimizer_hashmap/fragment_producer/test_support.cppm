@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides fragment and spill producer fixtures for unit tests.
+ * @brief Provides fragment and spill fixtures, including producers that change between scans.
  */
 module;
 
@@ -40,7 +40,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -56,9 +56,9 @@ export namespace fragment_producer_test_support {
 
 /// Packed DNA4 alphabet used to exercise 16-bit storage units.
 using dna4_u16 = sequence_custom_alphabet<seq::dna4, std::uint16_t>;
-/// Resident range used by the 16-bit DNA4 fixtures.
+/// A sequence range packed into 16-bit DNA4 storage units.
 using dna4_u16_range_t = compact_sequence_range<dna4_u16>;
-/// Describe a resident packed range for the fixed-target kernel bridge.
+/// Describe packed sequence bytes for the selected SIMD kernel.
 template <class p_range>
 [[nodiscard]] ::bioseq::minimizers::packed_sequence_kernel_view
 fixed_packed_sequence_view(const p_range& range) {
@@ -89,7 +89,7 @@ canonical_event_lookup_map(std::span<const bioseq::indexing::canonical_minimizer
     }
     return lookup;
 }
-/// Change the replayed position after the first completed scan.
+/// A test producer whose second position changes after the first scan
 struct drifting_replay_minimizer_producer {
     std::size_t scan_count = 0;
 
@@ -98,14 +98,14 @@ struct drifting_replay_minimizer_producer {
         return bioseq::indexing::k_minimap_scheme_identity;
     }
 
-    /// Return the fixed scalar producer identity.
+    /// Identify this producer as the scalar backend.
     [[nodiscard]] bioseq::indexing::minimizer_producer_identity
     producer_backend_identity() const noexcept {
         return bioseq::indexing::minimizer_producer_backend_identity_for_backend(
             bioseq::simd::minimizer_sketch_backend::scalar);
     }
 
-    /// Emit a position that changes after the first replay.
+    /// Emit two events, changing the  second position on repeated scans.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t span,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -130,19 +130,19 @@ struct drifting_replay_minimizer_producer {
     }
 };
 
-/// Select which producer identity changes after a scan boundary.
+/// Choose, whether a test changes the minimizer scheme or backend.
 enum class identity_drift_axis : std::uint8_t {
     scheme,
     backend,
 };
 
-/// Change one qualified identity after a selected completed grouped-SoA scan.
+/// Change the reported scheme or backend after a chosen number of scans.
 struct boundary_identity_drifting_producer {
     std::size_t scan_count = 0;
     std::size_t drift_after_scan = 1;
     identity_drift_axis axis = identity_drift_axis::scheme;
 
-    /// Return the scheme identity for the active scan ordinal.
+    /// Return the scheme selected by the current scan count.
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity scheme_identity() const noexcept {
         if (axis == identity_drift_axis::scheme && scan_count >= drift_after_scan) {
             return bioseq::indexing::k_bounded_nthash_u32_r7_sum_scheme_identity;
@@ -150,7 +150,7 @@ struct boundary_identity_drifting_producer {
         return bioseq::indexing::k_minimap_scheme_identity;
     }
 
-    /// Return the producer identity for the active scan ordinal.
+    /// Return the backend selected by the current scan count.
     [[nodiscard]] bioseq::indexing::minimizer_producer_identity
     producer_backend_identity() const noexcept {
         const auto backend = axis == identity_drift_axis::backend && scan_count >= drift_after_scan
@@ -159,7 +159,7 @@ struct boundary_identity_drifting_producer {
         return bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
     }
 
-    /// Emit one event and advance the scan ordinal.
+    /// Advance the scan count and emit one fixed event.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t span,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -174,7 +174,7 @@ struct boundary_identity_drifting_producer {
         });
     }
 };
-/// Decode every canonical event from captured grouped-SoA rows.
+/// Read hash-position pairs back from the encoded generation rows.
 [[nodiscard]] std::vector<bioseq::indexing::canonical_minimizer_event>
 decode_generation_events(const bioseq::indexing::encoded_grouped_soa_generation& generation,
                          std::span<const collected_minimizer_row> rows) {

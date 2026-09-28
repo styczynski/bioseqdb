@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates per-row carrier analysis, normalization, reconstruction, and admission.
+ * @brief Exposes helper checks and child-path construction for per-row mmsearch joins.
  */
 export module bioseq.postgres.table:custom_scan_per_row_join_paths;
 

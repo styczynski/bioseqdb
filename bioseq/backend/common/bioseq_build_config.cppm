@@ -1,23 +1,23 @@
 /**
  * @file
- * @brief Canonical declarations for Bioseq build-time policy.
+ * @brief Default build settings read by the build-config generator.
  *
- * This module is the authored input to the build-config generator. The build
- * compiles the generated module with the same module name, not this source.
+ * The, generator writes a module with the same name and selected settings.
+ * The build compiles that generated module.
  */
 export module bioseq.build_config;
 
 export namespace bioseq::build_config {
 
 /**
- * @brief Selects the semantic template-flatten profile.
+ * @brief Selects which template specializations are included  in the build.
  * @remark Unit: profile_ordinal. Domain: 0..5. Default: 0U.
  */
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
     "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0U;
 
 /**
- * @brief Enables every authored alphabet at the uint64 coordinate width.
+ * @brief Builds every supported alphabet with 64-bit sequence coordinates.
  * @remark Unit: boolean. Domain: false|true. Default: false.
  */
 inline constexpr bool bioseq_template_flatten_has_all_alphabets_uint64 [[bioseq::build_config(
@@ -25,7 +25,7 @@ inline constexpr bool bioseq_template_flatten_has_all_alphabets_uint64 [[bioseq:
     false;
 
 /**
- * @brief Enables every authored coordinate width.
+ * @brief Builds every supported sequence-coordinate width.
  * @remark Unit: boolean. Domain: false|true. Default: false.
  */
 inline constexpr bool bioseq_template_flatten_has_all_coordinates [[bioseq::build_config(
@@ -48,7 +48,7 @@ inline constexpr bool bioseq_template_flatten_has_extended_kmer_coordinates
                            "false|true")]] = false;
 
 /**
- * @brief Enables the complete specialization surface.
+ * @brief Builds the full set of template specializations.
  * @remark Unit: boolean. Domain: false|true. Default: false.
  */
 inline constexpr bool bioseq_template_flatten_has_full_specialization [[bioseq::build_config(
@@ -56,14 +56,14 @@ inline constexpr bool bioseq_template_flatten_has_full_specialization [[bioseq::
     false;
 
 /**
- * @brief Gives the generated typed scheduler owner count.
+ * @brief Number of generated compilation units for typed scheduler code.
  * @remark Unit: count. Domain: 7|14|56. Default: 7U.
  */
 inline constexpr unsigned int bioseq_scheduler_typed_heavy_unit_count [[bioseq::build_config(
     "BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT", "count", "7|14|56")]] = 7U;
 
 /**
- * @brief Enables test-only index surfaces in the configured build.
+ * @brief Includes indexes used only by tests.
  * @remark Unit: boolean. Domain: false|true. Default: false.
  */
 inline constexpr bool bioseq_test_indexes_enabled
@@ -71,7 +71,7 @@ inline constexpr bool bioseq_test_indexes_enabled
         false;
 
 /**
- * @brief Enables the noninstalled cache test-support profile.
+ * @brief Includes cache test helpers that are excluded from installation.
  * @remark Unit: boolean. Domain: false|true. Default: false.
  */
 inline constexpr bool bioseq_cache_testing_enabled
@@ -86,7 +86,7 @@ inline constexpr bool bioseq_external_api_clients_enabled [[bioseq::build_config
     "BIOSEQ_BUILD_CONFIG_EXTERNAL_API_CLIENTS_ENABLED", "boolean", "false|true")]] = false;
 
 /**
- * @brief Sets the retry interval for a conditional vacuum truncate lock.
+ * @brief Wait between attempts to lock a relation for vacuum truncation.
  * @remark Unit: milliseconds. Domain: 1..2147483647. Default: 50.
  */
 inline constexpr int bioseq_vacuum_truncate_lock_wait_interval_milliseconds
@@ -95,7 +95,7 @@ inline constexpr int bioseq_vacuum_truncate_lock_wait_interval_milliseconds
                            "1..2147483647")]] = 50;
 
 /**
- * @brief Sets the total conditional vacuum truncate lock timeout.
+ * @brief Time limit for acquiring the lock needed for vacum truncation.
  * @remark Unit: milliseconds. Domain: 1..2147483647. Default: 4500.
  */
 inline constexpr int bioseq_vacuum_truncate_lock_timeout_milliseconds

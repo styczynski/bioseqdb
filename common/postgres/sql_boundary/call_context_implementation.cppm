@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/call_context_implementation.cppm
- *
- * Checked PostgreSQL call-context views and transaction/SPI owners used by
- * generated SQL boundaries.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/call_context_implementation.cppm
+ * @brief Check SQL call contexts and clean up owned subtransactions and SPI sessions.
  */
 module;
 
@@ -44,7 +39,7 @@ namespace {
         sql_error_fields{.message = message});
 }
 
-/** Stable state that survives PostgreSQL subtransaction error unwinding. */
+/** Saved outer state and copied error data used after a subtransaction fails. */
 struct subtransaction_error_state {
     MemoryContext outer_context = nullptr;
     ResourceOwner outer_owner = nullptr;
@@ -102,11 +97,9 @@ void capture_subtransaction_error(
         : TopMemoryContext;
 
     /*
-     * Copy into memory that survives subtransaction rollback, but do not
-     * change CurrentResourceOwner after the failed terminal operation.
-     * PostgreSQL may already have advanced owner state before raising ERROR;
-     * recovery therefore changes only the memory context and leaves the
-     * error-time owner untouched until terminal cleanup completes.
+     * Copy the error into memory that survives rollback. Keep CurrentResourceOwner
+     * as PostgreSQL left it: the failed operation may already  have changed it.
+     * Restore the outer owner only after transaction cleanup finishes.
      */
     MemoryContextSwitchTo(error_owner);
     state->error = CopyErrorData();
@@ -145,9 +138,8 @@ void rollback_failed_subtransaction(
     PG_CATCH();
     {
         /*
-         * The inner transaction could not be terminated. Restoring the outer
-         * owner here would create a mismatched transaction/resource-owner
-         * state, so terminate without attempting to continue.
+         * Rollback failed. Exit the backend because restoring the outer resource
+         * owner could leave it paired with the wrong active transaction
          */
         FlushErrorState();
         proc_exit(1);
@@ -283,9 +275,8 @@ void function_call_context::rollback_transaction() {
 
 subtransaction subtransaction::begin() {
     /*
-     * Only the stable pointer may span PG_TRY: PostgreSQL ERROR longjmps
-     * across the frame, so release the C++ owner before entering and
-     * reacquire it immediately after PG_END_TRY.
+     * PostgreSQL errors jump past C++ destructors. Keep only the raw state
+     * pointer acrosg PG_TRY, then restore its unique_ptr owner after PG_END_TRY.
      */
     auto* state =
         std::make_unique<subtransaction_error_state>(
@@ -457,9 +448,9 @@ subtransaction::~subtransaction() noexcept {
     PG_CATCH();
     {
         /*
-         * Cleanup may have stopped before or after changing transaction
-         * ownership. Never force the saved outer owner onto that partially
-         * transitioned state from a noexcept destructor.
+         * A failed rollback may have changed transaction ownership partway.
+         * Exit the backend with that state  intact so we cannot restore an outer
+         * owner that no longer matches the active, transaction.
          */
         FlushErrorState();
         proc_exit(1);
@@ -521,9 +512,8 @@ spi_session::~spi_session() noexcept {
     PG_CATCH();
     {
         /*
-         * SPI cleanup failed and may have left its private state partially
-         * unwound. Do not install a potentially mismatched saved owner before
-         * terminating the backend.
+         * SPI_finish failed during cleanup. Exit before restoring the saved owner,
+         * since SPI may have already changed the state that owner belongs to.
          */
         FlushErrorState();
         proc_exit(1);

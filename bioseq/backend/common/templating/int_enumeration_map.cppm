@@ -1,9 +1,8 @@
 /**
  * @file int_enumeration_map.cppm
- * @brief Compile-time maps from structural keys to consecutive integer values.
+ * @brief Assigns consecutive numbers to compile-time keys.
  *
- * Lookup delegates to the shared value-pack search primitives, keeping key
- * validation and absence diagnostics in one owner.
+ * Pack-search helpers check for duplicate keys and report missing keys.
  */
 module;
 
@@ -17,9 +16,9 @@ import bioseq.common.templating.pack_search;
 export namespace bioseq::common::templating {
 
 /**
- * @brief Assigns consecutive values to a non-empty pack of structural keys.
- * @tparam p_start_index Value assigned to the first key.
- * @tparam p_keys Unique structural keys in enumeration order.
+ * @brief Assigns consecutive numbers to a non-empty list of unique keys.
+ * @tparam p_start_index Number assigned to the first key.
+ * @tparam p_keys Keys in enumeration order.
  */
 template <auto p_start_index, auto... p_keys> struct int_enumeration_map {
     /// Identifies this type as an integer-enumeration map.
@@ -37,8 +36,8 @@ template <auto p_start_index, auto... p_keys> struct int_enumeration_map {
     static constexpr value_type start = p_start_index;
 
     /**
-     * @brief Value assigned to a key.
-     * @tparam p_key Structural key to find. Absence is a compile-time error.
+     * @brief Number assigned to a key.
+     * @tparam p_key Key to find A missing key is a compile-time error.
      */
     template <auto p_key>
     static constexpr value_type field = static_cast<value_type>(
@@ -49,22 +48,21 @@ template <auto p_start_index, auto... p_keys> struct int_enumeration_map {
         static_cast<value_type>(static_cast<std::size_t>(p_start_index) + (count - 1u));
 
     /**
-     * @brief Reports whether a key belongs to the map.
-     * @tparam p_key Structural key to probe.
+     * @brief Checks whether the map contains a key.
      */
     template <auto p_key> static constexpr bool contains = contains_value_pack<p_key, p_keys...>();
 };
 
 /**
- * @brief String-literal facade over `int_enumeration_map`.
- * @tparam p_start_index Value assigned to the first string key.
- * @tparam p_names Unique string keys in enumeration order.
+ * @brief Assigns consecutive numbers to  sring keys.
+ * @tparam p_start_index Number assigned to the first string.
+ * @tparam p_names Unique strings in enumeration order.
  *
- * Constraining the key pack to `compile_time_string` permits bare string
- * literals in both the map declaration and its lookup expressions.
+ * String literals can be used directly when declaring the map or looking up
+ * a key. `compile_time_string` stores their characters in template arguments.
  */
 template <auto p_start_index, compile_time_string... p_names> struct string_enumeration_map {
-    /// Underlying generic map implementation.
+    /// Map that assigns numbers to these strings.
     using core_type = int_enumeration_map<p_start_index, p_names...>;
 
     /// Integer type used for assigned values.
@@ -87,8 +85,7 @@ template <auto p_start_index, compile_time_string... p_names> struct string_enum
     static constexpr value_type field = core_type::template field<p_key>;
 
     /**
-     * @brief Reports whether a string key belongs to the map.
-     * @tparam p_key String key to probe.
+     * @brief Checks whether the map contains a string key.
      */
     template <compile_time_string p_key>
     static constexpr bool contains = core_type::template contains<p_key>;

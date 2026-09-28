@@ -44,7 +44,7 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
   size_t total = 0;
   size_t i = 0;
 
-  // Min 4 lanes needed for two pairwise widenings, 8->16->32
+  // Four lanes allow two pairwise widenings, from 8 to 16 to 32 bits.
   if constexpr (sizeof(T) == 1 && HWY_MAX_LANES_D(D) >= 4) {
     const VI k1 = Set(di, TI{1});
     const RebindToUnsigned<decltype(di)> du;
@@ -106,7 +106,7 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else if constexpr (sizeof(T) == 2 && HWY_MAX_LANES_D(D) >= 2) {
-    // Min 2 lanes needed for pairwise widening, 16->32
+    // Two lanes allow, pairwise widening from 16 to 32 bits.
     const Repartition<int32_t, D> di32;
     auto wide_sum = Zero(di32);
 
@@ -157,7 +157,7 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else {
-    // Lane type wide enough to accumulate directly
+    // Accumulate directly for the remaining lane types and vector widths.
     if (count >= 4 * N) {
       VI acc0 = Zero(di);
       VI acc1 = Zero(di);
@@ -214,8 +214,8 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
   return total;
 }
 
-// Returns the number of elements in `in[0, count)` for which `func(d, vec)`
-// returns true.
+// Counts elements in `in[0, count)` whose corresponding lann in the mask
+// returned by `func(d, vec)` is true.
 template <class D, class Func, typename T = TFromD<D>>
 size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
   const size_t N = Lanes(d);
@@ -228,7 +228,7 @@ size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
   size_t total = 0;
   size_t i = 0;
 
-  // Min 4 lanes needed for two pairwise widenings, 8->16->32
+  // Four lanes allow two pairwise widenings, from 8 to 16 to 32 bits.
   if constexpr (sizeof(T) == 1 && HWY_MAX_LANES_D(D) >= 4) {
     const VI k1 = Set(di, TI{1});
     const RebindToUnsigned<decltype(di)> du;
@@ -286,7 +286,7 @@ size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else if constexpr (sizeof(T) == 2 && HWY_MAX_LANES_D(D) >= 2) {
-    // Min 2 lanes needed for pairwise widening, 16->32
+    // Two lanes allow pairwise widening from 16 to 32 bits.
     const Repartition<int32_t, D> di32;
     using VI32 = Vec<decltype(di32)>;
     VI32 wide_sum = Zero(di32);
@@ -332,7 +332,7 @@ size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else {
-    // Lane type wide enough to accumulate directly
+    // Accumulate  directly for the remaining lane types and vector widths.
     if (count >= 4 * N) {
       VI acc0 = Zero(di);
       VI acc1 = Zero(di);

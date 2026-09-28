@@ -1,14 +1,11 @@
 /**
  * @file write_state.cppm
- * @brief Transaction-scoped ownership of column write states.
+ * @brief Keep pending column writes separate for each subtransaction.
  *
- * Manages column_write_state objects keyed by
- * relation file number, one entry holds a stack of per-subtransaction write states
- * so that nested subtransactions can commit / abort their writes
- * independently before the enclosing transaction sees them.
- *
- * Backing storage is a transaction_scoped_hash_table, which owns lazy HTAB
- * creation, its MemoryContext, and the transaction-end reset callback.
+ * Each relation file has a stack of writer states. Completing a subtransaction
+ * flushes or discards its state, leaving its parent's state available.
+ * A transaction-scoped hash table owns the entries and clears them  at the
+ * end of the top-level transaction.
  */
 module;
 
@@ -21,8 +18,7 @@ import :options;
 import bioseq.postgres.support;
 import bioseq.common.logging;
 
-// Registered callbacks keep transaction-state ownership independent from the
-// writer and sequence-storage implementations that it coordinates.
+// Writer and sequence-storage modules supply these callbacks to avoid, circular imports.
 using begin_write_hook_type =
 	column_write_state* (*)(RelFileLocator, column_options, TupleDesc);
 using end_write_hook_type = void (*)(column_write_state*);
@@ -36,12 +32,12 @@ static flush_writes_hook_type flush_writes_hook = nullptr;
 static contains_pending_hook_type contains_pending_hook = nullptr;
 static close_sequence_caches_hook_type close_sequence_caches_hook = nullptr;
 
-/// @brief Registers writer callbacks invoked by transaction-state lifecycle events.
-/// @param[in] begin_write Creates a transaction-context state for a relation.
-/// @param[in] end_write Flushes and releases a state committed by its subtransaction.
-/// @param[in] flush_writes Makes pending writes visible without ending the state.
-/// @param[in] contains_pending Tests whether a state still owns buffered writes.
-/// @param[in] close_sequence_caches Commits or discards lazily created sequence caches.
+/// @brief Set the callbacks used to manage buffered writes.
+/// @param[in] begin_write Create a writer in the transaction's memory context.
+/// @param[in] end_write Flush and release a completed writer.
+/// @param[in] flush_writes Flush pending writes while keeping the writer open.
+/// @param[in] contains_pending Check whether a writer has buffered data.
+/// @param[in] close_sequence_caches Close sequence caches, saving or discarding pending changes.
 export void
 register_column_write_state_hooks(begin_write_hook_type begin_write,
 						   end_write_hook_type end_write,
@@ -65,9 +61,7 @@ struct subtransaction_write_frame
 };
 
 
-/**
- * @brief Stores nested write frames and a transactional drop marker for one relation file.
- */
+/** @brief Writer stack and DROP state for one relation file. */
 struct write_state_map_entry
 {
 	Oid relation_file_number;
@@ -83,11 +77,11 @@ static bioseq::postgres::support::transaction_scoped_hash_table<
 	write_state_map_entry> write_state_cache{"column store write state map"};
 
 /**
- * @brief Commits or discards the current frame and propagates its drop marker.
- * @param[in,out] entry Relation state, or `nullptr` when no writes were observed.
+ * @brief Complete one subtransaction's writes or update  its DROP markdr
+ * @param[in,out] entry Relation entry, or nullptr if none exists.
  * @param[in] current_sub_xid Subtransaction being completed.
- * @param[in] parent_sub_xid Parent that inherits committed drop state.
- * @param[in] commit Whether pending writes and cache deltas are committed.
+ * @param[in] parent_sub_xid Parent that inherits a committed DROP marker.
+ * @param[in] commit Flush writes on commit, or discard them on abort.
  */
 static void
 pop_current_write_state_entry(write_state_map_entry* entry,
@@ -100,13 +94,9 @@ pop_current_write_state_entry(write_state_map_entry* entry,
 		return;
 	}
 
-	/*
-	 * A relation can be dropped after its last write frame was popped by an
-	 * earlier commit.  The drop marker is still transactional state and must be
-	 * elevated or reverted even when there is no current write frame.  Checking
-	 * write_state_stack first strands dropped=true after a failed DROP, making the
-	 * restored relation appear permanently empty in this backend.
-	 */
+	/* A DROP marker can remain after the last writer frame is removed.
+	 * Handle it first so abort restores the relation's state even when
+	 * the stack is empty. Commit transfers the marker to the parent. */
 	if (entry->dropped)
 	{
 		if (entry->drop_subtransaction_id == current_sub_xid)
@@ -147,17 +137,16 @@ pop_current_write_state_entry(write_state_map_entry* entry,
 	entry->write_state_stack = stack_head->next;
 }
 
-/** @brief Finds or creates a relation write state for one subtransaction.
+/** @brief Reuse or create a relation writer for the current subtransaction.
  *
- * Returns the existing state when the stack head belongs to the current
- * subtransaction. Otherwise, pushes a state whose column options come from
- * source_relation_oid so table rewrites may write a different target relation.
+ * Table rewrites copy options from source_relation_oid while writing to the
+ * destination relation. Ordinary inserts use the  same relation for both.
  *
- * @param[in] relation Open destination relation borrowed for state creation.
- * @param[in] tuple_descriptor Tuple layout valid for the state lifetime.
- * @param[in] source_relation_oid Relation whose persisted options govern the write.
- * @param[in] current_sub_xid Subtransaction that owns the returned state.
- * @return Cached transaction-context state owned by the relation frame.
+ * @param[in] relation Open destination relation.
+ * @param[in] tuple_descriptor Tuple layout valid while the writer is alive.
+ * @param[in] source_relation_oid Relation whose options control this write.
+ * @param[in] current_sub_xid Subtransaction that owns the writer.
+ * @return Writer owned by this relation's current transaction frame.
  */
 export column_write_state*
 initialize_column_write_state(Relation relation, TupleDesc tuple_descriptor,
@@ -185,11 +174,7 @@ initialize_column_write_state(Relation relation, TupleDesc tuple_descriptor,
 	}
 
 	column_options bioseq_column_options = { 0 };
-	/*
-	 * In case of a table rewrite, we need to fetch table options based on the
-	 * relation id of the source tuple slot. For normal writes this is the
-	 * same as the target relation.
-	 */
+	/* Preserve the source table's options when a rewrite uses a new destination. */
 	bioseq_column_options =
 		read_column_options(source_relation_oid)
 			.value_or(column_options{});
@@ -218,12 +203,11 @@ initialize_column_write_state(Relation relation, TupleDesc tuple_descriptor,
 }
 
 
-/** @brief Flushes the current subtransaction's relation write state in place.
+/** @brief Flush this subtransaction's writer while keeping it open.
+ * @param[in] relation_file_number Relation file number.
+ * @param[in] current_sub_xid Subtransaction that must own the stack head.
  *
- * No-op if the relation has no state owned by the current subtransaction.
- *
- * @param[in] relation_file_number Physical relation key.
- * @param[in] current_sub_xid Subtransaction allowed to flush the stack head.
+ * Return without action if no matching  writer exists.
  */
 export void
 flush_relation_write_state(Oid relation_file_number, SubTransactionId current_sub_xid)
@@ -242,15 +226,13 @@ flush_relation_write_state(Oid relation_file_number, SubTransactionId current_su
 }
 
 
-/** @brief Finalizes the current write frame for every touched relation.
+/** @brief Flush or discard completed writers across all relations.
  *
- * Flushes matching frames on commit and discards them on abort. Drop markers
- * owned by this subtransaction propagate to the parent on commit and are
- * reverted on abort.
+ * Commit transfers DROP markers to the parent. Abort clears them.
  *
  * @param[in] current_sub_xid Subtransaction being completed.
- * @param[in] parent_sub_xid Parent that receives committed state.
- * @param[in] commit Whether frames are committed instead of discarded.
+ * @param[in] parent_sub_xid Parent that inherits committed DROP markers.
+ * @param[in] commit Flush on commit, or discard on abrt.
  */
 export void
 pop_all_column_write_states(SubTransactionId current_sub_xid,
@@ -266,11 +248,11 @@ pop_all_column_write_states(SubTransactionId current_sub_xid,
 }
 
 /**
- * @brief Finalizes one relation's current write frame.
- * @param[in] relation_file_number Physical relation key.
+ * @brief Complete one relation's writer for a subtransaction.
+ * @param[in] relation_file_number Relation file number
  * @param[in] current_sub_xid Subtransaction being completed.
- * @param[in] parent_sub_xid Parent that receives committed drop state.
- * @param[in] commit Whether the frame is committed instead of discarded.
+ * @param[in] parent_sub_xid Parent that inherits a committed DROP marker.
+ * @param[in] commit Flush on commit, or discard on abort.
  */
 export void
 pop_relation_column_write_state(Oid relation_file_number,
@@ -284,9 +266,9 @@ pop_relation_column_write_state(Oid relation_file_number,
 
 
 /**
- * @brief Marks a relation write state as dropped in a subtransaction.
- * @param[in] relation_file_number Physical relation key.
- * @param[in] current_sub_xid Subtransaction that owns the reversible marker.
+ * @brief Mark an existing relation entry as dropped by this subtransaction.
+ * @param[in] relation_file_number Relation file number.
+ * @param[in] current_sub_xid Subtransaction whose abort can undo the marker.
  */
 export void
 mark_column_write_state_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
@@ -303,8 +285,8 @@ mark_column_write_state_relation_dropped(Oid relation_file_number, SubTransactio
 
 
 /**
- * @brief Removes state for a relation dropped outside subtransaction cleanup.
- * @param[in] relation_file_number Physical relation key removed from the cache.
+ * @brief Remove a dropped relation's entry outside subtransaction callbacks.
+ * @param[in] relation_file_number Relation file number to remove from the cache.
  */
 export void
 drop_column_write_state_outside_transaction(Oid relation_file_number)
@@ -314,10 +296,10 @@ drop_column_write_state_outside_transaction(Oid relation_file_number)
 
 
 /**
- * @brief Tests whether an ancestor subtransaction owns pending column writes.
- * @param[in] relation_file_number Physical relation key.
- * @param[in] current_sub_xid Current frame excluded from the ancestor search.
- * @return `true` when another frame still owns buffered writes.
+ * @brief Check,  whether parent subtransactions have buffered writes.
+ * @param[in] relation_file_number Relation file number.
+ * @param[in] current_sub_xid Current subtransaction to exclude.
+ * @return true if another frame has pending column data.
  */
 export bool
 column_writes_pending_in_parent_transactions(
@@ -345,8 +327,8 @@ column_writes_pending_in_parent_transactions(
 }
 
 
-/// @brief Returns the memory context owning transaction-scoped write states.
-/// @return Context reset with the surrounding top-level transaction.
+/// @brief Return the memory context that owns pending column writes.
+/// @return A context reset at transaction end, or nullptr before the first entry.
 export MemoryContext
 column_write_memory_context()
 {

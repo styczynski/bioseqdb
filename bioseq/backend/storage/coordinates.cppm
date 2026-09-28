@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief PostgreSQL-free logical sequence transform and coordinate helpers.
+ * @brief Sequence orientation and slice-coordinate helpers.
  */
 module;
 
@@ -51,7 +51,7 @@ enum class sequence_transform : std::uint8_t {
     return std::uint64_t{0} - static_cast<std::uint64_t>(value);
 }
 
-/** Normalize one SQL-style slice bound and clamp it to `[0, length]`. */
+/** Resolves a zero-based slice bound, counting negative bounds from the end and clamping to [0, length]. */
 [[nodiscard]] constexpr std::uint64_t normalize_slice_bound(
     std::int64_t bound,
     std::uint64_t length) noexcept
@@ -63,7 +63,7 @@ enum class sequence_transform : std::uint8_t {
     return magnitude >= length ? 0u : length - magnitude;
 }
 
-/** Normalize one SQL-style element index, rejecting coordinates outside it. */
+/** Resolves a zero-based index Negative indices count from the end, and invalid indices return nullopt. */
 [[nodiscard]] constexpr std::optional<std::uint64_t> normalize_element_index(
     std::int64_t index,
     std::uint64_t length) noexcept

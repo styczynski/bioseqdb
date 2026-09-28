@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies KSW2 score and CIGAR parity across lazy-sequence fragments.
+ * @brief Check that sequence  fragmentation preserves KSW2 scores and CIGAR operations.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -26,9 +26,8 @@ using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t = compact_sequence_range<dna4_u64>;
 
 /**
- * @brief Resolves the generated DNA4 alignment table for the fixed test target.
- * @return Complete typed alignment kernel table.
- * @throws std::logic_error If the generated table lacks its DNA4 identity or entry.
+ * @brief Get the complete DNA4 alignment table for this test's Highway target.
+ * @throws std::logic_error If the DNA4 identity or alignment table is missing or incomplete.
  */
 [[nodiscard]] const alignment_kernels<seq::dna4>& fixed_alignment_kernels() {
     const auto& root = ::bioseq::simd_dispatch::highway_test_kernel_table();
@@ -48,10 +47,9 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Generates deterministic DNA4 symbols from a linear-congruential stream.
- * @param[in] n Number of symbols to generate.
+ * @brief Generate reproducible DNA4 bases.
+ * @param[in] n Number of bases.
  * @param[in] seed Initial generator state.
- * @return Generated DNA4 sequence.
  */
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -66,13 +64,13 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Runs fixed-target single-affine KSW2 over complete lazy views.
- * @param[in] query Query view whose backing outlives the call.
- * @param[in] target Target view whose backing outlives the call.
- * @param[in] query_length Query length in symbols.
- * @param[in] target_length Target length in symbols.
+ * @brief Run ubanded single-affine KSW2 through the test's Highway table
+ * @param[in] query Query view with storage valid for the call.
+ * @param[in] target Target view with storage valid for  the call.
+ * @param[in] query_length Number of query bases to align from position zero.
+ * @param[in] target_length Number of target bases to align from position zero.
  * @param[in] scoring DNA4 scoring matrix.
- * @return KSW2 score, coordinates, and CIGAR.
+ * @return Alignment score, coordinates, and CIGAR.
  */
 [[nodiscard]] ksw_alignment_result run_ksw2(bioseq::storage::lazy_sequence_view<seq::dna4> query,
                                             bioseq::storage::lazy_sequence_view<seq::dna4> target,
@@ -98,7 +96,7 @@ TEST_CASE("KSW2 alignment is bit-identical under fragmentation",
 
     const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
 
-    /// Input lengths and generator seed for one fragmentation parity fixture.
+    /// Query and target lengths, plus a seed for the input bases.
     struct parity_case {
         std::size_t qn, tn;
         std::uint64_t seed;
@@ -112,7 +110,7 @@ TEST_CASE("KSW2 alignment is bit-identical under fragmentation",
 
     for (auto [qn, tn, seed] : cases) {
         auto qd = make_dna4(qn, seed);
-        // Make the target a mutated copy of the query so an alignment exists.
+        // Give the query and target a shared sequence prefix.
         auto td = make_dna4(tn, seed);
         for (std::size_t i = 0; i + 3 < std::min(qn, tn); i += 1)
             td[i] = qd[i];
@@ -126,7 +124,7 @@ TEST_CASE("KSW2 alignment is bit-identical under fragmentation",
                                        tn,
                                        scoring);
 
-        // Fragmented: three chunk sizes (1 / 2 / 32 storage units per fragment).
+        // Repeat the alignment with fragments of 1, 2, and 32 packed words.
         const auto require_chunked_parity =
             [&q_range, &t_range, qn, tn, &scoring, &baseline](auto fragment_units) {
                 constexpr std::size_t units = decltype(fragment_units)::value;

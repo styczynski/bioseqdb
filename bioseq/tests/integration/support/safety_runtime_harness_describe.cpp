@@ -1,4 +1,7 @@
-/** @file Safety runtime catalog-description command family. */
+/**
+ * @file
+ * @brief Writes the available runtime-safety cases as JSON.
+ */
 
 module;
 

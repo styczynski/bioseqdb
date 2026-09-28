@@ -45,14 +45,14 @@ export {
                     parallel_divisor += leader_contribution;
             }
 
-            /* The CPU cost is divided among all the workers. */
+            /* Share total scan cost and rows across the expected participants. */
             path->total_cost /= parallel_divisor;
 
             path->rows = clamp_row_est(path->rows / parallel_divisor);
         }
     }
 
-    /** @brief Costs a custom scan from projected columns, restriction selectivity, and stripes. */
+    /** @brief Estimates a custom scan's read cost from column count and stripes likely to pass its filters. */
     void cost_bioseq_column_scan(PlannerInfo* root,
                                  RelOptInfo* rel,
                                  Oid relation_id,
@@ -65,11 +65,8 @@ export {
         Selectivity clause_sel =
             clauselist_selectivity(root, all_clauses, rel->relid, JOIN_INNER, nullptr);
 
-        /*
-         * We already filtered out clauses where the overall selectivity would be
-         * misleading, such as inequalities involving an uncorrelated column. So
-         * we can apply the selectivity directly to the number of stripes.
-         */
+        /* Pushdown selection has already  removed filters with poor column
+         * correlation. Use the remaining selectivity to esdimate stripes read. */
         double stripes_to_read = clause_sel * bioseq_column_table_stripe_count(relation_id);
         stripes_to_read = std::max(stripes_to_read, 1.0);
 
@@ -80,7 +77,7 @@ export {
                                                        rel, relation_id, number_of_columns_read);
     }
 
-    /** @brief Estimates the tablespace-adjusted cost of reading selected columns from one stripe. */
+    /** @brief Estimates the cost of reading selected columns from an average stored stripe. */
     Cost bioseq_column_per_stripe_scan_cost(RelOptInfo* rel,
                                             Oid relation_id,
                                             int number_of_columns_read) {
@@ -95,12 +92,7 @@ export {
             max_column_count = std::max(max_column_count, stripe_metadata->column_count);
         }
 
-        /*
-         * When no stripes are in the table we don't have a count in maxColumnCount. To
-         * prevent a division by zero turning into a NaN we keep the ratio on zero.
-         * This will result in a cost of 0 for scanning the table which is a reasonable
-         * cost on an empty table.
-         */
+        /* An empty table has no stripe width to divide by and no read cost. */
         if (max_column_count == 0) {
             return 0;
         }
@@ -111,14 +103,8 @@ export {
             static_cast<double>(total_stripe_size) / BLCKSZ * column_selection_ratio;
         Cost per_stripe_scan_cost = table_scan_cost / list_length(stripe_list);
 
-        /*
-         * Finally, multiply the cost of reading a single stripe by seq page read
-         * cost to make our estimation scale compatible with postgres.
-         * Since we are calculating the cost for a single stripe here, we use seq
-         * page cost instead of random page cost. This is because, random page
-         * access only happens when switching between columns, which is pretty
-         * much neglactable.
-         */
+        /* Use the tablespace's sequential page cost to express stripe reads in
+         * PostgreSQL planner units. This estimate treats column reads as sequential. */
         double rel_space_seq_page_cost;
         get_tablespace_page_costs(rel->reltablespace, nullptr, &rel_space_seq_page_cost);
         per_stripe_scan_cost = per_stripe_scan_cost * rel_space_seq_page_cost;

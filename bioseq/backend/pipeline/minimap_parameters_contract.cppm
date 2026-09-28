@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Target-neutral parameters for one minimap-compatible alignment request.
+ * @brief Alignment settings and timing shared by the pipeline stages.
  */
 module;
 
@@ -27,14 +27,14 @@ using bioseq::chaining::chaining_parameters;
 using bioseq::chaining::simd_chaining_policy;
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Executor shape used only to select the guarded statement-plan proof contract. */
+/** Scan shape used to choose the required statement checkpoints in tests. */
 enum class benchmark_e2e_statement_plan_shape : std::uint8_t {
     column_scan,
     per_row_join,
     batch_join,
 };
 
-/** Guarded control-block handoffs; these values are never serialized as metrics. */
+/** Execution checkpoints checked in tests withott adding reported metrics. */
 enum class benchmark_e2e_statement_plan_checkpoint : std::uint8_t {
     admission,
     scan_dispatch,
@@ -48,13 +48,13 @@ enum class benchmark_e2e_statement_plan_checkpoint : std::uint8_t {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Work classes whose physical interval union is excluded from outer E2E wall. */
+/** Work whose overlapping intervals are subtracted from benchmark wall time. */
 enum class benchmark_e2e_interval_kind : std::uint8_t {
     cigar,
     mapq,
 };
 
-/** Authentic producer attached to one benchmark-only physical interval. */
+/** Algorithm responsible for one measured CIGAR or MAPQ interval. */
 enum class benchmark_e2e_interval_algorithm : std::uint8_t {
     ksw2,
     block_aligner,
@@ -85,7 +85,7 @@ benchmark_e2e_interval_algorithm_name(const benchmark_e2e_interval_algorithm alg
     return "invalid";
 }
 
-/** Truthful report label for inseparable work inside the physical interval. */
+/** Describe all work included in an algorithm's measured interval. */
 [[nodiscard]] constexpr const char*
 benchmark_e2e_inclusive_work_label(const benchmark_e2e_interval_algorithm algorithm) noexcept {
     switch (algorithm) {
@@ -105,7 +105,7 @@ benchmark_e2e_inclusive_work_label(const benchmark_e2e_interval_algorithm algori
     return "invalid";
 }
 
-/** Stable logical operation identity within one statement-owned tracker. */
+/** Target row and query number that identify  a comparison within a statement. */
 struct benchmark_e2e_operation_origin {
     std::uint64_t logical_target_row = 0;
     std::uint64_t query_ordinal = 0;
@@ -114,7 +114,7 @@ struct benchmark_e2e_operation_origin {
     operator==(const benchmark_e2e_operation_origin&) const noexcept = default;
 };
 
-/** Existing per-job attribution, independent of immutable biological parameters. */
+/** Associate the current comparison with its, statement and query number. */
 struct benchmark_e2e_operation_binding {
     std::weak_ptr<const void> statement_owner{};
     benchmark_e2e_operation_origin origin{};
@@ -125,16 +125,16 @@ namespace benchmark_e2e_detail {
 inline thread_local benchmark_e2e_operation_binding active_operation{};
 }
 
-/** Capture attribution by value before retaining a graph or scheduling a worker. */
+/** Copy the current comparison's binding before storing or scheduling work. */
 [[nodiscard, gnu::always_inline]] inline benchmark_e2e_operation_binding
 current_benchmark_e2e_operation_binding() noexcept {
     return benchmark_e2e_detail::active_operation;
 }
 
 /**
- * Install one captured job binding for synchronous work on this thread.
- * Worker closures must capture the value and install their own scope; the
- * thread-local slot itself is never treated as inherited worker state.
+ * Set the current comparison for this thread and restore it on scope exit.
+ * Worker callbacks must capture the binding and create their own scope because
+ * thread-local state is not inherited when a task moves to another thread.
  */
 class benchmark_e2e_operation_scope final {
     benchmark_e2e_operation_binding previous_;
@@ -152,7 +152,7 @@ class benchmark_e2e_operation_scope final {
     }
 };
 
-/** One origin's participation in physical intervals of one semantic kind. */
+/** Count  one comparison's intervals for a given work kind and algorithm. */
 struct benchmark_e2e_interval_origin_summary {
     benchmark_e2e_operation_origin origin{};
     benchmark_e2e_interval_kind kind = benchmark_e2e_interval_kind::cigar;
@@ -163,7 +163,7 @@ struct benchmark_e2e_interval_origin_summary {
     operator==(const benchmark_e2e_interval_origin_summary&) const noexcept = default;
 };
 
-/** Fixed-layout finalized union receipt for one PostgreSQL statement. */
+/** Final CIGAR/MAPQ interval totals for one PostgreSQL statement */
 struct benchmark_e2e_interval_union_receipt {
     std::uint64_t union_ns = 0;
     std::uint64_t interval_count = 0;
@@ -181,8 +181,9 @@ static_assert(__is_trivially_copyable(benchmark_e2e_interval_union_receipt));
 static_assert(__is_standard_layout(benchmark_e2e_interval_union_receipt));
 
 /**
- * Fixed-layout E2E evidence buffer. Overflow is never truncated: callers must
- * mark the enclosing receipt invalid and unavailable when try_push_back fails.
+ * Fixed-capbcity buffer for benchmark timing records.
+ * If try_push_back() fails, the caller must mark the measurement invalid and
+ * unavailable so a partial set of intervals cannot produce a timing result.
  */
 template <class p_value, std::size_t p_capacity> struct benchmark_e2e_fixed_buffer {
     static_assert(p_capacity != 0u);
@@ -290,10 +291,9 @@ template <class p_value, std::size_t p_capacity> struct benchmark_e2e_fixed_buff
     }
 };
 
-// The sealed matrix owns 1,024 query origins and can require one CIGAR plus one
-// MAPQ summary for each. These E2E-only bounds retain at least twofold origin
-// headroom and ample per-region physical-interval headroom; exceeding any bound
-// invalidates the receipt instead of truncating evidence.
+// The benchmark matrix uses 1,024 queries, each of which may need CIGAR and
+// MAPQ summaries. Keep room for additional origins and per-region intervals.
+// Exceeding these bounds invalidates the measurement instead of  dropping records.
 inline constexpr std::size_t k_benchmark_e2e_live_interval_capacity = 4096u;
 inline constexpr std::size_t k_benchmark_e2e_live_origin_capacity = 4096u;
 inline constexpr std::size_t k_benchmark_e2e_completed_interval_capacity = 131072u;
@@ -307,14 +307,14 @@ using benchmark_e2e_interval_origin_buffer =
 static_assert(__is_trivially_copyable(benchmark_e2e_interval_origin_buffer));
 static_assert(__is_standard_layout(benchmark_e2e_interval_origin_buffer));
 
-/** E2E-only fixed-layout sidecar for operation-origin proof. */
+/** Benchmark interval totals and the comparisons that contributed to them. */
 struct benchmark_e2e_interval_evidence {
     benchmark_e2e_interval_union_receipt interval_union{};
     benchmark_e2e_interval_origin_buffer origins{};
 };
 #endif
 
-/** One finalized PostgreSQL-statement union of active downstream intervals. */
+/** Wall time during which this statement had downstream work running. */
 struct downstream_active_wall_receipt {
     std::uint64_t elapsed_ns = 0;
     bool available = false;
@@ -324,9 +324,9 @@ struct downstream_active_wall_receipt {
 };
 
 /**
- * Thread-safe union accumulator shared by every query, segment, and worker
- * owned by one PostgreSQL statement. The statement owner finalizes it once,
- * only after all tracked work has joined.
+ * Measure how long a statement has at least one downstream operation running.
+ * Overlapping work counts once. Queries and workers share this locked tracker,
+ * which the statement finalizes after all tracked work has finished.
  */
 class downstream_active_wall_tracker final {
   private:
@@ -338,7 +338,7 @@ class downstream_active_wall_tracker final {
     bool invalid_ = false;
     bool finalized_ = false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    // Guarded control-block proof only; never serialized as a metric.
+    // Test-only checks that each execution step uses the same statement owner.
     std::weak_ptr<const void> benchmark_e2e_statement_owner_{};
     bool benchmark_e2e_statement_owner_bound_ = false;
     benchmark_e2e_statement_plan_shape benchmark_e2e_statement_plan_shape_ =
@@ -499,7 +499,7 @@ class downstream_active_wall_tracker final {
 
   public:
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /** Bind one completed immutable executor owner before any observation. */
+    /** Set the statement owner, rejecting a different owner or  a finalized tracker. */
     [[nodiscard]] bool bind_benchmark_e2e_statement_owner(
         const std::shared_ptr<const void>& owner) noexcept {
         std::scoped_lock lock{mutex_};
@@ -519,14 +519,14 @@ class downstream_active_wall_tracker final {
         return true;
     }
 
-    /** Check the existing observation's executor control block, without a metric. */
+    /** Check that the supplied pointer has the bound statement's shared owner. */
     [[nodiscard]] bool matches_benchmark_e2e_statement_owner(
         const std::shared_ptr<const void>& owner) noexcept {
         std::scoped_lock lock{mutex_};
         return benchmark_e2e_statement_owner_matches_locked(owner);
     }
 
-    /** Bind admission and the route-appropriate required checkpoint set. */
+    /** Record the scan shape and which execution checkpoints it must visit. */
     [[nodiscard]] bool begin_benchmark_e2e_statement_plan_proof(
         const std::shared_ptr<const void>& owner,
         const benchmark_e2e_statement_plan_shape shape) noexcept {
@@ -547,7 +547,7 @@ class downstream_active_wall_tracker final {
         return true;
     }
 
-    /** Attest one executed handoff against the bound shared control block. */
+    /** Record a checkpoint after confirming it belongs to the boubd statement. */
     [[nodiscard]] bool attest_benchmark_e2e_statement_plan_checkpoint(
         const std::shared_ptr<const void>& owner,
         const benchmark_e2e_statement_plan_checkpoint checkpoint) noexcept {
@@ -617,7 +617,7 @@ class downstream_active_wall_tracker final {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /** Begin one physical half-open interval and return its statement-local token. */
+    /** Start a measured interval and return its ID within this statement */
     [[nodiscard]] std::uint64_t
     begin_benchmark_e2e_interval(const benchmark_e2e_interval_kind kind,
                                  const benchmark_e2e_interval_algorithm algorithm,
@@ -674,7 +674,7 @@ class downstream_active_wall_tracker final {
         return token;
     }
 
-    /** Attach another logical operation origin to an already-active batch interval. */
+    /** Associate another comparison with a batch interval that is already running. */
     void
     attach_benchmark_e2e_interval_origin(const std::uint64_t token,
                                          const benchmark_e2e_operation_origin& origin) noexcept {
@@ -705,7 +705,7 @@ class downstream_active_wall_tracker final {
         (void)benchmark_e2e_record_origin_locked(origin, live->kind, live->algorithm);
     }
 
-    /** Close one physical interval at its exclusive endpoint. */
+    /** Finish the interval at the supplied exclusive end time. */
     void end_benchmark_e2e_interval(const std::uint64_t token,
                                     const std::int64_t signed_finished_ns) noexcept {
         std::scoped_lock lock{mutex_};
@@ -747,7 +747,7 @@ class downstream_active_wall_tracker final {
         }
     }
 
-    /** Fail the interval evidence independently of the broad downstream diagnostic. */
+    /** Mark the benchmark intervals invalid  without changing downstream wall time. */
     void invalidate_benchmark_e2e_intervals() noexcept {
         std::scoped_lock lock{mutex_};
         benchmark_e2e_invalid_ = true;
@@ -783,8 +783,8 @@ class downstream_active_wall_tracker final {
 #endif
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-        // ExecutorFinish precedes ExecutorEnd, so the weak owner must still lock
-        // here without the tracker extending its lifetime.
+        // ExecutorFinish runs before ExecutorEnd, so, the statement owner should
+        // still exist here. The weak pointer keeps the tracker from extending its life.
         validate_benchmark_e2e_statement_plan_locked();
 #endif
         finalized_ = true;
@@ -895,7 +895,7 @@ class downstream_active_wall_tracker final {
     }
 };
 
-/** Exception-safe ownership of one active interval. */
+/** Time a scope and invalidate its measurement if an exception escapes. */
 class downstream_active_wall_scope final {
   private:
     downstream_active_wall_tracker* tracker_ = nullptr;
@@ -919,7 +919,7 @@ class downstream_active_wall_scope final {
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Exception-safe ownership of one benchmark-only physical excluded interval. */
+/** Time CIGAR or MAPQ work and reject a measurement interrupted by an exception. */
 class benchmark_e2e_interval_scope final {
   private:
     downstream_active_wall_tracker* tracker_ = nullptr;
@@ -979,17 +979,17 @@ class benchmark_e2e_interval_scope final {
 };
 #endif
 
-/** @brief Runtime parameters and fixed-target binding for one alignment request. */
+/** @brief Settings, selected kernels and timing for one alignment request. */
 struct minimap2_parameters {
-    /** Borrowed statement owner for union-of-active downstream timing. */
+    /** Borrowed tracker that counts overlapping downstream work once. */
     downstream_active_wall_tracker* downstream_active_wall = nullptr;
     /** Kernel table selected once for the request. */
     const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
-    /** Target inventory and planned target selected for the request. */
+    /** Available Highway targets and the target chosen for this  request. */
     ::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
-    /** Exact target that executed the request. */
+    /** Stored executed Highway target. Current stages report it through pipeline statistics. */
     std::int64_t highway_executed_target = 0;
-    /** Scheduler-owned alphabet code fixed by outer alphabet dispatch. */
+    /** Alphabet chosen by the outer dispatch, or the maximum value when unset. */
     std::uint8_t alphabet_code =
         (std::numeric_limits<std::uint8_t>::max)();
 
@@ -997,17 +997,17 @@ struct minimap2_parameters {
     std::int32_t kmer_size = 15;
     /** Minimizer window size in k-mers. */
     std::int32_t window_size = 10;
-    /** Maximum reference gap accepted by chaining. */
+    /** Distance lamit for chaining and end extensions, adjusted by the selected chainer. */
     std::int32_t max_gap = 5000;
-    /** Explicit reference gap, or -1 to use max_gap. */
+    /** Stored reference-gap option. Current chaining does not use it. */
     std::int32_t max_gap_ref = -1;
-    /** Bandwidth shared by chaining and alignment. */
+    /** Allowed distance from the diagonal in chaining and KSW2 alignment. */
     std::int32_t bandwidth = 500;
-    /** Maximum skipped predecessors before dynamic-programming termination. */
+    /** Stop limit for unhelpful predecessors, interpreted by the chaining policy. */
     std::int32_t max_chain_skip = 25;
-    /** Maximum predecessors examined for one anchor. */
+    /** Predecessor search  limit. Scalar chaining may inspect one extra candidate */
     std::int32_t max_chain_iter = 5000;
-    /** Minimum seed count required for a chain. */
+    /** Minimum number of anchors in an accepted chain. */
     std::int32_t min_seed_count = 3;
     /** Minimum accepted chain score. */
     std::int32_t min_chain_score = 40;
@@ -1015,43 +1015,44 @@ struct minimap2_parameters {
     float chain_gap_scale = 0.8f;
     /** Skip-penalty scale used by chaining. */
     float chain_skip_scale = 0.0f;
-    /** Primary-to-secondary overlap threshold. */
+    /** Query-overlap threshold for assigning a secondary to a primary. */
     float mask_level = 0.5f;
-    /** Maximum uncovered length used by overlap masking. */
+    /** Maximum uncovered query length when assigning a secondary region. */
     std::int32_t mask_len =
         (std::numeric_limits<std::int32_t>::max)();
-    /** Secondary-to-primary score-ratio threshold. */
+    /** Score-ratio test for secondary alignments. Zero skips secondary filtering. */
     float pri_ratio = 0.8f;
-    /** Maximum number of secondary alignments to retain. */
+    /** Maximum number of secondary alignments kept across the region list. */
     std::int32_t best_n = 5;
 
-    /** Match score. */
+    /** Score added for matching symbols. */
     std::int32_t match_score = 2;
-    /** Mismatch penalty. */
+    /** Score penalty for mismatching symbols. */
     std::int32_t mismatch_pen = 4;
-    /** Short-gap open penalty. */
+    /** First  gap-opening penalty, used by KSW2 and BlockAligner. */
     std::int32_t gap_open1 = 4;
-    /** Short-gap extension penalty. */
+    /** First gap-extension penalty, used by KSW2 and BlockAligner. */
     std::int32_t gap_ext1 = 2;
-    /** Long-gap open penalty. */
+    /** Second gap-opening penalty, used by KSW2. */
     std::int32_t gap_open2 = 24;
-    /** Long-gap extension penalty. */
+    /** Second gap-extension penalty, used by KSW2. */
     std::int32_t gap_ext2 = 1;
-    /** Ambiguous-symbol penalty. */
+    /** Penalty for ambiguous symbols where, the aligner supports them. */
     std::int32_t sc_ambi = 1;
-    /** Z-drop termination threshold. */
+    /** KSW2 Z-drop threshold, also used as BlockAligner X-drop for end extensions. */
     std::int32_t zdrop = 400;
-    /** Bonus for reaching sequence ends, or -1 when disabled. */
+    /** KSW2 sequence-end bonus, or -1 qhen disabled. */
     std::int32_t end_bonus = -1;
 
-    /** Maximum seed occurrence retained by filtering. */
+    /** Skip seed hashes whose target occurrence count exceeds this  limit. */
     std::int32_t max_occ = 500;
-    /** Mid-level seed-occurrence threshold. */
+    /** Stored intermediate occurrence limit. Current seeding does not use it. */
     std::int32_t mid_occ = 500;
 
     /**
-     * Minimum gap length between consecutive seeds before invoking KSW2.
-     * A zero value combines all seed-to-seed gaps into one KSW2 region.
+     * Combine nearby seed-to-seed spans until both sides reach this length,
+     * then align the span. The last span is always considered. Zero removes
+     * the minimum-length check.
      */
     std::int32_t min_ksw_len = 200;
 
@@ -1061,37 +1062,37 @@ struct minimap2_parameters {
     bool compute_divergence = true;
     /** Compute mapping quality for output regions. */
     bool compute_mapq = true;
-    /** Compute the exact unit-cost edit distance from traceback. */
+    /** Count substitutions, insertions and deletions in the reported alignment. */
     bool compute_edit_distance = false;
 
-    /** Apply the exact strict edit predicate to aligned regions. */
+    /** Keep aligned regions only when their exact edit count passes the bound */
     bool exact_edit_filter_enabled = false;
-    /** Signed exclusive upper bound for the exact edit predicate. */
+    /** Require edit_distance to be strictly below this signed bound. */
     std::int64_t exact_edit_filter_exclusive_upper_bound = 0;
 
-    /** Enable the query-scoped SneakySnake lower-bound stage. */
+    /** Enable the edit-distance lower-bound check before base alignment. */
     bool prefilter_enabled = false;
-    /** Largest exact edit count admitted by the prefilter. */
+    /** Edit limit used to reject candidates whose  lower bound is too large. */
     std::uint32_t prefilter_max_edits = 0;
     /** Backend selected for prefilter execution. */
     ::bioseq::prefilter::prefilter_backend prefilter_backend =
         ::bioseq::prefilter::prefilter_backend::automatic;
 
-    /** Minimum block-aligner scratch block size. */
+    /** Minimum adaptive BlockAligner block size. */
     std::size_t block_min_size = 16;
-    /** Maximum block-aligner scratch block size. */
+    /** Maximum adaptive BlockAligner block size. */
     std::size_t block_max_size = 32;
 
-    /** Shared chaining mode selected by the runtime configuration. */
+    /** Stored chaining mode. make_chaining_parameters() uses chaining_algorithm. */
     ::bioseq::chaining::chaining_mode chaining_mode =
         ::bioseq::chaining::chaining_mode::scalar_dp;
-    /** Long-join bandwidth, or zero when long joining is disabled. */
+    /** Stored long-join bandwidth. Current chaining does not use it. */
     std::int32_t bandwidth_long = 0;
 
-    /** Chaining implementation selected once before the inner loop. */
+    /** Chaining algorithm selected before execution. */
     ::bioseq::simd::chaining_algorithm chaining_algorithm =
         ::bioseq::simd::chaining_algorithm::scalar_minimap2;
-    /** Forward-chaining semantics used by SIMD chaining. */
+    /** Choose exact visited-predecessor or bounded-aatch SIMD chaining. */
     ::bioseq::chaining::simd_chaining_policy simd_chaining_policy =
         ::bioseq::chaining::simd_chaining_policy::exact_visited;
     /** Base-alignment implementation selected for the request. */
@@ -1101,29 +1102,29 @@ struct minimap2_parameters {
     ::bioseq::simd::minimizer_algorithm minimizer_algorithm =
         ::bioseq::simd::minimizer_algorithm::scalar;
 
-    /** Enable runtime execution accounting. */
+    /** Collect optional execution timings and counters. */
     bool enable_profiling = false;
     /** Permit Vulkan-backed algorithms for this request. */
     bool vulkan_enabled = true;
-    /** Select Vulkan seed-hit lookup. */
+    /** Request seed lookup through Vulkan. */
     bool vulkan_seed_hits_enabled = false;
-    /** Cache GPU-resident minimizer indexes under their memory permits. */
+    /** Keep GPU minimizer indexes available for reuse with their memory permits. */
     bool vulkan_index_cache_enabled = true;
-    /** Select the resident two-submit Vulkan frontend. */
+    /** Select the combined resident Vulkan frontend. */
     bool vulkan_fused_frontend_enabled = false;
-    /** Build the target minimizer index on the GPU. */
+    /** Permit  building target minimizer indexes on the GPU. */
     bool vulkan_gpu_index_build_enabled = false;
-    /** Enable GPU base-alignment extension under the block aligner. */
+    /** Permit GPU base alignment on supported BlockAligner requests. */
     bool vulkan_extend_enabled = false;
-    /** Ordered-sketch tile size in base pairs. */
+    /** Stored sketch tile size. Current Vulkan kernels do, not use this option. */
     std::uint32_t vulkan_ordered_sketch_tile_bp = 2048;
-    /** Device radix-sort digit width in bits per pass. */
+    /** Stored radix digit width. Current Vulkan kernels do not use this option. */
     std::uint32_t vulkan_radix_digit_bits = 8;
 
     /**
-     * @brief Build the chaining configuration for this request.
-     * @return Chaining parameters with derived values prepared and the shared
-     * chaining mode synchronized with chaining_algorithm.
+     * @brief Copy chaining settings and prepare values derived from them.
+     * @return Parameters whose mode follows chaining_algorithm and whose
+     * coordinate-only flag reflects the requested result fields.
      */
     [[nodiscard]] auto make_chaining_parameters() const -> chaining_parameters {
         chaining_parameters parameters;

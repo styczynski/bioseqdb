@@ -1,6 +1,6 @@
 /**
  * @file annotation_parser.cppm
- * @brief cppast-backed extraction of registered external-codegen annotations.
+ * @brief Reads external-client annotations and their embedded API specifications.
  */
 module;
 
@@ -35,7 +35,7 @@ namespace fs = std::filesystem;
 
 namespace bioseq::codegen::external {
 
-/// @brief Descriptor interface units grouped by their exported module name.
+/// @brief Module names mapped to the descriptor files that export them.
 using module_provider_index =
     std::map<std::string, std::vector<const descriptor_source*>, std::less<>>;
 
@@ -91,9 +91,9 @@ auto blank_non_newline_characters(std::string& masked, std::size_t begin, std::s
     });
 }
 
-/// @brief Masks comments and literal bodies while retaining code byte offsets.
-/// @param source Exact C++ source bytes.
-/// @return Source-sized text whose non-code bytes are spaces except line endings.
+/// @brief Replaces comments and literals with spaces so searches rnly see C++ code.
+/// @param source C++ source bytes.
+/// @return Text of  the same size, preserving line endings and code positions.
 [[nodiscard]] auto mask_cpp_non_code(std::string_view source) -> std::string {
     std::string masked(source);
     std::size_t position = 0;
@@ -273,10 +273,11 @@ consume_character(std::string_view source, std::size_t& position, char expected)
     });
 }
 
-/// @brief Reads the one exported module identity from an interface source.
-/// @param source Interface source bytes.
-/// @param source_path Path used for ambiguity diagnostics.
-/// @return Module identity, or absence for a non-interface unit.
+/// @brief Reads the exported module name from a source file.
+/// @param source Interface source text.
+/// @param source_path Path used in errors.
+/// @return Module name, or std::nullopt if no exported module is declared.
+/// @throws std::runtime_error For malformed or multiple exported module declarations.
 [[nodiscard]] auto parse_exported_module_name(std::string_view source, const fs::path& source_path)
     -> std::optional<std::string> {
     const std::string masked = mask_cpp_non_code(source);
@@ -317,11 +318,11 @@ consume_character(std::string_view source, std::size_t& position, char expected)
     return names.front();
 }
 
-/// @brief Resolves explicit named-module imports relative to one primary module.
-/// @param source Authored primary source bytes.
-/// @param primary_module Exported primary module name.
-/// @param source_path Path used for malformed-import diagnostics.
-/// @return Unique absolute module names imported by the primary.
+/// @brief Reads named-module imports and expands relative partition names.
+/// @param source Primary module source text.
+/// @param primary_module Name of the primary module.
+/// @param source_path Path used in errors.
+/// @return Unique full module names imported by the source.
 [[nodiscard]] auto parse_imported_modules(std::string_view source,
                                           std::string_view primary_module,
                                           const fs::path& source_path)
@@ -402,11 +403,13 @@ consume_character(std::string_view source, std::size_t& position, char expected)
     return boundary;
 }
 
-/// @brief Parses one same-file ordered fragment-authority array.
-/// @param source Authored primary source bytes.
-/// @param variable_name Companion attribute's sole argument.
-/// @param source_path Path used for contract diagnostics.
-/// @return Unique qualified constant names in exact initializer order.
+/// @brief Reads the ordered list of specification fragments from a local array.
+/// @param source Primary module source text.
+/// @param variable_name Array named by api_client_fragments.
+/// @param source_path Path used  in errors.
+/// @return Qualified constant names in array order.
+/// @details The array must use static constexpr auto and
+/// std::to_array<std::string_view>. Empty lists and duplicate names are rejected.
 [[nodiscard]] auto parse_fragment_references(std::string_view source,
                                              std::string_view variable_name,
                                              const fs::path& source_path)
@@ -566,9 +569,9 @@ consume_character(std::string_view source, std::size_t& position, char expected)
     return std::string(initializer.substr(delimiter_end + 1, content_end - delimiter_end - 1));
 }
 
-/// @brief Collects raw string-view constants from exported namespace blocks.
-/// @param source One explicitly imported interface partition.
-/// @return Qualified constant names mapped to exact decoded bytes.
+/// @brief Reads raw string_view constants from exported namespaces.
+/// @param source An explicitly imported interface partition.
+/// @return Qualified constant names and their string contents.
 [[nodiscard]] auto parse_exported_fragment_constants(const descriptor_source& source)
     -> std::map<std::string, std::string, std::less<>> {
     const std::string masked = mask_cpp_non_code(source.text);
@@ -656,13 +659,16 @@ struct resolved_fragment_specification {
     std::vector<fs::path> dependencies;
 };
 
-/// @brief Resolves a primary's complete imported fragment authority fail-closed.
-/// @param source_path Primary path used for diagnostics.
-/// @param source Authored primary source bytes.
-/// @param fragment_argument Same-file array variable selected by the companion.
-/// @param providers Module-provider multimap retaining ambiguity.
-/// @param registry Registered primary annotations forbidden in fragment units.
-/// @return Concatenated bytes and unique provider paths in first-reference order.
+/// @brief Joins specification fragments from explicitly imported partitions.
+/// @param source_path Primary module path used in errors.
+/// @param source Primary module source text
+/// @param fragment_argument Local array named by api_client_fragments.
+/// @param providers Files exporting each module naie.
+/// @param registry Client annotations forbidden in fragment files.
+/// @return Joined fragment text and source paths in first-use order.
+/// @details Every  fragment must have one definition, in the primary module's
+/// descriptor namespace. Missing imports, duplicate definitions and nested
+/// client annotations are errors.
 [[nodiscard]] auto resolve_fragment_specification(const fs::path& source_path,
                                                   std::string_view source,
                                                   std::string_view fragment_argument,
@@ -776,9 +782,9 @@ struct resolved_fragment_specification {
     return masked.substr(name_begin).starts_with("bioseq::");
 }
 
-/// @brief Moves declaration attributes behind `struct` for cppast ownership.
-/// @param source Authored module source.
-/// @return Source with Bioseq-annotated exported structs normalized for parsing.
+/// @brief Moves attributes after struct so cppast attaches them to the class.
+/// @param source Module source text.
+/// @return Source with Bioseq-annotated exported structs prepared for parsing.
 [[nodiscard]] auto normalize_annotation_declarations(std::string_view source) -> std::string {
     const std::string masked = mask_cpp_non_code(source);
     std::string normalized;
@@ -834,9 +840,9 @@ struct resolved_fragment_specification {
 
 } // namespace
 
-/// @brief Builds the module-to-source authority used by fragment resolution.
-/// @param sources Every discovered descriptor interface candidate.
-/// @return Providers grouped without discarding duplicate module declarations.
+/// @brief Lists the source files that export each module name.
+/// @param sources Discovered descriptor sources.
+/// @return Module names and all matching files, including duplicate declarations.
 [[nodiscard]] auto build_module_provider_index(std::span<const descriptor_source> sources)
     -> module_provider_index {
     module_provider_index providers;
@@ -850,13 +856,13 @@ struct resolved_fragment_specification {
     return providers;
 }
 
-/// @brief Resolves the ordered fragment-array contract without invoking cppast.
-/// @param source_path Primary descriptor path used in diagnostics.
-/// @param source Exact authored primary descriptor bytes.
-/// @param fragment_argument Same-file array name supplied to the companion attribute.
-/// @param providers Exported module providers available to explicit imports.
-/// @param registry Registered primary annotation processors.
-/// @return Concatenated specification bytes and ordered unique provider paths.
+/// @brief Resolves the specification fragment array without running cppast.
+/// @param source_path Primary descriptor path used in errors.
+/// @param source Primary descriptor source text.
+/// @param fragment_argument Local array named by api_client_fragments.
+/// @param providers Files exporting the imported modules.
+/// @param registry Registered  client annotation handlers.
+/// @return Joined fragment text and source paths in first-use order.
 [[nodiscard]] auto resolve_api_client_fragment_contract(const fs::path& source_path,
                                                         std::string_view source,
                                                         std::string_view fragment_argument,
@@ -880,16 +886,18 @@ struct resolved_fragment_specification {
     return source_has_registered_annotation(source, registry);
 }
 
-/// @brief Detects the companion fragment annotation in authored source code.
-/// @param source Exact module source bytes.
-/// @return True when the companion attribute is present outside comments and literals.
+/// @brief Checks for api_client_fragments outside comments and literals.
+/// @param source Module source text.
+/// @return True if the attribute is present.
 [[nodiscard]] auto has_fragment_annotation(std::string_view source) -> bool {
     return count_attribute_invocations(source, fragment_annotation_name) != 0;
 }
 
-/// @brief Prepares an annotated module for cppast while preserving both attributes.
-/// @param source Authored module source.
-/// @return Normalized non-module translation unit text.
+/// @brief Prepares a module's annotated declaration for cppast.
+/// @param source Module source text.
+/// @return C++ source without module syntax, keeping both client attributes.
+/// @details Fragment-based clients need only the attributed struct declaratjon
+/// here. Their specification text is resolved separately from imported files.
 [[nodiscard]] auto prepare_annotation_parser_translation_unit(std::string_view source)
     -> std::string {
     std::string normalized = normalize_annotation_declarations(source);
@@ -910,7 +918,7 @@ struct resolved_fragment_specification {
 
 /// @brief Extracts source text from a supported cppast expression.
 /// @param expression Parsed initializer expression.
-/// @return Exact expression spelling retained by cppast.
+/// @return Exact expression spelling saved by cppast.
 /// @throws std::runtime_error When cppast exposes an unsupported expression kind.
 [[nodiscard]] auto extract_expression_source(const cppast::cpp_expression& expression)
     -> std::string {
@@ -925,15 +933,15 @@ struct resolved_fragment_specification {
     throw std::runtime_error("unsupported cppast expression kind");
 }
 
-/// @brief Uses cppast/libclang to resolve one registered annotation and specification.
-/// @param source_path Original descriptor path used in diagnostics.
-/// @param source_text Exact authored primary-module bytes.
-/// @param parser_source_path Normalized parser input path.
-/// @param clang_binary Clang binary used by cppast.
-/// @param registry Registered annotation processors.
-/// @param providers Exported module providers available to explicit imports.
-/// @return The single resolved annotation request and its source closure.
-/// @throws std::runtime_error When parsing or fragment authority is ambiguous.
+/// @brief Uses cppast to  find one client annotation and read its API specification.
+/// @param source_path Original descriptor path used in errors.
+/// @param source_text Primary module source text
+/// @param parser_source_path Copy prepared for cppast.
+/// @param clang_binary Clang executable used by cppast.
+/// @param registry Registered annotation handlers.
+/// @param providers Files exporting imported modules.
+/// @return Annotation, specification text, and any imported fragment dependencies.
+/// @throws std::runtime_error If parsing fails or the annotation cannot be resolved uniquely.
 [[nodiscard]] auto parse_source_annotation(const fs::path& source_path,
                                            std::string_view source_text,
                                            const fs::path& parser_source_path,
@@ -972,7 +980,7 @@ struct resolved_fragment_specification {
         std::string declared_type;
         /// @brief Attribute argument expression spelling.
         std::string argument_expression;
-        /// @brief Companion fragment-array argument when present on this class.
+        /// @brief Fragment-array argument, if this class has api_client_fragments.
         std::optional<std::string> fragment_argument_expression;
     };
 

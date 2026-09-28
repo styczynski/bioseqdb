@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/generation/publication.cppm
- * @brief Builds and emits one authenticated grouped-SoA generation.
+ * @brief Encode grouped-SoA rows and prepare metadata for publication.
  */
 export module bioseq.indexing.minimizer_hashmap:generation_publication;
 
@@ -37,7 +37,7 @@ import :generation_stream;
 
 export namespace bioseq::indexing {
 
-/// Check a caller-supplied registry identity before planning or emitting rows.
+/// Check the registered algorithm against the producer and requested storage  profile.
 [[nodiscard]] constexpr bool grouped_soa_generation_algorithm_identity_matches(
     const grouped_soa_generation_options& options,
     const grouped_soa_minimizer_profile& profile,
@@ -51,10 +51,11 @@ export namespace bioseq::indexing {
            identity.hash_width == profile.hash_width;
 }
 
-/// Deterministically plan fixed geometry without retaining biological events.
-///
-/// The producer is replayed once and must retain the same scheme and backend identity afterward.
-/// @tparam p_producer Replayable canonical event source.
+/// Plan directory entries and byte ranges by scanning the producer's events.
+/// Keep counts and checksums to check later scans. Retry with smaller segments
+/// when a count exceeds its limit. The producer's scheme and backend must stay
+/// unchanged throughout planning.
+/// @tparam p_producer Replayable source of sorted minimizer events.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<grouped_soa_generation_plan, minimizer_generation_encoding_error>
 plan_minimizer_generation(p_producer& producer,
@@ -107,13 +108,10 @@ plan_minimizer_generation(p_producer& producer,
     return plan;
 }
 
-/// Build the immutable manifest fields from one already-qualified plan.
-///
-/// The direct-generation sink calls this once with its provisional directory
-/// checksum (extent checksums are still zero). The common publisher calls it
-/// again with the finalized directory and ordered payload checksum. Keeping
-/// both constructions here prevents the direct owner from duplicating any
-/// persisted layout equation.
+/// Build manifest fields from the directory plan and supplied checksums.
+/// Direct sinks use provisional checksums before writing payload. The encoder
+/// calls the same function with final checksums, keeping byte counts and segment
+/// layout consistent between  both stages.
 [[nodiscard]] inline std::expected<minimizer_generation_manifest,
                                    minimizer_generation_encoding_error>
 make_grouped_soa_generation_manifest(
@@ -206,14 +204,13 @@ make_grouped_soa_generation_manifest(
     };
 }
 
-/// Stream one immutable qualified generation into a callback-scoped row sink.
+/// Write payload rows, directory rows, and the READY manifest to the sink.
+/// Return the active-head row for the caller to publish after validating a
+/// complete storage reread. A failure can leave, incomplete rows in the sink.
+/// These rows must stay inactive.
 ///
-/// Payload rows, then directory rows, then the READY manifest are written in publication order.
-/// The active head is returned unpublished for a later storage-reread boundary. A failure can
-/// leave an incomplete generation in the sink, which must not be made active.
-///
-/// @tparam p_producer Replayable canonical event source.
-/// @tparam p_sink Borrowed sink receiving rows synchronously.
+/// @tparam p_producer Replayable source of sorted minimiser events.
+/// @tparam p_sink Borrowed sink receiving rows synchronously
 template <grouped_soa_event_producer p_producer, minimizer_generation_row_sink p_sink>
 [[nodiscard]] inline std::expected<encoded_grouped_soa_generation,
                                    minimizer_generation_encoding_error>
@@ -249,8 +246,8 @@ encode_minimizer_generation(p_producer& producer,
                       grouped_soa_bucket_directory_entry::encoded_bytes ==
                   0);
     if constexpr (requires { producer.bind_generation_layout(options.layout); }) {
-        /* Stats-bearing producers freeze their successful replay count
-         * before the planning scan.  Generic/vector producers need no hook. */
+        /* Record the layout before planning so execution stats can check
+         * how many scans a successful encoding requires. */
         producer.bind_generation_layout(options.layout);
     }
     auto plan = plan_minimizer_generation(producer, options, limits);
@@ -377,10 +374,9 @@ encode_minimizer_generation(p_producer& producer,
         return std::unexpected(metadata.error());
     }
 
-    // Publication boundary: payload was written by emit_pass above. Only the
-    // directory and READY manifest are appended here. The active head is
-    // returned to the caller and must be published only after a storage
-    // reread validates this complete generation.
+    // Payload rows are  complete. Append the directory and READY
+    // manifest, then return the active head. The caller publishes that
+    // head after a complete storage reread validates the generation.
     const std::uint32_t extent_payload_bytes =
         minimizer_extent_payload_bytes(options.layout);
     for (std::size_t offset = 0, chunk = 1; offset < directory_bytes->size();

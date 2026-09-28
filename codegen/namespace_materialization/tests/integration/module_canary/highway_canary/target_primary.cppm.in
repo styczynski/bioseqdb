@@ -1,4 +1,5 @@
-// Configure-generated target primary; intentionally Highway-free and neutral.
+// Generated during coafiguration. Declares the target binder using the
+// shared interface without including Highway headers.
 export module @TARGET_MODULE@;
 
 import bioseq.highway.gcc_canary.contract;

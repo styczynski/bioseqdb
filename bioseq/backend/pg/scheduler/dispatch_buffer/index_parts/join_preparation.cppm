@@ -1,6 +1,6 @@
 /**
  * @file index_parts/join_preparation.cppm
- * @brief Defines retained join-target preparation and its Highway callback boundary.
+ * @brief Keep a join target and prepare it for reuse across query batches.
  */
 module;
 
@@ -25,14 +25,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// A batch join keeps one locator-backed  target while processing its queries.
 module bioseq.postgres.scheduler.dispatch_buffer:join_preparation;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -44,7 +37,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.postgres.storage.indexing.active_read_policy_resolver;
 import bioseq.postgres.storage.indexing.cold_index_timing;
-import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
+import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipeline in a separate module.
 import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
 import bioseq.pipeline.minimap_port;
@@ -54,7 +47,11 @@ import bioseq.postgres.storage.manager;
 
 namespace bioseq::scheduler {
 
-/** @brief Implements the begin join target contract declared by the stable buffer facade. */
+/**
+ * @brief Save one locator-backed target row for the next join pass.
+ * Require its physical row number and clear preparation left by the previous
+ * target. The copied row remains available while query batches run.
+ */
 void tuple_dispatch_buffer::begin_join_target(TupleTableSlot* target_slot) {
     if (!join_mode || target_slot == nullptr || !join_queries.empty()) {
         ereport(ERROR,
@@ -123,8 +120,7 @@ void tuple_dispatch_buffer::begin_join_target(TupleTableSlot* target_slot) {
     join_gpu_prepared_grouped_soa_target.target_rowno = rowno;
 }
 
-/** @brief Implements the prepare join cpu after highway selection thunk contract declared by the
- * stable buffer facade. */
+/** @brief Forward the post-selection Highway callback to its owning oin buffer */
 void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection_thunk(
     void* state,
     ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
@@ -137,8 +133,12 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection_thunk(
     self->prepare_join_cpu_after_highway_selection(scanner_pg_ctx, dispatched_plan, typmod_ops);
 }
 
-/** @brief Implements the prepare join cpu after highway selection contract declared by the stable
- * buffer facade. */
+/**
+ * @brief Prepare the shared CPU target  after Highway has selected its kernels.
+ * Read the saved query slots and combine their minimizers. Open the required
+ * stored index when requested, and keep the result for later query batches.
+ * PostgreSQL and C++ failures leave through the same caller cleanup path.
+ */
 void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
     ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
     ::bioseq::simd::pipe::statement_execution_plan_owner dispatched_plan,
@@ -372,7 +372,10 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
     scanner_pg_ctx.cpu_prepared_target = join_cpu_prepared_target;
 }
 
-/** @brief Implements the prepare join target queries contract declared by the stable buffer facade.
+/**
+ * @brief Resolve the target's index policy and prepare it for all queries.
+ * CPU sketching waits for Highway selection. Vulkan prepares its shared
+ * target source here and sketches queries later in the selected GPU route.
  */
 void tuple_dispatch_buffer::prepare_join_target_queries(
     std::span<const join_query_ref> all_queries) {
@@ -463,10 +466,8 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
 #endif
         return;
     }
-    /* The selected Vulkan frontend owns query sketching. Validate only stable
-     * query references here: detoasting, rewidth, host sketching, and native
-     * query-union preparation are forbidden before the generated physical
-     * minimizer visitor. */
+    /* Vulkan will sketch these queries after selecting the generated kernel.
+     * Check references now  and leave sequence reads and, conversion to that route. */
     if (vulkan_seed_requested) {
         if (mmsearch_state.storage_unit_byte_width != 4u &&
             mmsearch_state.storage_unit_byte_width != 8u) {
@@ -698,10 +699,8 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
     }
     const buffered_scan_entry& target = buffered_entries.front();
     const std::uint64_t target_bp_size = target.seq_bp_size();
-    /* no_index starts without a retained prepared CPU target. Building one
-     * in this pre-measurement lifecycle would invalidate cold semantics; the
-     * selected CPU/SIMD route constructs its authentic transient target after
-     * timing begins and may not cross-fallback. Vulkan routes returned above. */
+    /* Build the temporary CPU target during dispatch so index construction
+     * is included in execution timing. Keep only its size and query count here. */
     join_cpu_prepared_target->target_bp_size = target_bp_size;
     join_cpu_prepared_target->query_count = query_headers.size();
     join_cpu_prepared_target->unions_ready = false;
@@ -717,7 +716,10 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
 #endif
 }
 
-/** @brief Implements the set join query batch contract declared by the stable buffer facade. */
+/**
+ * @brief Select the next query batch after the previous output is drained.
+ * Reject batches larger than dispatch_batch_capacity.
+ */
 void tuple_dispatch_buffer::set_join_query_batch(std::span<const join_query_ref> queries) {
     if (!join_target_prepared || join_output_position != join_output_cursors.size()) {
         ereport(ERROR,
@@ -735,7 +737,7 @@ void tuple_dispatch_buffer::set_join_query_batch(std::span<const join_query_ref>
     join_output_position = 0;
 }
 
-/** @brief Implements the apply typmod coalesce contract declared by the stable buffer facade. */
+/** @brief Use already-converted qery bytes while keeping the original value for EXPLAIN. */
 void tuple_dispatch_buffer::apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
     mmsearch_state.coalesced_query_varlena = std::move(coalesced_bytes);
     mmsearch_state.coalesce_active = true;

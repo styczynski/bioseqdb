@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates finalized carrier validation, neutralization, and transformed checks.
+ * @brief Exposes checks for finalized match bindings and scan-plan expressions.
  */
 export module bioseq.postgres.table:custom_scan_match_analysis;
 

@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/cpu_batch_route.cppm
- * @brief Owns generic and persisted native CPU batch execution.
+ * @brief Chooses CPU batch execution with a stored index or ordinary row processing.
  */
 module;
 
@@ -19,8 +19,8 @@ import bioseq.parallelism.pool;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Execute the non-Vulkan batch through persisted native preflight or the
- * generic CPU and SIMD row continuation.
+ * Runs a CPU batch, using parallel queries over a shared stored index when
+ * possible The row callback handles batches that cannot use that path.
  */
 template <class p_sequence,
           class p_scanner_row,
@@ -67,20 +67,11 @@ template <class p_sequence,
     std::optional<pipe::minimizer_range_execution_stats> cached_query_minimizer_stats;
     auto& pool = bioseq::parallelism::global_pool::instance();
     /*
-     * The persisted hash-major scanner path serializes one
-     * complete query at a time because its fragmented target could not
-     * enter worker code. For a shared target, authenticate every
-     * query/locator/reader identity on the PostgreSQL thread, copy the
-     * packed target once under the existing admission authority, then
-     * fan independent queries across the task pool. Workers borrow only
-     * immutable resident sequence bytes, retained query sketches, and
-     * the immutable selective reader; they never call PostgreSQL.
-     *
-     * task_parallel_region::query_batch owns the outer parallel region,
-     * so every inner align_regions/segment region observes an active
-     * task_parallel_scope and executes serially within its query worker.
-     * Any failed preflight or resident admission falls through to the
-     * established scanner_pg row loop below.
+     * Shared-target queries can run in parallel after  the PostgreSQL thread checks
+     * their identities and copies the target into memory. Workers read that copy
+     * and the prepared incex without calling PostgreSQL. Ineligible batches and
+     * targets that cannot reserve memory use generic_rows. Inner alignment tasks
+     * stay serial while the query batch runs in parallel.
      */
     auto generic_rows = [&batch_size,
                          &alphabet_code,

@@ -26,7 +26,7 @@ export import :cli;
 
 export namespace bioseq::codegen::safety {
 
-/// Runs every compiled safety contract module.
+/// Runs the safety contract tests and reports any failure.
 [[nodiscard]] inline int self_test() {
     try {
         run_safety_contract_self_tests();

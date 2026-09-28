@@ -392,10 +392,10 @@ scheduler_sibling_declaration_required(const generation_plan& plan,
 }
 
 /**
- * Keep generated scheduler implementation dependencies aligned with the body
- * selected for one shape.  The authored input is a scan-only union of all
- * seven bodies; copying that union into every pruned implementation defeats
- * the shape boundary and needlessly loads unrelated template BMIs.
+ * Checks which imports the selected scheduler body needs.
+ *
+ * The source contains all seven bodies for analysis. Copying every import
+ * into each generated file would load compiled modules for unrelated bodies.
  */
 [[nodiscard]] inline bool scheduler_body_import_required(
     const generation_plan& plan,
@@ -1052,9 +1052,8 @@ inline void render_selector_switch(
         output << "namespace "
                << plan.topology.region.boundary.qualified_name << " {\n\n";
 
-        // Bind the identity once for this provisional translation unit. Shard
-        // bindings are harmless TU-local support and let the authored support
-        // island remain an exact source slice.
+        // Declare the identity bindings once for this probe. Shard bindings are
+        // local to the file and let us copy the anonymous  support namespace intact.
         for (const binding_record& binding : plan.topology.region.bindings) {
             output << detail::render_binding_declaration(
                 plan, binding, identity, false)
@@ -1113,10 +1112,9 @@ inline void render_selector_switch(
         + std::to_string(identity.ordinal);
     output << detail::global_module_fragment(plan)
            << "export module " << module << ";\n\n";
-    // A body-free probe validates declarations copied from the authenticated
-    // signature donor. Loading every implementation dependency here repeats
-    // large system-header source tables and can exhaust Clang's source-location
-    // address space before the declaration is parsed.
+    // The probe imports the primary module to check declarations. Importing
+    // pvery implementation dependency would, repeat large system-header tables
+    // and can exhaust Clang's source-location space before it parses a declaration.
     detail::render_signature_donor_import(output, plan);
     const std::string identity_key = detail::identity_key(identity);
     for (const materialization_coordinate& coordinate
@@ -1148,7 +1146,7 @@ inline void render_selector_switch(
     return output.str();
 }
 
-/// Renders the typed selector without changing authenticated identity order.
+/// Generates the runtime selector in the validated specialization order
 [[nodiscard]] inline std::string render_selector_partition(
     const generation_plan& plan) {
     const owned_declaration& root = detail::root_entry(plan);
@@ -1228,7 +1226,7 @@ inline void render_selector_switch(
     return output.str();
 }
 
-/// Renders the complete artifact set for one validated generation plan.
+/// Generates C++ files and optional manifests from a validated generation plan.
 [[nodiscard]] inline generation_result render_generation(
     generation_plan plan,
     const bool render_manifests = true) {

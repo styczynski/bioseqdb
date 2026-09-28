@@ -19,26 +19,21 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::io {
 
-/// Result of inspecting a path's *name* (not its contents). `format` is the
-/// FASTA/FASTQ enum the reader must be instantiated with. `is_gzip_suffix` is
-/// true when the (case-insensitive) path ends in a recognised gzip suffix and
-/// is informational only — the reader independently magic-byte-sniffs gzip.
+/// Sequence format inferred from the filename, plus a gzip suffix flag.
+/// The reader checks the file's gzip magic bytes separately when opening it.
 struct sequence_file_kind {
     sequence_file_format format;
     bool is_gzip_suffix;
 };
 
 namespace detail {
-/// Single source of truth for ASCII case folding: the one
-/// per-byte rule shared by `lowercase_ascii_copy` (path sniffing) and the identifier
-/// parser's `normalise_name` (column/format-name matching). `constexpr` so
-/// the parser can drive its `consteval` `norm_key` drift guards through the
-/// exact same lowering, with no locale dependence (column names are ASCII).
+/// Converts ASCII uppercase letters to lowercase without using the locale
+/// Filename and identifier matcing share this rule, including compile-time checks.
 [[nodiscard]] inline constexpr char lowercase_ascii_character(char c) noexcept {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 }
 
-/// Return a lowercase ASCII copy for short path strings.
+/// Returns a copy  with ASCII uppercase letters changed to lowercase.
 [[nodiscard]] inline std::string lowercase_ascii_copy(std::string_view s) {
     std::string out(s);
     for (char& c : out)
@@ -46,8 +41,7 @@ namespace detail {
     return out;
 }
 
-/// Recognised gzip suffixes, longest-first so `.fastq.gz` strips before
-/// `.gz`. constexpr table — adding a suffix is a one-line edit.
+/// Compression suffixes removed before matching the sequence-file extension.
 inline constexpr std::array<std::string_view, 3> gzip_suffixes{".gz", ".bgz", ".bgzf"};
 
 /// One recognized extension and its sequence format.
@@ -55,8 +49,7 @@ struct file_format_suffix {
     std::string_view suffix;
     sequence_file_format format;
 };
-/// Extension → format table. The first entry whose suffix matches after a
-/// gzip suffix is stripped wins.
+/// Sequence-file suffixes checked after removing an optional compression suffix.
 inline constexpr std::array<file_format_suffix, 6> format_suffixes{{
     {".fasta", sequence_file_format::fasta},
     {".fa", sequence_file_format::fasta},
@@ -67,9 +60,8 @@ inline constexpr std::array<file_format_suffix, 6> format_suffixes{{
 }};
 } // namespace detail
 
-/// Map a file path to its sequence file kind by extension. Returns an error
-/// string (never throws) when the extension is unrecognised so the postgres
-/// caller can report a precise diagnostic. PostgreSQL-independent.
+/// Detects FASTA or FASTQ from a case-insensitive filename extension.
+/// Returns a diagnostic for an unknown extension. File contents are not read.
 [[nodiscard]] inline std::expected<sequence_file_kind, std::string>
 detect_sequence_file_kind(std::string_view path) {
     const std::string lowered = detail::lowercase_ascii_copy(path);

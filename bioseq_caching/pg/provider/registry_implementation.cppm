@@ -1,14 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Stores backend-local providers and publishes the cache API to other extensions.
  *
- * provider/registry_implementation.cppm
- *     Backend-local provider registry and rendezvous publication.
- *
- * Provider descriptors and names are copied into stable, never-compacted
- * slots.  A removed slot becomes a permanent tombstone for the life of the
- * backend.  Registration tokens authenticate synthetic unregister requests;
- * production providers remain registered for process lifetime.
- *
- *-------------------------------------------------------------------------
+ * Provider descriptions and names are copied into fixed slots. Removal leaves
+ * the slot unused for the rest of the process. Registration tokens and active
+ * reference counts prevent  removal by the wrong caller or during execution.
  */
 module;
 
@@ -754,7 +750,7 @@ bool initialize_provider_registry() noexcept {
                 (errmsg("bioseq cache-provider directory declined binding")));
         }
     } catch (...) {
-        /* Optional providers fail open; the published cache API stays valid. */
+        /* Report the optional provider failure. The cache API has already been published. */
         ereport(WARNING,
             (errmsg("bioseq cache-provider directory binding failed")));
     }

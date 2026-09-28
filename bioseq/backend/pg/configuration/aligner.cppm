@@ -1,6 +1,6 @@
 /**
  * @file aligner.cppm
- * @brief Declares PostgreSQL settings for sequence alignment execution.
+ * @brief PostgreSQL settings for minimizers, chaining and base alignment.
  */
 export module bioseq.postgres.configuration.aligner;
 
@@ -32,21 +32,21 @@ enum class minimizer_algorithm : int {
     bounded_nthash_simd = 4,
 };
 
-/** Selects the lookup topology for persisted minimizer fragments. */
+/** Selects how stored minimizer fragments are searched. */
 enum class fragment_minimizer_lookup_route : int {
     control_block_scan = 0,
     direct_compact_hash_lookup = 1,
 };
 
-/** Owns PostgreSQL settings for alignment execution. */
+/** PostgreSQL settings used to build alignment requests. */
 struct settings final {
     settings() = delete;
 
-    /** Owns minimizer extraction settings. */
+    /** Settings for selecting minimizers from a sequence. */
     struct minimizer final {
         minimizer() = delete;
 
-        /** @brief Sets the minimizer k-mer size. */
+        /** @brief Number of bases in each k-mer considered for a minimizer */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 64,
@@ -54,7 +54,7 @@ struct settings final {
         })]]
         static inline int kmer_size = 15;
 
-        /** @brief Sets the minimizer window size. */
+        /** @brief Number of consecutive, k-mers in a  minimizer window. */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1'024,
@@ -71,11 +71,11 @@ struct settings final {
                 minimizer_algorithm::bounded_nthash_simd};
     };
 
-    /** Owns seed-anchor chaining settings. */
+    /** Settings for joining matching seeds into candidate alignments. */
     struct chaining final {
         chaining() = delete;
 
-        /** @brief Sets the maximum chaining gap. */
+        /** @brief Maximum diqtance between anchors that chaining can join. */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1 << 30,
@@ -83,7 +83,8 @@ struct settings final {
         })]]
         static inline int maximum_gap = 5'000;
 
-        /** @brief Overrides the reference gap limit. Negative one uses maximum_gap.
+        /** @brief Store a reference-gap override in the request.
+         * The current chaining code uses maximum_gap for both sequences.
          */
         [[bioseq_sql::guc({
             .minimum = -1,
@@ -100,7 +101,9 @@ struct settings final {
         })]]
         static inline int bandwidth = 500;
 
-        /** @brief Sets the long-join bandwidth. Zero disables long joins. */
+        /** @brief Store a long-join bandwidth in the request.
+         * The current pipeline does not use this setting.
+         */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1 << 20,
@@ -108,7 +111,7 @@ struct settings final {
         })]]
         static inline int long_join_bandwidth = 0;
 
-        /** @brief Limits skipped anchors before chaining terminates early. */
+        /** @brief Stop searching earlier anchors after this many unhelpful candidates. */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1 << 20,
@@ -165,11 +168,13 @@ struct settings final {
                 chaining_algorithm::simd_minimap2};
     };
 
-    /** Owns secondary-alignment selection settings. */
+    /** Settings for choosing secondary alignments. */
     struct secondary final {
         secondary() = delete;
 
-        /** @brief Sets the overlap threshold for secondary alignments. */
+        /** @brief Required query overlap for assigning an alignment to a primary.
+         * The  comparison also accounts for query bases left uncovered by primaries.
+         */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1,
@@ -177,7 +182,7 @@ struct settings final {
         })]]
         static inline double overlap_threshold = 0.5;
 
-        /** @brief Sets the uncovered-length limit for secondary alignments. */
+        /** @brief Maximum uncovered query length allowed for a secondary alignment. */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 2'147'483'647,
@@ -185,7 +190,10 @@ struct settings final {
         })]]
         static inline int uncovered_length_limit = 2'147'483'647;
 
-        /** @brief Sets the secondary-to-primary score ratio threshold. */
+        /** @brief Score ratio used to keep a secondary relative to its primary.
+         * A secondary can also pass within the allowed absolute score difference.
+         * Zero disables the CPU secondary filter.
+         */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1,
@@ -193,8 +201,7 @@ struct settings final {
         })]]
         static inline double score_ratio_threshold = 0.8;
 
-        /** @brief Limits secondary alignments retained for each primary alignment.
-         */
+        /** @brief Maximum secondary alignments kept across one query. */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1'024,
@@ -203,7 +210,7 @@ struct settings final {
         static inline int maximum_count = 5;
     };
 
-    /** Owns base-alignment scoring settings. */
+    /** Scores and penalties used during base alignment. */
     struct scoring final {
         scoring() = delete;
 
@@ -263,7 +270,9 @@ struct settings final {
         })]]
         static inline int ambiguous_base_penalty = 1;
 
-        /** @brief Sets the Z-drop threshold. Negative one disables it. */
+        /** @brief Stop  extension when its score falls too far below the besw score.
+         * Z-drop adjusts the comparison for gaps. Negative one disables it.
+         */
         [[bioseq_sql::guc({
             .minimum = -1,
             .maximum = 1 << 20,
@@ -271,7 +280,9 @@ struct settings final {
         })]]
         static inline int z_drop_threshold = 400;
 
-        /** @brief Sets the sequence-end bonus. Negative one disables it. */
+        /** @brief Bonus for an alignment that reaches the query end.
+         * Negative one disables the bonus
+         */
         [[bioseq_sql::guc({
             .minimum = -1,
             .maximum = 1 << 20,
@@ -280,11 +291,11 @@ struct settings final {
         static inline int end_bonus = -1;
     };
 
-    /** Owns seed-frequency settings. */
+    /** Settings for ignoring minimizers that occur too often. */
     struct seeding final {
         seeding() = delete;
 
-        /** @brief Sets the maximum seed occurrence retained. */
+        /** @brief Ignore minimizers with more target occurrences than this limit. */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1 << 24,
@@ -292,7 +303,9 @@ struct settings final {
         })]]
         static inline int maximum_occurrence = 500;
 
-        /** @brief Sets the intermediate seed occurrence threshold. */
+        /** @brief Store an intermediate occurrence threshold in the request.
+         * The current seeding code uses maximum_occurrence instead.
+         */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1 << 24,
@@ -301,7 +314,7 @@ struct settings final {
         static inline int intermediate_occurrence_threshold = 500;
     };
 
-    /** Owns Block Aligner sizing settings. */
+    /** Block sizes used by Block Aligner during extension. */
     struct block_alignment final {
         block_alignment() = delete;
 
@@ -322,7 +335,7 @@ struct settings final {
         static inline int maximum_block_size = 256;
     };
 
-    /** Owns base-alignment algorithm selection. */
+    /** Choice of algorithm for aligning individual bases. */
     struct base_alignment final {
         base_alignment() = delete;
 
@@ -335,14 +348,15 @@ struct settings final {
                 base_alignment_algorithm::block_aligner};
     };
 
-    /** Owns persisted minimizer-fragment lookup settings. */
+    /** Settings for  reading stored minimizer fragments. */
     struct fragment_minimizer final {
         fragment_minimizer() = delete;
 
         /**
-         * @brief Selects the persisted minimizer-fragment lookup topology.
+         * @brief Choose control-table scans or direct compact, hash lookup.
          *
-         * Direct compact lookup fails when its authenticated image is unavailable.
+         * Direct lookup applies to stored fragments with 32-bit hashes.
+         * Opening that route requires a verified compact index image.
          */
         [[bioseq_sql::guc]]
         static inline bioseq::postgres::support::postgres_enum_storage<
@@ -351,16 +365,16 @@ struct settings final {
                 fragment_minimizer_lookup_route::direct_compact_hash_lookup};
     };
 
-    /** Owns grouped-SoA generation selection. */
+    /** Settings for storing minimizers in grouped arrays. */
     struct grouped_soa_generation final {
         grouped_soa_generation() = delete;
 
-        /** @brief Enables locator-backed grouped-SoA minimizer generations. */
+        /** @brief Build minimizer generations in grouped arrays with source locators. */
         [[bioseq_sql::guc]]
         static inline bool enabled = true;
     };
 
-    /** Owns Vulkan-backed alignment settings. */
+    /** Settings for GPU alignment through Vulkan. */
     struct vulkan final {
         vulkan() = delete;
 
@@ -370,7 +384,7 @@ struct settings final {
         })]]
         static inline bool enabled = true;
 
-        /** Owns Vulkan seed-lookup selection. */
+        /** GPU lookup of matching seed positions. */
         struct seed_lookup final {
             seed_lookup() = delete;
 
@@ -381,29 +395,29 @@ struct settings final {
             static inline bool enabled = false;
         };
 
-        /** Owns GPU-resident minimizer-index cache selection. */
+        /** Reuse target minimizer indexes already uploaded to the GPU. */
         struct index_cache final {
             index_cache() = delete;
 
-            /** @brief Caches GPU-resident minimizer index uploads. */
+            /** @brief Keep uploaded target indexes for later GPU lookups. */
             [[bioseq_sql::guc({
                 .plan_cache = bioseq::sql::plan_cache_policy::reset,
             })]]
             static inline bool enabled = true;
         };
 
-        /** Owns fused Vulkan frontend selection. */
+        /** Run minimizer extraction and seeding toether  on the GPU. */
         struct fused_frontend final {
             fused_frontend() = delete;
 
-            /** @brief Enables the resident fused Vulkan frontend. */
+            /** @brief Enable the GPU path that combines sketching and seed lookup. */
             [[bioseq_sql::guc({
                 .plan_cache = bioseq::sql::plan_cache_policy::reset,
             })]]
             static inline bool enabled = false;
         };
 
-        /** Owns Vulkan target-index build selection. */
+        /** GPU construction of target minimizer indexes. */
         struct index_build final {
             index_build() = delete;
 
@@ -414,7 +428,7 @@ struct settings final {
             static inline bool enabled = false;
         };
 
-        /** Owns GPU base-alignment extension selection. */
+        /** GPU extension of chains into base alignments. */
         struct alignment_extension final {
             alignment_extension() = delete;
 
@@ -433,7 +447,9 @@ struct settings final {
         })]]
         static inline int ordered_sketch_tile_bp = 2'048;
 
-        /** @brief Sets the device radix-sort digit width. */
+        /** @brief Store the requested radix digit width in the request.
+         * The current GPU radix kernels process eight bits per pass.
+         */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 16,
@@ -442,7 +458,7 @@ struct settings final {
         static inline int radix_sort_digit_bits = 8;
     };
 
-    /** Owns aligner profiling settings. */
+    /** Timing and counters for alignment stages. */
     struct profiling final {
         profiling() = delete;
 

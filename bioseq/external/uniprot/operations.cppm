@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/operations.cppm
- * @brief UniProt endpoint fragments.
+ * @brief UniProt endpoints used for client generation
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:operations;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief UniProt entry, cursor-search, and stream path entries. */
+/** @brief Endpoints for accession lookup, search, and streamed results. */
 inline constexpr std::string_view operation_paths = R"bioseq_openapi(  "/uniprotkb/{accession}":
     get:
       tags:

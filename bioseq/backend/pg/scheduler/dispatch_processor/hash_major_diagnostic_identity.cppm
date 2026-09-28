@@ -1,6 +1,6 @@
 /**
  * @file hash_major_diagnostic_identity.cppm
- * @brief Derives diagnostic tokens from authenticated hash-major identities.
+ * @brief Make compact diagnostic IDs for hash-major index sources.
  */
 module;
 
@@ -15,9 +15,9 @@ import bioseq.indexing.storage;
 export namespace bioseq::simd {
 
 /**
- * @brief Derives a nonzero diagnostic token from a hash-major source identity.
- * @param[in] source_identity Authenticated 128-bit source identity.
- * @return Stable nonzero token used only in diagnostic statistics.
+ * @brief Reduce a checked hash-major source identity to a diagnostic ID.
+ * @param[in] source_identity The 128-bit, identity supplied by the index reader.
+ * @return A stable, nonzero token for diagnostic statistics.
  */
 [[nodiscard]] constexpr std::uint64_t
 hash_major_source_diagnostic_token(const std::array<std::byte, 16>& source_identity) noexcept {

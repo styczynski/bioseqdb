@@ -1,6 +1,6 @@
 /**
  * @file external/io/sequence_stream.cppm
- * @brief Provider sequence streaming into bounded row channels.
+ * @brief Reads NCBI FASTA responses and sends sequence rows to a sink.
  */
 module;
 
@@ -31,7 +31,7 @@ import bioseq.external.transport.locator;
 import bioseq.external.transport.remote_source;
 import bioseq.io.sources; // io_source, source_read_result
 
-/// Provider-neutral FASTA streaming and NCBI sequence retrieval.
+/// FASTA parsing and NCBI sequence  streaming.
 export namespace bioseq::external::io {
 
 namespace prov = bioseq::external::provider;
@@ -40,7 +40,7 @@ namespace tx = bioseq::external::transport;
 /// Default number of bases emitted in a sequence chunk.
 inline constexpr std::uint64_t k_default_chunk_bases = 1048572; // 21*49932 <= 1 Mi
 
-/// Returns the NCBI E-utilities locator policy backed by static storage.
+/// Returns the HTTPS and host restrictions for NCBI E-utilities requests.
 inline prov::locator_policy_profile_view ncbi_eutils_policy() {
     static constexpr std::array<prov::locator_scheme, 1> schemes{prov::locator_scheme::https};
     static constexpr std::array<prov::locator_host_suffix_view, 1> suffixes{
@@ -58,19 +58,19 @@ inline prov::locator_policy_profile_view ncbi_eutils_policy() {
     return policy;
 }
 
-/// Returns the normalized NCBI provider identity.
+/// Returns the provider ID ncbi.
 inline prov::provider_id ncbi_provider_id() {
     static constexpr std::string_view value = "ncbi";
     return prov::provider_id{value};
 }
 
-/// Incremental FASTA reader that emits owning sequence payload chunks.
+/// Reads FASTA a block at a time and sends sequence rows to a sink.
 ///
-/// Header and whitespace bytes are omitted while letters are rechunked into
-/// bounded owning payloads.
+/// Skips headers and whitespace. The sequence_chunk target splits records
+/// into chunks, while the sequence target keeps each record in one row.
 class fasta_chunk_emitter {
   public:
-    /// Constructs an emitter for one accession and delivery mode.
+    /// Sets the accession, row size, and sink. Archive mode can emit several records.
     fasta_chunk_emitter(prov::query_target target,
                         std::uint64_t chunk_bases,
                         std::string_view accession,
@@ -81,23 +81,20 @@ class fasta_chunk_emitter {
           accession_(accession), sink_(sink), multi_record_(multi_record),
           chunk_index_(start_chunk_index) {}
 
-    /// Consumes one FASTA byte block and emits complete bounded chunks.
+    /// Reads FASTA bytes and emits ready rows when chunked output is requested.
     [[nodiscard]] std::expected<void, prov::external_error> feed(const std::uint8_t* data,
                                                                  std::size_t length) {
         for (std::size_t i = 0; i < length && !stopped_; ++i) {
             const char symbol = static_cast<char>(data[i]);
             if (symbol == '>') {
                 if (record_count_ >= 1) {
-                    // A new record begins. Single-record mode (efetch) keeps only
-                    // the first. Multi-record mode for archives closes the active
-                    // record and streams the next.
+                    // Efetch uses only the first record. Archive mode finishes the current
+                    // record before reading the next one.
                     if (!multi_record_) {
                         stopped_ = true;
                         break;
                     }
-                    // Close the active record and emit its full chunk_bases chunks
-                    // (chunk target — so a record larger than chunk_bases stays
-                    // bounded), then its remaining tail as the record-end chunk.
+                    // Send full chunks, then mark the remaining chunk as the record end.
                     if (target_ == prov::query_target::sequence_chunk) {
                         auto full = flush_full_chunks();
                         if (!full.has_value()) {
@@ -149,16 +146,15 @@ class fasta_chunk_emitter {
         return {};
     }
 
-    /// Returns peak bytes retained by the rechunk buffer.
+    /// Returns the largest rechunk buffer size observed after  a feed call.
     [[nodiscard]] std::uint64_t peak_rechunk_bytes() const noexcept {
         return peak_rechunk_bytes_;
     }
 
-    /// Completes the active record and returns its decoded letter count.
+    /// Emits the last record tail and returns the total number of rows sent.
     [[nodiscard]] std::expected<std::uint64_t, prov::external_error> finish() {
         if (total_letters_ == 0) {
-            // The archive and efetch paths share this emitter.
-            // report the operation the caller actually ran, not always efetch.
+            // Name the failing operation, according to the FASTA source.
             return std::unexpected(prov::make_external_error(
                 prov::external_error_kind::parse,
                 ncbi_provider_id(),
@@ -166,8 +162,7 @@ class fasta_chunk_emitter {
                 multi_record_ ? "NCBI Datasets archive member contained no sequence bases"
                               : "NCBI efetch returned no sequence bases"));
         }
-        // Emit only a non-empty final tail. Earlier multi-record rows were emitted
-        // at their header boundaries and remain included in `rows_`.
+        // Send the nonempty tail. rows_ already includes earlier records.
         if (!rechunk_.empty()) {
             auto pushed = emit(rechunk_, /*end_of_record=*/true);
             if (!pushed.has_value()) {
@@ -178,33 +173,29 @@ class fasta_chunk_emitter {
         return rows_;
     }
 
-    // Rows already published to the sink. A retry is only safe (no duplicate
-    // rows) while this is zero, before the first published row.
+    // Retry a download only before sending the first row, since replaying
+    // a partly emitted retponse would duplicate rows.
     /// Returns the number of emitted sequence rows.
     [[nodiscard]] std::uint64_t emitted_rows() const noexcept {
         return rows_;
     }
 
-    // Records actually streamed (each ends in exactly one `end_of_record` chunk)
-    // — the value the asset-end statistic wants. This counts *emitted* records,
-    // not bare `>` headers, so a malformed empty record does not inflate it past
-    // the number of `end_of_record` chunks. Single-record (efetch) mode reports
-    // one. A multi-record member reports one per streamed contig or segment.
+    // Count records when their final chunk reaches the sink. Empty FASTA
+    // records therefore do not increase the asset-end record count
     /// Returns the number of completed FASTA records.
     [[nodiscard]] std::uint64_t records_seen() const noexcept {
         return records_emitted_;
     }
 
-    // The next global chunk index this emitter would use — thread into a
-    // following member's emitter so `(accession, chunk_index)` stays unique
-    // across members.
-    /// Returns the next global chunk ordinal.
+    // Pass  this index to the next archive member so chunk IDs stay unique
+    // across all members retrieved for the accession.
+    /// Returns the index to use for the next sequence chunk.
     [[nodiscard]] std::uint64_t next_chunk_index() const noexcept {
         return chunk_index_;
     }
 
   private:
-    /// Emits full chunks while retaining the final record-ending chunk.
+    /// Sends full chunks while keeping one chunk to mark the end of the record.
     [[nodiscard]] std::expected<void, prov::external_error> flush_full_chunks() {
         while (rechunk_.size() > chunk_bases_) {
             const std::string_view chunk(rechunk_.data(), static_cast<std::size_t>(chunk_bases_));
@@ -217,7 +208,7 @@ class fasta_chunk_emitter {
         return {};
     }
 
-    /// Emits one normalized sequence payload and advances row coordinates.
+    /// Copies sequence text into a row and advances offsets after the sink accepts it.
     [[nodiscard]] std::expected<void, prov::external_error> emit(std::string_view letters,
                                                                  bool end_of_record) {
         prov::owning_sequence_payload payload;
@@ -230,9 +221,9 @@ class fasta_chunk_emitter {
         payload.key.provider_name = payload.provider_name;
         payload.key.domain =
             prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated("sequence");
-        // The record's own accession (e.g. a segment NC_002023.1) when streaming a
-        // multi-record member. Otherwise it is the queried accession. key.accession stays
-        // the queried accession so the PG scan's accession filter matches.
+        // For an archive record, keep its FASTA ID, such as NC_002023.1, as
+        // original_identifier. Keep the queried accession in key.accession so
+        // PostgreSQL can still match the scan's accession filter.
         payload.key.original_identifier =
             prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(
                 (multi_record_ && !current_record_id_.empty()) ? current_record_id_ : accession_);
@@ -256,7 +247,7 @@ class fasta_chunk_emitter {
         ++chunk_index_;
         ++rows_;
         if (end_of_record) {
-            ++records_emitted_; // one per record actually streamed (see records_seen)
+            ++records_emitted_; // count a record after its final chunk  is accepted
         }
         return {};
     }
@@ -280,8 +271,8 @@ class fasta_chunk_emitter {
     std::string current_record_id_;
 };
 
-// Extract the equality-constrained accession from a normalized query.
-/// Extracts the accession equality predicate from a normalized query.
+// Use the first string value from an accession equality comparison.
+/// Finds an accession equality value, or returns no value if none is present.
 [[nodiscard]] inline std::optional<std::string>
 accession_from_query(const prov::normalized_external_query& query) {
     for (const prov::predicate_node& node : query.predicates) {
@@ -302,10 +293,9 @@ accession_from_query(const prov::normalized_external_query& query) {
     return std::nullopt;
 }
 
-// Stream NCBI nucleotide FASTA for an accession into owning_sequence_payload
-// chunks. This is the bounded-memory replacement for the whole-body efetch
-// download. The PG scan drives it on a producer task feeding a bounded channel.
-/// Streams one NCBI FASTA response into normalized sequence messages.
+// The PostgreSQL scan runs this download in a proucer thread and receives
+// rows through a channel. Chunked output lets it read sequences as they arrive.
+/// Downloads NCBI nucleotide FASTA and sends sequence rows to the sink.
 [[nodiscard]] inline std::expected<prov::provider_statistics, prov::external_error>
 run_ncbi_sequence_stream(std::string_view accession,
                          prov::query_target target,
@@ -333,14 +323,13 @@ run_ncbi_sequence_stream(std::string_view accession,
     candidate.is_replayable = true;
     candidate.is_idempotent = true;
 
-    // NCBI E-utilities rate-limits at ~3 req/s without a key, returning 429.
-    // Retry transient failures (429/408/transient 5xx/transport) with exponential
-    // backoff + jitter, but ONLY before any row is published (the spec's emission
-    // barrier): a mid-stream failure after visible chunks is terminal.
+    // Retry temporary HTTP or transport failures with increasing delays.
+    // Stop retrying after any row reaches the sink, since restarting would
+    // duplicate  sequence chunks already delivered to PostgreSQL.
     constexpr int k_max_attempts = 5;
     for (int attempt = 0; attempt < k_max_attempts; ++attempt) {
         if (attempt != 0) {
-            const long base_ms = 200L << (attempt - 1); // 200,400,800,1600
+            const long base_ms = 200L << (attempt - 1); // retry delay in milliseconds
             const long jitter_ms =
                 static_cast<long>((accession.size() * 37u + attempt * 53u) % 200u);
             std::this_thread::sleep_for(std::chrono::milliseconds(base_ms + jitter_ms));
@@ -392,7 +381,7 @@ run_ncbi_sequence_stream(std::string_view accession,
                 emitter.emitted_rows() == 0 && attempt + 1 < k_max_attempts &&
                 (status == 429 || status == 408 || status == 500 || status == 502 ||
                  status == 503 || status == 504 ||
-                 status == 0 /* transport-level (timeout/reset), no HTTP status */);
+                 status == 0 /* transport failure before an HTTP status was received */);
             if (can_retry) {
                 continue;
             }

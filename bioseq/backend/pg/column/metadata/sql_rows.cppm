@@ -1,6 +1,6 @@
 /**
  * @file sql_rows.cppm
- * @brief Fixed SQL catalog-row layouts for columnar metadata.
+ * @brief Declare SQL catalog tables and row types for Bioseq storage metadata.
  */
 module;
 
@@ -17,7 +17,7 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::storage::metadata::catalog_rows {
 
 /**
- * @brief Chunk mask metadata.
+ * @brief Deletion bits and deleted-row count for a range within a chunk group.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -97,11 +97,11 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Validated custom options for one bioseq_external relation.
+ * @brief Store custom options for a bioseq_external table.
  *
- * The PostgreSQL table-AM reloptions ABI has no PG17 callback for a custom
- * table AM. Persist the authenticated domain in the existing typed metadata
- * catalog instead of encoding private values into core heap reloptions.
+ * PostgreSQL 17 provides no custom table-access callback for these relation
+ * options. Keep the external entity and sequence settings in this catalog,
+ * where Bioseq can validate  and restore them with the table.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -143,7 +143,7 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Per-stripe storage metadata.
+ * @brief A stripe's byte range, logical row range and chunk-group counts.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -176,7 +176,7 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Per-chunk-group storage metadata.
+ * @brief Total and deleted-row counts for one chunk group.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -198,7 +198,7 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Per-chunk storage metadata.
+ * @brief Locations, compression details and min/max values for one column chunk.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -240,7 +240,7 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Sequence storage shard locations and capacity metadata.
+ * @brief Map, sequence-colurn buckets to shard tables and track their byte counts.
  */
 struct [[bioseq_sql::table({
             .schema =

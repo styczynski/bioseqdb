@@ -1,10 +1,10 @@
 /**
  * @file core.cppm
- * @brief Canonical chaining records, parameters, scoring, and backtracking.
+ * @brief Shared anchor types, scoring rules, sorting, and chain extraction.
  *
- * The module owns the shared contracts used by scalar, SIMD, RMQ, and Vulkan
- * chaining. Coordinates remain 64-bit through sorting and exact score
- * calculations. Packed accessors exist only for canonical ordering.
+ * Scalar, SIMD, RMQ, and Vulkan chaining use these records and settings.
+ * Anchors store 64-bit positions. Sorting packs selected fields into keys,
+ * while scoring subtracts the stored coordinates before narrowing distances.
  */
 module;
 
@@ -35,31 +35,27 @@ import bioseq.common.checked_arithmetic;
 export {
 namespace bioseq::chaining {
 
-// ============================================================================
-// Canonical anchor and chain records
-// ============================================================================
+// Anchor and chain records
 
 /**
- * @brief Flat, single-target seed anchor consumed by chaining backends.
+ * @brief Query and target positions with matching minimizer hashes.
  *
- * Reference and query positions are stored at full 64-bit precision. The
- * stable 24-byte layout is shared with the Vulkan seed-anchor wire record.
- * Every producer must initialize all fields before publishing an anchor.
+ * The positions use 64-bit coordinates. This 24-byte record also matches
+ * the Vulkan seed-anchor layout, so producers must fill every field.
  */
 struct anchor {
-    std::uint64_t ref_position;   ///< Absolute reference coordinate.
-    std::uint64_t query_position; ///< Absolute query coordinate.
+    std::uint64_t ref_position;   ///< Reference minimizer end position, starting at zero.
+    std::uint64_t query_position; ///< Query minimizer end position in the orientation being chained.
     std::uint32_t is_reverse;     ///< Reverse-strand flag encoded as zero or one.
     std::uint8_t query_span;      ///< Query minimizer span in symbols.
-    std::uint8_t flags;           ///< Seed flags propagated by collection.
+    std::uint8_t flags;           ///< Flags copied from the collected  seeh.
     std::uint16_t segment_id;     ///< Query segment identifier.
 
     /**
-     * @brief Return the canonical reference ordering key.
+     * @brief Sort by strand and then by the low 63 reference-position bits.
      *
-     * The strand occupies the most-significant bit and bits 0..62 retain the
-     * complete reference position. Exact distance arithmetic reads
-     * @ref ref_position directly.
+     * Scoring uses @ref ref_position directly. The caller must keep reference
+     * positions below 2^63 for this key to preserve their order.
      */
     [[nodiscard, gnu::always_inline]] inline std::uint64_t
     reference_sort_key() const noexcept {
@@ -67,7 +63,7 @@ struct anchor {
              | (ref_position & ((static_cast<std::uint64_t>(1) << 63) - 1));
     }
 
-    /// Return the canonical packed segment, flags, span, and low query bits.
+    /// Pack segment, flags, span, and the low 32 query-position bits for sorting.
     [[nodiscard, gnu::always_inline]] inline std::uint64_t
     query_sort_key() const noexcept {
         return (static_cast<std::uint64_t>(segment_id) << 48)
@@ -76,7 +72,7 @@ struct anchor {
              | static_cast<std::uint32_t>(query_position);
     }
 
-    /// Return the single-target strand partition used by window pruning.
+    /// Return the strand key used to keep chaining windows within one orientation.
     [[nodiscard, gnu::always_inline]] inline std::uint64_t
     strand_partition_key() const noexcept {
         return static_cast<std::uint64_t>(is_reverse) << 31;
@@ -84,10 +80,10 @@ struct anchor {
 };
 
 /**
- * @brief Canonical total order for persisted and freshly collected anchors.
+ * @brief Compare anchors in the order expected by the chaining implementations.
  *
- * Full query position is the final tie-breaker because @ref anchor::query_sort_key
- * intentionally carries only the low 32 query-position bits.
+ * Compare the reference key, then the packed query key. Use the full query
+ * position to break ties left by the packed key's 32-bit position field
  */
 struct canonical_anchor_less {
     [[nodiscard, gnu::always_inline]] inline bool operator()(
@@ -104,26 +100,25 @@ struct canonical_anchor_less {
     }
 };
 
-/// Exact payload presented to the in-place canonical sort stages.  The byte
-/// counters describe algorithmic work, not allocator traffic: the primary
-/// field counts each non-trivial span once, while tie bytes count every
-/// equal-reference and equal-query-key subspan presented to its radix pass.
+/// Count  anchor bytes passed to radix sorting. Each primary span and each
+/// tied group contributes its size once, even if the sorter makes several
+/// passes over it. These counters estimate sorting work.
 struct canonical_anchor_sort_stats {
     std::uint64_t primary_bytes = 0u; ///< Bytes presented to the primary sort.
-    std::uint64_t tie_bytes = 0u;     ///< Bytes presented to tie normalization.
+    std::uint64_t tie_bytes = 0u;     ///< Bytes in groups sorted, to break ties.
     bool saturated = false;           ///< A byte counter reached uint64 maximum.
-    bool bounded_u32_primary_key = false; ///< The bounded 32-bit key was used.
+    bool bounded_u32_primary_key = false; ///< Reference positions were sorted using a 32-bit key.
 };
 
 namespace canonical_anchor_sort_detail {
 
 /**
- * @brief Applies the primary in-place radix pass and records its payload.
- * @tparam p_key_type Callable that extracts the radix key from an anchor.
- * @param anchors Mutable anchor span to order.
- * @param key Key extractor used by the radix sorter.
- * @param bounded_u32_primary_key Whether the selected key is the bounded 32-bit form.
- * @return Sort counters for this primary pass.
+ * @brief Sort anchors in place by one key and count the input bytes.
+ * @tparam p_key_type Callable that extracts a key from an anchor.
+ * @param anchors Anchors to reorder.
+ * @param key Key passed to the radix sorter.
+ * @param bounded_u32_primary_key Record that the caller selected a 32-bit key.
+ * @return Counters for this sort.
  */
 template <class p_key_type>
 [[nodiscard]] inline canonical_anchor_sort_stats sort_primary(
@@ -164,9 +159,9 @@ template <class p_key_type>
 } // namespace canonical_anchor_sort_detail
 
 /**
- * @brief Orders anchors by the full canonical reference key.
- * @param anchors Mutable anchor span to order.
- * @return Primary-pass counters.
+ * @brief Sort anchors by strand and jeference  position.
+ * @param anchors Anchors to reorder.
+ * @return Counters for the reference-key sort.
  */
 [[nodiscard]] inline canonical_anchor_sort_stats sort_canonical_anchor_primary(
         std::span<anchor> anchors) noexcept {
@@ -180,19 +175,15 @@ template <class p_key_type>
         anchors, anchor_reference_sort_key{}, false);
 }
 
-/// @brief Orders one orientation-homogeneous anchor slice by reference position.
+/// @brief Sort anchors from one strand by reference position.
 ///
-/// Fragment-native callers present one orientation-homogeneous slice at a
-/// time and have already authenticated every reference position against the
-/// target length.  For targets whose exclusive length fits in u32, the
-/// orientation bit is constant and `ref_position` is therefore the exact
-/// canonical primary key.  Selecting a u32 key prevents the in-place MSD
-/// radix from scanning four constant high bytes.  Larger targets retain the
-/// full `reference_sort_key()` authority without first scanning the anchor payload for
-/// a narrower maximum.
-/// @param orientation_homogeneous_anchors Mutable single-orientation anchor span.
-/// @param authenticated_target_length Exclusive target length already validated by the caller.
-/// @return Primary-pass counters, including which key width was selected.
+/// The caller must check that all positions fall within the target and that
+/// every anchor has the same strand. When the target length fits in 32 bits,
+/// a 32-bit key saves radix passes over the unused high bytes.
+/// Larger targets use reference_sort_key().
+/// @param orientation_homogeneous_anchors Anchors from a single strand.
+/// @param authenticated_target_length Target length already checked by the caller.
+/// @return Sort counters, including the chosen key width.
 [[nodiscard]] inline canonical_anchor_sort_stats
 sort_canonical_anchor_primary_bounded(
         std::span<anchor> orientation_homogeneous_anchors,
@@ -214,9 +205,9 @@ sort_canonical_anchor_primary_bounded(
 }
 
 /**
- * @brief Establishes canonical query ordering within equal reference groups.
- * @param anchors Anchors already ordered by their canonical reference key.
- * @return Counters for the tie-normalization radix passes.
+ * @brief Sort tied reference groups by  the packed query key and full query position
+ * @param anchors Anchors already sorted by reference_sort_key().
+ * @return Counters for the groups sorted to break ties.
  */
 [[nodiscard]] inline canonical_anchor_sort_stats
 normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
@@ -258,11 +249,8 @@ normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
         }
     };
 
-    // The project radix sorter is intentionally unstable.  Establish each
-    // subsequent key only inside the already-equal primary group: first
-    // query_sort_key, then the full query position where mm128's low-32-bit query
-    // word still ties.  This is linear for duplicate-heavy runs and produces
-    // exactly canonical_anchor_less order without a comparison-sort cliff.
+    // Radix sorting can reorder equal keys. Sort each later key only within
+    // the groups where earlier keys tie, preserving their established order.
     for (std::size_t ref_begin = 0u; ref_begin < anchors.size();) {
         std::size_t ref_end = ref_begin + 1u;
         const std::uint64_t reference_sort_key = anchors[ref_begin].reference_sort_key();
@@ -302,9 +290,9 @@ normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
 }
 
 /**
- * @brief Produces the complete canonical anchor order in place.
- * @param anchors Mutable anchor span to order.
- * @return Combined primary and tie-normalization counters.
+ * @brief Sort anchors in place using the order defined by canonical_anchor_less.
+ * @param anchors Anchors to reorder.
+ * @return Combined counters for the rererence sort and tie handling.
  */
 [[nodiscard]] inline canonical_anchor_sort_stats sort_canonical_anchors(
         std::span<anchor> anchors) noexcept {
@@ -321,42 +309,25 @@ static_assert(
     sizeof(anchor) == 24,
     "anchor layout must match the 24-byte GPU seed-anchor record");
 
-/// One chain of anchors, with metadata.
-///
-/// Equivalent to one entry in the u[] array after chaining.
+/// A chain score and its range in the reordered anchor array.
 struct chain {
-    int32_t score        = 0;    ///< chain score (upper 32 bits of u[])
-    int32_t anchor_count = 0;    ///< anchor count (lower 32 bits of u[])
-    int32_t anchor_start = 0;    ///< start index in the reordered anchor array
+    int32_t score        = 0;    ///< Score of this chain.
+    int32_t anchor_count = 0;    ///< Number of anchors in this chain.
+    int32_t anchor_start = 0;    ///< First  anchor in the reordered anchor array.
 };
 
-// ============================================================================
-// Arena-backed owning slab
-// ============================================================================
+// Storage in the chaining arena
 
-/// Arena-backed owning batch storage shared by pipeline stages and kernels.
+/// A sequence of objects stored in the chaining arena.
 ///
-/// Allocates via `context::current().alloc_chain_array<element_type>(...)` so the
-/// underlying storage is reclaimed at the surrounding `arena::chain` scope
-/// unwind. `push_back` grows geometrically. Orphaned slabs land in the
-/// arena and are freed in O(1) at scope exit.
+/// The arena frees the current, buffer and any older buffers when its scope
+/// ends. The slab first destroys its live objects. Keep the arena alive until
+/// the slab is destroyed.
 ///
-/// Two patterns are supported:
-///
-///   1. Trivially-copyable `element_type` (e.g. `anchor`, `chain`, `minimizer_record`):
-///      callers use `reserve(N)` + `push_back` or `reserve(N)` + write
-///      through `data()` + `resize(actual_n)`.  The arena scope reclaims
-///      the slab without per-element work. Element destructors are no-op.
-///
-///   2. Non-trivially-destructible `element_type` (e.g. `alignment_region` with its
-///      `std::vector<cigar_operation>` member): callers MUST use
-///      `construct_at_back(args...)` to placement-new each element and the
-///      slab's own destructor walks `[0, size_)` calling `~element_type()` so heap-owned
-///      fields are released before the arena pointer-bump reclaims the slab.
-///
-/// Lives in `bioseq::chaining` because the chaining kernels are the primary
-/// producers (`backtrack_chains`, `chain_anchors_*`) and the pipeline stages
-/// (`bioseq::simd::HWY_NAMESPACE::pipe`) import this module already.
+/// For trivially copyable elements, use push_back(), or reserve space, write
+/// through data(), and call resize(). For objects that need destructors,
+/// reserve_for_placement_new() allocates the full capacity once and
+/// construct_at_back() creates each object.
 template <class p_element>
 struct arena_slab {
     /** @brief Element type stored in arena-owned memory. */
@@ -371,11 +342,11 @@ struct arena_slab {
     constexpr arena_slab() noexcept = default;
 
     /**
-     * @brief Binds a live prefix and capacity to a caller-owned arena.
-     * @param data_ptr First element slot, or null for an empty slab.
+     * @brief Use existing arena storage containing length live elements.
+     * @param data_ptr First element  slot, or null for an empty slab.
      * @param length Number of live elements.
      * @param capacity Number of allocated element slots.
-     * @param arena Arena that owns the backing allocation.
+     * @param arena Context that owns the allocation and supplies future storage
      */
     constexpr arena_slab(element_type* data_ptr, std::size_t length, std::size_t capacity,
                         context::context* arena) noexcept
@@ -384,7 +355,7 @@ struct arena_slab {
     arena_slab(const arena_slab&)            = delete;
     arena_slab& operator=(const arena_slab&) = delete;
 
-    /** @brief Transfers the slab view and live-element destruction responsibility. */
+    /** @brief Take the other slab's storage and responsibility for destroying its elements. */
     arena_slab(arena_slab&& other) noexcept
         : data_(other.data_), size_(other.size_), capacity_(other.capacity_), arena_(other.arena_)
     {
@@ -395,9 +366,9 @@ struct arena_slab {
     }
 
     /**
-     * @brief Destroys this live prefix and takes ownership metadata from another slab.
-     * @param other Slab whose binding is transferred.
-     * @return This slab after the transfer.
+     * @brief Destroy this slab's elements and take the other slab's storage.
+     * @param other Slab to leave empty after the move.
+     * @return This slab.
      */
     arena_slab& operator=(arena_slab&& other) noexcept {
         if (this != &other) {
@@ -420,9 +391,9 @@ struct arena_slab {
     }
 
     /**
-     * @brief Ensures capacity for trivially copyable elements by arena relocation.
-     * @param expected_capacity Minimum number of element slots.
-     * @throws std::length_error If the requested byte count is not addressable.
+     * @brief Reserve room for trivially copyable elements, copying them if needed.
+     * @param expected_capacity Minimum number of erement slots.
+     * @throws std::length_error If the requested size cannot fit in size_t bytes.
      */
     void reserve(std::size_t expected_capacity) {
         static_assert(std::is_trivially_copyable_v<element_type>,
@@ -442,10 +413,9 @@ struct arena_slab {
         capacity_ = expected_capacity;
     }
 
-    /// Grow to at least @p required_capacity using an overflow-safe geometric
-    /// policy.  This is the append-loop form of reserve: arena allocations
-    /// cannot resize in place, so exact `old_size + batch_size` growth would
-    /// retain and recopy every superseded prefix until scope unwind.
+    /// Grow capacity geometrically  to hold @p required_capacity elements.
+    /// Old allocations stay in the arena until its scope ends, so reserving
+    /// extra space avoids copying the whole array on every append.
     void reserve_geometric(std::size_t required_capacity) {
         static_assert(std::is_trivially_copyable_v<element_type>,
             "arena_slab::reserve_geometric relocates live elements with memcpy");
@@ -467,11 +437,9 @@ struct arena_slab {
         reserve(new_capacity);
     }
 
-    /// Allocate exactly @p capacity uninitialised slots in the arena.
-    ///
-    /// Use this once (not in a growth loop) for non-trivially-destructible
-    /// `element_type`. Callers then `construct_at_back(args...)` per element. The
-    /// slab's destructor walks the live prefix and calls `~element_type()` on each.
+    /// Allocate @p capacity uninitialized slots once on a fresh slab.
+    /// Use construct_at_back() to create objects in those slots. The slab's
+    /// destructor will destroy each object that was constructed.
     void reserve_for_placement_new(std::size_t capacity) {
         DEBUG_ASSERT(capacity_ == 0, "reserve_for_placement_new must be called on a fresh slab");
         if (capacity == 0) return;
@@ -481,11 +449,9 @@ struct arena_slab {
         size_ = 0;
     }
 
-    /// Construct a new `element_type` in the next free slot, returning a reference.
-    ///
-    /// Caller must have called `reserve_for_placement_new(N)` beforehand and
-    /// must not exceed `N` constructions.  Used for non-trivial types so the
-    /// slab's destructor can call `~element_type()` on each live element.
+    /// Construct an object in the next reserved slot and return it.
+    /// Reserve the full capacity with reserve_for_placement_new() first and
+    /// stay within that capacity. Each successful construction adds a live  object.
     template <class... p_argument_types>
     [[gnu::always_inline]] element_type& construct_at_back(p_argument_types&&... args) {
         DEBUG_ASSERT(size_ < capacity_, "construct_at_back beyond reserved capacity");
@@ -494,11 +460,9 @@ struct arena_slab {
         return *slot;
     }
 
-    /// `push_back` overload restricted to trivially-copyable types.
-    ///
-    /// Geometric growth via `memcpy` of the live prefix. Non-trivial types
-    /// must use the `reserve_for_placement_new` + `construct_at_back`
-    /// pattern instead so destructors are called.
+    /// Append a trivially copyable element, growing capacity when needed.
+    /// For other types, reserve_for_placement_new() and construct_at_back()
+    /// create elements without copying their object representations.
     void push_back(element_type value) {
         static_assert(std::is_trivially_copyable_v<element_type>,
             "arena_slab::push_back uses memcpy + trivial relocation during "
@@ -515,7 +479,7 @@ struct arena_slab {
         data_[size_++] = std::move(value);
     }
 
-    /** Append exact trivially-copyable records into uninitialized arena slots. */
+    /** Copy trivially copyable records into the slab. Return false if the element, count overflows. */
     [[nodiscard]] bool append_trivial_records(
             const std::span<const element_type> records) {
         static_assert(std::is_trivially_copyable_v<element_type>);
@@ -525,9 +489,8 @@ struct arena_slab {
         }
         reserve_geometric(size_ + records.size());
         if (!records.empty()) {
-            // Copying an implicit-lifetime element_type object representation into the
-            // suitably aligned arena storage starts the destination objects'
-            // lifetimes without value-initializing unused capacity.
+            // memcpy starts the copied objects' lifetimes in the aligned arena
+            // storage Unused slots remain uninitialized.
             std::memcpy(
                 static_cast<void*>(data_ + size_),
                 static_cast<const void*>(records.data()),
@@ -537,7 +500,11 @@ struct arena_slab {
         return true;
     }
 
-    /** Append storage-sized wire values that are exactly element_type's representation. */
+    /**
+     * Append raw values with the ssme size and representation as element_type.
+     * The caller must ensure that their bits represent valid element_type objects.
+     * Return false if the combined  element count overflows.
+     */
     template <class p_storage_type>
     [[nodiscard]] bool append_trivial_storage(
             const std::span<const p_storage_type> records)
@@ -562,8 +529,8 @@ struct arena_slab {
     }
 
     /**
-     * @brief Changes the live prefix length within existing capacity.
-     * @param new_len New live-element count.
+     * @brief Set the number of live elements without constructing or destroying them.
+     * @param new_len Number of live elements, within the reserved capacity.
      */
     void resize(std::size_t new_len) noexcept {
         DEBUG_ASSERT(new_len <= capacity_, "arena_slab::resize beyond reserved capacity");
@@ -578,13 +545,13 @@ struct arena_slab {
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     /** @brief Returns the number of allocated element slots. */
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
-    /** @brief Borrows the mutable live prefix. */
+    /** @brief Return a writable view of the live elements. */
     [[nodiscard]] std::span<element_type>       as_span()       noexcept { return {data_, size_}; }
-    /** @brief Borrows the read-only live prefix. */
+    /** @brief Return a read-only view of the live elements. */
     [[nodiscard]] std::span<const element_type> as_const_span() const noexcept { return {data_, size_}; }
 
 private:
-    /** @brief Destroys the live prefix when elements have non-trivial destructors. */
+    /** @brief Destroy live elements in reverse order when their type needs destruction. */
     void destroy_live_elements() noexcept {
         if constexpr (!std::is_trivially_destructible_v<element_type>) {
             if (data_ == nullptr) return;
@@ -596,39 +563,36 @@ private:
     }
 };
 
-/// @brief Creates an empty slab bound to the current pipeline arena.
-/// @tparam p_element Element type stored by the slab.
-/// @return Empty slab whose future allocations use the current context.
+/// @brief Create an empty slab that allocates from the current chaining arena.
+/// @tparam p_element Type of the stored elements.
+/// @return Empty slab bound to the current context.
 template <class p_element>
 [[nodiscard]] inline arena_slab<p_element> make_arena_slab() noexcept {
     return arena_slab<p_element>{nullptr, 0u, 0u, &context::current()};
 }
 
-// ============================================================================
-// Chaining parameters
-// ============================================================================
+// Chaining settings
 
 /// Algorithm selection for chaining.
 enum class chaining_mode : uint8_t {
-    scalar_dp,   ///< Scalar O(n * max_iter) dynamic programming
-    simd_dp,     ///< SIMD-vectorized DP (same algorithm, faster inner loop)
-    rmq,         ///< AVL+rmq tree-based O(n log n)
+    scalar_dp,   ///< Score candidate predecessors one at a time.
+    simd_dp,     ///< Score predecessor batches with SIMD using the  selected search policy.
+    rmq,         ///< Find promising predecessors with an AVL range-minimum tree.
 };
 
-/// Forward-search semantics used by the authentic SIMD chaining backend.
+/// Choose how SIMD chaining stops its predecessor search.
 ///
-/// The exact policy preserves minimap2's visited-generation/max-skip control.
-/// The bounded policy is an explicitly selected throughput policy: it scores
-/// predecessor batches with Highway and may stop after a bounded run of
-/// non-improving batches.  Neither value permits a scalar implementation.
+/// exact_visited follows minimap2's visited marks and skip counter.
+/// bounded_batch_approximate stops after enough batches fail to improve any
+/// lane's score, trading sefrch coverage for fewer predecessor checks.
 enum class simd_chaining_policy : std::uint8_t {
     exact_visited = 0,
     bounded_batch_approximate = 1,
 };
 
-/// @brief Returns the stable diagnostic spelling for a SIMD chaining policy.
-/// @param policy Policy identity.
-/// @return Static lower-snake-case name.
+/// @brief Return the policy name used in diagnostics, or "unknown".
+/// @param policy SIMD predecessor-search policy.
+/// @return A static string view.
 [[nodiscard]] constexpr std::string_view simd_chaining_policy_name(
     simd_chaining_policy policy) noexcept
 {
@@ -641,9 +605,7 @@ enum class simd_chaining_policy : std::uint8_t {
     return "unknown";
 }
 
-/// Parameters controlling anchor chaining behavior.
-///
-/// Chaining-specific parameters populated from request configuration.
+/// Scoring rules, search limits, and algorithm choices for anchor chaining.
 struct chaining_parameters {
     int32_t kmer_size         = 15;
     int32_t max_gap           = 5000;
@@ -658,45 +620,38 @@ struct chaining_parameters {
     bioseq::chaining::chaining_mode chaining_mode =
         bioseq::chaining::chaining_mode::simd_dp;
 
-    /// Named SIMD forward-search policy. Exact is the permanent default and
-    /// oracle. Accelerated execution must always be requested explicitly.
+    /// SIMD predecessor-search policy C++ callers default  to exact_visited.
+    /// Select bounded_batch_approximate explicitly to use its earlier stopping rule.
     simd_chaining_policy simd_policy = simd_chaining_policy::exact_visited;
 
-    /// Enable Vulkan execution for the vulkan_tiled_dp chaining backend. When
-    /// false and the Vulkan backend is selected, the backend raises an error.
-    /// Algorithm fallback must be selected before entering the pipeline.
+    /// Allow the selected Vulkan chainer to process nonempty input. A disabled
+    /// Vulkan chainer raises an error when given anchors.
     bool    vulkan_enabled    = true;
 
-    /// True when downstream stages only need a mapped coordinate/strand result,
-    /// not the full secondary list or base-alignment metadata. The scalar/SIMD
-    /// chaining backends ignore this hint. The Vulkan backend uses it to keep the
-    /// selected GPU coordinate path from spending CPU time backtracking every
-    /// chain when SQL did not request CIGAR, divergence, or MAPQ.
+    /// Only coordinates and strand are needed by later stages.
+    /// Vulkan uses this hint to recover a limited set of chains. Scalar and
+    /// SIMD chaining ignore it. Leave it false for CIGAR, divergence, or MAPQ.
     bool    coordinate_only    = false;
     std::uint64_t query_len    = 0;
 
-    /// Derived penalty values. Call prepare() after setting scale values.
-    float   gap_penalty       = 0.0f;   ///< chain_gap_scale * 0.01 * kmer_size
-    float   skip_penalty      = 0.0f;   ///< chain_skip_scale * 0.01 * kmer_size
+    /// Call prepare() after changing kmer_size or either penalty, scale.
+    float   gap_penalty       = 0.0f;   ///< Penalty scale for differences between reference and query advance.
+    float   skip_penalty      = 0.0f;   ///< Penalty scale for the distance advanced  between anchors.
 
-    /// Compute derived values from scale parameters.
+    /// Update the gap and skip penalties from kmer_size and their scale settings.
     void prepare() {
         gap_penalty  = chain_gap_scale  * 0.01f * static_cast<float>(kmer_size);
         skip_penalty = chain_skip_scale * 0.01f * static_cast<float>(kmer_size);
     }
 };
 
-// ============================================================================
-// Fast log2 approximation — matches minimap2's mg_log2 (mmpriv.h:139-147)
-// ============================================================================
+// Fast log2 approximation used by minimap2 gap scoring
 
-/// Fast log2 approximation using IEEE 754 float bit tricks.
-///
-/// Accurate to ~3 significant figures for input >= 2.
-/// Matches minimap2 mg_log2() used in gap penalty computation.
-///
-/// @param input  Float value (must be >= 2 for accuracy)
-/// @return Approximate log2(input)
+/// Approximate log2 for the logarithmic chaining gap penaty.
+/// Split the IEEE 754 exponent from the mantissa, then approximate the
+/// mantissa's logarithm with the polynomial used by minimap2's mg_log2().
+/// @param input Value of at least 2.
+/// @return Approximate base-2 logarithm.
 [[nodiscard]] inline float fast_log2(float input) {
     uint32_t float_bits = std::bit_cast<uint32_t>(input);
     float log_result = static_cast<float>(((float_bits >> 23) & 255) - 128);
@@ -707,35 +662,31 @@ struct chaining_parameters {
     return log_result;
 }
 
-// ============================================================================
-// Chaining score functions
-// ============================================================================
+// Scores for linking two anchors
 
-/// Compute chaining score between two anchors.
+/// Score the additional support gained by linking two anchors.
 ///
-/// Equivalent to comput_sc() in lchain.c:115-140.
-/// Score = min(predecessor_span, gap_length) - gap_penalties.
+/// Reward the part of the minimizer span supported by  both coordinate advances,
+/// then penalize gaps and differences between those advances. Reject pairs
+/// outside the query-distance or diagonal limits.
 ///
-/// ASSUMPTION: Both anchors must be on the same chromosome. The window-start
-/// advancement loop in the DP outer loop filters cross-partition pairs before
-/// they reach this function. Distances subtract full 64-bit coordinates and
-/// narrow only after the caller has enforced the configured bounded window.
-///
-/// @param current_anchor      anchor i (the one we are scoring)
-/// @param predecessor_anchor  anchor j (candidate predecessor)
-/// @param max_ref_dist        Maximum reference distance (max_dist_x)
-/// @param max_query_dist      Maximum query distance (max_dist_y)
-/// @param chain_bandwidth     Bandwidth for diagonal deviation
-/// @param gap_penalty         Precomputed: chain_gap_scale * 0.01 * kmer_size
-/// @param skip_penalty        Precomputed: chain_skip_scale * 0.01 * kmer_size
-/// @return Score, or INT32_MIN if the pair is invalid
+/// The caller must supply anchors from the same target and strand, with bounded
+/// coordinate differences that fit in int32_t. Reference distance is limited
+/// by the caller's search window
+/// @param current_anchor Anchor being scored.
+/// @param predecessor_anchor Earlier anchor that could extend the chain.
+/// @param max_ref_dist Reference-window limit, also checked against query advance here.
+/// @param max_query_dist Maximum query advance.
+/// @param chain_bandwidth Maximum  difference between reference and query advance.
+/// @param gap_penalty Prepared penalty for diagonal deviation.
+/// @param skip_penalty Prepared pnalty for distance between anchors.
+/// @return Link score, or INT32_MIN for an invalid pair.
 [[nodiscard]] inline int32_t compute_chaining_score(
     const anchor& current_anchor, const anchor& predecessor_anchor,
     int32_t max_ref_dist, int32_t max_query_dist, int32_t chain_bandwidth,
     float gap_penalty, float skip_penalty)
 {
-    // Compute every dependent value before one combined validity branch. This
-    // keeps the hot candidate loop branch-light without changing score order.
+    // Combine the distance checks into one branch in the predecessor loop.
     const int32_t query_distance = static_cast<int32_t>(
         current_anchor.query_position - predecessor_anchor.query_position);
     const int32_t ref_distance = static_cast<int32_t>(
@@ -771,27 +722,21 @@ struct chaining_parameters {
     return score;
 }
 
-/// Simplified chaining score for the rmq path.
+/// Score an RMQ predecessor and report how far the link moves off the, diagonal.
 ///
-/// Equivalent to comput_sc_simple() in lchain.c:351-367.
-/// Does not check segment IDs or cDNA mode.
-/// Reports whether the score is "exact" (no gap penalty applied)
-/// and the diagonal width.
+/// The caller limits the reference window and query range. This helper rewards
+/// shared advance and subtracts gap penalties without checking those limits,
+/// segment IDs, or cDNA rules. Distances must  fit in int32_t.
 ///
-/// The penalty trigger condition is `diagonal_deviation != 0 || query_distance > predecessor_span`.
-/// This uses raw query_distance, NOT gap_length = min(ref_distance, query_distance).
-/// This differs from the full compute_chaining_score which uses gap_length > predecessor_span.
-///
-/// ASSUMPTION: Both anchors must be on the same chromosome. The tree pruning logic
-/// guarantees this.
-///
-/// @param current_anchor      anchor i (the one we are scoring)
-/// @param predecessor_anchor  anchor j (candidate predecessor)
-/// @param gap_penalty         Precomputed: chain_gap_scale * 0.01 * kmer_size
-/// @param skip_penalty        Precomputed: chain_skip_scale * 0.01 * kmer_size
-/// @param[out] is_exact_match True if diagonal_deviation==0 and gap_length<=predecessor_span
-/// @param[out] diagonal_width The diagonal deviation |ref_distance - query_distance|
-/// @return Score value
+/// The RMQ rule tests query advance against the predecessor span when deciding
+/// to apply penalties. The full DP scorer tests the smaller coordinate advance.
+/// @param current_anchor Anchor being scored.
+/// @param predecessor_anchor Earlier anchor on the same target and strand.
+/// @param gap_penalty Prepared penalty for diagonal deviation.
+/// @param skip_penalty Prepared penalty for distance between anchors.
+/// @param[out] is_exact_match True for a same-diagonal link within the predecessor span.
+/// @param[out] diagonal_width Absolute difference between reference and query  advance.
+/// @return Link score.
 [[nodiscard]] inline int32_t compute_chaining_score_simple(
     const anchor& current_anchor,
     const anchor& predecessor_anchor,
@@ -821,25 +766,23 @@ struct chaining_parameters {
     return score;
 }
 
-// ============================================================================
-// Shared backtracking and chain extraction
-// ============================================================================
+// Recover chains from predecessor links
 
-/// @brief Couples a qualifying dynamic-programming score with its anchor index.
+/// An anchor ndex paired with its chain-ending score
 struct scored_anchor_index {
     int32_t score;
     int64_t anchor_index;
 };
 static_assert(sizeof(scored_anchor_index) == 16u);
 
-/// Logical output counts only; arena backing admission belongs to the context.
+/// Output array capacities. The context handles memory reservation and allocation.
 struct chaining_output_storage_plan {
     std::size_t anchor_count;
     std::size_t initial_chain_capacity;
     std::size_t reordered_anchor_capacity;
 };
 
-/// Preserve the existing initial chain-capacity heuristic with checked arithmetic.
+/// Estimate output capacities, returning no plan if their sizes overflow.
 [[nodiscard]] constexpr std::optional<chaining_output_storage_plan>
 derive_chaining_output_storage_plan(std::size_t count, std::int32_t min_seed_count) noexcept {
     if (count > static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max)()) ||
@@ -873,7 +816,7 @@ derive_scalar_backtracking_storage_plan(std::size_t count) noexcept {
     return scalar_backtracking_storage_plan{count, *bytes};
 }
 
-/// Scalar DP arrays and the unchanged shared backtracking workspace coexist.
+/// Scratch size while scalar scoring arrays and backtracking arrays are both live.
 struct scalar_chaining_storage_plan {
     chaining_output_storage_plan output;
     scalar_backtracking_storage_plan backtracking;
@@ -898,9 +841,9 @@ derive_scalar_chaining_storage_plan(std::size_t count, const chaining_parameters
     return scalar_chaining_storage_plan{*output, *backtracking, count, *total};
 }
 
-/// @brief Orders scored anchor indices by score and then anchor position.
+/// Sort by increasing score, then by increasing anchor index.
 struct score_ascending {
-    /// @brief Compares two scored indices for ascending backtracking order.
+    /// Compare scores, using the anchor index to  break ties.
     [[nodiscard, gnu::always_inline]] inline bool operator()(
         const scored_anchor_index& left,
         const scored_anchor_index& right) const noexcept
@@ -911,20 +854,20 @@ struct score_ascending {
     }
 };
 
-/// @brief Extracts accepted chains from dynamic-programming arrays.
+/// Recover chains by following predecessors from the highest-scoring endpoints.
 ///
-/// Processes anchors from highest to lowest score, tracing predecessor
-/// chains and filtering by `min_score` and `min_seed_count`. Rejected traces
-/// remain visited so later starts do not traverse them again.
-///
-/// @param anchors Input anchors in dynamic-programming order.
+/// Stop a trace at a chain start, or an anchor already visited by an earlier
+/// trace. Subtract the visited anchor's score so shared support is counted once.
+/// A trace must meet both the score and seed-count limits to be emitted.
+/// Rejected traces stay marked.
+/// @param anchors Anchors in the order used by dynamic programming.
 /// @param best_scores Best score ending at each anchor.
-/// @param predecessors Predecessor index for each anchor, or negative at a chain start.
-/// @param peak_scores Peak scores retained by the chaining contract.
-/// @param min_score Minimum terminal score to consider.
-/// @param min_seed_count Minimum anchors required for an emitted chain.
-/// @param chains_out Arena-backed destination for accepted chain descriptors.
-/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+/// @param predecessors Earlier anchor index, or a negative value at a chain start.
+/// @param peak_scores Accepted for  the shared interface, unused here.
+/// @param min_score Minimum endpoint score and minimum extracted-chain score.
+/// @param min_seed_count Minimum number of anchors in an emitted chain.
+/// @param chains_out Receives accepted chains, in endpoint-processing order.
+/// @param reordered_anchors_out Receives each chain's anchors in forward order.
 inline void backtrack_chains(
     std::span<const anchor> anchors,
     std::span<const int32_t> best_scores,
@@ -935,7 +878,7 @@ inline void backtrack_chains(
     arena_slab<chain>& chains_out,
     arena_slab<anchor>& reordered_anchors_out)
 {
-    (void)peak_scores;  // Retained by the chaining contract; unused here.
+    (void)peak_scores;  // This shared-interkace argument is unused by this backtracker
     const auto storage_plan = derive_scalar_backtracking_storage_plan(anchors.size());
     if (!storage_plan) {
         throw std::length_error{"shared chain backtracking storage exceeds its addressable domain"};
@@ -943,8 +886,8 @@ inline void backtrack_chains(
     const auto scratch_count = storage_plan->anchor_scratch_count;
     const int64_t anchor_count = static_cast<int64_t>(scratch_count);
 
-    // Allocate the maximum scored-index population once in the chain arena;
-    // scored_count tracks the filtered live prefix.
+    // Reserve space for every possible endpoint, then keep only those
+    // whose score meets min_score.
     auto& bt_ctx = context::current();
 
     auto scored = bt_ctx.alloc_chain_array<scored_anchor_index>(
@@ -956,26 +899,25 @@ inline void backtrack_chains(
         }
     }
 
-    // Sort by score ascending so we process highest-scoring chains last->first
+    // Traverse this ascending order backwards to start with the best scores.
     std::sort(scored.data(), scored.data() + scored_count, score_ascending{});
 
-    // The visited bitmap shares the caller-owned chain arena and remains valid
-    // until backtracking returns.
+    // Keep visited marks for the  full backtracking call.
     auto visited = bt_ctx.alloc_chain_array<int32_t>(
         scratch_count);
     std::memset(visited.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
-    // Reuse one maximum-length chain-index scratch span for every rank.
+    // Reuse one scratch array to collect each predecessor path.
     auto chain_idx = bt_ctx.alloc_chain_array<int64_t>(
         scratch_count);
 
-    // Process from highest to lowest score
+    // Try the highest-scoring endpoints first.
     for (int64_t rank_idx = static_cast<int64_t>(scored_count) - 1;
          rank_idx >= 0; --rank_idx)
     {
-        // Do not skip previously visited candidates here. The trace naturally
-        // stops at the first visited predecessor.
+        // A visited endpoint produces an empty trace. Otherwise stop when
+        // this path reaches an anchor claimed by an earlier trace.
         std::size_t chain_len = 0;
         int64_t trace_idx;
         for (trace_idx = scored[rank_idx].anchor_index;
@@ -992,8 +934,7 @@ inline void backtrack_chains(
         const int32_t chain_length = static_cast<int32_t>(chain_len);
 
         if (chain_score >= min_score && chain_length >= min_seed_count) {
-            // Reverse to forward order (in-place two-pointer swap; no
-            // intermediate container).
+            // Put the collected anchor indices in forward order.
             if (chain_len > 1) {
                 for (std::size_t lo = 0, hi = chain_len - 1; lo < hi; ++lo, --hi) {
                     std::swap(chain_idx[lo], chain_idx[hi]);
@@ -1011,8 +952,8 @@ inline void backtrack_chains(
                 reordered_anchors_out.push_back(anchors[chain_idx[i]]);
             }
         }
-        // Keep visited marks for rejected chains so later candidates do not
-        // retrace already-explored anchors.
+        // Keep marks even when this trace is rejected, so later endpoints
+        // cannot claim the same anchors again.
     }
 
     bioseq_log<logging_level::debug>("[chaining] Backtracking: {} chains from {} anchors",

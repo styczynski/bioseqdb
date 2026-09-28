@@ -1,6 +1,6 @@
 /**
  * @file alignment_prefilter.cppm
- * @brief Re-exports alignment and rank-prefilter shader sources.
+ * @brief Exports alignment shaders and assembles the sequence-prefilter shaders.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter;
 
@@ -16,9 +16,7 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 /**
- * @brief Composes a rank-prefilter shader from its shared preamble and algorithm body.
- * @param[in] algorithm_body Algorithm-specific GLSL body.
- * @return Complete rank-prefilter GLSL body.
+ * @brief Adds the shared input layouts and  rank readers before an algorithm's GLSL body.
  */
 [[nodiscard]] std::string rank_prefilter_body(std::string_view algorithm_body) {
     std::string body;
@@ -29,10 +27,8 @@ export namespace bioseq::gpu::vulkan {
 }
 
 /**
- * @brief Composes one fixed-geometry GateKeeper shader body.
- * @param[in] length Compile-time sequence length.
- * @param[in] max_edits Compile-time edit threshold.
- * @return Complete rank-prefilter GLSL body.
+ * @brief Builds GateKeeper GLSL for a fixed sequence length and edit limit.
+ * Inserts those values as defines between the shared preamble and algorithm body.
  */
 [[nodiscard]] std::string specialised_gatekeeper_body(std::uint32_t length,
                                                       std::uint32_t max_edits) {

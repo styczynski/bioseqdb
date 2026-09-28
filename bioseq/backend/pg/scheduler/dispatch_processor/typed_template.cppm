@@ -1,9 +1,9 @@
 /**
  * @file
- * @brief Implements typed sequence dispatch for generated namespaces.
+ * @brief Generate sequence dispatch functions for each alphabet and storage width.
  */
-// Attribute-driven namespace-materialization input only. This scan-only module
-// supplies canonical source geometry; it is never attached to a compiler target.
+// Code generation reads these attributes and emits the dispatch variants.
+// This file is generator input and is not compiled as a module itself.
 module;
 
 extern "C" {
@@ -16,9 +16,8 @@ extern "C" {
 #undef snprintf
 #undef vsnprintf
 
-// This scan-only code-generation input cannot import the toolchain-owned
-// standard-library module. The dependency authority must remain relocatable
-// with the repository and generated PCM roots.
+// Include standard headers herc so code generation can scan this file
+// without depending on the compiler's prebuilt standard-library module.
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -89,125 +88,15 @@ import bioseq.parallelism.pipeline_ops;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.scheduler.supervisor.vulkan;
 
-/*-------------------------------------------------------------------------
+/*
+ * The generated entry points choose  the typed scan and alignment functions.
+ * The active read policy selects the MPF or MPS index format. Stored-index
+ * reuse also depends on the statement's read requirement. Missing indexes can
+ * require recomputation or an error, depending on that requirement.
  *
- * scheduler/dispatch_processor/index.cppm
- *
- * Heavy minimap/pipe implementation for batch_processor. Kept out of the
- * dispatch_buffer interface so edits to tuple-buffer or admin code do not
- * force that translation unit to reinstantiate the full supported alphabet x
- * storage-width minimap pipeline.
- *
- * Read/recompute/persist contract for minimizer indexes
- * -----------------------------------------------------
- *
- * There are two separate policy concepts in this file:
- *
- * 1. The active minimizer policy (`scanner_pg_context::active_index`).
- *    - Resolved once for the target column when a user relation is known.
- *      `bioseq.index.sequence_read.enabled` controls whether stored chunks are read;
- *      recompute paths still use this policy to choose transient
- *      minimizer-fragment vs minimizer-sequence storage.
- *    - Default when no enabled active row is found is
- *      `minimizers_per_fragment`.
- *    - The SQL schema has a unique partial index on
- *      `(user_relid, main_relfilenode, column_attno) WHERE is_active_read`, and
- *      `bioseq.set_active_read_index()` clears old active rows before setting
- *      the new one. Therefore more than one active read index is not a normal
- *      state. If an old/corrupt catalog ever exposes more than one, the resolver
- *      uses `LIMIT 1` with no ordering; treat that as unsupported.
- *
- * 2. The deferred recompute persistence choice.
- *    - Used only when `can_defer_recompute_minimizer_persist()` is true:
- *      `bioseq.index.recompute_async_persistence.enabled = on`,
- *      `bioseq.index.async_persistence.enabled = on`, a user relation is known, and the
- *      effective minimizer parameters are the persisted-index pair `k=15,w=10`.
- *    - It ignores `active_index` and scans `k_minimizer_index_names` in persistence
- *      preference order: `minimizers_per_fragment`, then
- *      `minimizers_per_sequence`.
- *    - If both minimizer indexes are enabled for UPDATE_ON_INSERT,
- *      `minimizers_per_fragment` wins. If neither is enabled, no deferred
- *      minimizer persist target is selected.
- *
- * GUC meanings in this dispatch path:
- *
- * - `bioseq.index.insert_maintenance.enabled`: write/load-time policy gate. When off,
- *   INSERT/load does not build UPDATE_ON_INSERT indexes. It does not by itself
- *   change the read path except by making stored indexes absent.
- *
- * - `bioseq.index.sequence_read.enabled`: read-time gate for stored-index reuse. When
- *   on, each row tries to assemble the active stored index if chunks exist.
- *   When off, no stored minimizer index is read even if chunks are present;
- *   rows go to recompute/transient paths that still honor the active
- *   minimizer-fragment/minimizer-sequence policy shape.
- *
- * - `bioseq.index.async_persistence.enabled`: global async persistence gate. If off, async
- *   staging functions refuse to enqueue/write opportunistically built indexes.
- *   It does not pick an index by itself.
- *
- * - `bioseq.index.recompute_async_persistence.enabled`: no-index recompute gate. It allows a
- *   recompute path to consult UPDATE_ON_INSERT minimizer policy and stage or
- *   otherwise handle a deferred minimizer target, but only together with
- *   `bioseq.index.async_persistence.enabled` and only for persisted parameters `k=15,w=10`.
- *
- * - `bioseq.index.memory_cap_mb`: memory-admission cap for resident targets,
- *   assembled indexes, sorted runs, and opportunistic RAM-first builds. `0`
- *   means use the live process/system memory budget. A larger or smaller cap
- *   can admit or reject resident/parallel paths, but it does not force
- *   persistence and it does not choose the active index.
- *
- * - `bioseq.scheduler.pipeline.mode` and
- *   `bioseq.scheduler.backend.max_concurrency`: enable task-parallel segment work when
- *   mode is `task_parallel` and effective concurrency is greater than one.
- *   These affect speed and resident materialization attempts, not the logical
- *   persistence policy.
- *
- * Stored-index present:
- *
- * - Active read index = `minimizers_per_fragment`.
- *   If the row has fragment-index chunks, assemble the required full/segment
- *   index from stored chunks and search with it. No new persistence is staged.
- *   If chunks are missing, fall through to recompute.
- *
- * - Active read index = `minimizers_per_sequence`.
- *   If the row has minimizer-sequence chunks, assemble a query-specific index
- *   from the stored minimizer-sequence representation and search with it.
- *   Logical-fragment-backed minimizer-sequence chunks remain supported. No new
- *   persistence is staged. If chunks are
- *   missing, fall through to recompute.
- *
- * - No active read row.
- *   The resolver defaults to `minimizers_per_fragment` when reads are enabled.
- *   If `bioseq.index.sequence_read.enabled` is off, no stored index is read; the
- *   resolved policy still chooses the transient recompute shape.
- *
- * Stored-index missing or reads disabled:
- *
- * - Active read index = `minimizers_per_fragment`.
- *   Recompute the search index. If RAM-first opportunistic build is admitted,
- *   the computed fragment chunks may be staged under
- *   `minimizers_per_fragment` when `bioseq.index.async_persistence.enabled` is on.
- *   In later resident recompute paths, if deferred choice also selects
- *   `minimizers_per_fragment`, the recomputed fragment index is written to a
- *   temp payload and staged for async persistence.
- *
- * - Active read index = `minimizers_per_sequence`.
- *   First, the RAM-first opportunistic branch may build fragment-shaped chunks
- *   and stage them under the minimizer-sequence name if memory admission succeeds and
- *   `bioseq.index.async_persistence.enabled` is on. If that is not admitted, the transient
- *   no-index minimizer-sequence branch can run when the deferred recompute gates are on
- *   and the UPDATE_ON_INSERT minimizer choice is minimizer-sequence. That branch materializes
- *   the target in memory when admitted, builds query-filtered transient segment
- *   indexes, searches, and logs `persisted=false`. This is an intentional
- *   semantic exception: the GUCs are used as eligibility gates, but no durable
- *   minimizer-sequence rows are staged by that fast path.
- *
- * - No UPDATE_ON_INSERT minimizer choice.
- *   Recompute and search normally. If `bioseq.index.recompute_async_persistence.enabled` was on
- *   but no eligible minimizer policy exists, the code logs that async-persist
- *   was skipped.
- *
- *-------------------------------------------------------------------------
+ * Saving recomputed indexes is a separate decision governed by the asynchronous
+ * persistence settings and enabled insert policies. See process_scanner_pg_row_typed
+ * for the row-level read and recompute paths.
  */
 namespace bioseq::simd {
 namespace typed_dispatch {
@@ -242,16 +131,12 @@ static constexpr std::uint8_t compile_shard
 
 namespace {
 
-/// Arms before fragment-anchor preparation and completes the scratch wave only
-/// after the synchronous prepare/consumer scope has unwound. The scratch API is
-/// idempotent/noexcept, so preparation and alignment failures both leave the
-/// reusable planner clean.
+// Share the typed helpers across generated dispatch variants.
 using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Compare every locator field before one resident target is shared by a
-/// query-parallel batch. The comparison stays PostgreSQL-free so it can also
-/// serve as a preflight stats before any worker is entered.
+/// Check that both locators identify the same  target before sharing it
+/// across worker threads. This check makes no PostgreSQL calls.
 [[nodiscard]] constexpr bool same_dispatch_target_locator(
         const bioseq::storage::sequence_locator& left,
         const bioseq::storage::sequence_locator& right) noexcept {
@@ -259,9 +144,8 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Validate the complete immutable hash-major reader identity before it is
-/// borrowed concurrently. No worker may observe a partially authenticated,
-/// mixed-layout or storage-profile-transcoded prepared group.
+/// Check the stored hash-major reader and its target identity, before
+/// worker threads borrow it
 [[nodiscard]] inline bool hash_major_parallel_reader_identity_valid(
         const batch_processor::cpu_prepared_index_group& group,
         const std::uint64_t target_bp_size) noexcept {
@@ -270,10 +154,8 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// grouped-SoA counterpart of the concurrent-reader stats. The reader owns only
-/// independent fragment address plans. Query routing/count reduction is
-/// transient wave state, and every persisted posting remains owned by exactly
-/// one fragment.
+/// Check the grouped-SoA fragment reader and its target identity before
+/// worker threads borrow its fragment plans.
 [[nodiscard]] inline bool fragment_parallel_reader_identity_valid(
         const batch_processor::cpu_prepared_index_group& group,
         const std::uint64_t target_bp_size) noexcept {
@@ -282,9 +164,8 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Attach the retained query-sketch stats after a worker has joined. The
-/// prebuilt-minimizer entry point must not publish its own query stats. This
-/// check makes duplicate attachment fail closed on the PostgreSQL thread.
+/// Attach the saved query-sketch counters after the wxrker returns.
+/// Reject results that already contain query counters to avoid counting twice.
 inline void attach_retained_hash_major_query_stats(
         match_result_collection& collection,
         const pipe::minimizer_range_execution_stats& stats) {
@@ -293,10 +174,9 @@ inline void attach_retained_hash_major_query_stats(
 }
 
 /**
- * Promote one decoded sequence locator through the statement's exact source
- * provider, then expose only the canonical lazy facade to the algorithm.
- * The provider remains scan-owned. The read session owns the facade adapter
- * and is closed only after the callback has joined/drained all algorithm work.
+ * Open a lazy sequence view through the scan's source provider  and pass it to
+ * the callback. The read session keeps the view alive until the callback and
+ * its worker tasks have finished.
  */
 template <class p_alphabet, class p_function>
 [[bioseq::template_flatten_when("shape", "root")]]
@@ -345,8 +225,8 @@ inline void with_source_provider_pg_target(
         std::forward<p_function>(callback));
 }
 
-// Keep the PG-backed scanner row path as a separate function so GCC does not
-// compile the whole typed scheduler as one very large control-flow graph.
+// Compile the PostgreSQL scanner path separately to keep GCC's function
+// analysis manageable.
 template <class p_sequence>
 [[bioseq::template_flatten_when("shape", "scanner_pg")]]
 [[nodiscard]] match_result_collection process_scanner_pg_row_typed(
@@ -916,8 +796,8 @@ process_inmemory_chunked_segmented_row(
         return run_pipeline();
     }
 
-    /* The one-shot summary still fires at scan end. Preparation remains
-     * outside this scope, matching the authored root's previous ordering. */
+    /* Profile batch execution after target preparation has finished.
+     * The scan-end hook writes the accumulated summary. */
     using profiling_arguments = bioseq::instrumentation::production_profiling_configuration;
     using timing_arguments = bioseq::instrumentation::benchmark_profiling_configuration;
     auto& profiler_block = bioseq::instrumentation::persistent_profiler_state<profiling_arguments>();

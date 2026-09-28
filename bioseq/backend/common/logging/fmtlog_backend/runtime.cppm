@@ -24,7 +24,7 @@ SOFTWARE.
 
 /**
  * @file runtime.cppm
- * @brief Owns fmtlog sinks, polling, timestamps, and thread lifecycle.
+ * @brief Drains fmtlog queues and writes timestamped messages to files and callbacks.
  */
 module;
 
@@ -66,27 +66,29 @@ template <int p_instance_tag> fmtlog fmtlog_wrapper<p_instance_tag>::instance;
 /** No-op default handler when a per-thread log queue is full. */
 inline void fmtlogEmptyFun(void*) {}
 
-/** Owns polling, buffering, header fields, and sink I/O for one fmtlog instance.
+/**
+ * Formats queued records, buffers output and manages the, polling threyd.
  *
- * @tparam ___ Unused instance tag. The default tag selects the shared runtime.
+ * @tparam ___ Instance tag. The logger uses the default runtime.
  */
 template <int ___ = 0> class fmtlogDetailT {
   public:
     // https://github.com/MengRao/str
-    /** Fixed-size stack buffer for fast decimal and short literal formatting.
+    /**
+     * Fixed-size character array for decimal digits and short header fields.
      *
-     * @tparam SIZE Character capacity of the buffer.
+     * @tparam SIZE Number of stored characters.
      */
     template <size_t SIZE> class Str {
       public:
         /** Character capacity of this buffer. */
         static const int Size = SIZE;
-        /** NUL-terminated character storage for formatted output. */
+        /** Fixed-width characters with no terminating NUL. */
         char s[SIZE];
 
-        /** Default-initializes the buffer. */
+        /** Leaves the character array uninitialized. */
         Str() {}
-        /** Copies from a same-sized @c Str view at @p p. */
+        /** Copies SIZE characters from the supplied address. */
         Str(const char* p) {
             *this = *(const Str<SIZE>*)p;
         }
@@ -100,7 +102,7 @@ template <int ___ = 0> class fmtlogDetailT {
             return s[i];
         }
 
-        /** Writes the decimal digits of @p num into @c s. */
+        /** Writes a nonnegative number as zero-padded digits, keeping the lowest SIZE digits. */
         template <typename T> void fromi(T num) {
             if constexpr (Size & 1) {
                 s[Size - 1] = '0' + (num % 10);
@@ -244,13 +246,13 @@ template <int ___ = 0> class fmtlogDetailT {
     /** Marks the thread-local queue for deferred teardown when the thread exits. */
     class ThreadBufferDestroyer {
       public:
-        /** Constructs an idle destroyer with no registered buffer. */
+        /** Creates the object that handles thread exit. */
         explicit ThreadBufferDestroyer() {}
 
-        /** Hook invoked after the thread-local buffer is created. */
+        /** Forces creation of the thread-exit object after a queue is allocated. */
         void threadBufferCreated() {}
 
-        /** Flags the thread-local buffer for deletion during the next poll. */
+        /** Marks the queue for  deletion after the poller drains its records. */
         ~ThreadBufferDestroyer() {
             if (fmtlog::threadBuffer != nullptr) {
                 fmtlog::threadBuffer->shouldDeallocate = true;
@@ -261,7 +263,7 @@ template <int ___ = 0> class fmtlogDetailT {
 
     /** Registered format metadata for one log site. */
     struct StaticLogInfo {
-        // Constructor
+
         /** Captures formatter, source location, level, and format string for a log site. */
         constexpr StaticLogInfo(fmtlog::FormatToFn fn,
                                 const char* loc,
@@ -288,7 +290,7 @@ template <int ___ = 0> class fmtlogDetailT {
             basePos = base - location;
         }
 
-        /** Returns the source file basename slice of @c location. */
+        /** Returns the source location after its last path separator, including any line or column. */
         inline fmt::string_view getBase() {
             return fmt::string_view(location + basePos, endPos - basePos);
         }
@@ -300,7 +302,7 @@ template <int ___ = 0> class fmtlogDetailT {
 
         /** Deferred body formatter for this log site, or null for one-shot messages. */
         fmtlog::FormatToFn formatToFn;
-        /** Original format string registered for this log site. */
+        /** Registered format string with named fields converted to argument indices. */
         fmt::string_view formatString;
         /** Source location string, possibly truncated to 255 bytes. */
         const char* location;
@@ -310,24 +312,24 @@ template <int ___ = 0> class fmtlogDetailT {
         uint8_t endPos;
         /** Severity recorded when the site was registered. */
         fmtlog::LogLevel logLevel;
-        /** Index of the first user argument in the header @c args vector. */
+        /** Index of this site's arguments in the shared fmt argument vector. */
         int argIdx;
     };
 
-    /** Thread-local guard that tears down the caller's queue on thread exit. */
+    /** At thread exit, this object asks the poller to free the thread's queue */
     static thread_local ThreadBufferDestroyer sbc;
     /** Nanoseconds since epoch for today's local midnight. */
     int64_t midnightNs;
-    /** Compiled fmt pattern for the line prefix written before each body. */
+    /** fmt pattern for the header written before each message body. */
     fmt::string_view headerPattern;
     /** Whether @c headerPattern was heap-allocated and must be freed. */
     bool shouldDeallocateHeader = false;
     /** Destination @c FILE for formatted log output. */
     FILE* outputFp = nullptr;
-    /** Whether this runtime opened @c outputFp and tracks file position. */
+    /** Whether the logger owns the handle and tracks its file position. */
     bool manageFp = false;
     size_t fpos = 0; // file position of membuf, used only when manageFp == true
-    /** Maximum buffered record age before a timed flush, in nanoseconds. */
+    /** Delay  before a later poll flushes pending output, in nanoseconds. */
     int64_t flushDelay;
     /** Next scheduled flush time in nanoseconds, or max when idle. */
     int64_t nextFlushTime = (std::numeric_limits<int64_t>::max)();
@@ -339,7 +341,7 @@ template <int ___ = 0> class fmtlogDetailT {
     std::mutex bufferMutex;
     /** Per-thread queues registered since the last poll. */
     std::vector<fmtlog::ThreadBuffer*> threadBuffers;
-    /** One thread queue node in the global poll min-heap. */
+    /** One thread queue and its next record, used to select the oldest timestamp. */
     struct HeapNode {
         /** Wraps @p buffer for heap ordering during poll. */
         HeapNode(fmtlog::ThreadBuffer* buffer) : tb(buffer) {}
@@ -358,7 +360,7 @@ template <int ___ = 0> class fmtlogDetailT {
     /** Merged log-site table used while draining queues. */
     std::vector<StaticLogInfo> bgLogInfos;
 
-    /** Optional callback invoked for each formatted record. */
+    /** Optional callback for records thas pass minCBLogLevel. */
     fmtlog::LogCBFn logCB = nullptr;
     /** Minimum level delivered to @c logCB. */
     fmtlog::LogLevel minCBLogLevel;
@@ -367,7 +369,7 @@ template <int ___ = 0> class fmtlogDetailT {
     /** Opaque user data passed to @c logQFullCB. */
     void* logQFullCBArg = nullptr;
 
-    /** Aggregated formatted output awaiting fwrite. */
+    /** Formatted records waiting to be written to the output file. */
     fmtlog::MemoryBuffer membuf;
 
     /** Count of named placeholders supported by the header pattern. */
@@ -400,10 +402,10 @@ template <int ___ = 0> class fmtlogDetailT {
     Str<9> nanosecond;
     /** Three-letter level field for the header pattern. */
     Str<3> logLevel;
-    /** Reusable fmt argument storage for @c headerPattern. */
+    /** Shared fmt arguments for headers and registered message formats. */
     std::vector<fmt::basic_format_arg<fmtlog::Context>> args;
 
-    /** True while the background polling thread is running. */
+    /** Requests that the background polling loop keep running. */
     volatile bool threadRunning = false;
     /** Background thread that calls @ref poll on an interval. */
     std::thread thr;
@@ -456,7 +458,7 @@ template <int ___ = 0> class fmtlogDetailT {
         args[reorderIdx[I]] = arg;
     }
 
-    /** Stores @p arg by value into the header slot at placeholder index @p I. */
+    /** Updates a header argument's value while keeping its cached fmt type. */
     template <size_t I, typename T> inline void setArgVal(const T& arg) {
         fmt::detail::value<fmtlog::Context>& value_ =
             *(fmt::detail::value<fmtlog::Context>*)&args[reorderIdx[I]];
@@ -486,7 +488,7 @@ template <int ___ = 0> class fmtlogDetailT {
         manageFp = false;
     }
 
-    /** Starts a background thread that polls queues every @p pollInterval nanoseconds. */
+    /** Starts polling at the requested interval, allowing for time spent in poll(). */
     void startPollingThread(int64_t pollInterval) {
         stopPollingThread();
         threadRunning = true;
@@ -526,7 +528,7 @@ template <int ___ = 0> class fmtlogDetailT {
             info.processLocation();
         }
         int64_t ts = fmtlog_wrapper<>::instance.tscns.tsc2ns(tsc);
-        // the date could go back when polling different threads
+        // A record from another thread can predate the current midnight.
         uint64_t t = (ts > midnightNs) ? (ts - midnightNs) : 0;
         nanosecond.fromi(t % 1000000000);
         t /= 1000000000;
@@ -589,7 +591,13 @@ template <int ___ = 0> class fmtlogDetailT {
         }
     }
 
-    /** Drains thread queues in timestamp order and writes formatted output. */
+    /**
+     * Polls thread queues and writes records in timestamp order.
+     *
+     * Only consumes records older  than this poll's start time whose log-site
+     * metadata has arrived. Queue fronts form a min-heap so the next record
+     * comes from the thread with the oldest pending timestamp.
+     */
     void poll(bool forceFlush) {
         fmtlog_wrapper<>::instance.tscns.calibrate();
         int64_t tsc = fmtlog_wrapper<>::instance.tscns.rdtsc();
@@ -625,7 +633,7 @@ template <int ___ = 0> class fmtlogDetailT {
         if (bgThreadBuffers.empty())
             return;
 
-        // build heap
+        // Order, queue fronts so the oldest timestamp is first.
         for (int i = bgThreadBuffers.size() / 2; i >= 0; i--) {
             adjustHeap(i);
         }
@@ -685,7 +693,7 @@ void fmtlogT<_>::registerLogInfo(uint32_t& logId,
     d.logInfos.emplace_back(fn, location, level, fmtString);
 }
 
-/** Formats @p fmt with @p args into logger-owned @p out. */
+/** Appends formatted arguments to the supplied memory buffer. */
 template <int _>
 void fmtlogT<_>::vformat_to(fmtlog::MemoryBuffer& out,
                             fmt::string_view fmt,

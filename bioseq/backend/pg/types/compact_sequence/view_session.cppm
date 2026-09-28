@@ -1,6 +1,6 @@
 /**
  * @file view_session.cppm
- * @brief Datum classification and callback-scoped compact-sequence view sessions.
+ * @brief Read flat or tree-backed PostgreSQL sequences through temporary views.
  */
 module;
 
@@ -39,7 +39,7 @@ import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** Fault injection sites for sequence facade test instrumentation. */
+/** Operations that tests can flag when reading through a sequence view. */
 export enum class sequence_facade_test_fault : std::uint8_t {
   none = 0u,
   resident_probe = 1u,
@@ -47,7 +47,7 @@ export enum class sequence_facade_test_fault : std::uint8_t {
   contiguous_access = 3u,
 };
 
-/** Counters recorded by sequence facade test hooks. */
+/** Counts of reads, packed-data probes, and materializations observed by tests. */
 export struct sequence_facade_test_counters {
   std::uint64_t source_stream_callbacks = 0u;
   std::uint64_t source_resident_probes = 0u;
@@ -56,49 +56,49 @@ export struct sequence_facade_test_counters {
   std::uint64_t poison_hits = 0u;
 };
 
-/** Active fault mask for the current thread's facade tests. */
+/** Operations flagged for the current thread's sequence-view tests. */
 inline thread_local sequence_facade_test_fault
     g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
-/** Per-thread facade operation counts for tests. */
+/** Sequence-view operation counts for tests on this thread */
 inline thread_local sequence_facade_test_counters
     g_pg_sequence_facade_test_counters{};
 
-/** Returns whether @p bit is set in the thread-local facade test poison mask. */
+/** Return whether the test mask contains any of the bits in @p bit. */
 [[nodiscard]] inline bool
 pg_sequence_facade_test_poison_has(sequence_facade_test_fault bit) noexcept {
   return (static_cast<std::uint8_t>(g_pg_sequence_facade_test_poison) &
           static_cast<std::uint8_t>(bit)) != 0u;
 }
 
-/** Sets the thread-local facade test poison to @p poison. */
+/** Set the operations flagged by this thread's sequence-view test. */
 export inline void
 arm_pg_sequence_facade_test_poison(sequence_facade_test_fault poison) noexcept {
   g_pg_sequence_facade_test_poison = poison;
 }
 
-/** Clears the thread-local facade test poison. */
+/** Clear this thread's sequence-view  test flags. */
 export inline void disarm_pg_sequence_facade_test_poison() noexcept {
   g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
 }
 
-/** Clears poison and resets all thread-local facade test counters. */
+/** Clear the test flags and operetion counts for this thread. */
 export inline void reset_pg_sequence_facade_test_counters() noexcept {
   disarm_pg_sequence_facade_test_poison();
   g_pg_sequence_facade_test_counters = {};
 }
 
-/** Returns a copy of the thread-local facade test counters. */
+/** Return a copy of this thread's sequence-view test counters. */
 export [[nodiscard]] inline sequence_facade_test_counters
 pg_sequence_facade_test_counters() noexcept {
   return g_pg_sequence_facade_test_counters;
 }
 
-/** Increments the source-stream callback test counter. */
+/** Count a read through the tree-backed view callback. */
 export inline void note_pg_sequence_facade_source_stream_callback() noexcept {
   ++g_pg_sequence_facade_test_counters.source_stream_callbacks;
 }
 
-/** Increments the resident-probe counter and possibly the poison-hit counter. */
+/** Count a packed-data probe on a source view and record it if the test flags it. */
 export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
   ++g_pg_sequence_facade_test_counters.source_resident_probes;
   if (pg_sequence_facade_test_poison_has(
@@ -107,7 +107,7 @@ export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
   }
 }
 
-/** Records contiguous flat access and possibly increments poison hits. */
+/** Record flat packed-data access when the test flags that operation. */
 export inline void note_pg_sequence_facade_contiguous_access() noexcept {
   if (pg_sequence_facade_test_poison_has(
           sequence_facade_test_fault::contiguous_access)) {
@@ -115,7 +115,7 @@ export inline void note_pg_sequence_facade_contiguous_access() noexcept {
   }
 }
 
-/** Records materialization start and throws when materialization poison is armed. */
+/** Count a materialization attempt and throw if the test forbids it. */
 export inline void note_pg_sequence_facade_materialization_begin() {
   ++g_pg_sequence_facade_test_counters.declared_materializations;
   if (pg_sequence_facade_test_poison_has(
@@ -153,7 +153,7 @@ namespace {
     __builtin_unreachable();
 }
 
-/** Returns the expected on-disk size of an unbound flat value with @p length letters. */
+/** Return the flat size, including header and padding, for @p length unbound letters. */
 [[nodiscard]] inline std::size_t expected_unbound_size(std::uint64_t length)
 {
     if (length > std::numeric_limits<std::size_t>::max() - 7u) {
@@ -163,7 +163,7 @@ namespace {
         + round_up_to_uint64(static_cast<std::size_t>(length));
 }
 
-/** Verifies bound-flat header, padding, and payload size against @p value. */
+/** Check that a packed sequence's padding and byte size  match its declared length and type. */
 inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 {
     bool valid = false;
@@ -197,7 +197,8 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 
 } // namespace
 
-/** Returns the read-only expanded header for a bioseq.seq expanded datum, or nullptr. */
+/** Borrow an expanded sequence for reading, or return nullptr for a flat Datum.
+ * An expanded value with another type's callback table raises an error. */
 export [[nodiscard]] inline pg_sequence_expanded const*
 get_pg_sequence_expanded_ro(Datum datum)
 {
@@ -213,7 +214,7 @@ get_pg_sequence_expanded_ro(Datum datum)
     return reinterpret_cast<pg_sequence_expanded const*>(header);
 }
 
-/** Returns the read-write expanded header for a bioseq.seq expanded datum, or nullptr. */
+/** Borrow a writable expanded sequence, or return nullptr when the Datum is not writable. */
 export [[nodiscard]] inline pg_sequence_expanded*
 get_pg_sequence_expanded_rw(Datum datum)
 {
@@ -223,7 +224,12 @@ get_pg_sequence_expanded_rw(Datum datum)
     return const_cast<pg_sequence_expanded*>(get_pg_sequence_expanded_ro(datum));
 }
 
-/** Classifies a detoasted or expanded datum and fills a descriptor with alphabet and length metadata. */
+/**
+ * Describe a detoasted or expanded sequence and check its representation.
+ * Flat values must have consistent headers and sizes Unbound text also has
+ * to contain, canonical ASCII letters. A locaror is described here but  still
+ * needs an owning scan before its sequence can be read.
+ */
 export [[nodiscard]] pg_sequence_descriptor
 classify_and_describe_sequence(Datum detoasted_or_expanded)
 {
@@ -328,9 +334,9 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
     __builtin_unreachable();
 }
 
-/* Metadata-only inspection for length, identical self-casts, and locating one
- * packed unit.  TOAST fetches only the fixed payload header; it never reads a
- * whole sequence merely to learn its logical shape. */
+/* Read the type and length needed by length checks, casts, and element
+ * access. For toasted input, request only the fixed sequence header.
+ * Packed letters and locator payloads are not read by this inspection. */
 export [[nodiscard]] pg_sequence_descriptor
 classify_and_describe_sequence_header(Datum input)
 {
@@ -453,7 +459,7 @@ classify_and_describe_sequence_header(Datum input)
 
 namespace {
 
-/** Opaque facade state passed to lazy_sequence_view backend callbacks. */
+/** Storage and read-session state used by the lazy sequence callbacks. */
 struct pg_sequence_facade_state {
     pg_sequence_read_session* session;
     pg_sequence_descriptor descriptor;
@@ -471,7 +477,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
-/** Writes letter ranks from a packed literal subtree into @p output for [@p from, @p to). */
+/** Read `[from, to)` from a packed literal, applying its reversal and complement. */
 [[nodiscard]] bool emit_literal_range(
     piece_edge edge,
     std::uint64_t from,
@@ -519,7 +525,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
-/** Recursively emits letter ranks from a piece tree into @p output. */
+/** Read a tree range in logical order, visiting only the  leaves that overlap it. */
 [[nodiscard]] bool emit_tree_range(
     pg_sequence_read_session& session,
     piece_edge edge,
@@ -576,7 +582,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
-/** Writes letter ranks from a flat bound sequence into @p output for [@p from, @p to). */
+/** Unpack `[from, to)` from a flat sequence into caller-owned rank storage. */
 [[nodiscard]] bool emit_flat_range(
     bioseq::pg_types::seq const& flat,
     std::uint64_t from,
@@ -611,7 +617,7 @@ template<class p_alphabet>
 }
 
 template <class p_alphabet>
-/** Fills @p output with ranks for [@p from, @p from+count) using flat or tree backing in @p state. */
+/** Read a rank range from flat or tree storage, then apply the requested output orientation. */
 [[nodiscard]] std::uint8_t const *
 facade_ptr_at(pg_sequence_facade_state const &state,
               bool mirror_coordinates, bool reverse_output,
@@ -660,10 +666,9 @@ template <class p_alphabet, bool p_is_reversed, bool p_write_reversed>
 facade_ptr_at_callback(void const *opaque,
                        bioseq::storage::sequence_size_t from, std::size_t count,
                        std::span<std::uint8_t> output) {
-  /* `p_is_reversed` changes the logical coordinate system, while
-   * `p_write_reversed` changes only the order in which that logical interval is
-   * written. Keep coordinate mirroring, output order, and complementation as
-   * three independent parts of the facade ABI. */
+  /* A reversed view reads coordinates from the opposite end and complements
+   * the ranks. p_write_reversed controls the order used to write that view
+   * into output. Keep these choices separate when selecting the callback. */
   constexpr bool reverse_output =
       (p_is_reversed && !p_write_reversed) || (!p_is_reversed && p_write_reversed);
   return facade_ptr_at<p_alphabet>(
@@ -674,7 +679,7 @@ facade_ptr_at_callback(void const *opaque,
       from, count, output);
 }
 
-/** Returns logical sequence length from facade opaque state. */
+/** Return the number of letters recorded in the sequence descriptor. */
 [[nodiscard]] inline bioseq::storage::sequence_size_t
 facade_bp_size(void const *opaque) noexcept {
   return static_cast<pg_sequence_facade_state const *>(opaque)
@@ -698,14 +703,14 @@ facade_bp_size(void const *opaque) noexcept {
   return true;
 }
 
-/** Returns whether the facade opaque state is safe for worker-thread sharing. */
+/** Check whether this view's backing allows worker-thrad reads. */
 [[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
 template <class p_alphabet>
-/** Attempts to expose a resident packed slice of flat backing without copying. */
+/** Borrow packed units from flat  storage when the requested packing width matches. */
 [[nodiscard]] auto facade_resident_probe(void const *opaque,
                                          bioseq::storage::sequence_size_t from,
                                          bioseq::storage::sequence_size_t to,
@@ -753,7 +758,11 @@ template <class p_alphabet>
 }
 
 template <class p_unit, class p_read_units>
-/** Rebase one complete identity packed slice through a bounded native-unit reader. */
+/**
+ * Copy a whole packed slice so its first letter starts at the first output bit
+ * Read storage units directly and shift letters across unit boundaries when
+ * the slice starts inside a unit. Clear padding after the last letter.
+ */
 [[nodiscard]] bool rebase_identity_packed_slice(
     pg_sequence_facade_state const& state,
     std::uint64_t source_from,
@@ -855,7 +864,7 @@ template <class p_unit, class p_read_units>
 }
 
 template <class p_unit>
-/** Rebase one complete identity source slice without decoding its packed symbols. */
+/** Copy a complete source slice into packed output starting, at letter zero. */
 [[nodiscard]] bool rebase_identity_source_slice(
     pg_sequence_facade_state const& state,
     source_piece const& source,
@@ -889,7 +898,7 @@ template <class p_unit>
 }
 
 template <class p_unit>
-/** Rebase one complete identity packed-literal slice without rank decoding. */
+/** Copy a complete packed literal slice into output starting at letter zero. */
 [[nodiscard]] bool rebase_identity_literal_slice(
     pg_sequence_facade_state const& state,
     literal_piece const& literal,
@@ -945,7 +954,12 @@ template <class p_unit>
 }
 
 template <class p_alphabet>
-/** Copies one identity-oriented native packed-unit window from facade backing. */
+/**
+ * Copy packed units directly when the view has a compatible  representation.
+ * Flat values and complete source leaves support unit windows. A sliced source
+ * or packed literal can be copied as a whole and shifted to start at letter zero.
+ * Return false when a tree or transform needs the rank-reading path.
+ */
 [[nodiscard]] bool facade_copy_packed_window(void const* opaque,
                                              void* destination,
                                              std::size_t first_unit,
@@ -983,8 +997,8 @@ template <class p_alphabet>
     return true;
   }
 
-  /* Native packed rebasing is limited to one immutable identity leaf. Branches
-   * and biological transforms remain outside this capability. */
+  /* Direct packed copying needs a single leaf with no reversal or
+   * complement. Trees with branches use the rank-reading path. */
   if (!state.tree || state.tree.transform != bioseq::storage::sequence_transform::identity ||
       state.tree.node->bp_length != state.descriptor.bp_length) {
     return false;
@@ -1014,9 +1028,9 @@ template <class p_alphabet>
       return status == pg_sequence_source_read_status::ok;
     }
 
-    /* The admitted owner and Vulkan upload require a zero-leading descriptor.
-     * Normalize only a complete direct source slice; arbitrary nested windows
-     * keep returning unsupported instead of acquiring broader transform semantics. */
+    /* Packed output saved for later use or sent to Vulkan starts at letter
+     * zero. Shift a direct source slice only  when copying the whole view.
+     * Other windows qust use the rank-reading path. */
     if (first_unit != 0u || unit_count != total_units) {
       return false;
     }
@@ -1075,7 +1089,7 @@ template <class p_alphabet>
 }
 
 template<class p_alphabet>
-/** Lazy-sequence backend ops wired to PostgreSQL flat or expanded sequence storage. */
+/** Connect lazy sequence operations to PostgreSQL flat or tree storage. */
 struct facade_adapter {
     using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
     static inline const typename view::backend_ops ops{
@@ -1094,7 +1108,7 @@ struct facade_adapter {
 };
 
 template<class p_alphabet, std::size_t p_storage_unit_byte_width>
-/** Compile-time check that a facade adapter matches the lazy_sequence_view backend contract. */
+/** Check that an enabled packing width uses the alphabet's lazy-view callback type. */
 consteval bool facade_adapter_profile_contract()
 {
     using adapter = facade_adapter<p_alphabet>;
@@ -1107,9 +1121,8 @@ consteval bool facade_adapter_profile_contract()
                std::add_const_t<typename view::backend_ops>>;
 }
 
-// The piece-tree/flat PostgreSQL callback adapter is specialized only by
-// alphabet. Repeating the enabled physical-width matrix must resolve to that
-// same view type rather than creating a width dimension.
+// All enabled packing widths for an alphabet use the same lazy-view type
+// The callbacks handle the stored width at runtime.
 static_assert(facade_adapter_profile_contract<seq::dna4, 8u>());
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 static_assert(facade_adapter_profile_contract<seq::dna5, 8u>());
@@ -1124,14 +1137,14 @@ static_assert(facade_adapter_profile_contract<seq::dna5, 4u>());
 #endif
 
 template<class p_alphabet>
-/** Destroys a retained_lazy_sequence_view owner allocated in the read-session context. */
+/** Destroy the view owner before its read-session storage is freed. */
 inline void release_facade_owner(void* opaque) noexcept
 {
     using owner = bioseq::storage::retained_lazy_sequence_view<p_alphabet>;
     static_cast<owner*>(opaque)->~owner();
 }
 
-/** No-op release hook when facade backing is owned by the read session. */
+/** Leave backing storage to the caller or read session that already owns it. */
 inline void release_facade_backing_noop(void*) noexcept {}
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1152,7 +1165,7 @@ facade_probe_tree_contains_source(piece_edge edge) noexcept {
 }
 
 template <bool p_is_reversed, bool p_write_reversed, class p_view>
-/** Compares facade orientations against a baseline view and sets bits in @p match_mask. */
+/** Compare one orientation of flat and  source views with the baseline and record matching results. */
 void record_orientation_matches(
     p_view baseline, p_view flat_facade, p_view source_facade,
     std::size_t from, std::size_t to, std::uint8_t& match_mask) {
@@ -1182,7 +1195,11 @@ void record_orientation_matches(
 
 } // namespace
 
-/** Builds a session-scoped retained lazy view over a bound flat or expanded bioseq.seq datum. */
+/**
+ * Build a lazy view for one bound sequence in the read session.
+ * The session owns the callback state and destroys the view owner. The caller
+ * must keep the input Datum and, its tree or flat storage alive for the session.
+ */
 export template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<p_alphabet>*
 make_pg_sequence_call_owner(
@@ -1229,9 +1246,9 @@ make_pg_sequence_call_owner(
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* Execute the exact four-orientation facade ABI against both adapter branches.
- * The expanded argument must still contain a real provider-backed source leaf;
- * a separately flattened copy is only the compact in-memory oracle. */
+/* Compare all four read orientations for fkat and tree-backed views.
+ * The input must include a real sequence source. Flatten a separate copy
+ * for  the expected ranks, then exercise the source callbacks as well. */
 export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     Datum input) {
   constexpr std::size_t k_from = 3u;
@@ -1355,7 +1372,12 @@ inline constexpr bool is_borrowed_view_result_v =
     std::ranges::view<std::remove_cvref_t<p_result>>
     || std::input_or_output_iterator<std::remove_cvref_t<p_result>>;
 
-/** Detoasts if needed, opens a read session, and runs @p view_callback on a single lazy view. */
+/**
+ * Run a callback with a temporary lazy view of a bound sequence.
+ * Detoast flat input when needed and keep read resources in one session.
+ * The callback must finish using the view before returning. Its result must
+ * be a value with a trivial destructor, with no borrowed view or iterator.
+ */
 export template <typename p_result, typename p_function>
 p_result with_pg_sequence_view(
     Datum datum,
@@ -1427,7 +1449,11 @@ p_result with_pg_sequence_view(
     return std::move(*result);
 }
 
-/** Opens one read session and runs @p callback on lazy views for two bound sequences of the same alphabet. */
+/**
+ * Run a callback with two temporary views of sequences using the same alphabet
+ * Both views share a read session. Their packing widths may differ. Return
+ * a value with a trivial destructor and keep all borrowed views inside  the callback.
+ */
 export template <typename p_result, typename p_function>
 p_result with_pg_sequence_views(
     Datum left_datum,
@@ -1519,9 +1545,9 @@ export struct pg_sequence_rank_value {
     std::uint8_t rank;
 };
 
-/* One-symbol scalar path used by the subscript handler.  It deliberately owns
- * a normal source read session and asks the facade for exactly one rank, so an
- * element lookup never flattens an EOH or reads a whole source fragment. */
+/* Read one letter for SQL subscripting. Flat values need only the header
+ * and the packed unit containing that letter. Expanded values use a read
+ * session and request one rank from the tree view, preserving lazy source reads. */
 export [[nodiscard]] pg_sequence_rank_value
 read_pg_sequence_rank_at(Datum input, std::uint64_t index)
 {

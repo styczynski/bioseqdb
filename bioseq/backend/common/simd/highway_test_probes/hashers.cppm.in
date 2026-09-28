@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Generates fixed-target scalar/SIMD hasher parity probes.
+ * @brief Tests that scalar and SIMD hashers agree on each compiled CPU target
  */
 
 #ifndef BIOSEQ_TEST_INDEXES
@@ -26,8 +26,7 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Builds the deterministic DNA4 fixture shared by hasher checks.
- * @return Logical DNA4 symbols for scalar and SIMD hashing.
+ * @brief Builds the fixed DNA4 sequence used by both hash implementations.
  */
 [[nodiscard]] auto short_dna4_sequence() -> std::vector<seq::dna4> {
     constexpr std::string_view k_bases =
@@ -48,11 +47,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 }
 
 /**
- * @brief Compares scalar and target-local SIMD hash sets for one lane type.
- * @tparam p_input Unsigned packed-lane type.
- * @tparam p_scalar_hasher Scalar hasher family.
- * @tparam p_simd_hasher Target-local SIMD hasher family.
- * @return `true` when both implementations emit identical position/hash pairs.
+ * @brief Compares scalar and SIMD position/hash sets for one packed word type.
+ *
+ * Both paths hash  the same DNA4 sequence. Comparing sets allows SIMD
+ * lanes to emit pairs in a different order and removes duplicate pairs.
+ * @tparam p_input Unsigned packed storage type.
+ * @tparam p_scalar_hasher Scalar hasher.
+ * @tparam p_simd_hasher SIMD hasher compiled for this CPU target.
+ * @return True when the sets match.
  */
 template<
     class p_input,

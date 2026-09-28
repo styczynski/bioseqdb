@@ -1,11 +1,10 @@
 /**
  * @file external/tests/io/fasta_stream_benchmark_test.cpp
- * @brief Bounded FASTA streaming benchmarks against a full-body baseline.
+ * @brief Compare FASTA chunking with reading a whole file into  memory.
  */
 
-// Compare bounded FASTA streaming with a full-body baseline over the same local
-// payload. The fixture requires filesystem access and a deliberately large
-// allocation.
+// Compare both readers on the same local FASTA file. The whole-file reader
+// deliberately keeps the complete input in memory.
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -87,8 +86,8 @@ double mib_per_s(std::uint64_t letters, double seconds) {
     return seconds > 0.0 ? (static_cast<double>(letters) / (1024.0 * 1024.0)) / seconds : 0.0;
 }
 
-// direct: stream the file through the PRODUCTION fasta_chunk_emitter. Its peak
-// rechunk buffer is the bounded live working set (never the whole record).
+// Feed the production FASTA chunker in 64 KiB blocks and record
+// the largest amount of dat held by its rechunk buffer.
 run_metrics run_direct(const std::string& path, std::uint64_t chunk_bases) {
     run_metrics metrics;
     const auto start = std::chrono::steady_clock::now();
@@ -123,8 +122,8 @@ run_metrics run_direct(const std::string& path, std::uint64_t chunk_bases) {
     return metrics;
 }
 
-// full-body: read the whole file into memory, then extract. Peak live buffer is
-// the entire body — the allocation the streaming path avoids.
+// Read the complete FASTA file before counting bases. Record the body
+// string's capacity for comparison with the chunker's buffer.
 run_metrics run_full_body(const std::string& path) {
     run_metrics metrics;
     const auto start = std::chrono::steady_clock::now();
@@ -167,7 +166,7 @@ run_metrics run_full_body(const std::string& path) {
 TEST_CASE(
     "external_fasta_stream: production emitter stays bounded vs full-body",
     "[component:external_api][layer:integration][feature:external_source][resource:filesystem]") {
-    const std::uint64_t bp = 16u * 1024u * 1024u; // 16 Mbp fixture
+    const std::uint64_t bp = 16u * 1024u * 1024u; // 16 Mi bases
     const std::uint64_t chunk_bases = 1048572;
     const std::string path = write_fixture(bp);
 
@@ -193,8 +192,8 @@ TEST_CASE(
 
     REQUIRE(direct.letters == bp);
     REQUIRE(spooled.letters == bp);
-    // The production emitter's peak rechunk buffer is bounded by chunk_bases plus
-    // one 64 KiB read block, regardless of the 16 MiB body — no full-body alloc.
+    // The chunker should keep roughly one chunk buffered for this fixture.
+    // Allow 128 KiB beyond the chunk size for incoming  data.
     REQUIRE(direct.peak_live_bytes <= chunk_bases + 128u * 1024u);
     REQUIRE(spooled.peak_live_bytes >= bp);
     REQUIRE(direct.peak_live_bytes * 4 < spooled.peak_live_bytes);

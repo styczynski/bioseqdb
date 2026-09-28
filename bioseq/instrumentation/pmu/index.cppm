@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/pmu/index.cppm
- * @brief Portable per-thread performance-monitoring counters.
+ * @brief Read hardware counters through the platform implementation.
  *
- * Supported backends expose the same four-event sample. Unavailable counters
- * produce zero values, and disabled configurations eliminate reads at compile time.
+ * Reads return cycles, instructions, branches, and branch misses.
+ * Failed initialization or reads produce zero values.
  */
 module;
 
@@ -18,11 +18,10 @@ import bioseq.instrumentation.pmu.unsupported;
 export namespace bioseq::instrumentation::pmu {
 
 /**
- * @brief Hold the stable four-counter sample shared by region and loop metrics.
+ * @brief Hardware counts used by region and  loop measurements.
  *
- * Fields preserve kernel/backend order so conversion and field-wise subtraction
- * cannot silently exchange counter identities. Values are raw monotonically
- * increasing readings until `subtract_clamped()` produces a scope delta.
+ * Take readings before and after a scope, then use subtract_clamped to
+ * calculate the changes. Field names keep the four event types separate.
  */
 struct counter_sample {
     std::uint64_t cycles = 0;
@@ -34,13 +33,11 @@ static_assert(sizeof(counter_sample) == 32);
 static_assert(alignof(counter_sample) == alignof(std::uint64_t));
 
 /**
- * @brief Initialize the calling thread's performance-counter group.
+ * @brief Initialize the platform's counters for the callng thread.
  *
- * Initialization is cached per thread, so later calls take only the backend's
- * availability branch.
- *
- * @return `true` when the thread can read all counters, or `false` when the
- * platform or host permissions do not provide the complete group.
+ * Linux and macOS cache their setup result.
+ * @return Backend setup result. The unsupported stub returns true while
+ * reporting counters unavailable.
  */
 [[nodiscard]] inline bool initialize_thread_counters() noexcept {
 #if defined(__APPLE__)
@@ -53,9 +50,10 @@ static_assert(alignof(counter_sample) == alignof(std::uint64_t));
 }
 
 /**
- * @brief Close the calling thread's counter group when it is initialized.
+ * @brief Ask the platform implementation to stop thread counter collection.
  *
- * The operation is idempotent after failed initialization or prior shutdown.
+ * Linux closes the event group. macOS requests that thread counting stop
+ * and keeps its process-wide setup.
  */
 inline void shutdown_thread_counters() noexcept {
 #if defined(__APPLE__)
@@ -68,9 +66,9 @@ inline void shutdown_thread_counters() noexcept {
 }
 
 /**
- * @brief Report whether the calling thread has a functional counter group.
- *
- * @return `true` only after successful initialization on the current thread.
+ * @brief Return  the platform's recorded availability state.
+ * @return Thread setup state on Linux, process setup state on macOS, or false
+ * on unsupported platforms.
  */
 [[nodiscard]] inline bool are_thread_counters_available() noexcept {
 #if defined(__APPLE__)
@@ -83,13 +81,12 @@ inline void shutdown_thread_counters() noexcept {
 }
 
 /**
- * @brief Read one coherent sample from the calling thread's counter group.
+ * @brief Read the calling thread's hardware counters.
  *
- * Backend values are monotonically increasing raw counts. Callers take a
- * baseline and use `subtract_clamped()` to obtain a region delta. A failed
- * lazy initialization returns an all-zero sample.
+ * Initialize them on first use. Take a baseline and use subtract_clamped
+ * to measure changes over a scope
  *
- * @return Counters in cycles, instructions, branches, branch-misses order.
+ * @return Raw counter values, or zeros when setup or reading fails.
  */
 [[nodiscard, gnu::always_inline]]
 inline counter_sample read_thread_counters() noexcept {
@@ -121,14 +118,14 @@ inline counter_sample read_thread_counters() noexcept {
 }
 
 /**
- * @brief Compute a field-wise nonnegative counter delta.
+ * @brief Calculate the change in each hardware counter.
  *
- * A counter that appears to move backwards because of rollover or scheduling
- * artifacts contributes zero. The other counter fields remain independent.
+ * If an ending value is below its baseline, return zero for that counter.
+ * This avoids unsigned underflow after  a, reset, rollover, or failed read.
  *
- * @param[in] ending_sample Raw sample taken at scope end.
- * @param[in] beginning_sample Raw sample taken at scope beginning.
- * @return Counter deltas in the stable public field order.
+ * @param[in] ending_sample Reading at scope end.
+ * @param[in] beginning_sample Reading at scope start.
+ * @return Nonnegative change in each counter.
  */
 [[nodiscard, gnu::always_inline]]
 inline counter_sample subtract_clamped(const counter_sample& ending_sample,

@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Owns batched-join begin, execute, rescan, EXPLAIN, and method tables.
+ * @brief Execute sequence joins in query batches and report their statistics.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so imported target-specific types share one
+// translation-unit  definition.
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -68,7 +68,7 @@ import :custom_scan_batch_join_execution_tuple_production_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Detects the one-child per-row recipe handled by the shared callback table. */
+    /** Check for the one-child per-row join plan handled by these shared callbacks. */
     [[nodiscard]] bool bioseq_batch_join_is_post_join_recipe(CustomScanState const* node) noexcept {
         if (node == nullptr || node->ss.ps.plan == nullptr || !IsA(node->ss.ps.plan, CustomScan))
             return false;
@@ -82,8 +82,8 @@ export {
     }
 
     /**
-     * @brief Initializes BatchJoin children, serialized contracts, and query-lifetime state.
-     * @throws PostgreSQL ERROR when the plan shape or executor contract is invalid.
+     * @brief Validate the join plan and initnalize its children and execution state.
+     * @throws PostgreSQL ERROR for invalid plan fields, column types, or source bindings.
      */
     void bioseq_batch_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
@@ -99,11 +99,10 @@ export {
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("BioseqBatchJoin executor shape is invalid or parallel")));
         }
-        /* custom_scan_tlist deliberately retains original helper/PHV identities
-         * as descriptor-only columns, but PostgreSQL setrefs must have removed
-         * every helper from the executable plan targetlist.  If that contract ever
-         * changes, fail before child initialization instead of silently executing a
-         * rendezvous stub (which would fabricate a CPU-looking success). */
+        /* Match helpers remain in custom_scan_tlist as column descriptions.
+         * PostgreSQL must replace executable helper calls with slot references
+         * before execution. Reject a remaining call before initializing children,
+         * since the helper stub cannot compute  an alignment result. */
         for (TargetEntry* output : postgres_list<TargetEntry>(cscan->scan.plan.targetlist)) {
             if (output != nullptr && output->expr != nullptr &&
                 batch_join_expression_has_match_helper(reinterpret_cast<Node*>(output->expr),
@@ -177,9 +176,7 @@ export {
                     "incumbent_cost_floor");
                 Node* sites_node = reinterpret_cast<Node*>(
                     list_nth(cscan->custom_private, k_batch_join_placeholder_sites));
-                /* PostgreSQL's canonical empty List is NIL, i.e. a null pointer.  Keep
-                 * shape validity separate from the decoded pointer so an empty helper
-                 * set is valid while every non-List node remains fail-closed. */
+                /* NIL is a valid empty helper list. Check non-null nodes have List type. */
                 const bool sites_shape_valid = sites_node == nullptr || IsA(sites_node, List);
                 List* sites = sites_node == nullptr ? NIL : reinterpret_cast<List*>(sites_node);
                 FuncExpr* mmsearch = try_cast_pg_node<FuncExpr>(reinterpret_cast<Node*>(
@@ -215,9 +212,8 @@ export {
                     static_cast<bioseq::indexing::index_read_requirement>(raw_requirement);
                 runtime->explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
 
-                /* Re-decode the catalog composite before any child initialization.  This
-                 * catches catalog drift and validates that the ordinal marker was not altered
-                 * between planning and execution. */
+                /* Decode aligner options again before starting either child. Check the
+                 * saved index requirement still agrees with the catalog value */
                 bioseq::simd::minimap2_parameters prevalidated_params = build_params_from_gucs();
                 bioseq::indexing::index_read_requirement decoded_requirement =
                     bioseq::indexing::index_read_requirement::allow;
@@ -231,15 +227,9 @@ export {
                          errmsg(
                              "BioseqBatchJoin index requirement marker disagrees with options")));
                 }
-                /* A selected Vulkan BatchJoin is allowed to initialize its children and
-                 * reach tuple_dispatch_buffer's production persisted-target preparation path.  That
-                 * path opens the PostgreSQL-owned minimizer-sequence generation, validates READY,
-                 * revision/ABI/source/device identity, and retains its three resident GPU
-                 * buffers.  Missing or incompatible data still fails there before typed
-                 * dispatch; the typed processor independently requires that exact GPU
-                 * prepared target and has no CPU/SIMD/recompute fallback.  The ordinary
-                 * column-scan path remains rejected separately because it has no such
-                 * prepared-target owner. */
+                /* Vulkan target preparation happens in the dispatch buffer after the
+                 * children start. It validates the persisted target before alignment,
+                 * so initialization here must let that preparation run. */
 
                 TupleDesc scan_desc = node->ss.ss_ScanTupleSlot == nullptr
                                           ? nullptr
@@ -356,10 +346,9 @@ export {
                 }
                 runtime->query_planner_rows = std::max(0.0, query_plan->plan_rows);
                 runtime->query_planner_width = std::max(0, query_plan->plan_width);
-                /* Validate against the post-setrefs Plan targetlists.  They are stable
-                 * planner ABI; ps_ResultTupleSlot is not, because projection-free and
-                 * pass-through PlanStates may return a scan/child slot instead.  The
-                 * actual slots are validated independently at each ExecProcNode edge. */
+                /* Check the completed child plans here. ExecProcNode can return a
+                 * child's scan slot  directly, so validate each returned slot again
+                 * before reading its values. */
                 if (runtime->target_column_count != list_length(target_plan->targetlist) ||
                     runtime->query_column_count != list_length(query_plan->targetlist) ||
                     runtime->target_slot_seq_resno <= 0 ||
@@ -469,16 +458,14 @@ export {
                 runtime->query_storage_unit_byte_width =
                     query_sequence_type_params.storage_unit_byte_width;
 
-                /* Bind the validated plan types and projected outputs before any
-                 * child initialization, then immediately freeze this request. */
+                /* Save the validated sequence types and requested result fields in the
+                 * execuion plan before initializing children. */
                 bioseq::simd::minimap2_parameters params = std::move(prevalidated_params);
                 const auto requirement = decoded_requirement;
                 params.alphabet_code = runtime->alphabet_code;
-                /* Plan setrefs has deliberately replaced every match-result helper
-                 * with an INDEX_VAR into the combined scan tuple.  Derive expensive
-                 * stage requirements from the validated private placeholder kinds,
-                 * not by re-walking an executor targetlist in which helpers no longer
-                 * exist. */
+                /* Match helpers have become INDEX_VAR slot references. Use their saved
+                 * descriptions to enable expensive result calculations such as CIGAR
+                 * and mapping quality. */
                 const int plan_node_id = cscan->scan.plan.plan_node_id;
                 if (plan_node_id < 0) {
                     ereport(ERROR,
@@ -580,8 +567,7 @@ export {
                              errmsg("BioseqBatchJoin target locator token mismatch")));
                 }
 
-                /* Reuse the target provider's executor-owned Relation. Its lock lives
-                 * through ExecEndNode; this BatchJoin neither reopens nor closes it. */
+                /* Borrow the Relation kept open by the target child until ExecEndNode. */
                 Relation target_relation = target_custom_state->ss.ss_currentRelation;
                 if (target_relation == nullptr) {
                     ereport(ERROR,
@@ -612,11 +598,9 @@ export {
                 char* target_column_name = get_attname(runtime->target_relation_oid,
                                                        runtime->target_storage_seq_attno,
                                                        /*missing_ok=*/false);
-                /* The target child may have replaced the executor snapshot while
-                 * flushing its columnar write state. Borrow that exact registered
-                 * snapshot. batch_join_release_executor_resources_checked drains the
-                 * buffer (and its fragment readers) before ExecEndNode(target_child)
-                 * releases the child's registration. */
+                /* Flushing writes may have changed the target child's snapshot. Use its
+                 * current registered snapshot  for fragments too. Cleanup drains the
+                 * buffer, before ending that child and releasing the snapshot. */
                 runtime->pipeline_desc = describe_pipeline_for_pg_alphabet(
                     runtime->execution_plan,
                     runtime->alphabet_code, query_sketch_plan_route_for(requirement));
@@ -717,7 +701,12 @@ export {
         }
     }
 
-    /** @brief Produces the next accepted batched match inside the C++ exception boundary. */
+    /** Return the next match, running query batches against one target at a time.
+     *
+     * Buffer the query side once, then drain each batch's results before moving
+     * to another batch or target. Apply the output predicates and projection to
+     * each match before returning it.
+     */
     TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(CustomScanState* node) {
         batch_join_runtime* runtime = try_get_batch_join_runtime(node);
         if (runtime == nullptr) {
@@ -783,7 +772,7 @@ export {
                                                     "target");
             slot_getallattrs(target);
             if (target->tts_isnull[runtime->target_slot_seq_resno - 1]) {
-                /* Strict INNER predicate: do not hand a NULL target to dispatch. */
+                /* A null target cannot match the strict INNER join predicate */
                 continue;
             }
             runtime->current_target_slot = target;
@@ -797,8 +786,8 @@ export {
     }
 
     /**
-     * @brief Executes one BatchJoin step while preserving PostgreSQL error semantics.
-     * @return The next projected slot, or an empty slot after the target stream is drained.
+     * @brief Return the next join result and preserve PostgreSQL error details.
+     * @return A projected row, or an  empty slot after all targets and results are consumed.
      */
     TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
@@ -865,7 +854,7 @@ export {
         return result;
     }
 
-    /** @brief Releases BatchJoin resources and reports checked cleanup failures as PostgreSQL errors. */
+    /** Release join resources and report cleanup failures as PostgreSQL errors. */
     void bioseq_batch_join_end_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_end_custom_scan(node);
@@ -911,7 +900,7 @@ export {
         }
     }
 
-    /** @brief Resets BatchJoin state and both child plans for a new executor pass. */
+    /** Clear buffered work and restart both children for anobher join pass. */
     void bioseq_batch_join_rescan_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_rescan_custom_scan(node);
@@ -989,7 +978,7 @@ export {
         }
     }
 
-    /** @brief Adds the serialized BatchJoin contract and execution statistics to EXPLAIN. */
+    /** Show the join's saved settings, costs, memory usage, and alignment work in EXPLAIN. */
     void bioseq_batch_join_explain_custom_scan(CustomScanState* node,
                                                List* ancestors,
                                                ExplainState* es) {
@@ -1077,7 +1066,7 @@ export {
             /*highway_dispatch_already_rendered=*/false);
     }
 
-    /** Returns the stable PostgreSQL scan callbacks for base Bioseq scans. */
+    /** Return the PostgreSQL state-creation callback for Bioseq table scans. */
     [[nodiscard]] const CustomScanMethods* bioseq_column_scan_scan_methods() noexcept {
         static const CustomScanMethods methods{
             .CustomName = "BioseqScan",
@@ -1086,7 +1075,7 @@ export {
         return &methods;
     }
 
-    /** Returns the stable PostgreSQL scan callbacks for batched joins. */
+    /** Return the PostgreSQL state-creation callback for sequence joins. */
     [[nodiscard]] const CustomScanMethods* bioseq_batch_join_scan_methods() noexcept {
         static const CustomScanMethods methods{
             .CustomName = "BioseqBatchJoin",
@@ -1095,7 +1084,7 @@ export {
         return &methods;
     }
 
-    /** Returns the stable PostgreSQL executor callbacks for batched joins. */
+    /** Return the PostgreSQL execution callbacks shared by both sequence-join plans. */
     [[nodiscard]] const CustomExecMethods* bioseq_batch_join_execute_methods() noexcept {
         static const CustomExecMethods methods{
             .CustomName = "BioseqBatchJoin",

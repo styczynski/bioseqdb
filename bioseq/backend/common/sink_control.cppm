@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Dependency-free flow signal shared by streaming sinks.
+ * @brief Return values that let a streaming consumer stop its producer.
  */
 module;
 
@@ -11,10 +11,9 @@ export module bioseq.common.sink_control;
 export namespace bioseq {
 
 /**
- * @brief Tells a producer whether its sink accepts another item.
+ * @brief Tells a producer whether to continue sending items.
  *
- * The enum has an explicit one-byte representation so generated and manually
- * authored adapters share the same layout without importing either domain.
+ * The one-byte enum gives generated and handwritten adapters the same layout.
  */
 enum class sink_control : std::uint8_t {
     /// Continue producing items.

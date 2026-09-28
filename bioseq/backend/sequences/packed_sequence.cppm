@@ -1,12 +1,10 @@
 /**
  * @file packed_sequence.cppm
- * @brief Packed sequence traits, iteration, dispatch, and storage views.
+ * @brief Packed sequence storage, borrowed views, and symbol iteration.
  *
- * @details Re-exports core alphabet contracts, LSB-first packing helpers,
- * range implementations, and wire factories. The module keeps alphabet identity
- * at the type level while exposing lazy, zero-copy views over LSB-first packed
- * storage. Width recasting preserves the logical alphabet, padding, and
- * sequence length.
+ * Exports alphabet settings, packing helpers, range adapters, and compact headers.
+ * Packed words store the first symbol in their low bits. Compatible word-width
+ * views keep the symbol count and, recalculate padding for the requested width.
  */
 module;
 
@@ -47,24 +45,22 @@ import bioseq.common.seqan_adapter;
 import bioseq.common.templating;
 import bioseq.sequences.rank_pack_core;
 
-/** Packed alphabet, dispatch, and storage-width contracts. */
+/** Alphabet types, packed-word settings, and runtime type selection. */
 export import :packed_sequence_core;
-/** LSB-first packed-unit extraction and storage-width views. */
+/** Rank extraction and views using a different  word width. */
 export import :packed_sequence_packing;
 /** Packed and unpacked sequence range implementations. */
 export import :packed_sequence_range;
-/** Standard-layout compact-sequence wire storage and factories. */
+/** Compact headers, inline payloads, and allocation helpers. */
 export import :packed_sequence_wire;
 
 export {
 
 /**
- * @brief Compare compact ranges with different backing configurations.
- * @tparam p_left_configuration Left range backing configuration.
- * @tparam p_right_configuration Right range backing configuration.
- * @param lhs Left compact range.
- * @param rhs Right compact range.
- * @return `true` when both ranges contain the same logical symbols.
+ * @brief Compares symbol sequences stored in different range configurations.
+ * @param lhs First range.
+ * @param rhs Second range.
+ * @return True when both decoded symbol sequences are equal.
  */
 template<
     typename p_left_configuration,
@@ -96,24 +92,22 @@ inline constexpr bool operator==(
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
 
-/** @brief Strand relation used by sequence hashing and ordering operations. */
+/** Identifies wnich strand supplied the selected canonical k-mer value. */
 enum class sequence_strand_mode : std::uint8_t {
-    /** Traverse symbols in stored order. */
+    /** The forward-strand value was selected. */
     forward = 0,
-    /** Traverse the reverse complement of the stored symbols. */
+    /** The reverse-complement value was selected. */
     reverse_complement = 1,
-    /** Compare strand-normalized values for equality. */
+    /** Forward and reverse-complement values are equal. */
     equal = 2,
 };
 
 /**
- * @brief Tests whether a compact range can expose a different storage width.
+ * @brief Checks the type requirements for viewing packed storage at another width.
  *
- * The check preserves alphabet identity and `bits_per_char` while permitting
- * a different packed storage-unit type.
- *
- * @tparam p_range_configuration Compact-range backing configuration.
- * @tparam p_new_storage_unit_type Requested packed storage-unit type.
+ * Keeps the alphabet and bits per symbol  unchanged.
+ * @tparam p_range_configuration Source range configuration.
+ * @tparam p_new_storage_unit_type Requested word type.
  */
 template <typename p_range_configuration, typename p_new_storage_unit_type>
 concept is_sequence_bit_castable_to = (
@@ -140,12 +134,10 @@ static_assert(is_sequence_bit_castable_to<seq::dna4, uint16_t>);
 static_assert(is_sequence_bit_castable_to<seq::dna4, uint8_t>);
 
 /**
- * @brief Read-only packed-sequence interface accepted by SIMD iteration.
+ * @brief Requires the read-only packed-view methods used by SIMD iteration
  *
- * The pointer requirement deliberately uses `convertible_to` so a view may
- * expose a more-qualified compatible pointer without materializing storage.
- *
- * @tparam p_view_type Candidate packed-sequence view.
+ * Accepts a read_cptr result convertible to a const pointer of the view word type.
+ * @tparam p_view_type Candidate view type.
  */
 template <typename p_view_type>
 concept supports_compact_sequence_bitcast_view =
@@ -185,8 +177,9 @@ struct range_format_kind<
 };
 
 /**
- * @brief Formats packed range geometry and decoded unit-separated symbols.
- * @tparam p_configuration Compact range backing configuration.
+ * @brief Formats sequence sizes, packing settings, and decoded symbols.
+ *
+ * Separates symbols from different packed words with |.
  */
 template<supports_compact_sequence_range p_configuration>
 struct formatter<compact_sequence_range<p_configuration>>
@@ -195,11 +188,10 @@ struct formatter<compact_sequence_range<p_configuration>>
     using range_type = compact_sequence_range<p_configuration>;
 
     /**
-     * @brief Writes a compact range description to a formatting context.
-     * @tparam p_format_context_type fmt output context.
-     * @param sequence Compact sequence range to format.
-     * @param context Destination formatting context.
-     * @return Iterator returned by the string formatter.
+     * @brief Writes the sequence description to the fmt output context.
+     * @param sequence Range to format.
+     * @param context Destination context.
+     * @return Output iterator from the string formatter.
      */
     template <typename p_format_context_type>
     auto format(

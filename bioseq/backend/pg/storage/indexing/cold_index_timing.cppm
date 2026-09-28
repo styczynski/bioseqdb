@@ -1,6 +1,6 @@
 /**
  * @file cold_index_timing.cppm
- * @brief Defines the lightweight cold-index timing and buffer-accounting helpers.
+ * @brief Measure time and PostgreSQL buffer reads while opening an index
  */
 module;
 
@@ -24,12 +24,12 @@ import bioseq.postgres.storage.indexing.minimizer_read_stats;
 
 export namespace bioseq::storage::indexing {
 
-/// Monotonic project clock converted to the unsigned SQL-bound domain.
+/// Read the clock in nanoseconds for measuring elapsed time.
 [[nodiscard]] inline std::uint64_t cold_index_now_ns() noexcept {
     return bioseq::instrumentation::clock::now_ns();
 }
 
-/// Add one elapsed interval while defending against a broken clock sample.
+/// Add the elapsed time, treating a backward clock reading as zero.
 inline void add_cold_index_elapsed(cold_index_preparation_stats& stats,
                                    std::uint64_t& destination,
                                    std::uint64_t begin_ns) noexcept {
@@ -37,7 +37,7 @@ inline void add_cold_index_elapsed(cold_index_preparation_stats& stats,
     stats.add(destination, end_ns >= begin_ns ? end_ns - begin_ns : 0);
 }
 
-/// Attribute PostgreSQL shared-buffer traffic since `begin` to this delta.
+/// Add shared-buffer hits and reads since the saved PostgreSQL counters.
 inline void add_cold_index_buffer_usage(cold_index_preparation_stats& stats,
                                         const BufferUsage& begin) noexcept {
     BufferUsage delta{};

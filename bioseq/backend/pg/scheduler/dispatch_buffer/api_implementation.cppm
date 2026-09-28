@@ -1,16 +1,10 @@
 /**
  * @file api_implementation.cppm
- * @brief Adapts the narrow dispatch-buffer API to its private implementation.
+ * @brief Connect  the custom-scan API to tuple_dispatch_buffer.
  */
-/*-------------------------------------------------------------------------
- *
- * scheduler/dispatch_buffer/api_implementation.cppm
- *
- * Implementation of the narrow tuple_dispatch_buffer API declared in
- * dispatch_buffer/api.cppm.  This is the only custom-scan-side translation
- * unit that imports bioseq.postgres.scheduler.dispatch_buffer.
- *
- *-------------------------------------------------------------------------
+/*
+ * Import the full, dispatch buffer here and forward the custom-scan API calls
+ * to it. Custom scans can then compile using the smaller API module.
  */
 module;
 
@@ -38,7 +32,7 @@ import bioseq.postgres.storage.scanner.source_provider_contract;
 
 namespace bioseq::scheduler {
 
-/** @return The immutable Highway plan registered for scheduler dispatch. */
+/** @return The registered Highway CPU dispatch plan for this statement. */
 bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch_plan_for_plan() noexcept {
     return bioseq::simd_dispatch::registered_highway_dispatch_plan();
 }
@@ -64,12 +58,12 @@ namespace {
 
 using buffer_implementation = tuple_dispatch_buffer;
 
-/** @return The private mutable buffer represented by an opaque API pointer. */
+/** @return The mutable tuple_dispatch_buffer behind the API handle. */
 [[nodiscard]] buffer_implementation* as_buffer(void* opaque_buffer) noexcept {
     return static_cast<buffer_implementation*>(opaque_buffer);
 }
 
-/** @return The private const buffer represented by an opaque API pointer. */
+/** @return The const tuple_dispatch_buffer behind the API handle. */
 [[nodiscard]] const buffer_implementation* as_buffer(const void* opaque_buffer) noexcept {
     return static_cast<const buffer_implementation*>(opaque_buffer);
 }
@@ -257,7 +251,7 @@ void dispatch_buffer_runtime::begin_join_target(TupleTableSlot* locator_passthro
 
 namespace {
 
-/** @return Internal join-query references preserving ordinal and slot identity. */
+/** @return Buffer query references with the original ordinals and tuple slots. */
 [[nodiscard]] std::vector<buffer_implementation::join_query_ref>
 translate_join_queries(const std::span<const dispatch_join_query_ref> queries) {
     std::vector<buffer_implementation::join_query_ref> translated_queries;

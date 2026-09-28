@@ -1,10 +1,9 @@
 /**
  * @file scan_state.cppm
- * @brief Standard-layout executor state for Bioseq custom scans.
+ * Executor state passed between Bioseq custom scans and PostgreSQL callbacks.
  *
- * PostgreSQL owns the embedded `CustomScanState` and passes its address through
- * C callbacks. Each Bioseq wrapper keeps that object first, remains
- * standard-layout, and centralizes every boundary cast.
+ * CustomScanState must  be the first member so PostgreSQL's pointer also points
+ * to the enclosing Bioseq state. Layout checks below, enforce this requirement.
  */
 module;
 
@@ -21,7 +20,7 @@ import bioseq.postgres.storage.metadata;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
 
-/// @brief Vectorization-specific state retained by one columnar custom scan.
+/// @brief Column batches and filters used by one custom scan.
 export struct scan_vectorization_state {
     /// @brief Whether vectorized execution is active.
     bool is_enabled;
@@ -31,34 +30,33 @@ export struct scan_vectorization_state {
     TupleTableSlot* scan_vector_slot;
     /// @brief Output vector slot owned by the scan.
     TupleTableSlot* result_vector_slot;
-    /// @brief First row not yet emitted from the current vector.
+    /// @brief Rows left to visit in the current batch, including filtered rows.
     std::uint32_t pending_row_number;
-    /// @brief Current row position within the vector.
+    /// @brief Index of the next row to visit in the current batch.
     std::uint32_t row_index;
-    /// @brief Planned vectorized qualifiers.
+    /// @brief Filters selected by the planner for evaluation on column batches.
     bioseq::postgres::support::postgres_list<Node> qualifiers;
-    /// @brief Executor-owned rewritten vectorized qualifiers.
+    /// @brief Filters compiled against the input vector slot for this execution.
     bioseq::postgres::support::postgres_list<Node> constructed_qualifiers;
-    /// @brief One-based attribute numbers required by vectorized execution.
+    /// @brief Zero-based column indexes needed when extracting rows from a batch
     bioseq::postgres::support::postgres_integer_list attributes_needed;
 };
 
 /**
- * @brief Per-execution state for the Bioseq columnar custom scan.
- *
- * Non-standard-layout runtime owners remain behind `runtime_state`. The
- * concrete runtime is created and destroyed by the custom-scan owner.
+ * @brief State for one execution of a Bioseq column  scan.
+ * The C++ runtime is stored separately so this object keeps the layout required
+ * by PostgreSQL callbacks. The scan owns and cleans up that runtime.
  */
 export struct scan_state {
     /// @brief PostgreSQL custom-scan base that must remain the first member.
     CustomScanState custom_scan_state;
-    /// @brief Zero-based bitmap of physical attributes to materialize.
+    /// @brief Zero-based indexes of columns the scan must read.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
-    /// @brief Expression context used for runtime qualifier evaluation.
+    /// @brief Context for evaluating filter parameters across rows.
     ExprContext* runtime_expression_context;
-    /// @brief Storage qualifiers retained by the scan.
+    /// @brief Filters passed to storage to skip chunk groups.
     bioseq::postgres::support::postgres_list<Node> qualifiers;
-    /// @brief PostgreSQL parallel-scan coordination record.
+    /// @brief Shared stdipe position used by parallel scan workers.
     parallel_column_scan_handle parallel_scan;
     /// @brief Vectorized execution state.
     scan_vectorization_state vectorization;
@@ -66,18 +64,18 @@ export struct scan_state {
     Snapshot snapshot;
     /// @brief Whether this scan must unregister `snapshot` during cleanup.
     bool owns_snapshot_registration;
-    /// @brief Opaque pointer to the custom-scan runtime owner.
+    /// @brief Separately allocated C++ runtime owned by this scan.
     void* runtime_state;
 
-    /// @brief Reinterprets PostgreSQL's callback pointer as Bioseq scan state.
-    /// @param state PostgreSQL custom-scan state pointer.
+    /// @brief Recover the Bioseq state from its embedded PostgreSQL state.
+    /// @param state CustomScanState belonging to a Bioseq column scan.
     /// @return The enclosing Bioseq state.
     [[nodiscard]] static scan_state* from_custom_scan_state(CustomScanState* state) noexcept {
         return reinterpret_cast<scan_state*>(state);
     }
 
-    /// @brief Reinterprets a generic PostgreSQL node as Bioseq scan state.
-    /// @param node Node whose first object is the embedded custom-scan state.
+    /// @brief Recover the Bioseq state from a PostgreSQL node pointer.
+    /// @param node Node belonging to a Bioseq column scan.
     /// @return The enclosing Bioseq state.
     [[nodiscard]] static scan_state* from_node(Node* node) noexcept {
         return reinterpret_cast<scan_state*>(node);
@@ -122,24 +120,24 @@ export struct scan_state {
     }
 };
 
-/// @brief Per-execution state for the Bioseq IndexScan wrapper node.
+/// @brief State for a Bioseq custom  scan that wraps a PostgreSQL IndexScan.
 export struct index_scan_state {
     /// @brief PostgreSQL custom-scan base that must remain the first member.
     CustomScanState custom_scan_state;
     /// @brief Executor state of the wrapped PostgreSQL IndexScan.
     IndexScanState* index_scan_executor_state;
 
-    /// @brief Reinterprets PostgreSQL's callback pointer as index-scan state.
+    /// @brief Recover the Bioseq index wrapper from its embedded CustomScanState.
     [[nodiscard]] static index_scan_state* from_custom_scan_state(CustomScanState* state) noexcept {
         return reinterpret_cast<index_scan_state*>(state);
     }
 
-    /// @brief Reinterprets a generic PostgreSQL node as index-scan state.
+    /// @brief Recover the Bioseq index wrapper from its PostgreSQL node pointer.
     [[nodiscard]] static index_scan_state* from_node(Node* node) noexcept {
         return reinterpret_cast<index_scan_state*>(node);
     }
 
-    /// @brief Reinterprets PostgreSQL plan state as the enclosing index-scan state.
+    /// @brief Recover the Bioseq index wrapper from its embedded plan state.
     [[nodiscard]] static index_scan_state* from_plan_state(PlanState* state) noexcept {
         return reinterpret_cast<index_scan_state*>(state);
     }

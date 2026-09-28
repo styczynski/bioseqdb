@@ -1,11 +1,10 @@
 /**
  * @file simd.cppm
- * @brief Target-neutral contracts and facade for SIMD DP chaining.
+ * @brief Shared types and call interface  for SIMD chaining.
  *
- * The complete Highway implementation is generated per target from the
- * chaining SIMD source modules. This module intentionally contains no Highway
- * headers, target namespaces, or runtime dispatch. Callers supply the function
- * selected once by the dispatch processor.
+ * Highway generates the CPU-specific implementations from the chaining SIMD
+ * modules. Callers select a function once and pass it here with their anchors,
+ * settings, and output arrays.
  */
 module;
 
@@ -25,13 +24,14 @@ import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::chaining {
 
-/// Three coordinate arrays, checked before the target-local SoA allocation.
+/// Compute the total element count for three SIMD input arrays, checking overflow.
 [[nodiscard]] constexpr std::optional<std::size_t>
 simd_chaining_soa_elements(std::size_t count) noexcept {
     return bioseq::common::checked_mul(count, std::size_t{3u});
 }
 
-/// The existing backtracker stores one N-element path per selected SIMD lane.
+/// Size one full-length backtracking path per SIMD lane.
+/// Return no size if the lane count or the 32-bit gather indices cannot support it.
 [[nodiscard]] constexpr std::optional<std::size_t>
 simd_chaining_path_elements(std::size_t count, std::size_t lanes) noexcept {
     if (lanes < 2u || count > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())) {
@@ -46,14 +46,14 @@ simd_chaining_path_elements(std::size_t count, std::size_t lanes) noexcept {
     return elements;
 }
 
-/// Logical SIMD workspace; physical context blocks are admitted separately.
+/// SIMD scratch-array sizes. The context reserves memory for their allocations.
 struct simd_chaining_storage_plan {
     chaining_output_storage_plan output;
     std::size_t soa_u32_elements;
     std::size_t forward_visited_elements;
     std::size_t logical_bytes_before_lane_paths;
 
-    /// Bind the selected target's real lane count, never an assumed NEON width.
+    /// Compute path storage using the selected CPU target's lane count.
     [[nodiscard]] constexpr std::optional<std::size_t>
     path_elements(std::size_t lanes) const noexcept {
         return simd_chaining_path_elements(output.anchor_count, lanes);
@@ -81,8 +81,9 @@ derive_simd_chaining_storage_plan(std::size_t count, const chaining_parameters& 
     const auto output = derive_chaining_output_storage_plan(count, params.min_seed_count);
     const auto soa = simd_chaining_soa_elements(count);
     const bool exact = params.simd_policy == simd_chaining_policy::exact_visited;
-    // SoA 3*u32, forward 3*i32, scored backtracking 2*i32,
-    // backtracking visited i32, and exact-policy forward visited i32.
+    // Count the  three input arrays, three scoring arrays, backtracking
+    // scores and indices, and visited marks. Only exact_visited also needs
+    // visited marks during forward scoring.
     const auto bytes = bioseq::common::checked_mul(count,
         (9u + static_cast<std::size_t>(exact)) * sizeof(std::int32_t));
     if (!output || !soa || !bytes) {
@@ -91,7 +92,7 @@ derive_simd_chaining_storage_plan(std::size_t count, const chaining_parameters& 
     return simd_chaining_storage_plan{*output, *soa, exact ? count : 0u, *bytes};
 }
 
-/// Terminal status reported when SIMD chaining cannot complete authentically.
+/// Completion status, including reasons the selected SIMD chainer was rejected.
 enum class simd_chaining_status : std::uint8_t {
     ok = 0,
     unsupported_simd_target,
@@ -102,7 +103,7 @@ enum class simd_chaining_status : std::uint8_t {
     cyclic_predecessors,
 };
 
-/// Return the stable diagnostic spelling of @p status.
+/// Return the diagnostic name of @p status, or "unknown".
 [[nodiscard]] constexpr std::string_view simd_chaining_status_name(
     simd_chaining_status status) noexcept
 {
@@ -146,11 +147,9 @@ private:
     simd_chaining_status status_;
 };
 
-/// Operation-originated stats for the named SIMD forward-search policy.
-///
-/// Bounded scan batches and the one-lane global-best rescue are deliberately
-/// separate populations: the former must classify exactly once as improving
-/// or non-improving, while the latter is a targeted SIMD probe.
+/// Counters for each SIMD predecessor-search pobicy.
+/// Count each bounded-search batch as improving or nonimproving. Keep the
+/// extra probe of the cached best anchor in separate counters.
 struct simd_chaining_policy_stats {
     std::uint64_t exact_visited_calls = 0;
     std::uint64_t bounded_batch_approximate_calls = 0;
@@ -165,10 +164,10 @@ struct simd_chaining_policy_stats {
     bool saturated = false;
 
     /**
-     * @brief Adds one counter and records unsigned overflow as saturation.
-     * @param destination Counter updated in place.
-     * @param increment Value to add.
-     * @param did_saturate Set when the addition overflows.
+     * @brief Add to a counter, clamping overflow to the largest uint64_t value.
+     * @param destination Counter to update.
+     * @param increment Amount  to add.
+     * @param did_saturate Set to true if this addition overflows.
      */
     static void add_counter(
             std::uint64_t& destination,
@@ -183,8 +182,8 @@ struct simd_chaining_policy_stats {
         destination += increment;
     }
 
-    /// @brief Saturating aggregation used by call, batch, and result collectors.
-    /// @param other Policy counters to add.
+    /// @brief Merge policy counters, clamping any overflowing totals.
+    /// @param other Counters to add.
     void merge(const simd_chaining_policy_stats& other) noexcept {
         saturated = saturated || other.saturated;
         add_counter(
@@ -229,10 +228,10 @@ struct simd_chaining_policy_stats {
             saturated);
     }
 
-    /// @brief Checks fail-closed consistency for the requested named policy.
-    /// @param selected Policy whose counter relationships must hold.
-    /// @param require_accelerated_work Require observed bounded-policy vector work.
-    /// @return `true` when all policy-specific relationships hold.
+    /// @brief Check that the counters agree with the selected search policy
+    /// @param selected Expected policy.
+    /// @param require_accelerated_work For bounded search, also require batches, an early stop, and skipped candidates.
+    /// @return False for rejected calls, overflow, or inconsistent counters.
     [[nodiscard]] constexpr bool is_internally_consistent(
         simd_chaining_policy selected,
         bool require_accelerated_work) const noexcept
@@ -281,10 +280,10 @@ struct simd_chaining_policy_stats {
 };
 
 /**
- * @brief Execution counters for SIMD scoring and backtracking work.
+ * @brief Counters for SIMD scoring, predecessor search, and backtracking.
  *
- * Match, pipeline, and benchmark aggregation carries this object end to end.
- * Forbidden scalar-route counters must remain zero for accepted execution.
+ * Callers merge these into pipeline and benchmark results. Consistency checks
+ * reject, overflow, rejected calls, and any recorded scalar scoring or backtracking.
  */
 struct simd_chaining_execution_stats {
     std::uint64_t anchors_consumed = 0;
@@ -307,13 +306,13 @@ struct simd_chaining_execution_stats {
     std::uint64_t backtrack_overlap_stops = 0;
     std::uint64_t backtrack_primary_contiguous_batches = 0;
     std::uint64_t backtrack_all_starts_visited_fast_batches = 0;
-    // Ordered score/skip/backtrack control over SIMD-produced values. This is
-    // not a scalar biological scoring or backtracking fallback.
+    // Sequential decisions made  from SIMD results, such as applying skip
+    // rules or committing a recovered chain.
     std::uint64_t scalar_orchestration_steps = 0;
     std::uint64_t fail_closed_rejections = 0;
 
-    // Forbidden paths. They are never incremented by this implementation;
-    // tests assert zero so later routing cannot silently launder scalar work.
+    // Reserved for counts of scalar scoring or backtracking calls.
+    // SIMD consistency checks require all three counters to be zero.
     std::uint64_t scalar_score_branches = 0;
     std::uint64_t scalar_backtrack_branches = 0;
     std::uint64_t shared_scalar_backtrack_calls = 0;
@@ -321,10 +320,10 @@ struct simd_chaining_execution_stats {
     bool saturated = false;
 
     /**
-     * @brief Adds one counter and records unsigned overflow as saturation.
-     * @param destination Counter updated in place.
-     * @param increment Value to add.
-     * @param did_saturate Set when the addition overflows.
+     * @brief Add to a counter, clamping overflow to the largest uint64_t value.
+     * @param destination Counter to update.
+     * @param increment Amount to add.
+     * @param did_saturate Set to true if this addition overflows.
      */
     static void add_counter(
             std::uint64_t& destination,
@@ -339,8 +338,8 @@ struct simd_chaining_execution_stats {
         destination += increment;
     }
 
-    /// @brief Saturating merge used by call, batch, and result collectors.
-    /// @param other Execution counters to add.
+    /// @brief Merge execution and policy counters, clamping overflowing totals.
+    /// @param other Counters to add.
     void merge(const simd_chaining_execution_stats& other) noexcept {
         saturated = saturated || other.saturated;
         policy.merge(other.policy);
@@ -377,10 +376,10 @@ struct simd_chaining_execution_stats {
 #undef BIOSEQ_MERGE_SIMD_CHAIN_COUNTER
     }
 
-    /// @brief Tests whether counters describe an authentic execution of @p selected.
-    /// @param selected Policy whose execution relationships must hold.
-    /// @param require_nonempty_vector_work Require observed scoring and backtracking vectors.
-    /// @return `true` when the counters authenticate the selected route.
+    /// @brief Check counters for the requested SIMD polic and zero scalar-work counts.
+    /// @param selected Expected predecessor-search policy.
+    /// @param require_nonempty_vector_work Also require recorded SIMD scoring and backtracking.
+    /// @return True when the requested checks pass.
     [[nodiscard]] constexpr bool is_internally_consistent(
             simd_chaining_policy selected,
             bool require_nonempty_vector_work = false) const noexcept {
@@ -406,10 +405,10 @@ struct simd_chaining_execution_stats {
     [[nodiscard]] constexpr bool operator==(
         const simd_chaining_execution_stats&) const noexcept = default;
 
-    /// @brief Validates selected-policy counters and forward-pass invariants.
-    /// @param selected Policy whose relationships must hold.
-    /// @param require_accelerated_work Require policy-specific accelerated work.
-    /// @return `true` when policy and execution counters agree.
+    /// @brief Check policy counters and, for exact_visited, the  forward-search totals.
+    /// @param selected Expected policy.
+    /// @param require_accelerated_work Require an early bounded-search stop with skipped candidates.
+    /// @return True when these counter relationships hold.
     [[nodiscard]] constexpr bool has_consistent_policy_stats(
         simd_chaining_policy selected,
         bool require_accelerated_work = false) const noexcept
@@ -427,8 +426,8 @@ struct simd_chaining_execution_stats {
         return false;
     }
 
-    /// @brief Checks exact-policy batch classification and replay relationships.
-    /// @return `true` when exact forward-pass counters are self-consistent.
+    /// @brief Check counts of exact-policy batches and sequential candidate replay.
+    /// @return True when classified batches and replayed lanes fit the recorded totals.
     [[nodiscard]] constexpr bool has_consistent_exact_execution_stats()
             const noexcept {
         if (no_improvement_fast_batches
@@ -458,7 +457,7 @@ struct simd_chaining_execution_stats {
     }
 };
 
-/** @brief Exact target-neutral ABI for a fixed-target chaining implementation. */
+/** @brief Function-pointer type for a CPU-specific SIMD chaining implementation. */
 using chain_anchors_simd_kernel = void (*)(
     std::span<const anchor>,
     const chaining_parameters&,
@@ -470,20 +469,18 @@ using chain_anchors_simd_kernel = void (*)(
 static_assert(std::is_pointer_v<chain_anchors_simd_kernel>);
 
 /**
- * @brief Target-neutral forwarding facade for independent callers.
+ * @brief Call the SIMD chaining function already selected by the caller
  *
- * This call is static with respect to Highway: the caller supplies the target
- * function that was selected at the process dispatch root (or an explicitly
- * chosen fixed-target function in a focused test).
- *
- * @throws simd_chaining_runtime_error when @p kernel is null.
- * @param kernel Fixed-target function selected by process dispatch.
- * @param anchors Canonically ordered anchors to chain.
- * @param params Scoring, distance, and policy parameters.
- * @param chains_out Arena-backed destination for chain descriptors.
- * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
- * @param stats Optional execution counters updated by the selected kernel.
- * @param aggregate_stats Whether the kernel should collect route summaries without hot-loop counters.
+ * CPU feature selection happens before this call. A missing function raises
+ * an error and records the rejected call  when counters are supplied.
+ * @param kernel Function for the selected CPU target.
+ * @param anchors Anchors in canonical_anchor_less order.
+ * @param params Scoring rules, distance limits, and SIMD policy.
+ * @param chains_out Receives chain descriptors in arena storage.
+ * @param reordered_anchors_out Receives anchors grouped in chain order.
+ * @param stats Optional counters updated by the kernel.
+ * @param aggregate_stats Ask the kernel for, its shorter set of counters.
+ * @throws simd_chaining_runtime_error If kernel is null.
  */
 inline void chain_anchors_simd(
     chain_anchors_simd_kernel kernel,

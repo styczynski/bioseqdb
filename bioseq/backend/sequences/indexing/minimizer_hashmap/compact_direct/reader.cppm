@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader.cppm
- * @brief Stable facade for compact-direct opening and execution.
+ * @brief Export  the reader's opening, query preparation, and execution modules.
  */
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader;

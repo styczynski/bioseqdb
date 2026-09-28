@@ -1,6 +1,6 @@
 /**
  * @file streaming.cppm
- * @brief Streaming state, scalar codecs, lookup tables, and shape predicates.
+ * @brief Streaming packing state, scalar codecs, and rank lookup, tables.
  */
 module;
 
@@ -30,48 +30,41 @@ import bioseq.simd.vector_stream;
 
 export {
 
-// =====================================================================
-// Highway-templated code.
-// =====================================================================
+// Helpers in the selected Highway target namespace.
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 
-/// Behaviour for ASCII bytes that don't map to a valid alphabet rank.
-///
-/// `drop`            — used by the file-input FSM (FASTA / FASTQ).
-///                     Newlines, whitespace, and unknown bytes are
-///                     silently skipped so the body can be passed
-///                     unchunked.
-/// `map_to_default`  — used by the SQL `seq_in` literal parser.
-///                     Matches SeqAn's permissive alphabet assignment where
-///                     unknown bytes resolve to the alphabet's
-///                     default rank (A for dna4, N for dna5).
+/**
+ * Controls how a character lookup handles an unrecognized byte.
+ *
+ * drop marks it with 0xFF so the packer can skip it. map_to_default uses
+ * rank 3 (N) for dna5 and rank zero for other alphabets. File readers use
+ * drop, while whole-sequence conversion defaults to map_to_default.
+ */
 enum class unknown_byte_policy {
     drop,
     map_to_default,
 };
 
-/// Per-record encoder state. The encoder writes packed words directly
-/// into `*output_storage` (a caller-owned `std::vector<p_storage_unit>`,
-/// typically the IO batch's shared sequence buffer or a per-call vector
-/// for the SQL one-shot adapter). Across records the partial-word
-/// state (`partial_word`, `partial_letters`) is reset by `reset()` while
-/// the output pointer is preserved.
+/**
+ * Packing state  for one sequence record.
+ *
+ * Completed words are appended to a caller-owned vector. A partial word stays
+ * in this state between input chunks until the record is finished The same
+ * vector can hold several records, each starting at record_start_offset.
+ */
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
 struct encode_state {
     using base_container = std::vector<p_storage_unit>;
 
-    /// Pointer to the destination vector. Set by the caller before
-    /// every record (or batch). The encoder appends to `*output_storage`.
+    /// Caller-owned vector receiving completed packed words.
     base_container* output_storage = nullptr;
-    /// Offset into `*output_storage` where the current record's first
-    /// packed word starts. Captured at `reset()`. The FSM reads it back
-    /// in `finalize_encode_state` to compute the record's slice.
+    /// Output-vector size when reset() started this record.
     std::size_t record_start_offset = 0;
     /// Bits accumulated for the partial word that has not yet been
     /// pushed into `*output_storage`.
@@ -79,13 +72,10 @@ struct encode_state {
     /// Number of letters in `partial_word`. Always `< p_letters_per_unit`
     /// on call-boundary entry / exit.
     std::size_t partial_letters = 0;
-    /// Total letters consumed across the current record (used by FASTQ
-    /// to validate quality length).
+    /// Number of letters kept for this record, used to cherk FASTQ quality length.
     std::size_t total_letters = 0;
 
-    /// Reset partial-word state for a new record. The output pointer is
-    /// preserved so a single attach call configures the encoder for the
-    /// whole batch.
+    /// Starts a new record without clearing the output vector or changing its pointer.
     inline void reset() noexcept {
         record_start_offset =
             (output_storage != nullptr) ? output_storage->size() : 0;
@@ -154,18 +144,13 @@ void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
 }  // namespace detail
 
 
-/// Build the 256-entry ASCII → rank LUT for `p_alphabet`. Two policies
-/// for unknown bytes:
-///
-/// * `drop`            — unknown bytes map to `0xFF` skip-sentinel. The
-///                       scalar `append_ranks` and the SIMD multiline
-///                       compaction path detect and drop them.
-/// * `map_to_default`  — unknown bytes map to the alphabet's default
-///                       rank (A for dna4, N for dna5).
-///
-/// Case folding (`A`↔`a`, `C`↔`c`, …) is applied via the bit-5 case
-/// flip. RNA `U` / `u` is mapped to T's rank so RNA literals decode
-/// correctly under both alphabets.
+/**
+ * Builds a byte-to-rank table with the selected  unknown-byte policy.
+ *
+ * Canonical alphabet letters also accept the opposite ASCII case. dna4 and
+ * dna5 map U and u to T. Unrecognized bytes map to 0xFF under drop, to
+ * N under map_to_default for dna5, and to rank zero for other alphabets.
+ */
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy = unknown_byte_policy::drop>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
@@ -209,16 +194,13 @@ build_letter_to_rank_lut() {
     return lut;
 }
 
-/// Build the two 16-byte halves of a `c & 0x1F`-indexed 32-byte rank
-/// LUT for `p_alphabet` under `p_policy`. Returns `{low, high}` where
-/// `low[i] = lut32[i]` and `high[i] = lut32[i + 16]`. Indexed by 5 low
-/// bits of the input ASCII byte. Case folding is automatic because
-/// bit 5 is the case bit.
-///
-/// The 32-byte LUT is the SIMD-friendly cousin of the 256-byte LUT —
-/// it lets the runtime path execute as two 16-byte `TableLookupBytes`
-/// + a select on bit 4 (~4-5 SIMD ops total), enabling fully-SIMD
-/// `map_to_default` lookups on dna4 and dna5.
+/**
+ * Builds two 16-byte tables indexed by the low five bits of a character.
+ *
+ * DNA encoders use these tables to look up both ASCII cases with SIMD byte
+ * shuffles. Unused entries follow p_policy, and U shares T's entry. This
+ * lookup alone cannot validate input because other bytes can  share those bits.
+ */
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy>
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 2>
@@ -230,7 +212,7 @@ build_letter_to_rank_lut_32() {
             ? std::uint8_t{0xFF}
             : (std::is_same_v<p_alphabet, seq::dna5>
                 ? std::uint8_t{3}    // N
-                : std::uint8_t{0});  // A
+                : std::uint8_t{0});  // Rank zero, A for dna4.
     for (std::size_t lut_index = 0; lut_index < 32; ++lut_index) {
         lut[lut_index] = k_default_byte;
     }
@@ -260,9 +242,7 @@ build_letter_to_rank_lut_32() {
     return halves;
 }
 
-/// Build the 256-entry rank → ASCII LUT for `p_alphabet`. Indexed by
-/// rank values. Entries past the alphabet's cardinality are 0 and
-/// unreachable when the input is well-formed.
+/// Maps valid ranks to canonical alphabet characters. Unused table entries are zero.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
 build_rank_to_letter_lut() {
@@ -277,10 +257,9 @@ build_rank_to_letter_lut() {
     return lut;
 }
 
-/// Build the 16-entry low-nibble dna4 LUT used by the dna4 SIMD
-/// `drop` fast path. `'A' & 0x0F = 1`, `'C' & 0x0F = 3`,
-/// `'G' & 0x0F = 7`, `'T' & 0x0F = 4` — all distinct, lets us do
-/// `TableLookupBytes(table_vec, chunk & 0x0F)` in one SIMD op.
+/// Builds the dna4 lookup indexed by a character's low four bits.
+/// A, C, G, and T have separate entries. Other entries are 0xFF.
+/// Bytes sharing those four bits are indistinguishable to this table
 [[nodiscard]] consteval std::array<std::uint8_t, 16>
 build_dna4_low_nibble_lut() {
     std::array<std::uint8_t, 16> lut{};
@@ -319,14 +298,9 @@ build_dna5_rank_to_ascii_lut() {
     return lut;
 }
 
-// ---------------------------------------------------------------------
-// Lane-compaction tables for the dna4 multi-line SIMD encoder. Each
-// entry of `k_compact_low_table` (256 × 16 bytes) is a `TableLookupBytes`
-// shuffle pattern that gathers the valid bytes from the low half of a
-// 16-byte rank vector to the front. `k_compact_high_table` does the same
-// for the high half. `k_shift_left_byte_table[shift]` shifts the high half
-// left by `shift` bytes so it slots into the low half's tail.
-// ---------------------------------------------------------------------
+// Byte-shuffle tables for gathering selected lanes from a 16-byte vector.
+// Low, and high tables gather their eight-lane halves in order. The shift
+// table places the high-half result  ater the selected low-half bytes.
 
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
 build_compact_low_table() {
@@ -388,15 +362,15 @@ inline constexpr auto k_compact_low_table = build_compact_low_table();
 inline constexpr auto k_compact_high_table = build_compact_high_table();
 inline constexpr auto k_shift_left_byte_table = build_shift_left_byte_table();
 
-// ---------------------------------------------------------------------
-// Streaming primitives — scalar, no Highway dependency. Used as the
-// generic fallback for non-(dna4/dna5) alphabets and as the bookkeeping
-// layer for every dna4/dna5 SIMD path.
-// ---------------------------------------------------------------------
+// Scalar packing and decoding helpers, also used by the SIMD codecs.
 
-/// Append `count` ranks to the encoder state, packing them into
-/// `partial_word` and pushing completed `p_storage_unit`s into
-/// `*output_storage`. Skip-sentinel `0xFF` bytes are silently dropped.
+/**
+ * Appends ranks to the current record and writes completed packed words.
+ *
+ * Ranks equal to 0xFF are skipped. Other ranks must fit p_bits_per_character.
+ * The output vector must be attached before calling, and a partial word stays
+ * in state for the next chunk or finalize_encode_state().
+ */
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -439,11 +413,13 @@ inline void reset_encode_state(
     state.reset();
 }
 
-/// Finalise the encoder for the current record. Pushes the trailing
-/// partial word (if any) into `*output_storage` and returns the
-/// `(word_count, padding)` pair the FSM needs to record this record's
-/// slice. Padding is the number of empty letter slots in the trailing
-/// unit (or 0 if the record fills its last unit exactly).
+/**
+ * Finishes the record by writing any partial word.
+ *
+ * Returns the number of output words since reset() and the unused letter slots
+ * in the last word. Clears the letter count. Call once per record, then reset
+ * the state before  starting the next record.
+ */
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -468,8 +444,8 @@ finalize_encode_state(
     return {word_count, finished.padding_letters};
 }
 
-/// Convert `size` ASCII bytes to ranks via the alphabet's 256-entry
-/// LUT. This generic scalar implementation is correct for every alphabet.
+/// Maps input bytes to ranks through the full byte lookup table.
+/// Under drop, unrecognized bytes become 0xFF entries in dst.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy = unknown_byte_policy::drop>
 inline void ascii_to_rank_scalar(
@@ -483,8 +459,8 @@ inline void ascii_to_rank_scalar(
     }
 }
 
-/// Generic scalar `body_bytes → rank → append_ranks` pipeline. Used by
-/// every alphabet shape that doesn't have a dedicated SIMD path.
+/// Converts an input chunk to ranks and appends them to the current record
+/// Used when the alphabet has no SIMD encoder.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy,
           typename p_storage_unit,
@@ -510,9 +486,8 @@ inline void encode_body_chunk_scalar(
     }
 }
 
-/// Generic scalar decoder. Walks `total_letters` ranks across the
-/// packed storage units and writes ASCII bytes to `dst`. Works for any
-/// alphabet and any storage shape.
+/// Decodes total_letters packed ranks to canonical alphabet characters.
+/// dst must have room for that many bytes. Padding slots are omitted.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -549,9 +524,14 @@ inline void decode_words_to_ascii_scalar(
     }
 }
 
-/// Same as `decode_words_to_ascii_scalar` but injects `\n` every
-/// `wrap_width` letters. Returns the new in-line letter counter so
-/// callers can resume mid-line across multiple decode batches.
+/**
+ * Decodes packed ranks, inserting a newline between full output lines.
+ *
+ * wrap_width must be positive, and letters_in_current_line must be smaller
+ * than it. dst needs room for the letters and inserted newlines. A  final full
+ * llne has no trailing newline, so the return value can equal wrap_width.
+ * Callers continuing the output must handle that full line before decoding more.
+ */
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -591,8 +571,7 @@ template <sequence_alphabet p_alphabet,
     return line_position;
 }
 
-/// Constexpr predicate: does `(alphabet, storage, BPC, LPU)` match the
-/// canonical dna4 SIMD-decode shape `(dna4, uint64_t, 2, 32)`?
+/// Tests for dna4 packed as 32 two-bit ranks per uint64_t word.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -604,8 +583,7 @@ constexpr bool is_dna4_simd_decode_shape() noexcept {
         && p_letters_per_unit == 32;
 }
 
-/// Constexpr predicate: does `(alphabet, storage, BPC, LPU)` match the
-/// canonical dna5+uint8 SIMD-decode shape `(dna5, uint8_t, 3, 2)`?
+/// Tests for dna5 packed as two three-bit ranks per uint8_t word.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,

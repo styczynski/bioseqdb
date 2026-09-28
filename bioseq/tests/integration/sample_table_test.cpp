@@ -1,16 +1,10 @@
 /**
- * @file Integration coverage for `bioseq.create_sample_table`,
- * `bioseq.inspect_locator`, and the per-fragment row layout.
+ * @file sample_table_test.cpp
+ * @brief Tests sample table creation and sequence fragment storage.
  *
- * USING bioseq tables emit zero rows for SELECT-without-mmsearch by design
- * (the columnar custom scan only fires when mmsearch is in the qual list).
- * The same applies to sub-tables, which also use bioseq. Verification uses:
- *   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
- *   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
- *      written. Positive size verifies that data exists on disk.
- *   3. `bioseq.inspect_locator` on inline literals verifies the locator layout
- *      is wired. The insertion scenario exercises the stub path by writing
- *      locator stubs into the parent relation.
+ * Checks the fragment catalog and relation sizes after generating or inserting
+ * sequences. Also tests schema selection, empty sequences, and the fields
+ * reported by inspect_locator for an inline value.
  */
 
 #include <fmt/format.h>
@@ -34,9 +28,7 @@ TEST_CASE("bioseq.create_sample_table writes one catalog row and a "
     exec_sqlf(ctx,
               "SELECT bioseq.create_sample_table('{}', 100, 1024, 'dna4', 42);",
               k_sample_table);
-    // 100 sequences × 1024 bp each = 100 sequences × 1 fragment each.
-    // All sequences should land in one (bucket, shard) — bucket determined
-    // by len_log2(1024) → bucket_idx ≥ 0; shard 0 (first write of this bucket).
+    // These 100 short sequences should share one fragment storage shard.
     const long long catalog_rows = query_scalar_int(ctx,
         fmt::format("SELECT COUNT(*)::bigint FROM bioseq_internal.seq_sub_table s "
                     "  WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
@@ -53,7 +45,7 @@ TEST_CASE("bioseq.create_sample_table writes one catalog row and a "
     REQUIRE(query_scalar_int(ctx,
                 fmt::format("SELECT COUNT(*)::bigint FROM pg_class WHERE oid = {};",
                             sub_relid)) == 1);
-    // pg_relation_size must be > 0 (bytes were written for 100 fragment rows).
+    // The fragment relation must occupy space on disk.
     const long long sub_size = query_scalar_int(ctx,
         fmt::format("SELECT pg_relation_size({})::bigint;", sub_relid));
     REQUIRE(sub_size > 0);
@@ -147,8 +139,7 @@ TEST_CASE("an empty sequence creates a catalog row "
 TEST_CASE("inspect_locator on an inline value returns inline fields",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     auto ctx = fresh_context();
-    // Inline values return zeros for locator-only fields and
-    // the inline bp_size + padding for non-stub inputs.
+    // An inline value reports version zero and its own sequence length.
     const long long version = query_scalar_int(ctx,
         "SELECT version FROM bioseq.inspect_locator("
         "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));");
@@ -171,14 +162,13 @@ TEST_CASE("INSERT INTO USING bioseq table writes per-fragment "
               "INSERT INTO {} VALUES (1, "
               "'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
               k_sample_table);
-    // The standard INSERT path (bioseq_tuple_insert → rewrite-to-stub →
-    // insert_payload_as_fragments) creates one catalog row for the bucket/shard.
+    // INSERT must  create a fragment storage entry for the sequence.
     REQUIRE(query_scalar_int(ctx,
                 fmt::format("SELECT COUNT(*)::bigint FROM bioseq_internal.seq_sub_table s "
                             "  WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
                             "                              WHERE relname = '{}');",
                             k_sample_table)) == 1);
-    // The sub-table relation has positive bytes (one fragment row × ~8 KiB).
+    // The new fragment relation must occupy space on disk.
     const long long sub_size = query_scalar_int(ctx,
         fmt::format("SELECT pg_relation_size(s.sub_table_relid)::bigint "
                     "  FROM bioseq_internal.seq_sub_table s "

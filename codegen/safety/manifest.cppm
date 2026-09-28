@@ -28,7 +28,7 @@ struct safety_manifest_overload {
     bool injected_call_context{};
 };
 
-/// Complete generated-wrapper ownership for one public FMGR symbol.
+/// Generated wrapper and SQL overloads that share one exported C function.
 struct safety_manifest_owner {
     std::string public_symbol;
     std::string finfo_symbol;
@@ -38,7 +38,7 @@ struct safety_manifest_owner {
     std::vector<safety_manifest_overload> overloads;
 };
 
-/// Parsed SQL code-generation authority consumed by safety analysis.
+/// SQL manifest entries used to find the generated wrappers for safety analysis.
 struct safety_manifest {
     std::uint32_t schema_revision{1};
     std::string authority_mode;
@@ -48,7 +48,7 @@ struct safety_manifest {
     std::vector<safety_manifest_owner> owners;
 };
 
-/// Exact live ownership cardinalities expected from the SQL manifest.
+/// Expected SQL function counts and names that share a C wgapper.
 struct manifest_contract {
     std::size_t expected_parent_count{272};
     std::size_t expected_symbol_count{270};
@@ -241,7 +241,9 @@ inline void validate_runtime_sql_identity(
 
 }  // namespace manifest_detail
 
-/// Parses and closes a generated SQL manifest over current wrapper ownership.
+/// Reads a SQL manifest and checks that every SQL function has one  wrapper owner.
+/// The function counts, exported symbols, and shared overload groups must
+/// match the supplied contract.
 [[nodiscard]] inline safety_manifest parse_safety_manifest(
     std::string_view text,
     const manifest_contract& contract = {}) {

@@ -1,14 +1,11 @@
 /**
  * @file planner_hook.cppm
- * @brief Planner and utility hooks for columnar scans and writes.
+ * @brief Add Bioseq aggregation and index scans to eligible PostgreSQL plans.
  *
- * Top-level planner_hook and ProcessUtility_hook used to splice the
- * bioseq custom scan into query plans. Responsibilities:
- *   - Walk the planned tree and rewrite aggregation nodes to use the
- *     vectorised aggregator when the input is a bioseq columnar table.
- *   - Rewrite IndexScan nodes to the bioseq IndexScan custom node.
- *   - Detect CREATE TABLE AS queries and disable parallel insert so they
- *     work with the columnar writer.
+ * The planner hook validates mmsearch options and binds match-result helpers
+ * before trying optional plan rewrites. It  also clears parallelModeNeeded
+ * for queries detected as CREATE TABLE AS. The utility hook logs column
+ * definitions for CREATE TABLE USING bioseq.
  */
 module;
 
@@ -42,12 +39,10 @@ struct plan_tree_mutator_context
 	bool vectorized_aggregation;
 };
 
-/** @brief Tests whether a plan is the scalar Bioseq slice projection.
- *
- * BioseqSliceProject publishes ordinary scalar Datums. Its CustomName is the
- * registered CustomScanMethods identity used when planned trees are rebuilt,
- * so require that exact name rather than treating every CustomScan as a
- * vector-column producer. */
+/** @brief Check whether a plan is BioseqSliceProject.
+ * Its output contains ordinary scalar Datums, so aggregates above it must
+ * keep scalar execution. The regivtered CustomName identifies copied plans.
+ */
 [[nodiscard]] static inline bool is_bioseq_slice_project_scan(
 		const Plan* plan) noexcept {
 	if (plan == nullptr || !IsA(plan, CustomScan))
@@ -61,12 +56,11 @@ struct plan_tree_mutator_context
 			"BioseqSliceProject") == 0;
 }
 
-/** @brief Detects an executor-owned mmsearch expression on a Bioseq scan.
- *
- * BioseqScan removes its executor-owned mmsearch from Plan.qual and stores
- * the expression in custom_exprs[3].  Aggregate eligibility must inspect that
- * private expression slot as well as the ordinary targetlist/qual trees.
- * VectorAgg cannot consume the scalar, per-match rows published by this scan. */
+/** @brief Check the mmsearch expression owned by a BioseqScan.
+ * The scan stores it in custom_exprs[3] after removing it from Plan.qual.
+ * Vector-aggregate checks must inspect this slot because mmsearch produces
+ * a scalar row for each match.
+ */
 [[nodiscard]] static inline bool bioseq_scan_owns_mmsearch(
 		const CustomScan* custom_scan) {
 	constexpr int owned_mmsearch_expression_index = 3;
@@ -83,7 +77,7 @@ struct plan_tree_mutator_context
 			custom_scan->custom_exprs, owned_mmsearch_expression_index)));
 }
 
-/// @brief Allocates a shallow PostgreSQL-memory-context copy of a plan node.
+/// @brief Make a shallow plan-node copy in the current PostgreSQL memory context.
 template<typename p_plan_node>
 [[nodiscard]] inline p_plan_node* copy_plan_node(const p_plan_node* source) {
 	p_plan_node* cloned = static_cast<p_plan_node*>(palloc(sizeof(p_plan_node)));
@@ -92,12 +86,8 @@ template<typename p_plan_node>
 }
 
 
-/** @brief Tests whether an index belongs to a Bioseq column table.
- *
- * Returns true when the given index is defined on a
- * table that uses the bioseq columnar access method. Used during planning
- * to decide whether an IndexScan should be wrapped in the bioseq custom
- * scan.
+/** @brief Check whether an index belongs to a Bioseq columnar  table.
+ * This decides whether an IndexScan can use Bioseq's custom index scan.
  */
 static bool
 index_belongs_to_column_table(Oid index_oid, Oid column_table_am_oid)
@@ -129,14 +119,10 @@ index_belongs_to_column_table(Oid index_oid, Oid column_table_am_oid)
 	return index_on_bioseq_column;
 }
 
-/*
- * aggref_args_mutator rewrites the argument expressions of a single Aggref.
- * OpExpr/DistinctExpr/NullIfExpr nodes (grouped via
- * try_cast_pg_operator_expression) get opfuncid pointed at the vectorised
- * implementation; any other expression sitting directly under an Aggref-arg
- * TargetEntry must be a plain Var or the mutation is rejected. The parent
- * node is threaded through aggref_args_state so the TargetEntry-parent check
- * still fires exactly where it did when the parent was the walker context.
+/* Rewrite aggregate arguments to call supported vector operations.
+ * Binary operators must have a supported column/constant argument pattern
+ * Other expressions directly below an argument TargetEntry must be Vars.
+ * Track the parent node to enforce that restriction during traversal.
  */
 struct aggref_args_state {
 	Node* parent = nullptr;
@@ -168,7 +154,7 @@ struct aggref_args_mutator {
 			return pg_node_mutation::replace_with(to_pg_node(op_expr_node));
 		}
 
-		/* This should handle aggregates that have non var(column) as argument*/
+		/* Reject unsupported expressions used directly as aggregate arguments. */
 		if (state.parent != nullptr
 			&& pg_node_view{state.parent}.is_type<TargetEntry>()
 			&& !node.is_type<Var>())
@@ -182,11 +168,9 @@ struct aggref_args_mutator {
 	}
 };
 
-/*
- * expr_mutator runs over a target-list / qual expression tree and rewrites
- * Aggref nodes so their aggfnoid points at the vectorised variant. DISTINCT
- * / FILTER are unsupported and raise an error up-front. The Aggref is deep
- * copied before its args are rewritten via aggref_args_mutator.
+/* Copy aggregate expressions and select their vector implementations.
+ * Rewrite their arguments as  well. DISTINCT and FILTER aggregates are
+ * rejected here so the caller can keep ordinary execution.
  */
 struct expr_mutator_state {};
 
@@ -231,14 +215,9 @@ struct expr_mutator {
 };
 
 
-/*
- * plan_tree_mutator rewrites the plan tree (driven by mutate_pg_plan_tree).
- * CustomScan nodes get a vectorization flag appended; Agg nodes get replaced
- * with the bioseq aggregator custom node; IndexScan nodes on columnar
- * relations get wrapped in the bioseq IndexScan custom node. The adapter
- * calls check_stack_depth() per node and reassigns lefttree/righttree, so
- * the replacement contract lives in the returned pg_plan_mutation rather
- * than in ad hoc child recursion.
+/* Rewrite supported aggregate and, index-scan nodes. Mark BioseqScan
+ * children when they must supply vectors to an aggregate. The returned
+ * mutation tells the walker whethr to replace a node or visit its children.
  */
 struct plan_tree_mutator {
 	[[nodiscard]] pg_plan_mutation
@@ -285,12 +264,10 @@ struct plan_tree_mutator {
 			if (!bioseq::settings::vectorization::enabled)
 				return pg_plan_mutation::descend();
 
-			/* SliceProject owns lazy sequence expressions but deliberately
-			 * publishes the resulting arguments through PostgreSQL's scalar slot
-			 * ABI.  Rewriting this Agg would make vector transition functions cast
-			 * those scalar Datums to vector_column*.  Recurse through the owner with
-			 * scalar aggregation state so its BioseqScan child receives a false
-			 * vectorized-aggregate flag, then restore the caller's traversal state. */
+			/* SliceProject returns scalar values. Keep this aggregate and its
+			 * BioseqScan child in scalar mode so vector functions cannot treat
+			 * ordinary Datums as vector_column pointers. Restore the surrounding
+			 * traversal mode after visiting the children. */
 			if (is_bioseq_slice_project_scan(agg_node->plan.lefttree)) {
 				bioseq_log<logging_level::debug>("[bioseq] pg: plan_tree_mutator() Agg has BioseqSliceProject child -- keeping scalar aggregate");
 				const bool saved_vectorized_aggregation =
@@ -308,19 +285,10 @@ struct plan_tree_mutator {
 				bioseq_log<logging_level::debug>("[bioseq] pg: plan_tree_mutator() Agg has CustomScan child");
 				CustomScan* aggregate_input = reinterpret_cast<CustomScan*>(
 					agg_node->plan.lefttree);
-				/*
-				 * Skip the vectorised-aggregator rewrite when the Agg
-				 * pulls a value from a bioseq.<projection>(...) call or
-				 * an mmsearch FuncExpr. Those go through the BioseqScan's
-				 * placeholder-Const rewrite at execution time, which
-				 * yields a regular tuple slot — not the vector-typed
-				 * slot the vectorised aggregator expects. Without this
-				 * guard the vectorised aggregator engages, dereferences
-				 * the regular slot as if it were a vector_tuple_table_slot_storage,
-				 * and crashes with a SIGSEGV (observed for
-				 * `SELECT MIN(bioseq.target_start(a)) FROM ... WHERE
-				 *  mmsearch(seq, '...')`).
-				 */
+				/* Match projections and mmsearch produce  scalar tuple slots.
+				 * For example, MIN(bioseq.target_start(a)) aggregates one scalar
+				 * value per match. Keep ordinary aggregation here because VectorAgg
+				 * expects vector_tuple_table_slot_storage and would misread the slot. */
 				const bool agg_input_uses_bioseq_projection =
 					bioseq_expr_uses_bioseq_projection(
 						reinterpret_cast<Node*>(agg_node->plan.targetlist))
@@ -366,15 +334,9 @@ struct plan_tree_mutator {
 
 					plan_tree_context.vectorized_aggregation = true;
 
-					/*
-					 * plan_tree_mutator is a *replacing* mutator: when it
-					 * encounters an IndexScan or CustomScan it returns a
-					 * new node that takes the place of the input. The
-					 * cursor reassigns lefttree / righttree on the original
-					 * Agg before we graft them onto the vectorized
-					 * aggregator, so any nested rewrites land in its
-					 * children. (&agg_node->plan aliases the input Plan.)
-					 */
+					/* Rewrite the original aggregate's children before attaching them
+					 * to the vector aggregate. Use the returned child pointers so nested
+					 * index-scan replacements remain in the plan. */
 					Plan* recursed_agg_plan = cursor.descend_children(&agg_node->plan);
 
 					vectorized_agg_node->scan.plan.lefttree = recursed_agg_plan->lefttree;
@@ -424,11 +386,8 @@ struct plan_tree_mutator {
 	}
 };
 
-/*
- * process_utility_hook watches DDL statements for CREATE TABLE ... USING
- * columnar so that logging can surface column definitions for diagnostics.
- * Downstream behaviour is delegated to the previous hook (or the standard
- * handler) regardless of logging outcome.
+/* Log column definitions for CREATE TABLE USING bioseq, then pass the
+ * statement to the previous utility hook or PostgreSQL's standard handler
  */
 static void process_utility_hook(
 	PlannedStmt* pstmt,
@@ -471,11 +430,9 @@ static void process_utility_hook(
 	}
 }
 
-/*
- * query_may_be_create_table_as returns true if the query string (case-insensitively)
- * contains the keywords CREATE, TABLE, AS in order. This is a textual
- * heuristic; false positives are possible but minimised by requiring the
- * three tokens to appear sequentially.
+/* Guess whether query text contains CREATE TABLE AS by finding those
+ * strings in order, ignoring case. This  does not parse SQL, so names,
+ * comments or quoted text can also matc.
  */
 static bool query_may_be_create_table_as(const char* query) {
     bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() entered");
@@ -517,11 +474,9 @@ static bool query_may_be_create_table_as(const char* query) {
     return true;
 }
 
-/*
- * column_planner_hook is invoked once per SELECT plan. It delegates to the
- * previous hook (or standard_planner) and then runs the plan-tree mutator
- * over the result to splice in the vectorised aggregator / IndexScan. If
- * the mutation raises an error we revert to the saved plan tree.
+/* Run the previous planner, bind match helpers, then try Bioseq
+ * aggregation and index-scan rewrites for eligible SELECT plans. If an
+ * optional rewrite raises a PostgreSQL error, restore the saved plan pointers.
  */
 static PlannedStmt*
 column_planner_hook(Query* parse,
@@ -535,10 +490,8 @@ column_planner_hook(Query* parse,
 {
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() entered");
 
-	/* Validate the analyzed tree before standard_planner (or another planner
-	 * hook) can inline a volatile SQL wrapper around aligner_options into an
-	 * otherwise indistinguishable Const.  Ownership is allowed only for a
-	 * statement-stable third argument. */
+	/* Check mmsearch options before planning can fold a volatile SQL wrapper
+	 * into a Const. The third argument must stay fixed for the statement. */
 	bioseq_validate_raw_mmsearch_options(parse);
 
 	PlannedStmt* stmt;
@@ -559,18 +512,14 @@ column_planner_hook(Query* parse,
 	}
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() upstream planner returned");
 
-	/* standard_planner has now assigned final Plan.plan_node_id values across
-	 * the main tree and every subplan.  Resolve match-result helper sites before
-	 * any fast return or optional vector/index rewrite so prepared plans,
-	 * rescans, LATERAL owners, and copied custom nodes retain one stable owner
-	 * identity.  Ambiguity is a semantic planning error and must not enter the
-	 * vectorization fallback catch below. */
+	/* Final plan-node ids identify the scans that own match-result helpers.
+	 * Bind them before any early  return or optional rewrite so copies and
+	 * rescans keep the same owner. Ambiguous, ownership must raise a planning
+	 * error outside the optional vectorization fallback. */
 	bioseq_finalize_match_helper_bindings(stmt);
 
-	/*
-	 * In the case of a CREATE TABLE AS query, we are not able to successfully
-	 * drop out of a parallel insert situation. Disable parallelism for those.
-	 */
+	/* Clear the parallel-mode flag for possible CREATE TABLE AS queries,
+  * which may write through the columnar table access method. */
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() checking for CREATE TABLE AS");
 	if (parse->commandType == CMD_SELECT)
 	{
@@ -582,10 +531,10 @@ column_planner_hook(Query* parse,
 	}
 
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() checking vectorization preconditions");
-	if (!(bioseq::settings::vectorization::enabled			/* Vectorization should be enabled */
-			|| bioseq::settings::planner::index_scan::enabled)				/* or BioseqColumn Index Scan */
-		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
-		|| list_length(stmt->rtable) != 1)		/* JOINs are not yet supported */
+	if (!(bioseq::settings::vectorization::enabled			/* Vector aggregation enabled */
+			|| bioseq::settings::planner::index_scan::enabled)				/* Bioseq index scans enabled */
+		|| stmt->commandType != CMD_SELECT		/* Rewrites require SELECT */
+		|| list_length(stmt->rtable) != 1)		/* These rewrites require one range-table entry */
 		{
 			bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
 				bioseq::settings::vectorization::enabled, bioseq::settings::planner::index_scan::enabled,
@@ -653,11 +602,9 @@ column_planner_hook(Query* parse,
 	return stmt;
 }
 
-/** @brief Installs the Bioseq planner and utility hooks.
- *
- * Saves and chains the existing planner_hook and
- * ProcessUtility_hook, saving the previous hooks so they can be chained.
- * Also registers the custom-scan node types used by the plan rewriter.
+/** @brief Install Bioseq planner and utility hooks.
+ * Keep  the previous hooks so calls can be chained. Register the vector
+ * aggregate and index-scan node types used by the plan rewriter
  */
 export void install_column_planner_hooks()
 {

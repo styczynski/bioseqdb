@@ -1,6 +1,6 @@
 /**
  * @file implementation_parts/persisted_gpu_target.cppm
- * @brief Owns authenticated persisted grouped-SoA GPU target preparation.
+ * @brief Prepare compatible stored MPF and MPS indexes for Vulkan seeding.
  */
 module;
 
@@ -8,7 +8,7 @@ module;
 
 extern "C" {
 #include "postgres.h"
-// Anchor PG18+ tuple-descriptor inline helpers before importing catalog modules.
+// Include PostgreSQL 18+ tuple-descriptor helpers before  the catalog modules.
 #include "access/tupdesc.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
@@ -53,7 +53,7 @@ namespace bioseq::simd {
 
 namespace {
 
-/** GPU target preparation admits the seed stage only; chain/alignment remain independent. */
+/** Check the selected GPU seed configuration. Chaining and alignment are checked separately. */
 [[nodiscard]] bool selected_gpu_seed_preparation_tuple_valid(
     const std::uint8_t alphabet_code,
     const std::uint8_t storage_unit_byte_width,
@@ -544,8 +544,8 @@ void batch_processor::prepare_gpu_persisted_mpf_target(
         manifest,
         session.read_live_storage_descriptor_once(identity),
         minimizer_fragment_image_mapped_open_validation::full_metadata);
-    // The borrowing reader must unwind before its transferred mmap authority,
-    // including failures while allocating the resident cache below.
+    // Declare the mapping owner before the reader so the reader is destroyed
+    // first if later preparation throws.
     bioseq::storage::indexing::mapped_minimizer_fragment_lease_guard mapping_guard;
     auto mapped_owner = mapped_image.borrow_mapping_token();
     auto reader = prepared_minimizer_fragment_reader::open(
@@ -565,8 +565,8 @@ void batch_processor::prepare_gpu_persisted_mpf_target(
                          reader ? 0u : static_cast<unsigned>(reader.error())));
         return;
     }
-    // Finishing the session destroys its metadata. Preserve only the scalar
-    // needed below; the reader already owns its independently decoded directory.
+    // Save the directory count before finish destroys the, session metadata.
+    // The reader already owns its decoded directory
     const std::size_t metadata_directory_entry_count = metadata.directory.entries().size();
     minimizer_generation_read_stats read_stats =
         session.finish_mapped_minimizer_fragment_payload();
@@ -626,8 +626,8 @@ void batch_processor::prepare_gpu_persisted_mpf_target(
         fail(ERRCODE_DATA_CORRUPTED, "MPF mapped source lost its mmap lifetime authority");
         return;
     }
-    // One MPF statement owner publishes at most one resident. Device allocation
-    // admission is exact; a zero cache limit disables unrelated LRU policy.
+    // Keep this target's GPU index in its own cache. A zero byte limit disables
+    // cache eviction. GPU allocations still need memory permits.
     auto cache = std::make_shared<bioseq::indexing::gpu_minimizer_index_cache>(0u);
     const std::uint64_t operation_identity =
         bioseq::indexing::next_gpu_source_direct_operation_identity();

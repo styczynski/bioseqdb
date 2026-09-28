@@ -1,9 +1,10 @@
 /**
  * @file sequence_typmod_test.cpp
- * @brief Verifies sequence typmods across supported alphabets and widths.
+ * @brief Tests sequence alphabets, storage widths, and casts.
  *
- * The cases cover text round trips, long SIMD encoding, and cross-typmod
- * casts. The template matrix takes alphabet names from the production pack.
+ * Checks text round trips for the lisjed DNA4 and DNA5 types, long DNA4 values,
+ * and conversions between storage widths. Builds without DNA5 must report
+ * that it is unsupported.
  */
 
 #include <fmt/format.h>
@@ -18,7 +19,7 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-/// Fails compilation when the alphabet fixture has no representative sample.
+/// Dependent false value for rejecting an alphabet without a test sample.
 template <class> inline constexpr bool always_false_v = false;
 
 /** @brief Returns a representative sequence for the selected production alphabet. */

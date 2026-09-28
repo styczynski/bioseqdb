@@ -1,6 +1,6 @@
 /**
  * @file sealed_seed_test.cpp
- * @brief Tests sealed shader-cache seed validation and publication.
+ * @brief Checks shader-cache manifests, saved file contents, and, atomic publication.
  */
 
 #include <cstdlib>
@@ -66,8 +66,7 @@ TEST_CASE("sealed shader cache manifest fixes exact AOT membership and bytes",
     CHECK(std::filesystem::file_size(
               gv::sealed_shader_cache_manifest_path(temp.path)) > 0u);
 
-    // Expected membership is a set at the API, but the stored wire image is
-    // canonical and exact. Reordering the request cannot change acceptance.
+    // Callers can list the expected keys in any order. The stored manifest uses sorted keys.
     const std::array reverse_expected{key_64, key_32};
     const auto loaded = gv::load_validated_sealed_shader_cache_manifest(
         temp.path, digest, reverse_expected);
@@ -136,8 +135,8 @@ TEST_CASE("sealed shader module uses the exact already-hashed metallib image",
     CHECK(shader_module_create_called);
     CHECK(shader_module_payload_matches);
 
-    // A fresh provider call sees the mutation and fails before Vulkan. The
-    // The verified image remains immutable and needs no pathname reopen.
+    // A fresh load must detect the changed file before creating a Vulkan module.
+    // The image loaded earlier keeps the bytes that already passed validation.
     shader_module_create_called = false;
     const auto rejected = gv::load_sealed_cached_module(
         VK_NULL_HANDLE,
@@ -169,8 +168,7 @@ TEST_CASE("process seed reads once and survives source mutation and deletion",
         gv::shader_kind::generate_units, 384u, 256u, 64u);
     const gv::shader_variant_key earlier_key = gv::make_shader_key(
         gv::shader_kind::generate_units, 384u, 256u, 32u);
-    // This intentionally matches producer traversal rather than manifest
-    // ordering; every production consumer uses the shared canonical contract.
+    // Pass keys in the producer's order and check that the cache sorts them for comparison.
     const std::array keys{key, earlier_key};
     const auto canonical = gv::canonical_sealed_shader_cache_keys(keys);
     REQUIRE(canonical);

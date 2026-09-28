@@ -1,10 +1,9 @@
 /**
  * @file symbol_counts.cppm
- * @brief Per-sequence symbol-rank histogram index.
+ * @brief Counts occurrences of each symbol in a sequence.
  *
- * NO_POSTGRES. `letter_to_rank` (which needs bioseq::pg_types::seq::dispatch_instance) lives
- * on the pg side (index_admin_pg.cppm) — pg_compact_sequence is not a NO_POSTGRES
- * module, so it cannot be named here.
+ * NO_POSTGRES. The index uses numeric alphabet ranks. PostgreSQL code
+ * converts query letters to those ranks before looking up their counts.
  */
 module;
 #include <algorithm>
@@ -26,10 +25,8 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::indexing {
 
 /**
- * @brief Counts each logical symbol rank in a lazy sequence.
- * @tparam p_alphabet Sequence alphabet whose ranks are counted
- * @param seq Sequence view to scan
- * @return Fixed-size histogram indexed by logical symbol rank
+ * @brief Counts each symbol in a lazy sequence.
+ * @return Array indexed by the alphabet's numeric symbol ranks.
  */
 template <sequence_alphabet p_alphabet>
 auto tally_symbol_counts(
@@ -47,10 +44,7 @@ auto tally_symbol_counts(
     return counts;
 }
 
-/**
- * @brief Stores the per-sequence logical symbol histogram.
- * @tparam p_storage Inline index storage implementation
- */
+/** @brief Stores each sequence's symbol counts in one inline index row. */
 template <class p_storage>
 struct symbol_counts_index {
     static_assert(is_index_chunked_storage_for<
@@ -62,12 +56,7 @@ struct symbol_counts_index {
     /// @brief Concrete storage type accepted by this index.
     using storage_type = p_storage;
 
-    /**
-     * @brief Builds and persists the histogram for one sequence.
-     * @tparam p_alphabet Sequence alphabet whose ranks are counted
-     * @param storage Destination inline storage
-     * @param seq Sequence view to scan
-     */
+    /** @brief Counts the sequence symbols and writes the resulting array to inline storage. */
     template <sequence_alphabet p_alphabet>
     static void build(
             p_storage& storage,
@@ -82,12 +71,7 @@ struct symbol_counts_index {
                 return chunk_no;
             });
     }
-    /**
-     * @brief Replaces the persisted histogram for one sequence.
-     * @tparam p_alphabet Sequence alphabet whose ranks are counted
-     * @param storage Destination inline storage
-     * @param seq Sequence view to scan
-     */
+    /** @brief Clears the stored symbol counts and builds them  again from the sequence. */
     template <sequence_alphabet p_alphabet>
     static void rebuild(
             p_storage& storage,
@@ -97,10 +81,9 @@ struct symbol_counts_index {
     }
 
     /**
-     * @brief Reads one persisted rank count when the index is present.
-     * @param storage Source inline storage
-     * @param rank Logical symbol rank to read
-     * @return Stored count, or `std::nullopt` when no histogram is present
+     * @brief Reads the stored count for one numeric symbol rank.
+     * @return The count, or std::nullopt when the index is absent
+     * Reports a storage error for a malformed array or an out-of-range rank.
      */
     static std::optional<std::int64_t> read_count(
             p_storage& storage,
@@ -129,7 +112,7 @@ template <> struct index_descriptor<symbol_counts_index> {
     static constexpr sequence_index_layout index_type = sequence_index_layout::sequence_inline;
     /// @brief Registry name of the symbol-count index.
     static constexpr std::string_view index_name = k_symbol_counts_index_name;
-    /// @brief Allows inexpensive histogram maintenance during insertion.
+    /// @brief Allows symbol counts to be built when the sequence is inserted.
     static constexpr bool allows_update_on_insert = true;
 };
 static_assert(

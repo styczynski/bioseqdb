@@ -1,8 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * Primary interface for bioseq_cache planner algorithms.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Exports planning helpers for exact results and reusable coverage.
  */
 export module bioseq.cache.pg.planner;
 

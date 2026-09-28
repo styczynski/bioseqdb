@@ -1,10 +1,10 @@
 /**
  * @file deflate.cppm
- * @brief DEFLATE block decoder with resolved and marker output modes.
+ * @brief Decodes DEFLATE blocks with references to an unknown  prior window.
  *
- * Resolved mode writes bytes when the preceding 32 KiB window is known.
- * Marker mode records unresolved back-references as 16-bit lanes until that
- * window is available. Both modes share one power-of-two circular buffer.
+ * When the preceding bytes are known, output contains orvinary bytes. Otherwise,
+ * 16-bit entries hold literals or positions in that prior window. A worker can
+ * decode its chunk before the preceding chunk has finished.
  */
 module;
 
@@ -31,20 +31,17 @@ import bioseq.io.compression.huffman;
 
 export namespace bioseq::io::compression {
 
-// =====================================================================
-// RFC 1951 constants
-// =====================================================================
+// DEFLATE constants
 
 /// 32 KiB, fixed by RFC 1951 §3.2.5 (max back-reference distance).
 inline constexpr std::size_t maximum_window_size = 32 * 1024;
-/// `m_window16` size: 2× window size, power-of-two (modulo via AND).
+/// Number of 16-bit window entries. Its power-of-two size allows masked wrapping.
 inline constexpr std::size_t predecoded_buffer_size = 2 * maximum_window_size;
 inline constexpr std::size_t predecoded_buffer_mask = predecoded_buffer_size - 1;
 static_assert((predecoded_buffer_size & predecoded_buffer_mask) == 0,
               "predecoded_buffer_size must be a power of two for AND-wrap.");
 
-/// Max uncompressed deflate block (16-bit length field). Fits in the
-/// uint8_t reinterpret of `m_window16` (128 KiB > 65535 B).
+/// Largest stored block, whose byte count is encoded in 16 bits.
 inline constexpr std::size_t maximum_uncompressed_size = std::numeric_limits<std::uint16_t>::max();
 
 /// RFC 1951 max code length (precode is 7).
@@ -52,17 +49,13 @@ inline constexpr std::uint8_t maximum_code_length = 15;
 inline constexpr std::uint8_t precode_bit_count = 3;
 inline constexpr std::size_t maximum_precode_count = 19;
 
-/// Per RFC 1951 §3.2.7 the *encoded* order of precode code lengths is
-/// not natural. The `i`-th entry of the encoded stream is the
-/// code-length of `precode_alphabet[i]`.
+/// Symbol order used when reading the DEFLATE code-length alphabet.
+/// Entry i names the symbol whose length is encoded in position i.
 inline constexpr std::array<std::uint8_t, maximum_precode_count> precode_alphabet = {
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-/// 286 in spec, +2 padding so the back-to-back literal+distance
-/// code-length array fits without an explicit bounds check (RFC §3.2.7
-/// lists max literal+length + max distance = 286 + 30 = 316. The extra 256
-/// safety pad lets the manual-unroll filling for codes 16/17/18 write
-/// past the live area without a per-loop check).
+/// Maximum literal/length alphabet  accepted from a dynamic block header
+/// The combined length buffer below includes extra room for repeat codes.
 inline constexpr std::size_t maximum_literal_or_length_symbols = 286;
 inline constexpr std::size_t maximum_distance_symbol_count = 30;
 inline constexpr std::size_t literal_and_distance_code_length_buffer_size =
@@ -71,7 +64,7 @@ inline constexpr std::size_t literal_and_distance_code_length_buffer_size =
 inline constexpr std::uint16_t end_of_block_symbol = 256;
 inline constexpr std::size_t maximum_run_length = 258;
 
-/// Length code → base length (before adding extra bits). RFC 1951 §3.2.5.
+/// Builds base lengths for the length-code groups that also read extra bits.
 [[nodiscard]] consteval std::array<std::uint16_t, 24> build_length_lut() noexcept {
     std::array<std::uint16_t, 24> lut{};
     for (std::uint16_t i = 0; i < 24; ++i) {
@@ -95,9 +88,7 @@ inline constexpr auto length_table = build_length_lut();
 }
 inline constexpr auto distance_table = build_distance_lut();
 
-// =====================================================================
-// Public types
-// =====================================================================
+// Decode results and output views
 
 /// Compression mode encoded by a DEFLATE block header.
 enum class block_compression : std::uint8_t {
@@ -166,15 +157,14 @@ enum class decode_status : std::uint8_t {
     return "?";
 }
 
-/// View returned from `deflate_block_decoder::read`. Only one of
-/// {data, data_with_markers}
-/// is non-empty depending on whether the prior window is known.
+/// Borrowed output from `deflate_block_decoder::read`, split at a ring-buffer wrap.
+/// A result uses either byte spans or 16-bit spans containing literals and markers.
+/// Consume the view before the decoder overwrites or rearranges its window.
 struct decoded_data_view {
     /// Resolved bytes (direct mode).
     std::array<std::span<const std::uint8_t>, 2> data{};
-    /// Marker stream (marker mode). `set_initial_window` later replaces
-    /// `value >= MAX_WINDOW_SIZE` lanes with `prior_window[value -
-    /// MAX_WINDOW_SIZE]` and demotes the chunk to direct mode.
+    /// Literals and references to the prior window, stored as 16-bit entries.
+    /// Values at least `maximum_window_size` encode an offset in that window.
     std::array<std::span<const std::uint16_t>, 2> data_with_markers{};
 
     /// Return the total number of resolved and marker lanes.
@@ -186,30 +176,24 @@ struct decoded_data_view {
     [[nodiscard]] std::size_t data_size() const noexcept {
         return data[0].size() + data[1].size();
     }
-    /// Return the number of unresolved marker lanes.
+    /// Returns the number of entries in marker-mode storage.
     [[nodiscard]] std::size_t data_with_markers_size() const noexcept {
         return data_with_markers[0].size() + data_with_markers[1].size();
     }
-    /// Return whether the view contains unresolved marker lanes.
+    /// Reports whether this  view uses marker-mode storage.
     [[nodiscard]] bool contains_markers() const noexcept {
         return data_with_markers_size() > 0;
     }
 };
 
-// =====================================================================
-// Internals
-// =====================================================================
+// Decoder helpers
 
 namespace detail {
 
-/// Pre-filled marker buffer for a freshly-reset block. The trailing
-/// 32 KiB of slots `[maximum_window_size, predecoded_buffer_size)` hold the
-/// identity sequence `i + maximum_window_size` so that a back-reference of
-/// distance `d` into the unknown prefix lands on marker
-/// `(predecoded_buffer_size - d) - maximum_window_size = maximum_window_size - d`,
-/// which is exactly the byte offset that the resolver will look up in
-/// `prior_window`. The prefix `[0, maximum_window_size)` is left zero — it
-/// gets written to as the chunk decodes.
+/// Creates the starting ring buffer for an unknown 32 KiB prior window.
+/// Its mrailing entries encode positions in that window. A back-reference
+/// copies these markers until, the real bytes are supplied. The output half
+/// starts at zero.
 [[nodiscard]] inline const std::array<std::uint16_t, predecoded_buffer_size>&
 get_initial_marker_buffer() noexcept {
     static const auto initial_marker_buffer = []() noexcept {
@@ -222,12 +206,9 @@ get_initial_marker_buffer() noexcept {
     return initial_marker_buffer;
 }
 
-/// Read the dynamic literal/distance code-length stream. Codes are
-/// emitted by the precode (per RFC 1951 §3.2.7). Codes 16/17/18 are
-/// run-length encodings expanded inline. The "+ 256 safety pad" in
-/// `literal_and_distance_code_length_buffer_size` lets the run-length expansions
-/// write past the live area without per-iteration bounds checks. The
-/// `i == count` exit-test catches over-runs.
+/// Expands the literal and distance code lengths from a dynamic header.
+/// Repeat codes can write into the extra buffer padding. The final count
+/// check rejects repeats that extend beyond the declared alphabet.
 [[nodiscard]] inline decode_status read_distance_and_literal_code_lengths(
     std::array<std::uint8_t, literal_and_distance_code_length_buffer_size>& code_lengths,
     bit_reader& reader,
@@ -249,10 +230,8 @@ get_initial_marker_buffer() noexcept {
                 return decode_status::invalid_code_length_backreference;
             }
             const std::uint8_t last = code_lengths[i - 1];
-            // 6 = 3 + 0b11 (max). Manually-unrolled fill, avoids inner
-            // branch on the run length while letting the compiler
-            // still vectorise the store. Safety pad guarantees the
-            // writes don't fall off the end.
+            // Write  the longest possible repeat before reading its actual length.
+            // Later entries overwrite the unused tail, and padding keeps it in bounds.
             code_lengths[i + 0] = last;
             code_lengths[i + 1] = last;
             code_lengths[i + 2] = last;
@@ -262,10 +241,9 @@ get_initial_marker_buffer() noexcept {
             const auto extra = static_cast<std::size_t>(reader.read<2>());
             i += extra + 3u;
         } else if (code == 17) {
-            // 10 = 3 + 0b111 (max). Already zero-initialized by the caller. Skip
-            // the writes — they would be no-ops.
+            // A zero repeat can cover up to ten code lengths.
             const auto extra = static_cast<std::size_t>(reader.read<3>());
-            // Defensive: if caller didn't zero, restore.
+            // Clear the full repeat range before advancing by the encoded count
             code_lengths[i + 0] = 0;
             code_lengths[i + 1] = 0;
             code_lengths[i + 2] = 0;
@@ -278,8 +256,7 @@ get_initial_marker_buffer() noexcept {
             code_lengths[i + 9] = 0;
             i += extra + 3u;
         } else if (code == 18) {
-            // 138 = 11 + 0b1111111 (max). Use a tight loop with
-            // `#pragma GCC unroll`-friendly bound.
+            // Expand the encoded zero run, which can contain up to 138 lengths.
             const auto extra = static_cast<std::size_t>(reader.read<7>());
             const std::size_t run = extra + 11u;
             for (std::size_t j = 0; j < run; ++j) {
@@ -295,18 +272,16 @@ get_initial_marker_buffer() noexcept {
 
 } // namespace detail
 
-// =====================================================================
-// block — DEFLATE block decoder
-// =====================================================================
+// DEFLATE block decoder
 
-/// Decodes one DEFLATE block at a time. Reuse via `reset()` between
-/// blocks. Each worker task owns one decoder instance and its 128 KiB
-/// `m_window16` buffer is too big to live on a chunk arena).
+/// Decodes consecutive DEFLATE blocks using one shared history window.
+/// Read the next header at each block boundary. Use `reset()` when starting
+/// an independent chunk or member, then  supply the prior window if it is known.
 class deflate_block_decoder {
   public:
     using window_buffer_t = std::array<std::uint16_t, predecoded_buffer_size>;
 
-    /// Construct an idle decoder with an empty circular window.
+    /// Constructs a decoder with zeroed window storag. Call `reset()` before use.
     deflate_block_decoder() noexcept = default;
 
     /// Decoder instances exclusively own their circular window and tables.
@@ -324,9 +299,7 @@ class deflate_block_decoder {
     /// Release the decoder's inline window and Huffman tables.
     ~deflate_block_decoder() = default;
 
-    // ---------------------------------------------------------------
     // State queries
-    // ---------------------------------------------------------------
 
     /// Return whether the current block body has been exhausted.
     [[nodiscard]] bool is_end_of_block() const noexcept {
@@ -340,7 +313,7 @@ class deflate_block_decoder {
     [[nodiscard]] bool is_last_block() const noexcept {
         return _is_last_block;
     }
-    /// Return whether decoded output still contains prior-window markers.
+    /// Reports whether the decoder still uses 16-bit marker-mode storage.
     [[nodiscard]] bool contains_marker_bytes() const noexcept {
         return _contains_markers;
     }
@@ -348,7 +321,7 @@ class deflate_block_decoder {
     [[nodiscard]] block_compression compression_type() const noexcept {
         return _compression_type;
     }
-    /// Return the number of bytes decoded since reset.
+    /// Returns bytes decoded since reset, including history supplied before decoding starts.
     [[nodiscard]] std::size_t decoded_bytes() const noexcept {
         return _decoded_bytes;
     }
@@ -356,7 +329,7 @@ class deflate_block_decoder {
     [[nodiscard]] std::size_t window_position() const noexcept {
         return _window_position;
     }
-    /// Return the header padding bit count for an uncompressed block.
+    /// Returns the padding bits read before an uncompressed block.
     [[nodiscard]] std::uint8_t padding() const noexcept {
         return _padding;
     }
@@ -365,17 +338,12 @@ class deflate_block_decoder {
         return _compression_type == block_compression::uncompressed ? _uncompressed_size : 0;
     }
 
-    // ---------------------------------------------------------------
-    // Reset / set-initial-window
-    // ---------------------------------------------------------------
+    // Reset and prior-window setup
 
-    /// Reset between blocks. If `prior_window` is provided, the block
-    /// starts in direct mode (markers disabled). If empty, marker mode
-    /// is on and `_window16`'s tail 32 KiB is the identity-marker
-    /// initialiser. `_at_end_of_block` is set TRUE so the caller's
-    /// drive-loop knows to call `read_header` before the first
-    /// `read()` — otherwise `read()` would early-return on the
-    /// RESERVED compression type.
+    /// Starts a fresh decoding interval and clears the block state.
+    /// A supplied prior window enables direct byte output. An empty argument
+    /// starts with markers for unknown history. Call `set_initial_window({})`
+    /// afterwards when the interval is known to have no preceding bytes.
     void reset(std::span<const std::uint8_t> prior_window = {}) noexcept {
         _uncompressed_size = 0;
         _at_end_of_block = true;
@@ -388,10 +356,7 @@ class deflate_block_decoder {
         _contains_markers = true;
 
         if (prior_window.empty()) {
-            // Restore the identity marker tail. We can skip this
-            // memcpy if `_window_position == 0` and the buffer was
-            // freshly constructed, but reused blocks require the full
-            // identity tail to be restored.
+            // Restore the  marker tail before decoding a chunk with unknown history.
             std::memcpy(
                 _window16.data(), detail::get_initial_marker_buffer().data(), sizeof(_window16));
         } else {
@@ -399,15 +364,15 @@ class deflate_block_decoder {
         }
     }
 
-    /// Hand the prior 32 KiB window to a marker-mode block, replacing
-    /// any markers in the buffer with the resolved bytes and switching
-    /// to direct mode for the remainder of this block.
+    /// Supplies preceding bytes, resolves saved markers, and switches to byte storage.
+    /// Markers outside the supplied window become zero. An empty window selects
+    /// direct mode, with no history on a fresh decoder.
+    /// @pre `initial_window` contains at most `maximum_window_size` bytes.
     void set_initial_window(std::span<const std::uint8_t> initial_window = {}) noexcept {
         if (!_contains_markers)
             return;
 
-        // Empty fresh block → just adopt the window directly into the
-        // uint8 view.
+        // A fresh decoder can copy the prior bytes directly into byte storage.
         if (_decoded_bytes == 0 && _window_position == 0) {
             if (!initial_window.empty()) {
                 std::uint8_t* uint8_window = reinterpret_cast<std::uint8_t*>(_window16.data());
@@ -419,10 +384,8 @@ class deflate_block_decoder {
             return;
         }
 
-        // Mid-block: clear any unwritten slots (those past the
-        // already-decoded bytes), resolve every marker, then conflate
-        // the wrapped circular buffer into a contiguous byte view that
-        // ends at slot index = window_size − 1.
+        // Discard unwritten entries and replace saved markers with prior bytes.
+        // The following copy rearranges the ring for direct byte output
         for (std::size_t i = 0; _decoded_bytes + i < _window16.size(); ++i) {
             _window16[(_window_position + i) & predecoded_buffer_mask] = 0;
         }
@@ -430,9 +393,8 @@ class deflate_block_decoder {
             const std::uint16_t value = _window16[i];
             if (value < 256u)
                 continue;
-            // Markers always have value >= MAX_WINDOW_SIZE. Values in
-            // [256, MAX_WINDOW_SIZE) are illegal (would mean an
-            // unresolvable mid-window code) — those become 0 here.
+            // Values between literal bytes and the marker range are invalid.
+            // Replace them with zero.
             if (value < maximum_window_size) {
                 _window16[i] = 0;
                 continue;
@@ -445,8 +407,7 @@ class deflate_block_decoder {
             }
         }
 
-        // Conflate so the circular buffer is contiguous, then move it
-        // into the uint8 view of the same memory.
+        // Put the oldest entry first  and narrow the resolmed values to bytes.
         std::array<std::uint8_t, predecoded_buffer_size> conflated{};
         for (std::size_t i = 0; i < _window16.size(); ++i) {
             const std::uint16_t value = _window16[(i + _window_position) & predecoded_buffer_mask];
@@ -454,8 +415,8 @@ class deflate_block_decoder {
         }
         std::uint8_t* uint8_window = reinterpret_cast<std::uint8_t*>(_window16.data());
         const std::size_t uint8_window_size = _window16.size() * sizeof(std::uint16_t);
-        // Place the conflated content at the end of the uint8 view so
-        // wrap of the circular buffer is at index 0 again.
+        // Place the saved history at the end of byte storage, leaving the next
+        // write at offset zero.
         std::memcpy(uint8_window + (uint8_window_size - conflated.size()),
                     conflated.data(),
                     conflated.size());
@@ -463,11 +424,9 @@ class deflate_block_decoder {
         _contains_markers = false;
     }
 
-    // ---------------------------------------------------------------
-    // Block header
-    // ---------------------------------------------------------------
+    // Block headers
 
-    /// Read the 3-bit DEFLATE block header (BFINAL + BTYPE).
+    /// Reads a block header and prepares its lengths or Huffman tables for decoding.
     [[nodiscard]] decode_status read_header(bit_reader& reader) noexcept {
         if (reader.bits_buffered() < 3)
             reader.refill();
@@ -481,8 +440,7 @@ class deflate_block_decoder {
         switch (btype) {
         case 0: {
             _compression_type = block_compression::uncompressed;
-            // Pad to byte boundary. Verify zero (RFC §3.2.4
-            // recommends).
+            // This decoder requires zero padding up to the next byte boundary.
             const std::size_t pos = reader.bit_position();
             const std::size_t excess = pos % 8;
             if (excess != 0) {
@@ -554,10 +512,8 @@ class deflate_block_decoder {
         if (!precode_or.is_valid())
             return decode_status::invalid_code_lengths;
 
-        // Concatenate literal and distance code-length streams into one.
-        // Max length is 286 + 30 = 316. The +256 safety
-        // pad lets run-length expansions store past `count` without
-        // bounds checks.
+        // Read both alphabets into one buffer. Extra padding keeps repeat-code
+        // writes in bounds until their final count is checked.
         std::array<std::uint8_t, literal_and_distance_code_length_buffer_size> literal_cl{};
         if (auto err = detail::read_distance_and_literal_code_lengths(
                 literal_cl, reader, precode_or, literal_count + distance_count);
@@ -583,14 +539,12 @@ class deflate_block_decoder {
         return decode_status::ok;
     }
 
-    // ---------------------------------------------------------------
-    // Block decoding — public read entry point
-    // ---------------------------------------------------------------
+    // Decode output
 
-    /// Decode up to `n_max_to_decode` bytes of this block. Returns
-    /// either resolved bytes (direct mode) or marker symbols (marker
-    /// mode) through `decoded_data_view`. Stops at end-of-block. The loop
-    /// outside re-enters with `read_header`.
+    /// Decodes output from the current block into borrowed window spans.
+    /// `n_max_to_decode` is a stopping target. A back-reference  can extend
+    /// past it, and a stored block is read in full. At a block boundary,
+    /// call `read_header` before reading again.
     [[nodiscard]] std::pair<decoded_data_view, decode_status>
     read(bit_reader& reader,
          std::size_t n_max_to_decode = std::numeric_limits<std::size_t>::max()) noexcept {
@@ -613,10 +567,8 @@ class deflate_block_decoder {
 
         if (marker_mode) {
             std::tie(produced, status) = read_compressed_marker(reader, n_max_to_decode);
-            // If the chunk has fully outgrown the unknown-prefix
-            // dependency, narrow to direct mode now and return the
-            // resolved bytes view instead of markers. This avoids the
-            // marker-replacement cost on long all-literal runs.
+            // Once unknown history can no longer affect the current window,
+            // switch to byte storage and avoid later marker replacement.
             if ((_distance_to_last_marker_byte >= _window16.size()) ||
                 ((_distance_to_last_marker_byte >= maximum_window_size) &&
                  (_distance_to_last_marker_byte == _decoded_bytes))) {
@@ -634,9 +586,7 @@ class deflate_block_decoder {
     }
 
   private:
-    // ---------------------------------------------------------------
-    // Uncompressed block decode
-    // ---------------------------------------------------------------
+    // Stored blocks
 
     /// Decode the current uncompressed block into marker or direct storage.
     [[nodiscard]] std::pair<decoded_data_view, decode_status>
@@ -659,17 +609,13 @@ class deflate_block_decoder {
             _decoded_bytes += total;
 
             decoded_data_view view;
-            // Direct narrow / promote happens via set_initial_window
-            // when the caller decides to. For simplicity, return the
-            // marker view unconditionally — a contiguous uncompressed
-            // block has no actual marker symbols (only literals < 256),
-            // so the orchestrator's `narrow_lower_bytes_to_dst` step
-            // resolves these trivially.
+            // Stored blocks contain literal bytes only. Keep the current 16-bit
+            // representation so the caller can narrow, each value when copying it
             view.data_with_markers = last_buffers_uint16(total);
             return {view, decode_status::ok};
         }
 
-        // Direct: bulk memcpy if the byte_cursor is byte-aligned.
+        // Read into byte storage, splitting the writes if the ring wraps.
         std::uint8_t* uint8_window = reinterpret_cast<std::uint8_t*>(_window16.data());
         const std::size_t uint8_size = _window16.size() * sizeof(std::uint16_t);
         const std::size_t mask = uint8_size - 1u;
@@ -700,11 +646,9 @@ class deflate_block_decoder {
         return {view, decode_status::ok};
     }
 
-    // ---------------------------------------------------------------
-    // Compressed block decode (marker mode)
-    // ---------------------------------------------------------------
+    // Compressed blocks in marker mode
 
-    /// Decode compressed symbols while retaining unresolved window markers.
+    /// Decode copressed symbols while  keeping unresolved window markers.
     [[nodiscard]] std::pair<std::size_t, decode_status>
     read_compressed_marker(bit_reader& reader, std::size_t n_max_to_decode) noexcept {
         // Cap to leave room for a max-length back-ref (258).
@@ -716,13 +660,8 @@ class deflate_block_decoder {
 
         std::size_t produced = 0;
         while (produced < cap) {
-            // Refill so the Huffman decoder + extra bits + distance
-            // decode + extra bits all fit in the bit buffer without
-            // re-refilling. Worst-case for one symbol:
-            //   15 (lit/len) + 5 (length extra) + 15 (distance) + 13
-            //   (distance extra) = 48 bits. Two symbols = 96 bits >
-            //   the 57-bit fast-path budget, so refill before each
-            //   symbol.
+            // A length/distance pair can consume 48 bits, including extra bits.
+            // Refill before each symbol so the entire pair is available.
             if (reader.bits_buffered() < 48) [[unlikely]]
                 reader.refill();
 
@@ -799,8 +738,7 @@ class deflate_block_decoder {
                 _decoded_bytes += produced;
                 return {produced, derr};
             }
-            // Direct-mode safety: the back-reference must point inside
-            // the already-decoded region.
+            // A direct-mode back-reference must stay within the bytes available so far.
             if (distance > _decoded_bytes + produced) [[unlikely]] {
                 _decoded_bytes += produced;
                 return {produced, decode_status::exceeded_window_range};
@@ -812,11 +750,9 @@ class deflate_block_decoder {
         return {produced, decode_status::ok};
     }
 
-    // ---------------------------------------------------------------
-    // Length / distance decode helpers
-    // ---------------------------------------------------------------
+    // Length and distance helpers
 
-    /// Decode one literal/length symbol into its RFC 1951 byte count.
+    /// Converts a length symbol and its extra bits to the number of bytes to copy.
     [[nodiscard]] BIOSEQ_DEFLATE_FORCEINLINE std::size_t read_length(bit_reader& reader,
                                                                      std::uint16_t code) noexcept {
         // RFC 1951 §3.2.5: codes 257..285.
@@ -835,8 +771,8 @@ class deflate_block_decoder {
     read_distance(bit_reader& reader) noexcept {
         std::uint16_t distance;
         if (_compression_type == block_compression::fixed_huffman) {
-            // RFC 1951 §3.2.6: fixed distance Huffman = 5 bits, MSB
-            // first. Reverse to LSB-first peek-style.
+            // Fixed distance codes have five bits in Huffman code order. Reverse
+            // the bit-reader value to recover the  distance symbol.
             const std::uint64_t raw = reader.read<5>();
             distance = static_cast<std::uint16_t>(reverse_bits_5(static_cast<std::uint8_t>(raw)));
             if (distance >= maximum_distance_symbol_count) [[unlikely]] {
@@ -868,9 +804,7 @@ class deflate_block_decoder {
         return result;
     }
 
-    // ---------------------------------------------------------------
-    // Window appends
-    // ---------------------------------------------------------------
+    // Window writes
 
     /// Append one literal or marker lane to the marker-mode window.
     BIOSEQ_DEFLATE_FORCEINLINE void append_to_window_uint16(std::uint16_t symbol) noexcept {
@@ -916,7 +850,7 @@ class deflate_block_decoder {
             _distance_to_last_marker_byte += length;
             return;
         }
-        // Slow path: per-byte copy with wrap.
+        // Copy repeated entries one at a time to handle overlap and ring wrapping.
         const std::size_t per_repeat = std::min(static_cast<std::size_t>(distance), length);
         for (std::size_t copied = 0; copied < length;) {
             for (std::size_t pos = offset; pos < offset + per_repeat && copied < length;
@@ -935,22 +869,15 @@ class deflate_block_decoder {
         const std::size_t mask = uint8_size - 1u;
         const std::size_t offset = (_window_position + uint8_size - distance) & mask;
 
-        // FAST PATH: no overlap, no wrap on dest, no wrap on src.
+        // Copy the whole range when it neither overlaps nor wraps.
         if (length <= distance && _window_position + length < uint8_size &&
             distance <= _window_position) [[likely]] {
             std::memcpy(uint8_window + _window_position, uint8_window + offset, length);
             _window_position += length;
             return;
         }
-        // memset shortcut: distance=1 == repeat last byte. Only safe when
-        // `wp + length < uint8_size` so memset doesn't overrun the
-        // buffer's tail past the wrap point. This was the original cause
-        // of the FASTQ-corruption bug at decoded position 12976134:
-        // for QUAL strings encoded as a memset of the dominant `G`
-        // character, the back-ref straddled the buffer wrap at wp ≈
-        // 130k, the memset wrote past `uint8_size`, then subsequent
-        // reads at wp = 0..5 picked up the stale tail of the
-        // identity-marker pattern.
+        // A distance of one repeats the previous byte. Use memset only while
+        // the entire repeat fits before the ring boundary.
         if (distance == 1u && _window_position + length < uint8_size) [[unlikely]] {
             std::memset(uint8_window + _window_position, uint8_window[offset], length);
             _window_position += length;
@@ -968,9 +895,7 @@ class deflate_block_decoder {
         _window_position = (_window_position + length) & mask;
     }
 
-    // ---------------------------------------------------------------
-    // Last-N-bytes view computation
-    // ---------------------------------------------------------------
+    // Views of the most recent output
 
     /// Return the most recently appended direct bytes as at most two spans.
     [[nodiscard]] std::array<std::span<const std::uint8_t>, 2>
@@ -991,7 +916,7 @@ class deflate_block_decoder {
         return result;
     }
 
-    /// Return the most recently appended marker lanes as at most two spans.
+    /// Returns the most recent marker-mode entries as at most two spans.
     [[nodiscard]] std::array<std::span<const std::uint16_t>, 2>
     last_buffers_uint16(std::size_t size) const noexcept {
         const std::size_t total = _window16.size();
@@ -1009,13 +934,10 @@ class deflate_block_decoder {
         return result;
     }
 
-    // ---------------------------------------------------------------
-    // Members
-    // ---------------------------------------------------------------
+    // Decoder state
 
-    /// 64 KiB uint16_t (= 128 KiB raw). In marker mode each lane is
-    /// either a literal (< 256) or a marker (>= 0x8000). In direct
-    /// mode the same memory is interpreted as 128 KiB of uint8_t.
+    /// Ring with 65,536 16-bit entries for literals and unresolved markers.
+    /// Direct mode reuses the same  memory as a 128 KiB byte ring.
     alignas(64) window_buffer_t _window16{};
 
     /// Per-block Huffman decoders (dynamic case).
@@ -1031,14 +953,13 @@ class deflate_block_decoder {
     /// buffer (uint16_t-indexed in marker mode, uint8_t-indexed in
     /// direct mode).
     std::size_t _window_position{0};
-    /// True until `set_initial_window` is called.
+    /// True while the wixdow uses the 16-bit marker representation
     bool _contains_markers{true};
-    /// Cumulative decoded bytes across blocks (resets only on `reset`
-    /// with prior_window).
+    /// Bytes decoded since, reset, plus history supplied before decoding starts.
     std::size_t _decoded_bytes{0};
-    /// Bytes since the last marker byte was emitted. When this exceeds
-    /// `maximum_window_size`, downstream back-refs can no longer reach the
-    /// unknown prefix, so we narrow to direct mode.
+    /// Consecutive bytes written since the last unresolved marker.
+    /// The read path uses this count to decide when the saved history
+    /// can safely switch to direct byte storage.
     std::size_t _distance_to_last_marker_byte{0};
 };
 

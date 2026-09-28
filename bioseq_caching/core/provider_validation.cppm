@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/provider_validation.cppm
- * @brief No-Postgres validation for provider ABI schemas, maps, and keys.
+ * @brief Checks provider column mappings and cache keys without PostgreSQL.
  */
 module;
 
@@ -36,7 +36,7 @@ enum class source_map_error : std::uint16_t {
     invalid_flags,
 };
 
-/** One copied consumer/source schema plus its ordered required attributes. */
+/** References a provider column schema and the attribute numbers a consumer needs. */
 struct provider_schema_view {
     const bioseq_cache_column_schema* columns = nullptr;
     std::size_t column_count = 0;
@@ -44,14 +44,14 @@ struct provider_schema_view {
     std::size_t required_attno_count = 0;
 };
 
-/** Boundary and lineage halves of one provider contract. */
+/** Describes output columns, row-identity columns and supported provider operations. */
 struct provider_contract_view {
     provider_schema_view boundary{};
     provider_schema_view lineage{};
     std::uint64_t capability_mask = 0;
 };
 
-/** Locate one declared schema field by its one-based provider attno. */
+/** Finds a provider column by its attribute number, or returns null. */
 [[nodiscard]] inline const bioseq_cache_column_schema*
 find_provider_column(const provider_schema_view& schema, std::uint32_t attno) noexcept {
     if (schema.columns == nullptr) {
@@ -65,7 +65,7 @@ find_provider_column(const provider_schema_view& schema, std::uint32_t attno) no
     return nullptr;
 }
 
-/** Validate pointer/count/attno invariants for one copied provider schema. */
+/** Checks column numbering, required attributes and metadata consistency  within a provider schema. */
 [[nodiscard]] inline std::expected<void, source_map_error>
 validate_provider_schema(const provider_schema_view& schema) noexcept {
     if (schema.column_count > k_maximum_provider_boundary_columns ||
@@ -113,7 +113,7 @@ validate_provider_schema(const provider_schema_view& schema) noexcept {
     return {};
 }
 
-/** Compare the provider meaning and complete SQL metadata of two columns. */
+/** Checks that the source, consumer and mapping agree on column meaning, SQL type and collation. */
 [[nodiscard]] constexpr std::expected<void, source_map_error>
 validate_column_meaning(const bioseq_cache_column_schema& consumer,
                         const bioseq_cache_column_schema& source,
@@ -137,7 +137,7 @@ validate_column_meaning(const bioseq_cache_column_schema& consumer,
     return {};
 }
 
-/** Validate one boundary/lineage mapping against copied source and consumer POD. */
+/** Checks thah each required consumer column maps to a source column with the same meaning and SQL type. */
 [[nodiscard]] inline std::expected<void, source_map_error>
 validate_map_half(const provider_schema_view& consumer,
                   const provider_schema_view& source,
@@ -201,7 +201,7 @@ validate_map_half(const provider_schema_view& consumer,
     return {};
 }
 
-/** Validate both map halves and capability sufficiency. */
+/** Checks output and row-identity mappings, and confirms that the source supports the operations the consumer needs. */
 [[nodiscard]] inline std::expected<void, source_map_error>
 validate_source_map(const provider_contract_view& consumer,
                     const provider_contract_view& source,
@@ -246,7 +246,7 @@ validate_source_map(const provider_contract_view& consumer,
     return (producer & required) == required;
 }
 
-/** Compare only the length-delimited physical identity contract. */
+/** Compares physical identity kinds and their used bytes, ignoring unused array space */
 [[nodiscard]] constexpr bool physical_identity_equal(const physical_identity& left,
                                                      const physical_identity& right) noexcept {
     if (left.kind != right.kind || left.length != right.length || left.length > left.bytes.size()) {
@@ -260,19 +260,19 @@ validate_source_map(const provider_contract_view& consumer,
     return true;
 }
 
-/** One digest-bucket candidate retaining the canonical equality evidence. */
+/** A cache key with both its digest and the full bytes needed to detect a hash collision. */
 struct canonical_cache_key {
     cache_digest_256 digest{};
     std::vector<std::byte> bytes;
 };
 
-/** Require digest, length, and every canonical byte to share an entry. */
+/** Compares the  digest and full key bytes so hash collisions cannot share an entry. */
 [[nodiscard]] inline bool collision_checked_key_equal(const canonical_cache_key& left,
                                                       const canonical_cache_key& right) noexcept {
     return left.digest == right.digest && left.bytes == right.bytes;
 }
 
-/** Prefix provider payloads with unambiguous provider ID and byte length. */
+/** Adds a provider ID and payload length before the payload bytes. */
 inline void append_provider_digest_frame(std::vector<std::byte>& destination,
                                          std::uint32_t provider_id,
                                          std::span<const std::byte> payload) {
@@ -281,7 +281,7 @@ inline void append_provider_digest_frame(std::vector<std::byte>& destination,
     destination.insert(destination.end(), payload.begin(), payload.end());
 }
 
-/** Validate bounded runtime recipe shape before any provider callback. */
+/** Checks the limits on runtime recipe count, serialized size and node count. */
 [[nodiscard]] constexpr bool provider_recipe_shape_valid(std::uint32_t recipe_count,
                                                          std::uint64_t total_bytes,
                                                          std::uint32_t node_count) noexcept {
@@ -290,13 +290,13 @@ inline void append_provider_digest_frame(std::vector<std::byte>& destination,
            node_count <= k_maximum_provider_boundary_columns;
 }
 
-/** Runtime/captured semantic recipes must reproduce the exact expected bytes. */
+/** Checks that the runtime digest matches the digest recorded during planning. */
 [[nodiscard]] constexpr bool runtime_digest_matches(const cache_digest_256& expected,
                                                     const cache_digest_256& actual) noexcept {
     return expected == actual;
 }
 
-/** Validate callback availability implied by provider flags. */
+/** Checks provider ABI compatibility, required callbacks and recognized capability flags. */
 [[nodiscard]] inline bool provider_registration_valid(const bioseq_cache_provider* provider,
                                                       std::uint32_t postgres_major) noexcept {
     if (provider == nullptr || provider->struct_size < sizeof(bioseq_cache_provider) ||
@@ -326,7 +326,7 @@ inline void append_provider_digest_frame(std::vector<std::byte>& destination,
     return true;
 }
 
-/** Preserve self-join binding identity in addition to physical row identity. */
+/** Compares a row's physical identity and query binding, so separate uses in a self-join stay distinct. */
 [[nodiscard]] constexpr bool same_base_occurrence(const base_row_reference& left,
                                                   const base_row_reference& right) noexcept {
     return left.rte_ordinal == right.rte_ordinal && left.logical_rel_oid == right.logical_rel_oid &&
@@ -338,7 +338,7 @@ inline void append_provider_digest_frame(std::vector<std::byte>& destination,
            left.xmin_identity == right.xmin_identity;
 }
 
-/** Sort and deduplicate dependency lock partitions, never raw keys alone. */
+/** Returns the distinct dependency-lock partitions in ascending order, giving callers a consistent lock order. */
 template <class p_partition_function>
 [[nodiscard]] std::vector<std::uint32_t>
 canonical_dependency_partitions(std::span<const dependency_key> dependencies,
@@ -378,7 +378,7 @@ struct semantic_setting_record {
            class_mask == static_cast<std::uint8_t>(semantic_setting_class::cache_only);
 }
 
-/** Require every result-affecting setting to appear exactly once in one class. */
+/** Checks that each required setting has exactly  one record with a recognized class. */
 [[nodiscard]] inline bool
 semantic_setting_inventory_complete(std::span<const std::uint32_t> required_setting_ids,
                                     std::span<const semantic_setting_record> records) noexcept {

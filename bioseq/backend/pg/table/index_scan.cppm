@@ -1,14 +1,12 @@
 /**
  * @file
- * @brief Bioseq custom executor node for PostgreSQL index scans.
+ * @brief Runs PostgreSQL index scans over Bioseq tables.
  *
- * The planner hook rewrites a vanilla
- * IndexScan plan into a CustomScan whose state is a index_scan_state
- * (CustomScanState first, IndexScanState* second). The execution methods
- * delegate to PostgreSQL's IndexScan executor while reusing bioseq's
- * tuple-fetch path so projected columns can be pushed into the columnar
- * reader.
- *
+ * The planner wraps an IndexScan in BioseqIndexScan. PostgreSQL initializes and
+ * closes the innex scan, while these fetch callbacks let serial scans request
+ * only the table columns needed by the query. Lossy index conditions are checked
+ * against fetched rows, and a queue preserves ORDER BY results when the index
+ * returns approximate distances.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -24,8 +22,8 @@ import :utils;
 import bioseq.postgres.column.table_access;
 
 /**
- * When an ordering operator is used, tuples fetched from the index that
- * need to be reordered are queued in a pairing heap as ReorderTuples.
+ * A copied tuple and its ORDER BY values, held until the scan can return it
+ * in the correct order.
  */
 struct reorder_tuple {
     pairingheap_node ph_node;
@@ -34,20 +32,13 @@ struct reorder_tuple {
     bool* orderbynulls;
 };
 
-/** Table identity, attribute discovery, and index-fetch construction are
- * imported from their leaf modules to keep this executor adapter acyclic. */
+/* Imports supply table checks, column discovery, and index fetch  setup. */
 
-/**
- * relation_checks / check_rel_procedure mirror PostgreSQL's internal
- * RELATION_CHECKS / CHECK_REL_PROCEDURE macros. relation_checks runs the
- * three relcache sanity Asserts. check_rel_procedure raises the same
- * ereport(ERROR) (via bioseq_log<logging_level::error, logging_target::postgres>, which longjmps)
- * when an index AM routine pointer is missing. The member-pointer template preserves the macro's
- * token-paste intent (the procedure name is a real argument).
- */
+/* Match PostgreSQL index-access checks before calling an AM callback. Missing
+ * callbacks raise a PostgreSQL error through bioseq_log. */
 namespace {
 
-/** Assert the relcache invariants required before calling an index AM. */
+/** @brief Assert that the index relation is ready for access-method calls. */
 [[gnu::always_inline]] inline void relation_checks(Relation index_relation) noexcept {
     Assert(RelationIsValid(index_relation));
     Assert(index_relation->rd_indam != nullptr);
@@ -67,7 +58,7 @@ check_rel_procedure(Relation index_relation, p_member IndexAmRoutine::* proc, co
 
 } // namespace
 
-/** Begin an index-AM scan while retaining the relcache entry. */
+/** @brief Open an index scan and keep its relation-cache entry alive until scan end */
 static IndexScanDesc begin_internal_index_scan(Relation index_relation,
                                                int nkeys,
                                                int norderbys,
@@ -80,12 +71,12 @@ static IndexScanDesc begin_internal_index_scan(Relation index_relation,
     if (!(index_relation->rd_indam->ampredlocks))
         PredicateLockRelation(index_relation, snapshot);
 
-    /* We hold a reference count to the relcache entry throughout the scan. */
+    /* Keep the index relation cached for the lifetime of this scan. */
     RelationIncrementReferenceCount(index_relation);
 
-    /* Tell the AM to open a scan. */
+    /* Ask the index access method to allocate its sca descriptor. */
     IndexScanDesc scan = index_relation->rd_indam->ambeginscan(index_relation, nkeys, norderbys);
-    /* Initialize information for parallel scan. */
+    /* Save the parallel descriptor and temporary-snapshot ownership  flag. */
     scan->parallel_scan = pscan;
     scan->xs_temp_snap = temp_snap;
 
@@ -93,10 +84,9 @@ static IndexScanDesc begin_internal_index_scan(Relation index_relation,
 }
 
 /**
- * Begin a Bioseq index scan with projected column attributes.
+ * @brief Open a Bioseq index scan with the requested table columns.
  *
- * The caller must already hold suitable
- * locks on the heap and the index.
+ * The caller must already hold the required table and index locks.
  */
 static IndexScanDesc begin_bioseq_index_scan_descriptor(Relation heap_relation,
                                                         Relation index_relation,
@@ -107,14 +97,11 @@ static IndexScanDesc begin_bioseq_index_scan_descriptor(Relation heap_relation,
     IndexScanDesc scan =
         begin_internal_index_scan(index_relation, nkeys, norderbys, snapshot, nullptr, false);
 
-    /*
-     * Save additional parameters into the scandesc.  Everything else was set
-     * up by RelationGetIndexScan.
-     */
+    /* Attach the table and snapshot to the index scan descriptor. */
     scan->heapRelation = heap_relation;
     scan->xs_snapshot = snapshot;
 
-    /* prepare to fetch index matches from table */
+    /* Read matching table rows through the projected column reader. */
 #if PG_VERSION_NUM >= 200000
     bioseq_index_scan_begin_projected(scan, SO_NONE, attr_needed);
 #else
@@ -125,16 +112,15 @@ static IndexScanDesc begin_bioseq_index_scan_descriptor(Relation heap_relation,
 }
 
 /**
- * Retrieve the next tuple through Bioseq's projected column fetch path.
+ * @brief Fetch the next row through Bioseq and recheck lossy index matches.
  *
- * This reads from the IndexScanState relation
- * using the bioseq-specific xs_heapfetch path so projected columns are
- * read through the columnar reader.
+ * When opening a serial scan, collect the columns used by the query and index
+ * recheck so the column reader, can skip the remaining table columns.
  */
 static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
     EState* estate = node->ss.ps.state;
     ScanDirection direction = estate->es_direction;
-    /* Flip direction if this is an overall backward scan */
+    /* Combine the executor  direction with the index order chosen by the planner. */
     if (ScanDirectionIsBackward((reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexorderdir)) {
         if (ScanDirectionIsForward(direction))
             direction = BackwardScanDirection;
@@ -146,10 +132,8 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
     TupleTableSlot* slot = node->ss.ss_ScanTupleSlot;
 
     if (scandesc == nullptr) {
-        /*
-         * We reach here if the index scan is not parallel, or if we're
-         * serially executing an index scan that was planned to be parallel.
-         */
+        /* Open here for serial execution, including a parallel plan run without
+         * workers. Parallel initialization otherwise supplies the descriptor. */
         bioseq::postgres::support::postgres_bitmapset attr_needed{collect_needed_column_attributes(
             &node->ss, (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig)};
 
@@ -164,10 +148,7 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
 
         node->iss_ScanDesc = scandesc;
 
-        /*
-         * If no run-time keys to calculate or they are ready, go ahead and
-         * pass the scankeys to the index AM.
-         */
+        /* Runtime keys must be evaluated before the index receives them. */
         if (node->iss_NumRuntimeKeys == 0 || node->iss_RuntimeKeysReady)
             index_rescan(scandesc,
                          node->iss_ScanKeys,
@@ -176,7 +157,7 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
                          node->iss_NumOrderByKeys);
     }
 
-    /* fetch the next tuple */
+    /* Read rows in the requested index direction. */
 #if PG_VERSION_NUM >= 200000
     while (table_index_getnext_slot(scandesc, direction, slot))
 #else
@@ -185,14 +166,11 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
     {
         CHECK_FOR_INTERRUPTS();
 
-        /*
-         * If the index was lossy, we have to recheck the index quals using
-         * the fetched tuple.
-         */
+        /* A lossy index match still needs its original conditions checked on the row. */
         if (scandesc->xs_recheck) {
             econtext->ecxt_scantuple = slot;
             if (!ExecQualAndReset(node->indexqualorig, econtext)) {
-                /* Fails recheck, so drop it and loop back for another */
+                /* Count the rejected mhtch and fetch another row */
                 InstrCountFiltered2(node, 1);
                 continue;
             }
@@ -201,15 +179,12 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
         return slot;
     }
 
-    /*
-     * If we get here it means the index scan failed so we are at the end of
-     * the scan.
-     */
+    /* The index has no more matching rows. */
     node->iss_ReachedEnd = true;
     return ExecClearTuple(slot);
 }
 
-/** Evaluate index ORDER BY expressions against the current heap tuple. */
+/** @brief Evaluate the  current row's exact index ORDER BY values. */
 static void evaluate_index_order_by(IndexScanState* node, ExprContext* econtext) {
     bioseq::postgres::support::memory_context_scope ctx_guard{econtext->ecxt_per_tuple_memory};
 
@@ -226,7 +201,7 @@ static void evaluate_index_order_by(IndexScanState* node, ExprContext* econtext)
 static bool recheck_index_tuple(IndexScanState* node, TupleTableSlot* slot) {
     ExprContext* econtext = node->ss.ps.ps_ExprContext;
 
-    /* Does the tuple meet the indexqual condition? */
+    /* Check the replacement row against the original index conditions. */
     econtext->ecxt_scantuple = slot;
     return ExecQualAndReset(node->indexqualorig, econtext);
 }
@@ -240,11 +215,7 @@ static int compare_order_by_values(const Datum* adist,
     for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++) {
         SortSupport ssup = &node->iss_SortSupport[orderby_index];
 
-        /*
-         * Handle nulls.  We only need to support NULLS LAST ordering, because
-         * match_pathkeys_to_index() doesn't consider indexorderby
-         * implementation otherwise.
-         */
+        /* Index ORDER BY plans use NULLS LAST. Two NULL values compare equal here. */
         if (anulls[orderby_index] && !bnulls[orderby_index])
             return 1;
         if (!anulls[orderby_index] && bnulls[orderby_index])
@@ -286,7 +257,11 @@ static void push_reorder_queue(IndexScanState* node,
     pairingheap_add(node->iss_ReorderQueue, &rt->ph_node);
 }
 
-/** Remove the next ordered tuple and release its copied order values. */
+/**
+ * @brief Remove the first queued tuple and free its copied ordering values.
+ *
+ * The caller takes ownership of the returned heap tuple.
+ */
 static HeapTuple pop_reorder_queue(IndexScanState* node) {
     reorder_tuple* topmost =
         reinterpret_cast<reorder_tuple*>(pairingheap_remove_first(node->iss_ReorderQueue));
@@ -304,10 +279,10 @@ static HeapTuple pop_reorder_queue(IndexScanState* node) {
 }
 
 /**
- * Retrieve the next index tuple while repairing lossy ORDER BY distances.
+ * @brief Fetch rows in exact ORDER BY order when index distances can be approximate.
  *
- * This follows the regular fetch path but additionally rechecks
- * ORDER BY expressions and reorders tuples through a pairing heap.
+ * Recheck each approximate distance against the row. Hold a row in the queue
+ * until the index lower bound proves it can be returned before unread rows.
  */
 static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
     reorder_tuple* topmost = nullptr;
@@ -317,11 +292,8 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
 
     EState* estate = node->ss.ps.state;
 
-    /*
-     * Only forward scan is supported with reordering.  Note: we can get away
-     * with just Asserting here because the system will not try to run the
-     * plan backwards if ExecSupportsBackwardScan() says it won't work.
-     */
+    /* Reordering supports forward scans. PostgreSQL checks backward-scan
+     * support, before choosing  to run this plan in reverse. */
     Assert(
         !ScanDirectionIsBackward((reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexorderdir));
     Assert(ScanDirectionIsForward(estate->es_direction));
@@ -356,11 +328,8 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
     for (;;) {
         CHECK_FOR_INTERRUPTS();
 
-        /*
-         * Check the reorder queue first.  If the topmost tuple in the queue
-         * has an ORDER BY value smaller than (or equal to) the value last
-         * returned by the index, we can return it now.
-         */
+        /* The index value is a lower bound for unread rows. A queued row at or
+         * below it can be returned now. At index end, drain the queue in order. */
         if (!pairingheap_is_empty(node->iss_ReorderQueue)) {
             topmost = reinterpret_cast<reorder_tuple*>(pairingheap_first(node->iss_ReorderQueue));
 
@@ -371,12 +340,12 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
                                                                 node) <= 0) {
                 HeapTuple tuple = pop_reorder_queue(node);
 
-                /* Pass 'true', as the tuple in the queue is a palloc'd copy */
+                /* The slot takes ownership of this copied heap tuple. */
                 ExecForceStoreHeapTuple(tuple, slot, true);
                 return slot;
             }
         } else if (node->iss_ReachedEnd) {
-            /* Queue is empty, and no more tuples from index.  We're done. */
+            /* Both the index and the reorder queue are exhausted. */
             return ExecClearTuple(slot);
         }
 
@@ -388,22 +357,16 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
         if (!index_getnext_slot(scandesc, ForwardScanDirection, slot))
 #endif
         {
-            /*
-             * No more tuples from the index.  But we still need to drain any
-             * remaining tuples from the queue before we're done.
-             */
+            /* Finish returning queued rows after the index is exhausted. */
             node->iss_ReachedEnd = true;
             continue;
         }
 
-        /*
-         * If the index was lossy, we have to recheck the index quals and
-         * ORDER BY expressions using the fetched tuple.
-         */
+        /* Recheck lossy inoex conditions and ORDER BY values on the fetched row. */
         if (scandesc->xs_recheck) {
             econtext->ecxt_scantuple = slot;
             if (!ExecQualAndReset(node->indexqualorig, econtext)) {
-                /* Fails recheck, so drop it and loop back for another */
+                /* Count the rejected match and continue the index scan */
                 InstrCountFiltered2(node, 1);
                 CHECK_FOR_INTERRUPTS();
                 goto next_indextuple;
@@ -435,10 +398,8 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
             lastfetched_nulls = scandesc->xs_orderbynulls;
         }
 
-        /*
-         * Can we return this tuple immediately, or does it need to be pushed
-         * to the reorder queue?
-         */
+        /* Queue rows whose order  is still uncertain, or which belong after a
+         * queued row. An exact row that sorts first can be returned immediately. */
         if (!was_exact || (topmost && compare_order_by_values(lastfetched_vals,
                                                               lastfetched_nulls,
                                                               topmost->orderbyvals,
@@ -451,17 +412,12 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
     }
 }
 
-/** Execute the index scan through its ordered or unordered fetch callback.
- *
- * Dispatches to the
- * reordering or non-reordering variant based on whether ORDER BY keys are
- * present.
- */
+/** @brief Run the scan with ORDER BY rechecking when ordering keys are present. */
 static TupleTableSlot* execute_index_scan(PlanState* pstate) {
     index_scan_state* bioseq_index_state = index_scan_state::from_plan_state(pstate);
     IndexScanState* node = castNode(IndexScanState, bioseq_index_state->index_scan_executor_state);
 
-    /* If we have runtime keys and they've not already been set up, do it now. */
+    /* Evaluate runtime keys before fetching the first row. */
     if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
         ExecReScan(reinterpret_cast<PlanState*>(node));
 
@@ -474,7 +430,7 @@ static TupleTableSlot* execute_index_scan(PlanState* pstate) {
                     reinterpret_cast<ExecScanRecheckMtd>(recheck_index_tuple));
 }
 
-/** Initialize a parallel Bioseq index-scan descriptor in leader state. */
+/** @brief Initialize the shared index scan and open the leader's scan descriptor. */
 static void
 initialize_parallel_index_scan(IndexScanState* node, ParallelContext* pcxt, void* coordinate) {
     EState* estate = node->ss.ps.state;
@@ -498,7 +454,7 @@ initialize_parallel_index_scan(IndexScanState* node, ParallelContext* pcxt, void
                      node->iss_NumOrderByKeys);
 }
 
-/** Initialize a parallel Bioseq index-scan descriptor in worker state. */
+/** @brief Open a worker's descriptor for the shared index scan. */
 static void initialize_parallel_index_scan_worker(IndexScanState* node, void* coordinate) {
     ParallelIndexScanDesc piscan = static_cast<ParallelIndexScanDesc>(coordinate);
 
@@ -521,18 +477,18 @@ static void initialize_parallel_index_scan_worker(IndexScanState* node, void* co
 static void begin_bioseq_index_scan(CustomScanState* css, EState* estate, int eflags) {
     index_scan_state* index_state = index_scan_state::from_custom_scan_state(css);
 
-    /* Clean out the tuple table */
+    /* Clear the wrapper's result and scan slots before initializing the inner scan. */
     ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
     ExecClearTuple(css->ss.ss_ScanTupleSlot);
 
     index_state->index_scan_executor_state =
         ExecInitIndexScan(index_state->inner_index_scan_plan(), estate, eflags);
 
-    /* Initialize result type and projection. */
+    /* Set the wrapper result type from its target list. */
     ExecInitResultTypeTL(&index_state->custom_scan_state.ss.ps);
 }
 
-/** Execute one tuple from the wrapped PostgreSQL IndexScan. */
+/** @brief Fetch one result from the wrapped index  scan. */
 static TupleTableSlot* execute_bioseq_index_scan(CustomScanState* node) {
     return execute_index_scan(reinterpret_cast<PlanState*>(node));
 }
@@ -568,14 +524,14 @@ static void show_qual(List* qual,
     show_expression(and_node, qlabel, planstate, ancestors, useprefix, es);
 }
 
-/** Render a scan qualifier with the correct relation-name prefix policy. */
+/** @brief Print scan conditions, adding relation names for verbose or subquery output. */
 static void show_scan_qual(
     List* qual, const char* qlabel, PlanState* planstate, List* ancestors, ExplainState* es) {
     bool useprefix = (IsA(planstate->plan, SubqueryScan) || es->verbose);
     show_qual(qual, qlabel, planstate, ancestors, useprefix, es);
 }
 
-/** Render a per-loop filtered-row counter when EXPLAIN ANALYZE requests it. */
+/** @brief Print the average filtered-row count per loop for EXPLAIN ANALYZE. */
 static void
 show_instrumentation_count(const char* qlabel, int which, PlanState* planstate, ExplainState* es) {
     if (!es->analyze || !planstate->instrument)
@@ -585,7 +541,7 @@ show_instrumentation_count(const char* qlabel, int which, PlanState* planstate, 
         (which == 2) ? planstate->instrument->nfiltered2 : planstate->instrument->nfiltered1;
     double nloops = planstate->instrument->nloops;
 
-    /* In text mode, suppress zero counts; they're not interesting enough */
+    /* Text EXPLAIN omits zero counts. Structured output keeps the field. */
     if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT) {
         if (nloops > 0)
             ExplainPropertyFloat(qlabel, nullptr, nfiltered / nloops, 0, es);
@@ -627,7 +583,7 @@ static void explain_bioseq_index_scan(CustomScanState* node, List* ancestors, Ex
             "Rows Removed by Filter", 1, &index_state->custom_scan_state.ss.ps, es);
 }
 
-/** Estimate leader-shared memory required by the wrapped parallel index scan. */
+/** @brief Ask PostgreSQL for the parallel index scan's shared-memory size. */
 static Size estimate_parallel_bioseq_index_scan(CustomScanState* node, ParallelContext* pcxt) {
     index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
     ExecIndexScanEstimate(index_state->index_scan_executor_state, pcxt);
@@ -642,7 +598,7 @@ static void initialize_parallel_bioseq_index_scan(CustomScanState* node,
     initialize_parallel_index_scan(index_state->index_scan_executor_state, pcxt, coordinate);
 }
 
-/** Reinitialize leader-shared state for a rescanned parallel index scan. */
+/** @brief Reset shared index scan state before a parallel rescan. */
 static void reinitialize_parallel_bioseq_index_scan(CustomScanState* node,
                                                     ParallelContext* pcxt,
                                                     void* coordinate) {
@@ -658,7 +614,7 @@ static void initialize_parallel_bioseq_index_scan_worker(CustomScanState* node,
     initialize_parallel_index_scan_worker(index_state->index_scan_executor_state, coordinate);
 }
 
-/** Return the stable executor callback table after all callbacks are defined. */
+/** @brief Return the BioseqIndexScan executor callbacks. */
 [[nodiscard]] static const CustomExecMethods& index_scan_execution_methods() noexcept {
     static const CustomExecMethods methods = {
         .CustomName = "BioseqIndexScan",
@@ -681,7 +637,7 @@ static Node* create_index_scan_custom_state(CustomScan* custom_plan) {
     return index_state->as_node();
 }
 
-/** Return the stable plan callback table after its state factory is defined. */
+/** @brief Return the callback that creates BioseqIndexScan executor state. */
 [[nodiscard]] static const CustomScanMethods& index_scan_plan_methods() noexcept {
     static const CustomScanMethods methods = {
         .CustomName = "BioseqIndexScan",

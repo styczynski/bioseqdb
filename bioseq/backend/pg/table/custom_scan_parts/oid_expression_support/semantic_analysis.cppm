@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Analyzes projection, edit predicates, feature flags, and default params.
+ * @brief Checks edit predicates and determines the,  alignment work requested by scan expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -40,7 +40,12 @@ export import :custom_scan_oid_expression_support_semantic_analysis_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Checks that a sequence-valued edit helper names the base scan's aligned column. */
+    /**
+     * @brief Checks that a sequence-valued edit argument names the aligned base column.
+     *
+     * A non-sequence row identifier passes this check and is checked by helper
+     * registration. Calls to other functions also pass.
+     */
     [[nodiscard]] bool
     edit_sequence_argument_matches_target(const FuncExpr* function,
                                           Index target_relid,
@@ -52,14 +57,13 @@ export {
             return false;
         Node* argument_node = reinterpret_cast<Node*>(linitial(function->args));
         if (argument_node == nullptr || exprType(argument_node) != oids.bioseq_seq_type_oid) {
-            /* Accept the target-owned row-marker helper form. */
+            /* Helper registration checks ownership of non-sequence row identifiers. */
             return true;
         }
         Var* argument = try_cast_pg_node<Var>(argument_node);
         if (argument == nullptr) {
-            /* A sequence-valued wrapper (COALESCE, cast, PHV expression, etc.)
-             * has biological identity that the shared match_result cannot safely
-             * infer.  Only the exact mmsearch target Var is supported. */
+            /* This check supports a direct target column A sequence expression
+             * needs comparison with the complete target in the recipe-aware check. */
             return false;
         }
         return target_relid != 0 && target_sequence_attno > 0 && argument->varno == target_relid &&
@@ -67,7 +71,7 @@ export {
                bms_is_empty(argument->varnullingrels);
     }
 
-    /** @brief Checks that a sequence-valued edit helper names the complete owned target recipe. */
+    /** @brief Checks that a  sequence-valued edit argument equals the complete match target. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_recipe(const FuncExpr* function,
                                           Node* target_expression,
@@ -80,21 +84,19 @@ export {
             return false;
         }
         Node* argument = reinterpret_cast<Node*>(linitial(function->args));
-        /* A sequence-valued helper argument is biological identity, not a
-         * row marker.  It must name the complete owned recipe; accepting the raw
-         * storage Var of a sliced/reversed/concatenated target would silently report
-         * the transformed match as if it belonged to the whole stored sequence. */
+        /* A helper for a sliced or reversed target must name that complete
+         * target expression. Naming only the stored sequence would attribute
+         * the transformed match to a different sequence. */
         if (argument != nullptr && exprType(argument) == oids.bioseq_seq_type_oid) {
             return equal(argument, target_expression);
         }
-        /* Only non-sequence row-marker spellings reach the target-owned
-         * fallback.  The surrounding helper registration has already validated
-         * that such a Var belongs to target_relid. */
+        /* Non-sequence row identifiers reach this path. Helper registration
+         * checks that they belong to the target eelation. */
         return edit_sequence_argument_matches_target(
             function, target_relid, target_sequence_attno, oids);
     }
 
-    /** @brief Detects executor features referenced by target-list and qual expressions. */
+    /** @brief Finds the alignment features requested by output expressions and filters. */
     [[nodiscard]] scan_feature_flags
     detect_feature_flags(List* targetlist, List* qual, const bioseq_stub_oids& oids) {
         bioseq_feature_detector detector{&oids, scan_feature_flags{}};
@@ -122,7 +124,7 @@ export {
 
     /** @brief Stops an expression walk at the first bioseq.edit call. */
     struct edit_function_probe_visitor {
-        /** @brief Records an edit call at the current node and controls traversal. */
+        /** @brief Marks an edit call as  found and stops, or keeps searching the expression. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor, pg_node_view node, edit_function_probe& probe) const {
             if (FuncExpr* function = node.try_cast<FuncExpr>();
@@ -144,14 +146,20 @@ export {
         return probe.found;
     }
 
-    /** @brief Unwraps the scan-owned placeholder form admitted for an edit predicate operand. */
+    /**
+     * @brief Removes a PlaceHolderVar wrapper that belongs only to this scan.
+     *
+     * Returns the operand unchanged if it has no wrapper. Returns null for a
+     * wrapper with another owner, an outer-query reference, or outer-join
+     * nulling information.
+     */
     [[nodiscard]] Node* strict_edit_operand(Node* operand, Index scan_relid) noexcept {
         PlaceHolderVar* placeholder = try_cast_pg_node<PlaceHolderVar>(operand);
         if (placeholder == nullptr)
             return operand;
-        /* bioseq_placeholder_support introduces this exact wrapper for aggregate
-         * and join plans.  Accept only a scan-owned, non-nulled PHV; unwrapping a
-         * generic or outer-join-nullable PHV would discard planner semantics. */
+        /* Keep the ownership and outer-join checks before unwrapping. Dropping
+         * a, generic PlaceHolderVar could change when its expression is evaluated
+         * or whether an outer join makes it NULL. */
         if (!bioseq_is_concrete_rte_varno(scan_relid) || placeholder->phid == 0 ||
             placeholder->phlevelsup != 0 || !bms_is_empty(placeholder->phnullingrels) ||
             bms_num_members(placeholder->phrels) != 1 ||
@@ -161,7 +169,13 @@ export {
         return reinterpret_cast<Node*>(placeholder->phexpr);
     }
 
-    /** @brief Decodes an executor-owned `bioseq.edit(Var) < integer Const` predicate. */
+    /**
+     * @brief Extracts bioseq.edit(sequence_column) < integer_constant for scan execution.
+     *
+     * Require the column to belong to this scan  and the comparison to use a
+     * PostgreSQL built-in integer less-than function Return no value for any
+     * other form.
+     */
     [[nodiscard]] std::optional<strict_edit_predicate> decode_strict_edit_upper_bound(
         Node* expression, Index scan_relid, const bioseq_stub_oids& oids) {
         OpExpr* comparison = try_cast_pg_node<OpExpr>(expression);
@@ -177,11 +191,10 @@ export {
             list_length(edit->args) != 1 || upper == nullptr || upper->constisnull) {
             return std::nullopt;
         }
-        /* Operator names are schema-overloadable.  A bare SQL literal such as 10
-         * is int4, so PostgreSQL resolves BIGINT < 10 to its built-in int84lt
-         * implementation rather than inserting an int8 cast.  Accept only the
-         * three exact built-in RHS integer widths and normalize their Const datum;
-         * an arbitrary operator merely named `<` must remain fail-closed. */
+        /* A literal such as 10 has type int4, so BIGINT < 10 uses int84lt.
+         * Accept the built-in comparisons for all three integer widths and
+         * read each constant using its actual type. Checking the function OID
+         * also excludes user-defined operators named <. */
         const Oid opcode = get_opcode(comparison->opno);
         std::int64_t exclusive_upper_bound = 0;
         switch (upper->consttype) {
@@ -215,7 +228,7 @@ export {
         };
     }
 
-    /** @brief Copies qualifiers while excluding expressions containing bioseq.edit. */
+    /** @brief Builds a filter list excluding whole expressions that contain bioseq.edit. */
     [[nodiscard]] List* quals_without_bioseq_edit(List* quals, const bioseq_stub_oids& oids) {
         postgres_list<Node> filtered;
         for (Node* qual : postgres_list<Node>(quals)) {
@@ -226,7 +239,7 @@ export {
         return filtered.release();
     }
 
-    /** @brief Detects feature flags in RestrictInfo clauses, rejecting unexpected list entries. */
+    /** @brief Finds requested alignment features, returning no value for malformed restrictions. */
     [[nodiscard]] std::optional<scan_feature_flags>
     detect_restrictinfo_feature_flags(List* restrictions, const bioseq_stub_oids& oids) {
         bioseq_feature_detector detector{&oids, scan_feature_flags{}};
@@ -242,15 +255,15 @@ export {
         return detector.flags;
     }
 
-    /** @brief Carries OIDs and the first detected typmod mismatch through an explain walk. */
+    /** @brief Keeps the first storage-width convrsion found for EXPLAIN. */
     struct explain_coalesce_walk_context {
         const bioseq_stub_oids* oids;
         explain_typmod_coalesce result;
     };
 
-    /** @brief Detects an mmsearch whose operands share an alphabet but not storage width. */
+    /** @brief Finds mmsearch operands with the same alphabet and different storage-unit widths. */
     struct typmod_coalesce_visitor {
-        /** @brief Records the first qualifying typmod mismatch and continues traversal. */
+        /** @brief Records the first supported operand-width  mismatch and keeps walking. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               explain_coalesce_walk_context& ctx) const {
@@ -258,9 +271,9 @@ export {
                 if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
                     if (is_mmsearch_funcid(fe->funcid, *ctx.oids) && list_length(fe->args) >= 2) {
                         Node* arg0 =
-                            reinterpret_cast<Node*>(linitial(fe->args)); // bioseq.seq column
+                            reinterpret_cast<Node*>(linitial(fe->args)); // target sequence column
                         Node* arg1 = reinterpret_cast<Node*>(
-                            lsecond(fe->args)); // query literal / param / var
+                            lsecond(fe->args)); // query constant, parameter, or column
                         if (arg0 != nullptr && arg1 != nullptr &&
                             pg_node_view{arg0}.is_type<Var>()) {
                             const int32 col_typmod = expect_pg_node<Var>(arg0)->vartypmod;
@@ -292,7 +305,12 @@ export {
         }
     };
 
-    /** @brief Derives typmod coalescing metadata from plan qualifiers without runtime state. */
+    /**
+     * @brief Finds a sequence-width conversion that EXPLAIN can report before execution.
+     *
+     * Inspect mmsearch calls with known operand types. If their alphabets agree
+     * and their storage-unit widths differ, report the target column's width.
+     */
     [[nodiscard]] explain_typmod_coalesce
     explain_detect_typmod_coalesce(List* qual, const bioseq_stub_oids& oids) {
         explain_coalesce_walk_context ctx{&oids, explain_typmod_coalesce{}};
@@ -305,7 +323,7 @@ export {
         return ctx.result;
     }
 
-    /** @brief Snapshots backend aligner settings into the parameters used to build a pipeline. */
+    /** @brief Copies PostgreSQL's current aligner settings into a pipeline parameter set. */
     [[nodiscard]] bioseq::simd::minimap2_parameters build_params_from_gucs() {
         bioseq::simd::minimap2_parameters params;
         params.kmer_size = bioseq::aligner::settings::minimizer::kmer_size;
@@ -353,7 +371,7 @@ export {
         params.vulkan_enabled = bioseq::aligner::settings::vulkan::enabled;
         params.vulkan_seed_hits_enabled = bioseq::aligner::settings::vulkan::seed_lookup::enabled;
         params.vulkan_index_cache_enabled = bioseq::aligner::settings::vulkan::index_cache::enabled;
-        /* Resident two-submit frontend and GPU index construction. */
+        /* Settings for the fused GPU frontend and GPU index construction. */
         params.vulkan_fused_frontend_enabled =
             bioseq::aligner::settings::vulkan::fused_frontend::enabled;
         params.vulkan_gpu_index_build_enabled =

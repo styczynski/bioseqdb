@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_test.cpp
- * @brief Exercises PostgreSQL error, storage, and SQL boundary contracts.
+ * @brief Tests installed SQL objects, sequence lookup races, and  table options.
  */
 
 #include <libpq-fe.h>
@@ -233,9 +233,8 @@ TEST_CASE("Generated sequence handles bind only to fixed internal objects",
   REQUIRE(handles[2].value() == "0");
   REQUIRE(handles[3].value() == "0");
 
-  // Exercise the generated C++ handles themselves, not only an equivalent
-  // catalog query.  The diagnostic entry point is present only in the
-  // indexes-enabled build profile.
+  // Call the generated C++ sequence handles through the diagnostic function
+  // provided by the indexes-enabled build.
   exec_sql(
       ctx,
       "SELECT bioseq_internal.arm_sequence_source_failure("
@@ -259,9 +258,8 @@ TEST_CASE("Generated sequence handles bind only to fixed internal objects",
             oid));
   }
 
-  // A handle performs a live lookup on every call: rename/missing,
-  // Wrong-relkind and rename/missing transitions must be observed without a
-  // stale cached OID. Keep the extension catalog changes transactional.
+  // Each lookup must see renames and reject a table placed under the sequence
+  // name. Roll, back the catalog changes when these checks finish.
   exec_sql(ctx, "BEGIN;");
   const std::string original_oid = query_scalar(
       ctx,
@@ -311,9 +309,8 @@ TEST_CASE("Generated sequence handles bind only to fixed internal objects",
       ctx,
       "ALTER EXTENSION bioseq "
       "DROP SEQUENCE bioseq_internal.storageid_seq;");
-  // The extension-owned access method still has a normal dependency on this
-  // sequence, so removing only the sequence membership cannot make it
-  // independently droppable.
+  // The access method still depends on this sequence, so DROP must fail even
+  // after the sequence is removed from the extension's member list.
   exec_sql(ctx, "SAVEPOINT extension_owned_dependency;");
   const auto dependent_sequence = sql_error(
       ctx,
@@ -493,10 +490,9 @@ TEST_CASE(
   }
   exec_sql(gate, "DROP SCHEMA wrong_sequence_namespace;");
 
-  // Exercise a committed DROP inside the lookup window without rebuilding
-  // the extension-owned sequence (and therefore without changing its state
-  // or membership).  The real sequence waits under a temporary name while a
-  // disposable same-name sequence is selected and then dropped.
+  // Rename the extension's sequence temporarily to preserve its state and
+  // membership. Drop a disposable  sequence with the original name while
+  // lookup is paused, then restore the original name.
   constexpr long long drop_advisory_key = 0xed3b81a4LL;
   exec_sql(
       gate,

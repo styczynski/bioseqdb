@@ -1,6 +1,6 @@
 /**
  * @file concepts.cppm
- * @brief Small no-Postgres callable and stats types used by the global pool.
+ * @brief Task callbacks, pool settings and scheduler counters.
  */
 module;
 
@@ -19,20 +19,20 @@ import bioseq.parallelism.mode;
 
 export namespace bioseq::parallelism {
 
-/// Type-erased half-open range callback accepted by pool facades.
+/// Callback that processes the half-open range [begin, end).
 using range_body = std::function<void(std::size_t, std::size_t)>;
 
-/// Move-only type-erased task callable used at the pool module boundary.
+/// Own a task callable, including one with move-only captures.
 class task_body {
-    /// Type-erased callable storage used only inside one scheduled task.
+    /// Common interface for invoking and destroying the stored callable.
     struct base {
         /// Invoke the stored callable.
         virtual void call() = 0;
-        /// Destroy the concrete callable through the erased boundary.
+        /// Destroy, the stored callable through a base pointer.
         virtual ~base() = default;
     };
 
-    /// Concrete callable owner behind the task boundary.
+    /// Store a callable of its original type behind the common interface.
     template <class p_callable>
     struct model final : base {
         p_callable callable;
@@ -73,25 +73,24 @@ private:
     std::unique_ptr<base> body_;
 };
 
-/// Configuration applied atomically to the process-wide TBB arena facade.
+/// Settings for the oneTBB arena in this process.
 struct pool_config {
-    /// Local global-pool task-arena ceiling. Zero selects oneTBB's runtime
-    /// default. This must not become a process-wide scheduler limit: other
-    /// oneTBB arenas may have an independent concurrency contract.
+    /// Maximum simultanoous participants in this arena, including the caller.
+    /// Zero uses the oneTBB default. Other arenas keep their  own limits.
     unsigned maximum_concurrency = 1;
-    /// Pipeline regions admitted to use the configured arena.
+    /// Which pipeline work may run in parallel.
     pipeline_concurrency_mode mode = pipeline_concurrency_mode::single_thread;
 };
 
-/// Lock-free scheduler counters sampled by PostgreSQL instrumentation.
+/// Atomic scheduler counters read by PostgreSQL instrumentation.
 struct scheduler_stats {
-    /// Batches accepted by the pool facade.
+    /// Batches registered with begin_batch().
     std::atomic<std::uint64_t> batches_scheduled{0};
-    /// Batches reported as completed.
+    /// Batches completed through end_batch().
     std::atomic<std::uint64_t> batches_processed{0};
-    /// Accepted batches without a terminal event.
+    /// Batches that have neither completed nor been cancelled.
     std::atomic<std::int64_t> batches_in_flight{0};
-    /// Queries belonging to in-flight batches.
+    /// Queries in batches that have neither completed nor been cancelled.
     std::atomic<std::int64_t> queries_waiting{0};
     /// Queries reported as completed.
     std::atomic<std::uint64_t> queries_processed{0};
@@ -101,15 +100,15 @@ struct scheduler_stats {
     std::atomic<std::uint64_t> rate_window_start_queries{0};
     /// Most recent pool restart time.
     std::atomic<std::uint64_t> restart_ns{0};
-    /// Fixed number of timestamp slots used for age sampling.
+    /// Number of slots used to track the ages of unfinished batches.
     static constexpr std::size_t k_inflight_slots = 4096;
-    /// Submission timestamps indexed by the rolling batch sequence.
+    /// Submission times in nanoseconds, with zero marking an unused slot.
     std::array<std::atomic<std::uint64_t>, k_inflight_slots> inflight_submit_ns{};
-    /// Rolling sequence used to select an in-flight timestamp slot.
+    /// Increasing batch number used to choose a timestamp slot.
     std::atomic<std::uint64_t> inflight_seq{0};
 };
 
-/// Pool surface required by scheduler-independent pipeline algorithms.
+/// Operations a pool must provide to run the  pipeline.
 template <class p_pool>
 concept thread_pool_like = requires(p_pool& pool, range_body body) {
     { pool.maximum_concurrency() } -> std::convertible_to<unsigned>;

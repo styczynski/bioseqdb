@@ -1,6 +1,6 @@
 /**
  * @file hash_major_session_reader.cppm
- * @brief Defines snapshot-bound hash-major metadata and logical-stream reading.
+ * @brief Read hash-major index metadata and payloads using one PostgreSQL snapshot.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -70,16 +70,16 @@ import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format 
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode seqence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -96,7 +96,8 @@ import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.en
 import bioseq.postgres.storage.indexing.chunked_storage;
 export import bioseq.postgres.storage.indexing.hash_major_parallel_probe_contract;
 export namespace bioseq::storage::indexing {
-/// Snapshot-bound reader for one READY hash-major generation and its three streams.
+/// Read one published hash-major index through the caller's registered  snapshot.
+/// Check metadata and source identity before reading directory, control or position bytes.
 class index_storage_hash_major_minimizer_read_session {
   private:
     enum class operation_state : std::uint8_t {
@@ -173,10 +174,9 @@ class index_storage_hash_major_minimizer_read_session {
         });
     }
 
-    /// Retain only the final validated row of a selective scan. Consecutive
-    /// scheduler waves commonly split inside one 8,064-byte catalog row. Its
-    /// pinned projection can serve the next wave before any slot is advanced.
-    /// All other batch pins are released immediately.
+    /// Keep the final row available for the next request and release the other row buffers.
+    /// Adjacent requests can split inside a stored row, so keeping its buffer
+    /// pin avoids fetching and checking the same bytes again.
     void clear_row_batch_slots_except_checked_(std::size_t retained_ordinal) {
         if (!cached_boundary_row_valid_ || retained_ordinal >= row_batch_slot_count_) {
             fail_("hash-major boundary-row cache slot is invalid");
@@ -305,17 +305,12 @@ class index_storage_hash_major_minimizer_read_session {
         std::uint64_t expected_row = first_row;
         bool accepted = true;
 
-        // A bounded control/posting wave often starts in the same physical
-        // row where the preceding wave ended. Reuse that already authenticated
-        // pinned projection before opening another btree scan. If more rows
-        // remain, releasing the cache also clears every prior batch slot before
-        // the next scan advances them.
+        // Reuse the previous request's final row when this request starts there.
+        // Clear the saved row and other slots before scanning any further rows.
         if (cached_boundary_row_valid_) {
             if (cached_boundary_row_kind_ == kind && cached_boundary_row_ordinal_ == expected_row) {
-                // The projection was address-bound CRC authenticated before
-                // being retained, and its heap buffer has remained pinned.
-                // Replaying the immutable span needs neither another tuple
-                // deformation nor another 8-KiB row-CRC pass.
+                // The cached row already passed its address  and CRC checks.
+                // Keeping its buffer pinned lets this request reuse the bytes directly.
                 accepted = consume(expected_row, cached_boundary_row_.bytes);
                 ++expected_row;
                 if (!accepted || expected_row > last_row) {
@@ -695,8 +690,8 @@ class index_storage_hash_major_minimizer_read_session {
 
   public:
     index_storage_hash_major_minimizer_read_session() = delete;
-    /// Bind one logical index and query to an already-registered executor
-    /// snapshot, then validate the exact sidecar schema.
+    /// Open the index table and check its schema and primary key
+    /// The caller must keep the registered MVCC snapshot alive until this reader closes.
     index_storage_hash_major_minimizer_read_session(std::string_view table_name,
                                                     std::string_view classification_index_name,
                                                     std::uint64_t query_key,
@@ -830,9 +825,8 @@ class index_storage_hash_major_minimizer_read_session {
         abandon_noexcept_();
     }
 
-    /// Returns false only for an authenticated absence of the distinct
-    /// hash-major head sentinel.  A present malformed head or manifest is a
-    /// hard error and never enters the grouped-SoA fallback.
+    /// Read and check the active head and its manifest once.
+    /// Return false if the head is absent. A malformed head or manifest is an error.
     [[nodiscard]] bool read_active_head_manifest_once() {
         if (state_ != operation_state::opened || active_scan_ != nullptr) {
             fail_("hash-major metadata was read more than once");
@@ -1122,14 +1116,13 @@ class index_storage_hash_major_minimizer_read_session {
         };
     }
 
-    /// Execute the isolated process-parallel transport experiment without
-    /// changing the production selective-reader callbacks.
+    /// Measure a serial or parallel scan of  this generation for diagnostcs.
     [[nodiscard]] hash_major_minimizer_parallel_scan_stats
     run_parallel_scan_probe(std::uint32_t requested_workers);
 
-    /// Administrative/restart audit. Each stream is reread in primary-key
-    /// order with one physical row resident at a time. The scan authenticates
-    /// every address-bound row receipt and the exact concatenated logical CRC.
+    /// Check every stream's stored rows and checksum for an administrative audit.
+    /// Read in primary-key order using bounded batches, then compare row counts,
+    /// byte lengths and the CRC of each complete stream with the manifest.
     [[nodiscard]] std::array<hash_major_minimizer_catalog_stream_receipt, 3>
     audit_complete_streams() {
         if (state_ != operation_state::source_authorized || active_scan_ != nullptr || !manifest_) {
@@ -1170,8 +1163,8 @@ class index_storage_hash_major_minimizer_read_session {
         return receipts;
     }
 
-    /// Checked close used by a route-inapplicable, self-authenticated F6 head
-    /// before the independent F5 sentinel is probed.
+    /// Close after reading metadata when this index's storage profile cannot, serve the query.
+    /// The caller may then try the separately stored grouped-SoA index.
     void close_metadata_read() {
         if (state_ != operation_state::metadata_ready || active_scan_ != nullptr) {
             fail_("hash-major metadata close is out of order");
@@ -1180,7 +1173,7 @@ class index_storage_hash_major_minimizer_read_session {
         close_relations_();
     }
 
-    /// Close a reader after authenticating absence of the hash-major head.
+    /// Close after finding no active hash-major  head.
     void close_head_absent() {
         if (state_ != operation_state::head_absent || active_scan_ != nullptr) {
             fail_("hash-major absent-head close is out of order");
@@ -1189,7 +1182,7 @@ class index_storage_hash_major_minimizer_read_session {
         close_relations_();
     }
 
-    /// Validate aggregate receipts, close every PG handle, and return read stats.
+    /// Finish the read statistics and close the reader's PostgreSQL resources.
     [[nodiscard]] minimizer_generation_read_stats finish() {
         if (state_ != operation_state::source_authorized || active_scan_ != nullptr ||
             heap_relation_ == nullptr || primary_index_relation_ == nullptr) {
@@ -1224,7 +1217,7 @@ static_assert(!std::is_copy_constructible_v<index_storage_hash_major_minimizer_r
 static_assert(
     std::is_nothrow_move_constructible_v<index_storage_hash_major_minimizer_read_session>);
 
-/// Normal open outcome with either an owned reader or classified absence.
+/// An opened reader, or details of a missing head or unusable index table.
 struct hash_major_minimizer_read_session_open_result {
     std::optional<index_storage_hash_major_minimizer_read_session> session{};
     minimizer_generation_relation_inspection relation_failure{
@@ -1238,8 +1231,9 @@ struct hash_major_minimizer_read_session_open_result {
     }
 };
 
-/// Open the exact current-generation reader or return a classified absence
-/// without weakening schema validation.
+/// Open the index reader and check its metadata.
+/// Report a missing or malformed table, or an absent head, in the result.
+/// Invalid head or manifest contents raise an error.
 [[nodiscard]] inline hash_major_minimizer_read_session_open_result
 open_exact_hash_major_minimizer_read_session_pg(
     std::string_view table_name,

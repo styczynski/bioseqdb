@@ -4,6 +4,5 @@
  */
 export module bioseq.postgres.table;
 
-/* Re-export only the lightweight declaration partition. Implementation
- * partitions remain behind their existing module boundaries. */
+/* Export, the public declarations through :api. */
 export import :api;

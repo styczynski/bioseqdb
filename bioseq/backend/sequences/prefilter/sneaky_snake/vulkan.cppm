@@ -1,12 +1,9 @@
 /**
  * @file vulkan.cppm
- * @brief Vulkan rank-buffer batch surface for the SneakySnake prefilter.
+ * @brief SneakySnake batch filtering through the Vulkan runtime.
  *
- * The runtime owns descriptor bindings, push constants, mapped allocations,
- * command replay, synchronization, and the existing grid-strided batch
- * dispatch. This module only provides the selected-backend policy boundary:
- * an unavailable or software Vulkan device fails loudly and never routes the
- * work through a CPU implementation.
+ * The runtime owns GPU buffers and synchronization. This entry point requires
+ * a  hardware Vulkan device and reports failure when it is unavailable.
  */
 module;
 
@@ -22,9 +19,8 @@ import bioseq.gpu.vulkan.runtime;
 export namespace bioseq::prefilter {
 
 /**
- * @brief Reports whether the shared runtime owns a hardware Vulkan device.
- * @return `true` only when SneakySnake can use the hardware Vulkan backend.
- * @note A software Vulkan device does not satisfy this capability check.
+ * @brief Checks whether a hardware Vulkan device is available for SneakySnake.
+ * @return False for software Vulkan devices.
  */
 [[nodiscard]] inline bool is_vulkan_sneaky_snake_supported() {
     auto& vulkan_runtime = bioseq::gpu::vulkan::runtime::instance();
@@ -32,16 +28,13 @@ export namespace bioseq::prefilter {
 }
 
 /**
- * @brief Executes one selected Vulkan SneakySnake batch over flat rank streams.
- * @param[in] query_ranks Flat query ranks addressed by job symbol offsets.
- * @param[in] target_ranks Flat target ranks addressed by job symbol offsets.
- * @param[in] jobs Ordered slice geometry and edit thresholds.
- * @return One prefilter result per job in input order.
- *
- * The shared runtime retains ownership of descriptor bindings, push constants,
- * dispatch geometry, mapped allocations, command replay, and synchronization.
- * Hardware availability is required before the existing rank-batch roundtrip is
- * invoked. This boundary never selects a CPU fallback.
+ * @brief Runs SneakySnake on a batch of rank-buffer slices using Vulkan.
+ * @param query_ranks Query symbols encoded as rank bytes.
+ * @param target_ranks Target symbols using the same encoding.
+ * @param jobs Slice offsets, lengths, and edit thresholds.
+ * @return One result per job in input order
+ * @throws bioseq::gpu::vulkan::vulkan_runtime_error If a hardware device is, unavailable
+ * or runtime execution fails.
  */
 [[nodiscard]] inline std::vector<prefilter_result>
 run_sneaky_snake_vulkan_batch(

@@ -1,6 +1,6 @@
 /**
  * @file row_codec.cppm
- * @brief Provides ownership and validation primitives for generated SQL row codecs.
+ * @brief Validate SQL row layouts and copy values for generated row codecs.
  */
 module;
 
@@ -28,7 +28,7 @@ import bioseq.postgres.support;
 
 export namespace bioseq::postgres::support {
 
-/** @brief Reports a generated row-codec contract or conversion violation. */
+/** Reports an invalid row layout, value or codec operation. */
 class row_codec_error final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -43,7 +43,7 @@ enum class scan_comparison {
     greater_equal,
 };
 
-/** @brief Expected PostgreSQL tuple-descriptor facts for one row field. */
+/** Expected column number, name, SQL type and NULL hllowance for one field */
 struct row_descriptor_field final {
     AttrNumber attribute_number;
     std::string_view name;
@@ -52,8 +52,9 @@ struct row_descriptor_field final {
 };
 
 /**
- * @brief Validates a live tuple descriptor against generated field metadata.
- * @throws row_codec_error If arity or any field property differs.
+ * Check that a tuple descriptor matches the generated row  definition.
+ * @throws row_codec_error For a missing descriptor, wrong column count or
+ * a column with a different number, name, type or NULL rule, including dropped columns.
  */
 template<std::size_t p_field_count>
 void validate_row_descriptor(
@@ -84,7 +85,7 @@ void validate_row_descriptor(
     }
 }
 
-/** @brief Rejects a null result context before row deformation or copying. */
+/** Reject a missing result memory context before decoding or copying row values. */
 inline void require_row_result_context(
         MemoryContext result_context,
         std::string_view row_name) {
@@ -95,7 +96,7 @@ inline void require_row_result_context(
     }
 }
 
-/** @brief Rejects a null value for a generated required attribute. */
+/** Reject SQL NULL in a required row field. */
 inline void require_row_attribute_not_null(
         bool is_null,
         AttrNumber attribute_number,
@@ -110,11 +111,9 @@ inline void require_row_attribute_not_null(
 }
 
 /**
- * Copy one non-NULL by-reference Datum into an explicit PostgreSQL context.
- *
- * The generator supplies this policy from the field's closed C++/SQL type
- * mapping.  Keeping typlen/byval in generated compile-time data avoids a
- * catalog/OID lookup on every row encode, deform, or update.
+ * Type length and storage rules for copying a referenced Datum.
+ * Generated codecs supply these values from the field type, avoiding a
+ * PostgreSQL catalog lookup for every encoded, decoded or updated row.
  */
 struct by_reference_datum_copy_policy final {
     int16 type_length;
@@ -122,12 +121,11 @@ struct by_reference_datum_copy_policy final {
 };
 
 /**
- * Encode an owning C++ text value directly into its PostgreSQL owner context.
- *
- * The input bytes remain owned by the caller.  Only raw pointer, length, and
- * MemoryContext values cross the PostgreSQL ERROR bridge.  On success there is
- * exactly one allocation, already owned by result_context. On ERROR the bridge
- * restores the caller's memory context before throwing postgres_error.
+ * Copy, C++ text into the requested PostgreSQL memory context.
+ * The source bytes stay with the  caller. The PostgreSQL call receives only
+ * plain values and pointers, so an error can become a C++ exception after
+ * restoring the caller's memory context.
+ * @throws row_codec_error For a null context or text beyond the supported length.
  */
 [[nodiscard]] inline Datum encode_text_to_memory_context(
         std::string_view value,
@@ -156,15 +154,16 @@ struct by_reference_datum_copy_policy final {
 }
 
 /**
- * @brief Copies a non-null by-reference Datum into @p result_context.
- * @throws row_codec_error If the policy describes a by-value or invalid type.
+ * Copy a non-null referenced Datum into `result_context`, detoasting if needed.
+ * @throws row_codec_error For a null context or a type that cannot use this copy policy.
+ * @throws postgres_error If PostgreSQL copying fails.
  */
 [[nodiscard]] Datum copy_pg_datum_to_memory_context(
     Datum value,
     by_reference_datum_copy_policy policy,
     MemoryContext result_context);
 
-/** @brief Copies a by-reference Datum and returns its typed context-owned pointer. */
+/** Copy a referenced Datum and return a typed pointer owned by `result_context`. */
 template<class p_value>
     requires std::is_object_v<p_value>
 [[nodiscard]] p_value* copy_pg_datum_to_memory_context(
@@ -197,7 +196,7 @@ row_scan_strategy(scan_comparison comparison) {
     return InvalidStrategy;
 }
 
-/** @brief Encoded comparison facts used to initialize one scan key. */
+/** Comparison operator and value used to build a PostgreSQL scan key. */
 struct encoded_scan_value final {
     StrategyNumber strategy;
     RegProcedure procedure;
@@ -221,7 +220,7 @@ struct encoded_scan_value final {
     return result;
 }
 
-/** @brief Owns encoded Datum/null arrays for one generated row. */
+/** Value and NULL arrays for a generated row. PostgreSQL contexts own referenced data. */
 template<std::size_t p_field_count>
 class encoded_row_data final {
 public:
@@ -312,7 +311,11 @@ private:
     pg_datum_list<p_field_count> storage_{};
 };
 
-/** @brief Owns deformed row values tied to an explicit result context. */
+/**
+ * Values read from a heap tuple, plus  the context for decoded field copies.
+ * The Datum array can ltill refer to tuple storage Field decoders copy
+ * referenced data into `result_context` as needed.
+ */
 template<std::size_t p_field_count>
 class deformed_row_data final {
 public:

@@ -1,6 +1,6 @@
 /**
  * @file source_provider_promotion_implementation.cppm
- * @brief Implements exact locator promotion behind the narrow scheduler API.
+ * @brief Opens locator-backed sequences through the PostgreSQL source provider.
  */
 module;
 
@@ -9,8 +9,8 @@ module;
 extern "C" {
 #include "postgres_ext.h"
 
-// This narrow declaration must match postgres.h for the selected server SDK.
-// The target version avoids a libpq dependency's unrelated pg_config.h.
+// Match Datum in the selected PostgreSQL server headers.
+// Use  the server version because libpq can supply a different pg_config.h.
 #if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else

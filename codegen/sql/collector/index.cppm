@@ -1647,11 +1647,9 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                     }
                 } else if (*kind == entity_kind::grant
                            || *kind == entity_kind::revoke) {
-                    // One SQL object can own several distinct ACL effects
-                    // (for example a schema-object revoke and a schema-wide
-                    // table revoke). Canonical descriptor text distinguishes
-                    // those companions while an exact duplicate remains an
-                    // error below.
+                    // One SQL object can have several grants or revokes, such as a revoke
+                    // on the schema and another on all its tables. Include the normalized
+                    // annotation text in the key so only exact duplicates are rejected.
                     annotation_key += ":" + canonical;
                 }
                 const auto [previous, inserted] =
@@ -2015,8 +2013,8 @@ collect_direct_import_enum_authorities(
     }
 }
 
-/// Source-only fixture for contract tests that exercise lexical collection.
-/// Production generation never calls this entry point.
+/// Collects annotations from fixture files for source-parsing tests.
+/// Production generation uses the prepared compilation database instead.
 [[nodiscard]] inline collected_program collect_fixture_sources(
     const std::vector<std::filesystem::path>& source_paths,
     const std::vector<std::filesystem::path>&
@@ -2136,13 +2134,12 @@ collect_direct_import_enum_authorities(
 }
 
 /**
- * Run the structural scanner, enforce path-owned authority for generated-only
- * PostgreSQL boundary capabilities, then collect SQL annotations. Authority is
- * checked before collection so an otherwise annotation-free source cannot
- * bypass the generated-path contract. Terminal identifiers are resolved from
- * the scanner's comment/string-free model, excluding module and import names,
- * so namespace aliases, using declarations, and local type aliases cannot
- * conceal a reserved capability.
+ * Checks that a fixture uses generated-only PostgreSQL helpers only from
+ * an allowed source path, then collects its SQL annotations.
+ *
+ * The path check also applies to files without annotations. It examines
+ * identifier tokens outside  module and import names, so aliases cannot hide
+ * reserved helpers and comments or strings cannot trigger a false match.
  */
 [[nodiscard]] inline collected_program
 collect_provenance_checked_fixture(

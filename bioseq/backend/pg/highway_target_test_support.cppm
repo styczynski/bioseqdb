@@ -1,6 +1,6 @@
 /**
  * @file highway_target_test_support.cppm
- * @brief Exposes test-only SQL routines for selecting a Highway target.
+ * @brief SQL test helpers for selecting the CPU instruction set used by Highway.
  */
 module;
 
@@ -23,18 +23,18 @@ import bioseq.postgres.scheduler.dispatch_processor.reprepare_probe;
 namespace {
 
 #if defined(BIOSEQ_TEST_INDEXES)
-/** @brief Retains the unforced runnable-target mask for test validation. */
+/** @brief Save the available CPU targets before a test restricts Highway to one. */
 struct highway_target_test_state_record {
 	std::int64_t baseline_runnable_targets = 0;
 };
 
-/** @return Process-local state for Highway target-forcing tests. */
+/** @return The saved Highway test state for this PostgreSQL proces */
 [[nodiscard]] auto highway_target_test_state() noexcept -> highway_target_test_state_record& {
     static highway_target_test_state_record target_test_state{};
 	return target_test_state;
 }
 
-/** @return The validated unforced runnable-target mask. */
+/** @return The checked mask of CPU targets available before test overrides. */
 [[nodiscard]] auto highway_baseline_runnable_targets() -> std::int64_t {
     auto& target_test_state = highway_target_test_state();
 	if (target_test_state.baseline_runnable_targets != 0) {

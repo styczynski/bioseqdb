@@ -1,8 +1,8 @@
 /**
  * @file external/providers/configured.cppm
- * @brief Configured production provider pack.
+ * @brief Providers included in BioseqDB.
  */
-/// Concrete provider adapters in dispatch order.
+/// Provider modules included in the configured pack.
 export module bioseq.external.providers.configured;
 
 import bioseq.external.provider.pack;
@@ -13,7 +13,7 @@ import bioseq.external.providers.ebi;
 
 export namespace bioseq::external::providers {
 
-/// Configured provider pack in stable compile-time layout order.
+/// Providers in the order used  by typed dispatch.
 using configured_external_api_provider = bioseq::external::provider::
     external_api_provider<ncbi_provider, ucsc_provider, uniprot_provider, ebi_provider>;
 

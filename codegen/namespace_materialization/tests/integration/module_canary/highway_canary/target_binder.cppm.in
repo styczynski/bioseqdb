@@ -1,7 +1,7 @@
 module;
 
-// Runtime targets use the conservative export mask. The compile-only
-// attributed probe widens only its private fixed-target units.
+// The runtime targets use the baseline/EMU128 mask. Attribute-test files
+// use a wider private mask so their extra target can compile.
 #define HWY_COMPILE_ALL_ATTAINABLE 1
 #define HWY_DISABLED_TARGETS (~(@TARGET_POLICY_MASK@))
 #define HWY_HEADER_ONLY 1

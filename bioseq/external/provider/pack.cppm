@@ -1,6 +1,6 @@
 /**
  * @file external/provider/pack.cppm
- * @brief Compile-time provider pack lookup and dispatch.
+ * @brief Find a configured provider by name and call its typed handler.
  */
 module;
 
@@ -18,13 +18,12 @@ import bioseq.external.provider.concepts;
 import bioseq.common.templating.runtime_dispatch;
 import bioseq.common.templating.pack_search;
 
-/// Compile-time provider-pack dispatch implementation.
+/// Helpers for  choosing a provider type from its name.
 namespace bioseq::external::provider::detail {
 
-// Local classes may not have member templates, so the dispatch probe/handler
-// live at namespace scope. The probe matches a runtime provider id against each
-// compile-time adapter's stable id. The handler routes the single match.
-/// Invokes a typed provider handler selected by runtime dispatch.
+// These helpers need member templates, so they live outside the function.
+// The probe matches a provider name, then the handler calls that provider's code.
+/// Call the handler with the selected provider type.
 template <class p_handler_type> struct pack_dispatch_handler {
     p_handler_type& handler;
     std::expected<void, external_error>* result;
@@ -33,7 +32,7 @@ template <class p_handler_type> struct pack_dispatch_handler {
     }
 };
 
-/// Matches a runtime provider identity against a typed adapter.
+/// Match a provider name against the configured type's ID.
 struct pack_dispatch_probe {
     std::string_view requested_provider_id;
     template <class p_provider_type> [[nodiscard]] bool matches(std::size_t) const noexcept {
@@ -42,9 +41,7 @@ struct pack_dispatch_probe {
     void on_no_match(std::size_t) const noexcept {}
 };
 
-// Uniqueness on the stable id *views* rather than on the heterogeneous
-// compile_time_string<N> value types (provider ids differ in length), so the check
-// works regardless of how each adapter sizes its compile-time id string.
+// Compare IDs as string views so providers can use different string lengths.
 /// Returns whether every provider exposes a distinct stable identity.
 template <class... p_provider_types> consteval bool has_unique_provider_id_views() {
     const std::array<std::string_view, sizeof...(p_provider_types)> views{
@@ -63,7 +60,7 @@ template <class... p_provider_types> consteval bool has_unique_provider_id_views
 
 export namespace bioseq::external::provider {
 
-/// Statically checked set of provider adapters with runtime identity dispatch.
+/// Configured providers with compile-time checks for duplicate types and names.
 template <external_api_provider_compatible... p_provider_types> struct external_api_provider {
     using provider_types = bioseq::common::templating::type_list<p_provider_types...>;
 
@@ -75,7 +72,8 @@ template <external_api_provider_compatible... p_provider_types> struct external_
 
     static constexpr std::size_t k_provider_count = sizeof...(p_provider_types);
 
-    /// Dispatches a stable provider identity to one typed handler invocation.
+    /// Find the provider by name and cacl the handler with its type.
+    /// Return unsupported_capability if the  name is unknown.
     template <class p_handler_type>
     static std::expected<void, external_error> dispatch_to_provider(provider_id id,
                                                                     p_handler_type&& handler) {

@@ -1,6 +1,7 @@
 /**
  * @file sketch_index.cppm
- * @brief Owns sketch, scan, radix-sort, and target-index compute shader bodies.
+ * @brief Compute shaders for minimizer sketches, prefix sums, radix sorting
+ * and target-index construction.
  */
 module bioseq.gpu.vulkan.shader_compiler:sketch_index;
 
@@ -9,19 +10,14 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-// ===========================================================================
-// Resident frontend kernels
-// ===========================================================================
+// GPU minimizer and index-building stages.
 
-/// @brief Ordered tile-replay minimizer sketch. One workgroup per tile
-/// (1 active invocation) replays the exact `collect_minimizers_view` state
-/// machine over `[replay_lo, loop_hi)`, emitting only minimizers whose trigger
-/// position falls in this tile's owned window interval `[tile_lo, tile_hi)`.
-/// The left-context overlap (`tile_lo - replay_lo`) reconstructs the ring buffer
-/// and the valid-base/init state so the concatenation across tiles in tile
-/// order equals the single serial traversal — but it is parallel across tiles (never
-/// a one-workgroup-per-sequence serial emit). `emit_mode==0` counts per tile.
-/// `emit_mode==1` writes raw `MinimizerRepr` words at `out_base + local`.
+/// @brief Sketch sequence tiles in parallel while preserving minimizer order.
+/// Each invocation handles a tile and replays some preceding bases to restore
+/// the rolling hash and window state. It emits only minimizers triggered in
+/// that tile's interval, so  joining tiles in order matches a serial sketch.
+/// Mode 0 counts minimizers. Mode 1 writes them into prefix-sum ranges.
+/// Mode 2 appends hash-position pairs through a shared counter.
 // clang-format off
 inline constexpr std::string_view k_ordered_sketch_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
@@ -418,11 +414,10 @@ void main() {
 )GLSL";
 // clang-format on
 
-/// @brief Generic exclusive prefix scan over a `uint` array, producing block totals.
-/// Each workgroup exclusive-scans its block into `out_prefix` and writes the
-/// block total to `block_sums[wg]`. A second `add` stage adds the scanned block
-/// offsets back. Two-level scan (block size = compile_time_workgroup_size_x handled serially by
-/// invocation 0 to stay portable on MoltenVK without subgroup ops).
+/// @brief Compute an exclusive prefix sum within each block and save its total.
+/// One lane per workgroup scans blocks serially, avoiding subgroup operations.
+/// The add shader later combines these local sums into a prefix sum, for the
+/// whole array
 inline constexpr std::string_view k_prefix_scan_block_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
@@ -453,8 +448,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Prefix-scan offset addition. Invocation 0 of workgroup 0 exclusive-
-/// scans `block_sums` in place, then every element adds its block's offset.
+/// @brief Finish the prefix sum in two dispatches. Stage 0 scans the block
+/// totals into offsets. After ghose writes are visible, stage 1 adds each
+/// block's offset to its local  prefix sums.
 inline constexpr std::string_view k_prefix_scan_add_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
@@ -487,10 +483,9 @@ void main() {
     }
 }
 )GLSL";
-/// @brief Device radix sort over parallel (key:uint64, value:uint64)
-/// arrays. One 256-lane workgroup processes each contiguous chunk. Lane 0
-/// assigns stable scatter destinations and all lanes move the values. Histogram
-/// stage: per-chunk 256-bin counts of digit `(key >> radix_shift) & 0xff`.
+/// @brief Count one radix-sort digit for each chunk of keys. A workgroup
+/// counts all 256 possible byte values in shared memory and saves its
+/// histogram for the next stage.
 inline constexpr std::string_view k_radix_sort_histogram_body = R"GLSL(
 // Cooperative per-workgroup histogram: 256 threads (one per bin) zero and write
 // the shared histogram; all threads count this workgroup's chunk into it with
@@ -532,10 +527,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Multi-level histogram scan. One 256-lane workgroup
-/// computes, for every (workgroup, bin), its stable global start offset:
-/// `bin_base[bin] + sum_{wg' < wg} hist[wg'][bin]`, where `bin_base` is the
-/// exclusive prefix over bin totals. Writes the offsets back into `histogram`.
+/// @brief Turn chunk histograms into output offsets for radix sorting.
+/// Each bin starts after all smaller bins, and chunks within a bin keep
+/// their input order. One lane handles each of the 256 bins.
 inline constexpr std::string_view k_radix_sort_scan_body = R"GLSL(
 // One workgroup of 256 threads — one thread per radix bin. Each bin's thread
 // reduces its column of the per-workgroup histograms and then writes that
@@ -578,9 +572,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Stable scatter. Each 256-lane workgroup re-walks its
-/// chunk in order, using the per-(wg,bin) global offsets from the scan as a
-/// running cursor.
+/// @brief Move keys and their values to the positions found by the histogram
+/// scan. One lane assigns positions in input order, then all lanes copy the
+/// data. Equal digits keep their  order for the next radix pass.
 inline constexpr std::string_view k_radix_sort_scatter_body = R"GLSL(
 // Cooperative stable scatter. Lane 0 walks the workgroup's chunk in order to
 // assign each element its destination (= the per-bin global offset, advanced
@@ -641,8 +635,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief GPU target-index run marking. `flags[i] = 1` where a
-/// new hash run begins in the sorted key array.
+/// @brief Mark the first element of each equal-hash run in the sorted keys.
 inline constexpr std::string_view k_index_mark_runs_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
@@ -673,9 +666,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Dense bucket emission. Each element atomically adds to its bucket's
-/// `pos_count`. Run starts set the bucket `hash`/`pos_offset` (the sorted
-/// position index). `bucket_index = inclusive_scan(flags) - 1`.
+/// @brief Build one bucket per hash run, recording its hash and position
+/// range. The scanned run flags identify each bucket, and atomic increments
+/// count its positions.
 inline constexpr std::string_view k_index_emit_buckets_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
@@ -710,7 +703,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Race-free slot claim via a 32-bit atomicCompSwap linear probe.
+/// @brief Assign each hash bucket a sljt by linear probing. Atomic claims
+/// prevent two buckets from taking the same slot Record failure if the
+/// probe limit  is reached.
 inline constexpr std::string_view k_index_claim_slots_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
@@ -749,7 +744,8 @@ void main() {
 }
 )GLSL";
 
-/// @brief Write a serialized_bucket into its claimed slot.
+/// @brief Copy each bucket's hash and position range into its claimed slot.
+/// Skip buckets whose slot search failed.
 inline constexpr std::string_view k_index_emit_slots_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };

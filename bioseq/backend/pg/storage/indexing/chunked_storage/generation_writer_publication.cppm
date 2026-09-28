@@ -1,6 +1,6 @@
 /**
  * @file generation_writer_publication.cppm
- * @brief Defines descriptor locking, storage transitions, and atomic head publication.
+ * @brief Publish  a validated generation and update storage records for mapped files.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -16,7 +16,7 @@ extern "C" {
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
+#include "catalog/namespace.h" // get_relname_relid
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
@@ -61,24 +61,24 @@ import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::invoke_pg_as_cpp
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
+import bioseq.indexing.storage;           // index storage concepts
 import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // minimizer fragment file format
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.storage.scanner;        // sequence access through PostgreSQL
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // decode sequence bases in batches
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -97,7 +97,8 @@ import :file_actions;
 import :fragment_image;
 import :generation_writer_rows;
 export namespace bioseq::storage::indexing {
-/// Lock and return the current head bytes used to serialize descriptor publication.
+/// Lock the active head row and copy its bytes before replacing it.
+/// Return no value when this query key has no published generation.
 [[nodiscard]] inline std::optional<std::array<std::byte, minimizer_generation_head::encoded_bytes>>
 read_locked_generation_head_for_descriptor_publication_pg(const std::string_view table_name,
                                                           const std::uint64_t query_key) {
@@ -176,7 +177,8 @@ read_locked_generation_head_for_descriptor_publication_pg(const std::string_view
     return bytes;
 }
 
-/// Lock and decode the unique LIVE descriptor for one logical generation key.
+/// Lock and validate the LIVE storage catalog entry for this index and query key.
+/// Return no value if none exists.
 [[nodiscard]] inline std::optional<minimizer_generation_storage_descriptor>
 read_locked_live_descriptor_for_publication_pg(
     const minimizer_generation_administration_identity& identity, const std::uint64_t query_key) {
@@ -360,7 +362,9 @@ read_locked_live_descriptor_for_publication_pg(
     return result;
 }
 
-/// Retire the previous descriptor and install the new LIVE descriptor atomically.
+/// Retire the old storage  entry and insert the new LIVE entry when supplied.
+/// Record the retiring transaction so cleanup can wait for older snapshots.
+/// Both changes belong to the caller's transaction.
 inline void apply_minimizer_generation_storage_transition_pg(
     const minimizer_generation_administration_identity& identity,
     const std::uint64_t query_key,
@@ -539,8 +543,10 @@ inline void apply_minimizer_generation_storage_transition_pg(
     }
 }
 
-/// Consume the private complete-reread authorization and publish its head atomically.
-/// There is no public overload that accepts an arbitrary relation/generation.
+/// Publish a fully reread generation in the transaction that built it
+/// Check the ready token and relation identity, then replace the actie head.
+/// For mapped fragment files, retire the previous storage entry and add the new one.
+/// Consume  the token and return the saved head with any replaced generation ID.
 [[nodiscard]] ready_minimizer_generation_published_head_receipt
 publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& token) {
     const auto minimizer_generation_storage_error = [](std::string_view message) {
@@ -874,9 +880,8 @@ publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& to
         delete publication;
         return receipt;
     } catch (const bioseq::postgres::support::postgres_error&) {
-        // The current transaction/ResourceOwner owns SPI, relation and palloc
-        // state. Do not issue PostgreSQL cleanup calls while propagating the
-        // exact original error.
+        // Let transaction abort reclaim PostgreSQL resources while the original
+        // error propagates through C++ cleanup.
         publication->blob = nullptr;
         publication->descriptor_relation = nullptr;
         publication->relation = nullptr;

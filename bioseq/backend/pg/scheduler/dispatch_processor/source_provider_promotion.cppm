@@ -1,6 +1,6 @@
 /**
  * @file source_provider_promotion.cppm
- * @brief Declares the narrow PostgreSQL source-provider promotion boundary.
+ * @brief Opens lazy sequence views from stored sequence locators.
  */
 module;
 
@@ -15,8 +15,8 @@ extern "C" {
      (PGSIXBIT(ch5) << 24))
 #include "utils/errcodes.h"
 
-// This narrow declaration must match postgres.h for the selected server SDK.
-// The target version avoids a libpq dependency's unrelated pg_config.h.
+// Match Datum in the selected PostgreSQL server headers.
+// Use the server version because libpq can supply a different pg_config.h.
 #if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else
@@ -41,8 +41,9 @@ import bioseq.storage.layout;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Allocate a canonical locator stub and promote it through an open source
- * provider without exposing storage-manager implementation BMIs to callers.
+ * Creates a locator datum and opens its lazy sequence through source_provider.
+ * parent_mctx owns the returned datum. This declaration keeps storage-manager
+ * code out of modules that only need to open a  sequence.
  */
 [[nodiscard]] Datum
 promote_source_provider_pg_locator(bioseq::storage::pg_sequence_source_provider* source_provider,
@@ -54,10 +55,8 @@ promote_source_provider_pg_locator(bioseq::storage::pg_sequence_source_provider*
                                    std::uint16_t last_padding_letters);
 
 /**
- * Validate an exact statement source provider and promote one locator.
- *
- * The narrow provider contract keeps scanner implementation details out of
- * typed scheduler module interfaces. The returned datum is owned by parent_mctx.
+ * Checks that source_provider belongs to this relation, snapshot, and column,
+ * then opens the locator as a lazy sequence. parent_mctx owns the returned datum.
  */
 [[nodiscard]] Datum promote_exact_source_provider_pg_locator(
     bioseq::storage::pg_sequence_source_provider* source_provider,
@@ -74,8 +73,9 @@ promote_source_provider_pg_locator(bioseq::storage::pg_sequence_source_provider*
     std::uint16_t last_padding_letters);
 
 /**
- * Promotes one locator through the statement source provider and passes its
- * typed lazy view to the callback.
+ * Opens a locator as a lazy sequence and passes its view to the callback.
+ * Checks the alphabet, storage width, and length before use Reuses the supplied
+ * read, session, or opens one and closes it when the callback finishes or throws.
  */
 template <class p_alphabet, class p_scanner_pg_context, class p_function>
 inline void with_source_provider_pg_locator(p_scanner_pg_context& context,
@@ -140,7 +140,7 @@ inline void with_source_provider_pg_locator(p_scanner_pg_context& context,
     }
 }
 
-/** Promotes the target locator from a scanner context to its typed lazy view. */
+/** Opens the scanner target column as a lazy view for the callback. */
 template <class p_sequence, class p_scanner_pg_context, class p_function>
 inline void with_source_provider_pg_target(p_scanner_pg_context& context,
                                            const bioseq::storage::sequence_locator& locator,

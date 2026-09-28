@@ -1,6 +1,5 @@
 export module bioseq.codegen.website.postgres;
 
-// Public PostgreSQL catalog and tutorial-execution surface. Consumers import one
-// semantic module without depending on partition ownership.
+// Exports PostgreSQL catalog queries and tutorial execution through one mooule.
 export import :executor;
 export import :catalog;

@@ -1,9 +1,7 @@
 /**
  * @file minimap_int.cppm
- * @brief Target-neutral scalar minimap2 integer hasher.
- *
- * @details Composes canonical lexicographic rolling state with minimap2's width-clamped seven-step
- * integer permutation while retaining the canonical strand result.
+ * @brief Computes scalar minimap2 integer hashes from rolling k-mer codes.
+ * The smaller strand code is mixed into a hash while its strand label is kept.
  */
 module;
 
@@ -21,18 +19,12 @@ import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-/**
- * @brief Defines the scalar minimap2 integer hash policy for one sequence alphabet.
- * @tparam p_alphabet Sequence alphabet consumed by the canonical rolling hasher.
- */
+/** @brief Hashes an alphabet's k-mers with the minimap2 integer mixing function. */
 template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
-    /** @brief Lexicographic scalar hasher supplying canonical codes and strand tags. */
+    /** @brief Rolling hasher that selects the smaller strand code. */
     using base_hasher_type = lexic_hasher<p_alphabet>;
 
-    /**
-     * @brief Maintains canonical rolling state and emits minimap2-permuted hashes.
-     * @tparam p_input_type Scalar word used for the packed k-mer and hash.
-     */
+    /** @brief Keeps rolling k-mer codes and returns their minimap2 hashes. */
     template <typename p_input_type>
     class scalar_hash : public hasher_base<p_alphabet, p_input_type> {
       public:
@@ -50,18 +42,15 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
             : base_hasher_(kmer_length),
               mask_((static_cast<typename traits::input_type>(1) << (2u * kmer_length)) - 1u) {}
 
-        /**
-         * @brief Clamps one permutation shift to the selected scalar width.
-         * @tparam p_offset Requested compile-time shift distance.
-         */
+        /** @brief Limits a requested bit shift  to one less than the scalar word width. */
         template <std::size_t p_offset>
         static constexpr std::size_t k_shift = std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
 
         /**
-         * @brief Advances the canonical state and applies the minimap2 integer permutation.
-         * @param[in] incoming Alphabet rank entering the right edge of the k-mer.
-         * @param[in] outgoing Alphabet rank leaving the left edge of the k-mer.
-         * @return The mixed canonical hash and the unchanged canonical strand classification.
+         * @brief Updates the strand codes and hashes the smaller code.
+         * @param incoming Rank appended to the forward code.
+         * @param outgoing Rank whose complement is prepended to the reverse code.
+         * @return The mixed hash with the strand chosen before mixing.
          */
         constexpr typename traits::hasher_return_type next(typename traits::input_type incoming,
                                                            typename traits::input_type outgoing) {
@@ -76,17 +65,15 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
     };
 
     /**
-     * @brief Applies minimap2's width-clamped seven-step integer permutation.
-     * @tparam p_input_type Scalar word containing the canonical k-mer.
-     * @param[in] lex_kmer Canonical packed k-mer code.
-     * @param[in] kmer_mask Mask retaining only the k-mer's occupied bits after mixing.
-     * @return Permuted hash masked to the k-mer width.
+     * @brief Mixes a packed k-mer code with the minimap2 integer hash function.
+     * kmer_mask limits the, result to the chosen hash wldth. Shifts are capped
+     * for narrow integer types.
      */
     template <typename p_input_type>
     [[nodiscard]] static constexpr p_input_type scramble(const p_input_type& lex_kmer,
                                                          const p_input_type& kmer_mask) {
         constexpr std::size_t k_max_storage_shift = sizeof(p_input_type) * 8u - 1u;
-        // Clamps permutation shifts to the scalar word bit width.
+        // Keep shifts within the scalar word width.
         constexpr auto clamp = [](std::size_t shift) constexpr {
             return shift > k_max_storage_shift ? k_max_storage_shift : shift;
         };

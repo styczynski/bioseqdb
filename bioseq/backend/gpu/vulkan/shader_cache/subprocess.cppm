@@ -1,6 +1,6 @@
 /**
  * @file subprocess.cppm
- * @brief Owns bounded subprocess execution and durable shader-cache publication.
+ * @brief Runs compiler processes with limits and writes cache files through temporary files.
  */
 module;
 
@@ -22,8 +22,8 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Captures operating-system identity used by the cache digest.
-/// @return Stable uname component or an unavailable marker.
+/// @brief Returns OS and machine information for the cache build ID.
+/// Returns `uname-unavailable` if the system query fails.
 [[nodiscard]] inline std::string system_uname_digest_component() {
     utsname info{};
     if (::uname(&info) != 0) {
@@ -33,29 +33,28 @@ export namespace bioseq::gpu::vulkan {
         info.sysname, ' ', info.nodename, ' ', info.release, ' ', info.version, ' ', info.machine);
 }
 
-/// @brief Resource bounds for one captured subprocess invocation.
+/// @brief Output and time limits for a captured command.
 struct run_capture_limits {
     std::size_t maximum_output_bytes = 4u << 20u; ///< Combined stdout and stderr byte cap.
-    std::chrono::milliseconds timeout = std::chrono::minutes(5); ///< Wall-clock limit before abort.
+    std::chrono::milliseconds timeout = std::chrono::minutes(5); ///< Time allowed for output capture and child completion.
 };
 
-/// @brief Descriptor mapping inherited by a captured subprocess.
+/// @brief Maps an open descriptor to a descriptor number in the child.
 struct run_capture_inherited_fd {
     int source_fd = -1; ///< Open descriptor duplicated into the child.
     int target_fd = -1; ///< Child descriptor number receiving the duplicate.
 };
 
-/// @brief Move-disabled owner for one subprocess file descriptor.
+/// @brief Closes a subprocess file descriptor when its owner leaves scope.
 class capture_file_descriptor {
   public:
-    /// @brief Adopts one subprocess-related descriptor.
-    /// @param[in] fd Descriptor to close unless transferred.
+    /// @brief Takes ownership of `fd`, which may be released before destruction.
     explicit capture_file_descriptor(int fd = -1) noexcept : fd_(fd) {}
 
     /// @brief Prevents copying descriptor ownership.
     capture_file_descriptor(const capture_file_descriptor&) = delete;
 
-    /// @brief Prevents copy assignment of descriptor ownership.
+    /// @brief Prevents assignment from duplicating descriptor ownership.
     capture_file_descriptor& operator=(const capture_file_descriptor&) = delete;
 
     /// @brief Closes the owned descriptor.
@@ -63,14 +62,12 @@ class capture_file_descriptor {
         close_now();
     }
 
-    /// @brief Returns the owned descriptor without transferring it.
-    /// @return Borrowed file descriptor.
+    /// @brief Returns the descriptor while keeping ownership here.
     [[nodiscard]] int get() const noexcept {
         return fd_;
     }
 
-    /// @brief Transfers the descriptor out of this owner.
-    /// @return Owned file descriptor.
+    /// @brief Gives the descriptor to the caller and clears this owner.
     [[nodiscard]] int release() noexcept {
         return std::exchange(fd_, -1);
     }
@@ -86,7 +83,7 @@ class capture_file_descriptor {
     int fd_ = -1;
 };
 
-/// @brief Owns initialized POSIX spawn file actions.
+/// @brief Owns the child's descriptor seup instructions for `posix_spawn`.
 class capture_spawn_file_actions {
   public:
     /// @brief Creates an uninitialized spawn-actions owner.
@@ -95,7 +92,7 @@ class capture_spawn_file_actions {
     /// @brief Prevents copying POSIX spawn actions.
     capture_spawn_file_actions(const capture_spawn_file_actions&) = delete;
 
-    /// @brief Prevents copy assignment of POSIX spawn actions.
+    /// @brief Prevents assignment  from copying the spawn actions.
     capture_spawn_file_actions& operator=(const capture_spawn_file_actions&) = delete;
 
     /// @brief Destroys initialized POSIX spawn actions.
@@ -104,31 +101,26 @@ class capture_spawn_file_actions {
             (void)::posix_spawn_file_actions_destroy(&actions_);
     }
 
-    /// @brief Initializes the POSIX spawn action list.
-    /// @return POSIX status code.
+    /// @brief Initializes the spawn action list and returns the POSIX status code.
     [[nodiscard]] int initialize() noexcept {
         const int rc = ::posix_spawn_file_actions_init(&actions_);
         initialized_ = rc == 0;
         return rc;
     }
 
-    /// @brief Adds one descriptor duplication action.
-    /// @param[in] fd Source descriptor.
-    /// @param[in] target Child descriptor number.
-    /// @return POSIX status code.
+    /// @brief Schedules duplication of `fd` to `target` in the child.
+    /// Returns the POSIX status code.
     [[nodiscard]] int add_dup2(int fd, int target) noexcept {
         return ::posix_spawn_file_actions_adddup2(&actions_, fd, target);
     }
 
-    /// @brief Adds one child-side descriptor close action.
-    /// @param[in] fd Descriptor to close in the child.
-    /// @return POSIX status code.
+    /// @brief Schedules closing `fd` in the child.
+    /// Returns the POSIX status code.
     [[nodiscard]] int add_close(int fd) noexcept {
         return ::posix_spawn_file_actions_addclose(&actions_, fd);
     }
 
-    /// @brief Returns the initialized POSIX spawn action list.
-    /// @return Borrowed action-list pointer.
+    /// @brief Returns the action list after successful initialization.
     [[nodiscard]] const posix_spawn_file_actions_t* get() const noexcept {
         return &actions_;
     }
@@ -138,7 +130,7 @@ class capture_spawn_file_actions {
     bool initialized_ = false;
 };
 
-/// @brief Owns spawn attributes that isolate the child process group.
+/// @brief Sets up a separate process group so a failed command can be stopped with its children.
 class capture_spawn_attributes {
   public:
     /// @brief Creates an uninitialized spawn-attribute owner.
@@ -147,7 +139,7 @@ class capture_spawn_attributes {
     /// @brief Prevents copying POSIX spawn attributes.
     capture_spawn_attributes(const capture_spawn_attributes&) = delete;
 
-    /// @brief Prevents copy assignment of POSIX spawn attributes.
+    /// @brief Prevents assignment from copying spawn attributes.
     capture_spawn_attributes& operator=(const capture_spawn_attributes&) = delete;
 
     /// @brief Destroys initialized POSIX spawn attributes.
@@ -156,8 +148,8 @@ class capture_spawn_attributes {
             (void)::posix_spawnattr_destroy(&attributes_);
     }
 
-    /// @brief Initializes attributes that place the child in its own process group.
-    /// @return POSIX status code.
+    /// @brief Makes the child's PID its, process-group ID.
+    /// Returns the POSIX status code
     [[nodiscard]] int initialize_process_group() noexcept {
         int rc = ::posix_spawnattr_init(&attributes_);
         if (rc != 0)
@@ -169,8 +161,7 @@ class capture_spawn_attributes {
         return ::posix_spawnattr_setflags(&attributes_, POSIX_SPAWN_SETPGROUP);
     }
 
-    /// @brief Returns the initialized POSIX spawn attributes.
-    /// @return Borrowed attribute pointer.
+    /// @brief Returns the attributes after successful initialization.
     [[nodiscard]] const posix_spawnattr_t* get() const noexcept {
         return &attributes_;
     }
@@ -180,29 +171,27 @@ class capture_spawn_attributes {
     bool initialized_ = false;
 };
 
-/// @brief Reaps a captured subprocess and terminates its group on early exit.
+/// @brief Owns a captured child process and stops its group if  capture fails.
 class captured_child_process {
   public:
-    /// @brief Adopts the child PID and captured-output descriptor.
-    /// @param[in] read_fd Captured-output read descriptor.
-    /// @param[in] pid Direct child process identifier and process-group identifier.
+    /// @brief Takes ownership of the output descriptor and child process.
+    /// `pid` must also identify the child's process group.
     captured_child_process(int read_fd, pid_t pid) noexcept : read_fd_(read_fd), pid_(pid) {}
 
     /// @brief Prevents copying child-process ownership.
     captured_child_process(const captured_child_process&) = delete;
 
-    /// @brief Prevents copy assignment of child-process ownership.
+    /// @brief Prevents assignment from duplicating child-process ownership.
     captured_child_process& operator=(const captured_child_process&) = delete;
 
-    /// @brief Closes capture output and terminates unfinished child groups.
+    /// @brief Closes the output pipe and stops the process group unless capture completed.
     ~captured_child_process() noexcept {
         close_read();
         if (!completed_)
             terminate_group_and_reap();
     }
 
-    /// @brief Returns the captured-output descriptor.
-    /// @return Borrowed read descriptor.
+    /// @brief Returns the descriptor used to read captured output.
     [[nodiscard]] int read_fd() const noexcept {
         return read_fd_;
     }
@@ -215,27 +204,27 @@ class captured_child_process {
         }
     }
 
-    /// @brief Records that the direct child has been reaped.
+    /// @brief Records that `waitpid` has collected the child's exit status.
     void mark_reaped() noexcept {
         direct_child_reaped_ = true;
     }
 
-    /// @brief Records successful capture completion so destruction need not terminate the group.
+    /// @brief Marks capture successful so destruction leaves the process group alone.
     void mark_completed() noexcept {
         completed_ = true;
     }
 
   private:
-    /// @brief Result of a nonblocking direct-child reap attempt.
+    /// @brief Result of checking child completion without waiting.
     enum class reap_probe : std::uint8_t {
         running, ///< Direct child is still executing.
-        reaped, ///< Direct child exited and was reaped.
+        reaped, ///< The child exited and its xit status was collected.
         no_longer_a_child, ///< Process is no longer this parent's direct child.
-        error, ///< waitpid failed with an unexpected errno.
+        error, ///< `waitpid` failed with  an unexpected error.
     };
 
-    /// @brief Attempts a nonblocking direct-child reap.
-    /// @return Current direct-child state.
+    /// @brief Checks whether the child exited and collects its status if available.
+    /// Returns immediately while the child is running.
     [[nodiscard]] reap_probe probe_reap() noexcept {
         if (direct_child_reaped_)
             return reap_probe::reaped;
@@ -258,16 +247,16 @@ class captured_child_process {
         }
     }
 
-    /// @brief Kills the child process group and performs a bounded direct-child reap.
+    /// @brief Sends SIGKILL to the process group and tries to collect the child's exit status.
+    /// Polls for child exit for up to one second after the signal.
     void terminate_group_and_reap() noexcept {
         if (pid_ <= 0)
             return;
         const reap_probe before = probe_reap();
         if (before == reap_probe::no_longer_a_child)
             return;
-        // POSIX_SPAWN_SETPGROUP made the child PID the process-group ID, so
-        // ordinary descendants cannot outlive a timeout or continue touching
-        // helper outputs after capture rejection.
+        // The child leads its process group. Kill that group so descendants that
+        // stay in it also stop after a timeout or rejected capture.
         (void)::kill(-pid_, SIGKILL);
         if (direct_child_reaped_)
             return;
@@ -289,11 +278,13 @@ class captured_child_process {
 };
 
 /**
- * @brief Runs a command in an isolated process group and captures bounded output.
- * @param[in] args Executable and argument vector.
- * @param[in] limits Output and elapsed-time limits.
- * @param[in] inherited_fds Additional descriptor mappings for the child.
- * @return Captured combined output or a spawn, timeout, I/O, or exit diagnostic.
+ * @brief Runs a command and captures stdout and stderr in one bounded string.
+ * Failure cleanup stops processes that  remain in the child's process group
+ * Waits for both the child and the output pipe, applying the supplied limits.
+ * @param[in] args Executable followed by its arguments.
+ * @param[in] limits Output and capture-time limits.
+ * @param[in] inherited_fds Extra descriptor mappings available to the child.
+ * @return Combined output, or a command or capture error.
  */
 [[nodiscard]] inline std::expected<std::string, std::string>
 run_capture(std::span<const std::string> args,
@@ -311,7 +302,8 @@ run_capture(std::span<const std::string> args,
     }
     capture_file_descriptor read_owner{pipe_fds[0]};
     capture_file_descriptor write_owner{pipe_fds[1]};
-    // Marks one pipe end close-on-exec so the child cannot inherit it.
+    // Close the original pipe descriptor during exec. Spawn actions keep the
+    // stdout and stderr duplicates open.
     const auto set_close_on_exec = [](int fd) noexcept -> int {
         const int flags = ::fcntl(fd, F_GETFD, 0);
         if (flags < 0)
@@ -477,8 +469,8 @@ run_capture(std::span<const std::string> args,
     return std::expected<std::string, std::string>{std::in_place, std::move(output)};
 }
 
-/// @brief Resolves the platform tool dispatcher used for Metal compilation.
-/// @return Absolute system path when available, otherwise the PATH lookup name.
+/// @brief Finds `xcrun` for Metal compilation.
+/// Uses `/usr/bin/xcrun` when executable, otherwise searches PATH at spwn time.
 [[nodiscard]] inline std::string xcrun_executable() {
     if (::access("/usr/bin/xcrun", X_OK) == 0) {
         return "/usr/bin/xcrun";
@@ -486,8 +478,8 @@ run_capture(std::span<const std::string> args,
     return "xcrun";
 }
 
-/// @brief Captures the installed Metal compiler version for cache identity.
-/// @return Compiler version output or an unavailable marker.
+/// @brief Returns the Metal compiler version for the cache, build ID.
+/// Returns an unavailable  marker if the command fails.
 [[nodiscard]] inline std::string probe_metal_version() {
     const std::array<std::string, 4> args{xcrun_executable(), "-sdk", "macosx", "metal"};
     std::vector<std::string> version_args(args.begin(), args.end());
@@ -496,9 +488,8 @@ run_capture(std::span<const std::string> args,
     return result ? *result : std::string{"xcrun metal unavailable"};
 }
 
-/// @brief Synchronizes the directory entry containing a published file.
-/// @param[in] path Published file path.
-/// @return Success or a filesystem diagnostic.
+/// @brief Flushes the parent directory after a cache file is renamed into place.
+/// Returns a filesystem error if the directory cannot be opened or synced.
 [[nodiscard]] inline std::expected<void, std::string>
 fsync_parent_dir(const std::filesystem::path& path) {
     const std::filesystem::path parent = path.parent_path();
@@ -517,10 +508,8 @@ fsync_parent_dir(const std::filesystem::path& path) {
     return {};
 }
 
-/// @brief Writes every byte to an open descriptor while retrying interruptions.
-/// @param[in] fd Open output descriptor.
-/// @param[in] bytes Bytes to write.
-/// @return Success or an I/O diagnostic.
+/// @brief Writes all bytes to `fd`, retrying interrupted writes.
+/// Returns an error if a write fails or makes no progress.
 [[nodiscard]] inline std::expected<void, std::string>
 write_all_fd(int fd, std::span<const std::byte> bytes) {
     const std::byte* cursor = bytes.data();
@@ -539,10 +528,9 @@ write_all_fd(int fd, std::span<const std::byte> bytes) {
     return {};
 }
 
-/// @brief Atomically publishes exact bytes after syncing file and parent directory.
-/// @param[in] final_path Published destination path.
-/// @param[in] bytes File payload.
-/// @return Success or an I/O diagnostic.
+/// @brief Writes and syncs a temporary file, then renames it to `final_path`.
+/// Syncs the parent directory after the rename. The temporary name is fixed,
+/// so callers must serialize writes to the same destination.
 [[nodiscard]] inline std::expected<void, std::string>
 durable_write_file(const std::filesystem::path& final_path, std::span<const std::byte> bytes) {
     const std::filesystem::path temporary_path = final_path.string() + ".tmp";
@@ -577,10 +565,8 @@ durable_write_file(const std::filesystem::path& final_path, std::span<const std:
     return fsync_parent_dir(final_path);
 }
 
-/// @brief Syncs and atomically publishes an existing temporary file.
-/// @param[in] temporary_path Complete temporary file.
-/// @param[in] final_path Published destination path.
-/// @return Success or an I/O diagnostic.
+/// @brief Syncs a completed temporary file and renames it to `final_path`.
+/// Flushes the destination  directory after the rename and reports open, sync, or rename errors.
 [[nodiscard]] inline std::expected<void, std::string>
 durable_rename_existing(const std::filesystem::path& temporary_path,
                         const std::filesystem::path& final_path) {
@@ -607,9 +593,8 @@ durable_rename_existing(const std::filesystem::path& temporary_path,
     return fsync_parent_dir(final_path);
 }
 
-/// @brief Runs a command and discards successful captured output.
-/// @param[in] args Executable and argument vector.
-/// @return Success or the captured subprocess diagnostic.
+/// @brief Runs a command with capture limits and discards successful output
+/// Returns the capture error if the command fails.
 [[nodiscard]] inline std::expected<void, std::string>
 spawn_wait(std::span<const std::string> args) {
     auto result = run_capture(args);

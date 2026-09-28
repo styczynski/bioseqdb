@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/promoted_sequence.cppm
- * @brief Snapshot-bound promoted sequence callback support for index rebuilds.
+ * @brief Keep a stored sequence readable for one index-build callback.
  */
 module;
 
@@ -19,16 +19,9 @@ import bioseq.sequences;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Expose one promoted PostgreSQL sequence through its canonical lazy facade.
- * @tparam p_alphabet Sequence alphabet selected from the stored representation.
- * @tparam p_callback Callable accepting the borrowed lazy sequence view.
- * @param promoted_datum Source-domain-promoted sequence datum.
- * @param parent_context Context that owns the read session and facade adapter.
- * @param callback Operation executed while the session and view remain valid.
- *
- * The callback borrows the view only for the call. The function closes the read
- * session before returning, aborts it on either PostgreSQL or C++ failure, and
- * rethrows the original failure after cleanup.
+ * Open a read session for the promoted sequence and pass its lazy view to the
+ * callback. The view is valid only during that call. Close the session on
+ * success, or abort it before rethrowing a PostgreSQL or C++ failure.
  */
 template <sequence_alphabet p_alphabet, class p_callback>
 inline void with_promoted_pg_sequence_view(Datum promoted_datum,

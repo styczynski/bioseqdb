@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/08_direct_execution_test.cpp
- * @brief Direct routing, occurrence emission, and selection shards.
+ * @brief Checks direct index lookup, anchor output, and work  split across hash groups.
  */
 
 #include <hwy/highway.h>
@@ -36,7 +36,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -202,10 +202,8 @@ TEST_CASE("compact direct fragment route is exact and scan free",
                 minimizer_generation_encoding_error::storage_contract_mismatch);
         REQUIRE(wrong_identity_admission.reserved_bytes() == 0u);
 
-        // A protected decoy represents the complete grouped-SoA payload that a
-        // minimap_manifest reader would own.  It is protected before open and is never
-        // passed to the direct-only API, so any accidental payload dependency
-        // would fault instead of being hidden by a warm test allocation.
+        // Keep an inaccessible grouped payload allocation beside the direct reader
+        // The direct-only API receives only the compact index.
         auto forbidden_grouped_soa_payload =
             make_sparse_mapped_test_payload(generation->manifest.payload_bytes);
         REQUIRE(forbidden_grouped_soa_payload.has_value());
@@ -216,8 +214,7 @@ TEST_CASE("compact direct fragment route is exact and scan free",
         const std::uint8_t direct_only_posting_width =
             direct_only_compact.view.header.posting_width_bytes;
         bioseq::parallelism::memory_admission_controller direct_admission;
-        // One byte cannot admit even one fragment_block_plan. Direct open must
-        // therefore succeed only by retaining no scan-route address plan.
+        // A one-byte budget forces direct open to keep no fragment scan plan.
         direct_admission.set_index_memory_cap_bytes(1u);
         auto direct_reader = prepared_minimizer_fragment_reader::open_compact_direct(
             direct_admission,
@@ -249,8 +246,8 @@ TEST_CASE("compact direct fragment route is exact and scan free",
         REQUIRE(direct_admission.reserved_bytes() == 0u);
         direct_admission.set_index_memory_cap_bytes(0u);
 
-        // Leave the reader as the only lifetime authority for its direct
-        // image.  The unrelated PROT_NONE grouped-SoA mapping remains live.
+        // Drop the external compact index owner to check that the reader keeps
+        // its data alive. The protected grouped payload stays allocated.
         const std::uintptr_t direct_image_begin =
             reinterpret_cast<std::uintptr_t>(direct_only_compact.view.image.data());
         const std::uint64_t direct_postings_offset =
@@ -463,9 +460,8 @@ TEST_CASE("compact direct fragment route is exact and scan free",
         own_fragment_compact_direct_test_index(compact));
     REQUIRE(reader.has_value());
     REQUIRE(reader->compact_direct_ready());
-    // The reader now owns both mappings.  Drop every external lifetime token,
-    // then make the grouped-SoA payload inaccessible: the explicit direct route
-    // must remain valid and cannot silently scan controls or positions.
+    // Make the grouped payload unreadable and drop the, external owners.
+    // Direct lookup must use the compact image kept alive  by the reader.
     REQUIRE(mprotect(protected_payload_address, protected_payload_size, PROT_NONE) == 0);
     protected_payload->owner.reset();
     grouped_soa_payload.reset();
@@ -564,8 +560,8 @@ TEST_CASE("compact direct fragment route is exact and scan free",
     const std::uint64_t next_plan_metadata = queries.size() * sizeof(prepared_query_anchors);
     admission.set_index_memory_cap_bytes(retained_before_plan_boundary + next_plan_metadata +
                                          admitted_plan_peak);
-    // This query has c+1=5 unique hashes. Its exact preallocation peak is
-    // rejected before the vector reserve, and all wave owners return reusable.
+    // Five unique hashes exceed the budget for four. Rejection must leave
+    // the scratch buffers and their memory reservations unchanged.
     REQUIRE_THROWS_AS(reader->prepare_fragment_anchor_batch(
                           admission,
                           queries,
@@ -648,15 +644,15 @@ TEST_CASE("compact-direct single-query occurrence emission covers P32 spans",
     constexpr bioseq::storage::sequence_size_t query_length = 200u;
     constexpr std::int32_t kmer_size = 15;
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
-        // Both P32 inline-singleton strand orientations.
+        // One inline 32-bit position on each strand.
         {7u, packed(10u, 0u)},
         {8u, packed(20u, 1u)},
-        // One query occurrence expands an out-of-line two-strand list.
+        // One query minimizer matches four stored positions across both strands.
         {9u, packed(30u, 0u)},
         {9u, packed(31u, 0u)},
         {9u, packed(32u, 1u)},
         {9u, packed(33u, 1u)},
-        // Duplicate query occurrences retain the generic fallback.
+        // Repeated query minimizers exercise the general emission loop.
         {10u, packed(40u, 0u)},
         {10u, packed(41u, 1u)},
     };
@@ -740,9 +736,9 @@ TEST_CASE("compact-direct single-query occurrence emission covers P64 spans",
     constexpr bioseq::storage::sequence_size_t query_length = 200u;
     constexpr std::int32_t kmer_size = 15;
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
-        // P64 never inlines, including a count-one posting list.
+        // Even one 64-bit position needs a separate posting list.
         {7u, packed(high_bp, 0u)},
-        // One occurrence expands a multi-position, two-strand P64 list.
+        // One query minimizer matches four 64-bit positions across both strands.
         {8u, packed(100u, 0u)},
         {8u, packed(101u, 0u)},
         {8u, packed(high_bp + 1u, 1u)},
@@ -856,8 +852,8 @@ TEST_CASE("compact-direct selection shards preserve P32 differential parity",
             static_cast<std::uint8_t>((hash + 1u) & 1u),
         });
     }
-    // Repeat one accepted occurrence byte-for-byte. It must expand through
-    // its shard-local cursor without introducing an atomic or shared cursor.
+    // Repeat an accepted query minimizer to chck duplicate anchors across
+    // work groups. Each  group writes through its own output cursor.
     query0.push_back(query0[6u]);
     query0.push_back(minimap_sketch_data{heavy_hash, 90u, 0u});
     for (std::uint64_t hash = selected_hash_count; hash != 0u; --hash) {

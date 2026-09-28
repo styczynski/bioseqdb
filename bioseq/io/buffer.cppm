@@ -1,6 +1,6 @@
 /**
  * @file buffer.cppm
- * @brief Aligned refill storage and parser cursors.
+ * @brief Aligned input buffer shared by the reader and parser.
  */
 module;
 
@@ -18,10 +18,9 @@ import bioseq.io.options;
 
 export namespace bioseq::io {
 
-/// One I/O slab: a HWY-aligned byte buffer plus the parser's bookkeeping
-/// (fill cursor, parse cursor, EOF marker). The producer fills bytes
-/// in `[fill_size, capacity)`. The parser reads from
-/// `[parse_cursor, fill_size)`.
+/// Aligned input bytes with separate fill and parse positions. The reader
+/// writes into [fill_size, capacity), and the parser consumes
+/// [parse_cursor, fill_size).
 struct buffer_slab {
     hwy::AlignedFreeUniquePtr<std::uint8_t[]> data;
     std::size_t capacity = 0;
@@ -36,11 +35,11 @@ struct buffer_slab {
     explicit buffer_slab(std::size_t initial_capacity)
         : data(hwy::AllocateAligned<std::uint8_t>(initial_capacity)), capacity(initial_capacity) {}
 
-    /// Return the writable start of the slab allocation.
+    /// Return a writable pointer to the buffer.
     [[nodiscard]] std::uint8_t* raw() noexcept {
         return data.get();
     }
-    /// Return the readable start of the slab allocation.
+    /// Return a read-only pointer to the  buffer.
     [[nodiscard]] const std::uint8_t* raw() const noexcept {
         return data.get();
     }
@@ -65,15 +64,13 @@ struct buffer_slab {
         return true;
     }
 
-    /// Grow the slab according to the policy: double up to 8 MiB, then
-    /// linear 8 MiB increments forever, capped by `max_buffer_size`.
-    /// Return true on success and false when the cap is reached.
-    /// Preserves bytes in `[0, fill_size)`.
+    /// Enlarge the buffer while preserving filled bytes. Growth slows to fixed
+    /// increments for large records and stops at max_buffer_size.
+    /// Return false when the capacity has already reached that limit.
     bool grow(const reader_options& options) {
         if (capacity >= options.io.max_buffer_size)
             return false;
-        // Switch to 8 MiB increments once geometric growth would
-        // over-reserve large records.
+        // Limit spare capacity when a record needs a large buffer.
         constexpr std::size_t geometric_growth_limit_bytes = static_cast<std::size_t>(1)
                                                              << 23; // 8 MiB
         std::size_t new_capacity = (capacity < geometric_growth_limit_bytes)

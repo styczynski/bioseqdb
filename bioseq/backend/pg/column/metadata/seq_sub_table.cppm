@@ -1,9 +1,10 @@
 /**
  * @file seq_sub_table.cppm
- * @brief Sequence sub-table catalog rows and manager operations.
+ * @brief Manage cklumnar stripe metadata and sequence-storage shards.
  *
- * The row owns tuple decoding and the manager owns catalog operations. This
- * partition exposes only those two semantic interfaces.
+ * Stripe operations track reserved rows and storage ranges. The sequence
+ * sub-table registry maps each column's length buckets to physical shards
+ * and records their byte counts.
  */
 module;
 #include <algorithm>
@@ -35,7 +36,8 @@ import :types;
 import :tuple_ops;
 import :core;
 
-/// @brief Lists stripe metadata for one relation in the requested scan order.
+/// @brief List a relation's stripes in first-row order under the transaction snapshot.
+/// scan_direction selects ascending or descending order.
 export List* list_stripes_for_relation(RelFileLocator relfilelocator,
                                        ScanDirection scan_direction) {
     uint64_t storage_id = lookup_storage_id(relfilelocator);
@@ -43,7 +45,7 @@ export List* list_stripes_for_relation(RelFileLocator relfilelocator,
     return read_data_file_stripes(storage_id, GetTransactionSnapshot(), scan_direction);
 }
 
-/// @brief Returns the exact row count represented by a relation's stripes.
+/// @brief Sum the row counts of a relation's visible stripes, including deleted rows.
 export uint64_t column_table_row_count(Relation relation) {
     uint64_t total_row_count = 0;
     List* stripe_list = list_stripes_for_relation(relation->rd_locator, ForwardScanDirection);
@@ -56,10 +58,7 @@ export uint64_t column_table_row_count(Relation relation) {
     return total_row_count;
 }
 
-/*
- * deleted_rows_for_stripe returns number of deleted rows for stripe
- * of the given relfilelocator.
- */
+/** @brief Sum deleted-row counts across a stripe's chunk groups. */
 export uint32_t
 deleted_rows_for_stripe(RelFileLocator relfilelocator, uint32_t chunk_count, uint64_t stripe_id) {
     uint64_t storage_id = lookup_storage_id(relfilelocator);
@@ -87,10 +86,7 @@ deleted_rows_for_stripe(RelFileLocator relfilelocator, uint32_t chunk_count, uin
     return deleted_rows;
 }
 
-/*
- * decompressed_length_for_stripe returns total size of all decompressed rows and chunk
- * for given stripe
- */
+/** @brief Sum the uncompressed value-buffer sizes of all chunks in a  stripe. */
 export Size decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id) {
     HeapTuple heap_tuple = nullptr;
     ScanKeyData scan_keys[2];
@@ -127,13 +123,11 @@ export Size decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64
     return decompressed_chunk_size;
 }
 
-/*
- * find_highest_used_address returns the highest used address for the given
- * relfilelocator across all active and inactive transactions.
+/**
+ * @brief Find the last occupied logical byte for VACUUM truncation.
  *
- * This is used by truncate stage of VACUUM, and VACUUM can be called
- * for empty tables. So this doesn't throw errors for empty tables and
- * returns 0.
+ * Use a dirty snapshot to include stripes from transactions still writing.
+ * With no stripes, keep the reserved metapage range.
  */
 export uint64_t find_highest_used_address(RelFileLocator relfilelocator) {
     uint64_t storage_id = lookup_storage_id(relfilelocator);
@@ -145,9 +139,8 @@ export uint64_t find_highest_used_address(RelFileLocator relfilelocator) {
     return highest_used_address;
 }
 
-/*
- * find_highest_used_address_and_id returns the highest used address and id for
- * the given relfilelocator across all active and inactive transactions.
+/** @brief Find the highest stripe id and last occupied logical byte.
+ * Use a dirty snapshot so concurrent stripe reservations are included.
  */
 void find_highest_used_address_and_id(uint64_t storage_id,
                                       uint64_t* highest_used_address,
@@ -160,7 +153,7 @@ void find_highest_used_address_and_id(uint64_t storage_id,
 
     *highest_used_id = 0;
 
-    /* file starts with metapage */
+    /* Keep the metapage range even when there are no stripes. */
     *highest_used_address = usable_column_bytes_per_page;
 
     for (stripe_metadata* stripe :
@@ -171,10 +164,11 @@ void find_highest_used_address_and_id(uint64_t storage_id,
     }
 }
 
-/*
- * reserve_empty_stripe reserves an empty stripe for given relation
- * and inserts it into bioseq.stripe. It is guaranteed that concurrent
- * writes won't overwrite the returned stripe.
+/**
+ * @brief Reserve a stripe id and logical row range, then record the reseruation.
+ *
+ * The metapage counters assign separate ranges to  concurrent writers.
+ * Flushing later assigns storage bytes and completes the catalog row.
  */
 export empty_stripe_reservation* reserve_empty_stripe(Relation rel,
                                                       uint64_t column_count,
@@ -188,8 +182,7 @@ export empty_stripe_reservation* reserve_empty_stripe(Relation rel,
     stripe_reservation->stripe_id = reserve_column_stripe_id(rel);
     stripe_reservation->stripe_first_row_number = reserve_column_row_numbers(rel, stripe_row_limit);
 
-    /* The catalog reservation is the concurrency-visible owner record and is
-     * completed in place when buffered stripe data is flushed. */
+    /* Record the reservation now. Flushing the stripe completes this row in place. */
     insert_empty_stripe_metadata_row(storage_id,
                                      stripe_reservation->stripe_id,
                                      column_count,
@@ -199,10 +192,8 @@ export empty_stripe_reservation* reserve_empty_stripe(Relation rel,
     return stripe_reservation;
 }
 
-/*
- * complete_stripe_reservation completes reservation of the stripe with
- * stripe_id for given size and in-place updates related stripe metadata tuple
- * to complete reservation.
+/** @brief Reserve bytes for a flushed stripe and complete its catalog row
+ * Store its byte range, row count and chunk-group count in the existing reservation.
  */
 export stripe_metadata* complete_stripe_reservation(Relation rel,
                                                     uint64_t stripe_id,
@@ -268,10 +259,7 @@ update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec
 
     systable_inplace_update_finish(state, modified_tuple);
 
-    /*
-     * build_stripe_metadata expects a real heap tuple with MVCC fields, which
-     * is what old_tuple is — the in-place update preserved its header.
-     */
+    /* Decode the updated values from a heap tuple with transaction header fields. */
     stripe_metadata* modified_stripe_metadata =
         build_stripe_metadata(bioseq_column_stripes, modified_tuple);
 
@@ -280,19 +268,15 @@ update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec
     heap_freetuple(modified_tuple);
     table_close(bioseq_column_stripes, AccessShareLock);
 
-    /* return stripe_metadata object built from modified tuple */
+    /* Return the updated stripe metadata. */
     return modified_stripe_metadata;
 }
 
-/*
- * read_data_file_stripes reads the stripe list for a given storage_id
- * in the given snapshot.
- */
+/** @brief Read, visible stripes in first-row order using the supplied snapshot. */
 List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction) {
-    // A raw transaction snapshot is not the copied active statement snapshot.
-    // Ordered scans borrow the exact supplied object, so retain an unowned
-    // MVCC snapshot for the scan. Dirty snapshots and caller-owned snapshots
-    // keep their existing semantics and incur no registration work.
+    // Keep an unregistered MVCC snapshot  alive for the ordered scan.
+    // The caller manages the lifetime of an already registered or active snapshot.
+    // Dirty snapshots are used directly.
     const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
                                  snapshot->regd_count == 0 && snapshot->active_count == 0;
     if (retain_snapshot) {
@@ -329,10 +313,9 @@ List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirecti
     return stripe_metadata_list.release();
 }
 
-/*
- * build_stripe_metadata builds a stripe_metadata object from given heap tuple.
- *
- * NB: heap_tuple must be a proper heap tuple with MVCC fields.
+/** @brief Decode and validate a stripe catalog tuple.
+ * The tuple must include a heap header because its inserting transaction
+ * determines the stripe's aborted and current-transaction flags.
  */
 stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple heap_tuple) {
     Assert(RelationGetRelid(bioseq_column_stripes) == column_stripe_relation_oid());
@@ -350,13 +333,9 @@ stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple
     stripe->row_count = row.row_count;
     stripe->first_row_number = static_cast<std::uint64_t>(row.first_row_number);
 
-    /*
-     * If there is unflushed data in a parent transaction, then we would
-     * have already thrown an error before starting to scan the table.. If
-     * the data is from an earlier subxact that committed, then it would
-     * have been flushed already. For this reason, we don't care about
-     * subtransaction id here.
-     */
+    /* Committed subtransactions have already flushed their stripes.
+     * Scans reject pending writes in parent transactions, so the inserting
+     * transaction id is enough to classify the stripe here. */
     TransactionId entry_xmin = HeapTupleHeaderGetXmin(heap_tuple->t_data);
     stripe->aborted = !TransactionIdIsInProgress(entry_xmin) && TransactionIdDidAbort(entry_xmin);
     stripe->inserted_by_current_transaction = TransactionIdIsCurrentTransactionId(entry_xmin);
@@ -366,10 +345,7 @@ stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple
     return stripe;
 }
 
-/*
- * delete_metadata_rows removes the rows with given relfilelocator from columnar
- * metadata tables.
- */
+/** @brief Delete stripe, chunk and  row-mask metadata for a physical relation. */
 export void delete_metadata_rows(RelFileLocator relfilelocator) {
     /* Binary-upgrade restore order does not guarantee catalog availability. */
     if (IsBinaryUpgrade) {
@@ -397,10 +373,7 @@ export void delete_metadata_rows(RelFileLocator relfilelocator) {
                                  storage_id);
 }
 
-/*
- * delete_metadata_rows_for_stripe removes the rows with given relfilelocator and
- * stripe id from columnar metadata tables.
- */
+/** @brief Delete one ntripe and its chunk and row-mask metadata. */
 export void delete_metadata_rows_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id) {
     /* Binary-upgrade restore order does not guarantee catalog availability. */
     if (IsBinaryUpgrade) {
@@ -435,10 +408,7 @@ export void delete_metadata_rows_for_stripe(RelFileLocator relfilelocator, uint6
                                 stripe_id);
 }
 
-/*
- * delete_storage_metadata_rows removes the rows with given
- * storage_id from given columnar metadata table.
- */
+/** @brief Delete every row for a storage id from the given metadata table. */
 void delete_storage_metadata_rows(Oid metadata_table_id,
                                   AttrNumber storage_id_attribute_number,
                                   Oid storage_id_index_id,
@@ -453,7 +423,7 @@ void delete_storage_metadata_rows(Oid metadata_table_id,
     Relation metadata_table =
         bioseq::postgres::support::try_open_postgres_relation(metadata_table_id, AccessShareLock);
     if (metadata_table == nullptr) {
-        /* extension has been dropped */
+        /* The metadata table is already gone. */
         return;
     }
 
@@ -480,10 +450,7 @@ void delete_storage_metadata_rows(Oid metadata_table_id,
     table_close(metadata_table, AccessShareLock);
 }
 
-/*
- * delete_stripe_metadata_rows removes the rows in columnar
- * metadata table that match storage_id and stripe_id.
- */
+/** @brief Delete metadata rows matching both a storage id and stripe id. */
 void delete_stripe_metadata_rows(Oid metadata_table_id,
                                  AttrNumber storage_id_attribute_number,
                                  AttrNumber stripe_id_attr_number,
@@ -505,7 +472,7 @@ void delete_stripe_metadata_rows(Oid metadata_table_id,
     Relation metadata_table =
         bioseq::postgres::support::try_open_postgres_relation(metadata_table_id, RowShareLock);
     if (metadata_table == nullptr) {
-        /* extension has been dropped */
+        /* The metadata table is already gone. */
         return;
     }
 
@@ -537,68 +504,47 @@ Oid column_storage_id_sequence_oid(void) {
         bioseq::postgres::support::catalog_missing_policy::return_invalid);
 }
 
-/*
- * column_stripe_relation_oid returns relation id of bioseq.stripe.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up bioseq_internal.stripe on each call so catalog recreation
+ * cannot leave a cached OID pointing to the old table */
 Oid column_stripe_relation_oid(void) {
     return get_relname_relid("stripe", column_namespace_oid());
 }
 
-/*
- * column_stripe_primary_key_index_oid returns relation id of bioseq.stripe_pkey.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the current bioseq_internal.stripe_pkey OID. */
 Oid column_stripe_primary_key_index_oid(void) {
     return get_relname_relid("stripe_pkey", column_namespace_oid());
 }
 
-/*
- * stripe_first_row_number_index_oid returns relation id of
- * bioseq.stripe_first_row_number_idx.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the current bioseq_internal.stripe_first_row_number_idx OID. */
 Oid stripe_first_row_number_index_oid(void) {
     return get_relname_relid("stripe_first_row_number_idx", column_namespace_oid());
 }
 
-/*
- * column_options_relation_oid returns relation id of bioseq.options.
- */
+/* Look up bioseq_internal.options. */
 Oid column_options_relation_oid(void) {
 
     return get_relname_relid("options", column_namespace_oid());
 }
 
-/*
- * column_options_index_oid returns relation id of bioseq.options_pkey.
- */
+/* Look up bioseq_internal.options_pkey. */
 Oid column_options_index_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_options_index_oid() entered");
     return get_relname_relid("options_pkey", column_namespace_oid());
 }
 
-/*
- * column_chunk_relation_oid returns relation id of bioseq.chunk.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the current bioseq_internal.chunk OID. */
 Oid column_chunk_relation_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_relation_oid() entered");
     return get_relname_relid("chunk", column_namespace_oid());
 }
 
-/*
- * column_chunk_group_relation_oid returns relation id of bioseq.chunk_group.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the  current bioseq_internal.chunk_group OID. */
 Oid column_chunk_group_relation_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_group_relation_oid() entered");
     return get_relname_relid("chunk_group", column_namespace_oid());
 }
 
-/*
- * column_row_mask_relation_oid returns relation id of bioseq.row_mask.
- */
+/* Look up bioseq_internal.row_mask. */
 Oid column_row_mask_relation_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_relation_oid() entered");
     return get_relname_relid("row_mask", column_namespace_oid());
@@ -611,46 +557,31 @@ Oid column_row_mask_sequence_oid(void) {
         bioseq::postgres::support::catalog_missing_policy::return_invalid);
 }
 
-/*
- * column_chunk_index_oid returns relation id of bioseq.chunk_pkey.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the current bioseq_internal.chunk_pkey OID. */
 Oid column_chunk_index_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_index_oid() entered");
     return get_relname_relid("chunk_pkey", column_namespace_oid());
 }
 
-/*
- * column_chunk_group_index_oid returns relation id of bioseq.chunk_group_pkey.
- * Resolved per call so catalog recreation observes the current OID.
- */
+/* Look up the current bioseq_internal.chunk_group_pkey OID. */
 Oid column_chunk_group_index_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_group_index_oid() entered");
     return get_relname_relid("chunk_group_pkey", column_namespace_oid());
 }
 
-/*
- * column_row_mask_index_oid returns relation id
- * of bioseq.row_mask_pkey
- */
+/* Look up bioseq_internal.row_mask_pkey. */
 Oid column_row_mask_index_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_index_oid() entered");
     return get_relname_relid("row_mask_pkey", column_namespace_oid());
 }
 
-/*
- * column_row_mask_stripe_index_oid returns relation id
- * of bioseq.bioseq_row_mask_stripe_unique
- */
+/* Look up bioseq_internal.row_mask_stripe_unique. */
 Oid column_row_mask_stripe_index_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_stripe_index_oid() entered");
     return get_relname_relid("row_mask_stripe_unique", column_namespace_oid());
 }
 
-/*
- * column_namespace_oid returns namespace id of the schema we store columnar
- * related tables.
- */
+/* Find the bioseq_internal schema used for columnar metadata. */
 Oid column_namespace_oid(void) {
     Oid nspace = get_namespace_oid("bioseq_internal", false);
     bioseq_log<logging_level::debug>(
@@ -659,9 +590,8 @@ Oid column_namespace_oid(void) {
     return nspace;
 }
 
-/*
- * lookup_storage_id reads storage metapage to find the storage ID for the given relfilelocator. It
- * returns false if the relation doesn't have a meta page yet.
+/** @brief Read a relation's storage id from its metapage.
+ * The relation must already have a metapage in the current format.
  */
 uint64_t lookup_storage_id(RelFileLocator relfilelocator) {
     bioseq_log<logging_level::debug>("[bioseq] pg: lookup_storage_id() entered");
@@ -675,20 +605,17 @@ uint64_t lookup_storage_id(RelFileLocator relfilelocator) {
     return storage_id;
 }
 
-/*
- * allocate_column_storage_id - create a new, unique storage id and return
- * it.
- */
+/** @brief Allocate, a storage id from bioseq_internal.storageid_seq. */
 export uint64_t allocate_column_storage_id() {
     bioseq_log<logging_level::debug>("[bioseq] pg: allocate_column_storage_id() entered");
     return nextval_internal(column_storage_id_sequence_oid(), false);
 }
 
-/** @brief Ensures the relation metapage uses the current column storage format.
+/** @brief Initialize or update the relation's columnar metapage.
  *
- * Empty relations receive a new metapage. Existing incompatible metapages are
- * reconstructed from the authoritative stripe metadata before their format
- * identity is updated.
+ * An empty relation gets a new torage id and metapage. Otherwise, rebuild
+ * reservation counters from stripe metadata before updating the format.
+ * Return immediately if  the metapage already uses the current format.
  */
 export void ensure_current_column_storage_format(Relation rel, bool is_upgrade) {
     bioseq_log<logging_level::debug>("[bioseq] pg: ensure_current_column_storage_format() entered");
@@ -749,13 +676,11 @@ export void ensure_current_column_storage_format(Relation rel, bool is_upgrade) 
         rel, is_upgrade, *next_stripe_id, *next_row_number, *next_logical_offset);
 }
 
-/*
- * find_highest_used_row_number returns the highest used row_number for given
- * storage_id. Returns invalid_column_row_number if storage with
- * storage_id has no stripes.
- * Note that normally we would use column_storage_reserved_row_number
- * to decide that. However, this function is designed to be used when
- * building the metapage itself during upgrades.
+/**
+ * @brief Find the highest row number in the visible stripe metadata.
+ *
+ * This rebuilds the metapage counter during a storage-format update.
+ * Return invalid_column_row_number when there are no stripes.
  */
 uint64_t find_highest_used_row_number(uint64_t storage_id) {
     uint64_t highest_row_number = invalid_column_row_number;
@@ -770,14 +695,7 @@ uint64_t find_highest_used_row_number(uint64_t storage_id) {
     return highest_row_number;
 }
 
-/*
- * RewriteMetadataRowWithNewValues rewrites a given metadata entry
- * for a storage_id and a stripe_id in place with a new offset,
- * row_count, size_bytes, and chunk_count.
- *
- * This is used in the vacuum UDF to fill any existing holes
- * if possible.
- */
+/** @brief Update a stripe's location and counts after VACUUM moves its data. */
 export stripe_metadata* rewrite_stripe_metadata(Relation rel,
                                                 uint64_t stripe_id,
                                                 uint64_t size_bytes,
@@ -795,13 +713,12 @@ export stripe_metadata* rewrite_stripe_metadata(Relation rel,
     return update_stripe_metadata_row(storage_id, stripe_id, update);
 }
 
-// bioseq_internal.seq_sub_table access uses the systable API so MVCC and
-// transactional semantics match the other metadata catalogs.
+// Read sequence-shard registrations through PostgreSQL catalog scans.
 
-/** @brief One seq_sub_table catalog row for a sequence-column shard.
+/** @brief A registered shard for one sequence column and length bucket.
  *
- * Maps a (database, tablespace, main relation, column, bucket, shard) key to
- * the physical sub-table and sidecar relations and tracks write progress.
+ * Its key identifies the parent relation, column, bucket and shard number.
+ * The row stores the shard and sidecar relation OIDs, byte counts and  full flag
  */
 export struct sequence_sub_table_row {
     Oid database_oid = InvalidOid;
@@ -837,14 +754,11 @@ export struct sequence_sub_table_row {
     }
 };
 
-/** @brief Catalog operations for bioseq_internal.seq_sub_table shard routing.
- *
- * Access uses the systable API so MVCC and transactional semantics match other
- * metadata catalogs.
+/** @brief Find and update sequence-shard registrations in bioseq_internal.seq_sub_table.
+ * Catalog scans and writes follow PostgreSQL transaction visibility.
  */
 export struct sequence_sub_table_manager {
-    // Relation-id resolvers (trivial, hot) — drop the redundant SubTableMetadata
-    // prefix; it is obvious these resolve seq_sub_table relations.
+    // Look up the registry table and its indexes.
     /// @brief Returns the OID of bioseq_internal.seq_sub_table, resolved per call.
     [[gnu::always_inline]] static inline Oid relid() {
         return get_relname_relid("seq_sub_table", column_namespace_oid());
@@ -858,11 +772,7 @@ export struct sequence_sub_table_manager {
         return get_relname_relid("seq_sub_table_active_shard_idx", column_namespace_oid());
     }
 
-    /** @brief Returns the active non-full shard row for one bucket, if any.
-     *
-     * Uses the active-shard partial index. Returns empty when the catalog is
-     * missing or every matching shard is full.
-     */
+    /// @brief Find a registered non-full shard for this length buckec.
     [[nodiscard]] static std::optional<sequence_sub_table_row>
     lookup_active_shard(Oid database_oid,
                         Oid tablespace_oid,
@@ -903,9 +813,8 @@ export struct sequence_sub_table_manager {
         return result;
     }
 
-    /** @brief Returns the shard row for an exact bucket and shard index.
-     *
-     * Uses the primary-key index. Returns empty when the catalog or row is missing.
+    /** @brief Find the registration for one bucket and shard number.
+     * Return no value if the registry table or matching row is absent.
      */
     [[nodiscard]] static std::optional<sequence_sub_table_row> lookup_shard(Oid database_oid,
                                                                             Oid tablespace_oid,
@@ -944,10 +853,9 @@ export struct sequence_sub_table_manager {
         return result;
     }
 
-    /** @brief Inserts a new shard catalog row or returns an existing active shard.
-     *
-     * If another non-full shard already owns the bucket, returns that row instead
-     * of inserting a duplicate. Raises when the catalog is missing.
+    /** @brief Register a new shard unless this bucket already has an  active one.
+     * Return the existing active row when the initial lookup finds it.
+     * A missing registry or a conflicting insert raises a PostgreSQL error.
      */
     [[nodiscard]] static sequence_sub_table_row insert_shard(Oid database_oid,
                                                              Oid tablespace_oid,
@@ -966,9 +874,7 @@ export struct sequence_sub_table_manager {
                 });
         }
 
-        // Race-loss handling — if the unique partial index already accepted a
-        // row for the same (db, spc, relfilenode, attno, bucket) with
-        // is_full=FALSE, return the winner instead of trying to insert a duplicate.
+        // Reuse an active shard, already visible for this parent column and bucket.
         {
             std::optional<sequence_sub_table_row> existing = lookup_active_shard(
                 database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx);
@@ -996,9 +902,8 @@ export struct sequence_sub_table_manager {
             .is_full = false,
             .total_payload_bytes = 0,
         };
-        // This registry has a partial active-shard index. PostgreSQL's system
-        // catalog helpers neither evaluate its predicate nor support it under
-        // assertions; use the existing executor-backed metadata writer.
+        // Use the executor-backed writer to maintain the active-shard partial index.
+        // It checks the index predicate when inserting the new row.
         auto encoded = seq_sub_table_codec::encode(catalog_row, CurrentMemoryContext);
         const auto tuple_data = encoded.tuple_data(tuple_descriptor);
         auto* modification =
@@ -1023,10 +928,9 @@ export struct sequence_sub_table_manager {
         return row;
     }
 
-    /** @brief Adds write bytes to one shard and may mark it full against a cap.
-     *
-     * A zero cap_bytes does not mark the shard full here. That rollover path is
-     * handled by insert_payload. Raises when the catalog or target row is missing.
+    /** @brief Add bytes to a shard's counters and mark it full at a nonzero cap.
+     * A zero cap  leaves the full flag unchanged. Sequence insertion handles
+     * that mode's shard rollover. Missing registry rows raise an error.
      */
     static sequence_sub_table_row update_shard_bytes_written(Oid database_oid,
                                                              Oid tablespace_oid,
@@ -1082,16 +986,8 @@ export struct sequence_sub_table_manager {
         sequence_sub_table_row current(old_tuple, tuple_descriptor);
         const std::uint64_t new_bytes_written = current.bytes_written + delta_bytes;
         const std::uint64_t new_total_payload = current.total_payload_bytes + delta_bytes;
-        // is_full is driven only by a real byte cap. The zero-cap
-        // shard-per-insert sentinel is implemented entirely by insert_payload
-        // rollover (which, when the active shard already holds a row, marks it full
-        // and allocates the next shard, passing cap_bytes=1 so this branch flips
-        // is_full). We deliberately do NOT mark a shard full here merely because
-        // cap_bytes==0: the per-commit byte flush from close_all must leave a
-        // single-row shard ACTIVE so the next insert's rollover is the one (and
-        // only) place that advances the shard index — keeping the full-marking and
-        // the new-shard creation in one transaction, exactly like the normal
-        // byte-cap rollover.
+        /* With a zero cap, flushing byte counts does not mark the shard full
+         * Sequence insertion closes it when the uext shard is needed. */
         const bool now_full = current.is_full || (cap_bytes != 0 && new_bytes_written >= cap_bytes);
 
         seq_sub_table_codec::update update{};
@@ -1116,10 +1012,9 @@ export struct sequence_sub_table_manager {
         return current;
     }
 
-    /** @brief Lists every shard row for one main relation across columns and buckets.
-     *
-     * Performs a sequential scan filtered by database, tablespace, and relfilenode.
-     * Returns an empty vector when the catalog is missing.
+    /** @brief List a parent relation's shards across all columns and buckets.
+     * Scan the registry by database, tablespace and parent file number.
+     * Return an empty vector if the registry table is absent.
      */
     [[nodiscard]] static std::vector<sequence_sub_table_row>
     list_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
@@ -1178,7 +1073,8 @@ export struct sequence_sub_table_manager {
         return shards;
     }
 
-    /// @brief Deletes every shard row for one main relation. No-op when the catalog is missing.
+    /// @brief Delete a  parent relation's shard registrations. Return if the registry
+    /// table is absent. The physical shard tables are left to the caller.
     static void delete_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
         const Oid rel_oid = relid();
         if (!OidIsValid(rel_oid)) {

@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides block-aligner unit-test fixtures and comparison helpers.
+ * @brief Builds sequence fixtures and compares block alignment results.
  */
 module;
 
@@ -27,17 +27,16 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 export namespace bioseq::simd::block_aligner_test_support {
 
-/** @brief Packed DNA4 sequence type used by block-aligner fixtures. */
+/** DNA4 packed into 64-bit words for the alignment tests. */
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-/** @brief Compact DNA4 range used by resident fixture owners. */
+/** Packed DNA4 range wrapped by the in-memory sequence fixtures. */
 using range_t = compact_sequence_range<dna4_u64>;
-/** @brief Packed DNA5 sequence type used by fallback fixtures. */
+/** DNA5 packed into 64-bit words for tests with ambiguous bases. */
 using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 
 /**
- * @brief Resolves the generated fixed-target alignment table for an alphabet.
- * @tparam p_alphabet Sequence alphabet represented by the table.
- * @return Alignment kernels for the alphabet.
+ * Returns the alphabet's alignment kernels for,  the test CPU target.
+ * Throws std::logic_error if the generated table has no matching entry.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] const alignment_kernels<p_alphabet>& fixed_alignment_kernels() {
@@ -56,7 +55,7 @@ template <sequence_alphabet p_alphabet>
     throw std::logic_error{"generated fixed-target test table lacks alignment alphabet"};
 }
 
-/** @brief Stores one alignment result and its execution observations. */
+/** Keeps an alignment result with its execution and allocation counters. */
 struct reference_run {
     ksw_alignment_result result;
     block_aligner_execution_stats stats;
@@ -72,7 +71,7 @@ struct reference_run {
     return result;
 }
 
-/** @brief Formats packed CIGAR operations for exact comparison. */
+/** Converts packed CIGAR words to text for test comparisons. */
 [[nodiscard]] std::string packed_cigar_string(std::span<const std::uint32_t> cigar) {
     std::string result;
     for (const std::uint32_t packed : cigar) {
@@ -95,7 +94,7 @@ struct reference_run {
     return result;
 }
 
-/** @brief Creates global-alignment parameters for a fixed block range. */
+/** Builds global gap-fill settings with the requested block sizes and traceback option. */
 [[nodiscard]] block_aligner_parameters
 global_params(std::size_t min_size = 16, std::size_t max_size = 16, bool trace = true) {
     return block_aligner_parameters{
@@ -111,7 +110,7 @@ global_params(std::size_t min_size = 16, std::size_t max_size = 16, bool trace =
     };
 }
 
-/** @brief Creates X-drop parameters for one extension stage and input order. */
+/** Builds X-drop extension settings for the given stage and input orer. */
 [[nodiscard]] block_aligner_parameters
 xdrop_params(block_alignment_stage stage, block_input_order input_order, bool trace = true) {
     return block_aligner_parameters{
@@ -127,7 +126,7 @@ xdrop_params(block_alignment_stage stage, block_input_order input_order, bool tr
     };
 }
 
-/** @brief Runs forward DNA4 block alignment across complete resident inputs. */
+/** Aligns complete DNA4 inputs and allows the diagonal shortcut. */
 [[nodiscard]] reference_run run_block(std::string_view query,
                                       std::string_view reference,
                                       const scoring_matrix<dna4_u64>& scoring,
@@ -158,10 +157,10 @@ xdrop_params(block_alignment_stage stage, block_input_order input_order, bool tr
 }
 
 /**
- * @brief Runs block alignment for a selected region and compile-time route.
- * @tparam p_strand_reversed Whether the query uses reverse-complement order.
- * @tparam p_enable_diagonal_certificate Whether diagonal certification is enabled.
- * @tparam p_sequence Packed sequence representation.
+ * Aligns selected regions and records the work performed.
+ * @tparam p_strand_reversed Read the query as a reverse complement.
+ * @tparam p_enable_diagonal_certificate Allow a score bound to prove that an ungapped alignment is optimal.
+ * @tparam p_sequence Packed sequence type used by the fixture.
  */
 template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_sequence>
 [[nodiscard]] reference_run run_block_region_mode(std::string_view query_source,
@@ -206,10 +205,10 @@ template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_se
 }
 
 /**
- * @brief Runs block alignment across complete inputs with a compile-time route.
- * @tparam p_strand_reversed Whether the query uses reverse-complement order.
- * @tparam p_enable_diagonal_certificate Whether diagonal certification is enabled.
- * @tparam p_sequence Packed sequence representation.
+ * Aligns both  full inputs with the selected strand and diagonal-shortcut setting.
+ * @tparam p_strand_reversed Read the query as a reverse complement.
+ * @tparam p_enable_diagonal_certificate Allow a score bound to prove that an ungapped alignment is optimal.
+ * @tparam p_sequence Packed sequence type used by the fixture.
  */
 template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_sequence>
 [[nodiscard]] reference_run run_block_mode(std::string_view query,
@@ -220,7 +219,7 @@ template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_se
         query, reference, 0, query.size(), 0, reference.size(), scoring, params);
 }
 
-/** @brief Compares every observable field of two alignment results. */
+/** Checks result scores, endpoints, status flags and packed CIGAR for equality. */
 void check_align_result_identical(const ksw_alignment_result& optimized,
                                   const ksw_alignment_result& forced_dp) {
     CHECK(optimized.max == forced_dp.max);
@@ -236,7 +235,7 @@ void check_align_result_identical(const ksw_alignment_result& optimized,
     CHECK(optimized.cigar == forced_dp.cigar);
 }
 
-/** @brief Produces the ASCII reverse complement of a DNA sequence. */
+/** Reverses the text and complements uppercase A, C, G and T */
 [[nodiscard]] std::string reverse_complement_ascii(std::string_view source) {
     std::string result(source.rbegin(), source.rend());
     for (char& symbol : result) {
@@ -260,7 +259,7 @@ void check_align_result_identical(const ksw_alignment_result& optimized,
     return result;
 }
 
-/** @brief Runs certified forward DNA4 alignment over selected regions. */
+/** Aligns selected DNA4 regions and allows the diagonal shortcut. */
 [[nodiscard]] reference_run run_block_region(std::string_view query_source,
                                              std::string_view reference_source,
                                              std::size_t query_start,
@@ -321,7 +320,7 @@ void check_align_result_identical(const ksw_alignment_result& optimized,
     };
 }
 
-/** @brief Compares observable alignment-region fields and formatted CIGAR data. */
+/** Compares region coordinates, scores, alignment status and CIGAR text. */
 void check_region_alignment_identical(const alignment_region& optimized,
                                       const alignment_region& forced_dp) {
     CHECK(optimized.query_start == forced_dp.query_start);
@@ -335,7 +334,7 @@ void check_region_alignment_identical(const alignment_region& optimized,
     CHECK(format_cigar(optimized.cigar) == format_cigar(forced_dp.cigar));
 }
 
-/** @brief Describes one scoring-matrix generation input. */
+/** Scores and a label used to generate a test scoring matrix. */
 struct scoring_matrix_generation_case {
     std::int8_t match;
     std::int8_t mismatch;
@@ -343,7 +342,7 @@ struct scoring_matrix_generation_case {
     std::string_view description;
 };
 
-/** @brief Scoring inputs shared by alphabet facade checks. */
+/** Scoring cases that  check signed penalties, zero values and int8 limits. */
 constexpr std::array<scoring_matrix_generation_case, 6> scoring_matrix_generation_cases{{
     {4, 6, 1, "positive penalty magnitudes"},
     {-4, -6, -1, "fully signed scores"},
@@ -354,8 +353,9 @@ constexpr std::array<scoring_matrix_generation_case, 6> scoring_matrix_generatio
 }};
 
 /**
- * @brief Checks scalar and SIMD scoring cells through canonical and adapted facades.
- * @tparam p_alphabet Alphabet represented by both facades.
+ * Checks that alphabet and packed-sequence matrix types give the same scores.
+ * Also checks SIMD padding and how signed penalties are normalized.
+ * @tparam p_alphabet Alphabet used by both matrix types.
  */
 template <class p_alphabet>
 void check_scoring_matrix_facade_parity(std::string_view alphabet_name) {

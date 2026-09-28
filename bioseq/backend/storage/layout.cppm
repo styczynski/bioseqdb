@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief PostgreSQL-free sequence locator layout and length-bucket routing.
+ * @brief Stored sequence locators, fragment checks, and length-bucket  selection.
  */
 module;
 
@@ -22,7 +22,7 @@ import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::storage {
 
-/** Serialized locator payload discriminator. Its value is a storage contract. */
+/** Version byte stored in each, locator payload. */
 inline constexpr std::uint8_t sequence_locator_payload_version = 3u;
 
 /** Width-byte marker indicating that a flat sequence value holds a locator. */
@@ -36,11 +36,10 @@ inline constexpr std::uint8_t sequence_locator_stub_width_marker = 0x80u;
 }
 
 /**
- * Frozen 40-byte locator payload embedded in PostgreSQL sequence stubs.
+ * 40-byte locator stored inside a PostgreSQL sequence stub.
  *
- * The record remains standard-layout and trivially copyable because persisted
- * payloads use its existing host-byte-order object representation. Renaming
- * fields does not alter offsets or bytes.
+ * The payload is copied in host byte order. Field sizes and offsets must stay
+ * compatible with stored records, including the reserved fields.
  */
 struct sequence_locator {
     std::uint8_t payload_version = sequence_locator_payload_version;
@@ -67,7 +66,7 @@ static_assert(
         * std::uint64_t{32768u}
     >= std::uint64_t{1'000'000'000'000ULL});
 
-/** Encode the exact persisted payload without owning PostgreSQL framing. */
+/** Copies the locator into an exactly sized payload, rejecting invalid version or reserved fields. */
 [[nodiscard]] inline bool encode_sequence_locator_payload(
     std::span<std::byte> output,
     const sequence_locator& locator) noexcept
@@ -82,7 +81,7 @@ static_assert(
     return true;
 }
 
-/** Decode and validate the exact persisted payload representation. */
+/** Reads an exactly sized payload and checks its version and reserved fields. */
 [[nodiscard]] inline std::optional<sequence_locator>
 decode_sequence_locator_payload(std::span<const std::byte> payload) noexcept
 {
@@ -99,7 +98,7 @@ decode_sequence_locator_payload(std::span<const std::byte> payload) noexcept
     return locator;
 }
 
-/** Exact reason a locator cannot be consumed by flat PostgreSQL storage. */
+/** Reason a locator fails storage or catalog range checks. */
 enum class sequence_locator_validation_error : std::uint8_t {
     none = 0u,
     invalid_payload_metadata,
@@ -111,7 +110,7 @@ enum class sequence_locator_validation_error : std::uint8_t {
     fragment_row_range_exceeds_catalog,
 };
 
-/** Validate all narrowing and fragment-row geometry before opening a shard. */
+/** Checks locator metadata, catalog integer limits, and the fragment row interval. */
 [[nodiscard]] constexpr sequence_locator_validation_error
 validate_sequence_locator(const sequence_locator& locator) noexcept
 {
@@ -159,7 +158,7 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
     return sequence_locator_validation_error::none;
 }
 
-/** Compute the number of fixed-size fragments needed for a logical length. */
+/** Counts fixed-size fragments. Returns UINT64_MAX for a nonempty sequence wbth zero fragment  capacity. */
 [[nodiscard]] constexpr std::uint64_t expected_sequence_fragment_count(
     std::uint64_t logical_length,
     std::uint64_t letters_per_unit,
@@ -176,14 +175,14 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
     return bioseq::common::ceil_div(storage_units, fragment_storage_units);
 }
 
-/** @brief Reason a fragment's framed byte count is invalid. */
+/** Reason a fragment byte count fails its size check. */
 enum class fragment_frame_error : std::uint8_t {
     none = 0u,
     shorter_than_header,
     size_mismatch,
 };
 
-/** @brief Validate a fragment's complete framed byte count. */
+/** Checks that a fragment includes its header and has the expected total size. */
 [[nodiscard]] constexpr fragment_frame_error validate_fragment_frame(
     std::uint64_t actual_bytes,
     std::uint64_t header_bytes,
@@ -206,7 +205,7 @@ enum class fragment_metadata_error : std::uint8_t {
     padding_mismatch,
 };
 
-/** @brief Compare fragment metadata with the expected persisted geometry. */
+/** Checks a fragment's alphabet, word width, logical length, and padding. */
 [[nodiscard]] constexpr fragment_metadata_error validate_fragment_metadata(
     std::uint8_t actual_alphabet,
     std::uint8_t actual_width,
@@ -230,7 +229,7 @@ enum class fragment_metadata_error : std::uint8_t {
     return fragment_metadata_error::none;
 }
 
-/** Build the inclusive bit-width threshold of every length bucket. */
+/** Builds length-bucket bit thresholds, ending with the full width of p_length_type. */
 template <class p_length_type,
           std::size_t p_minimum_bits,
           std::size_t p_maximum_bits>
@@ -266,7 +265,7 @@ static_assert(
     make_sequence_bucket_bit_thresholds<std::uint64_t, 8u, 42u>().back()
     == 64u);
 
-/** Return the bucket-routing bit width for one sequence length. */
+/** Returns the bits needed for length minus one, using one bit for lengths zero and one. */
 [[nodiscard]] [[gnu::always_inline]] constexpr std::size_t
 sequence_size_bit_width(std::uint64_t sequence_size) noexcept
 {
@@ -315,7 +314,7 @@ inline constexpr std::size_t sequence_bucket_count =
 static_assert(sequence_bucket_count<std::uint64_t, 8u, 42u>
               <= (std::numeric_limits<std::uint8_t>::max)());
 
-/** Route one sequence length through the precomputed branchless lookup. */
+/** Selects the sequence-length bucket from the precomputed bit-width table. */
 template <class p_length_type,
           std::size_t p_minimum_bits,
           std::size_t p_maximum_bits>

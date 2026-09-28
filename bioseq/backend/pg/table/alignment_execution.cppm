@@ -17,7 +17,7 @@ import bioseq.pipeline.minimap_parameters_contract;
 
 export namespace bioseq::postgres::table::alignment_execution {
 
-/** Sentinel used until a scan node has joined its statement collector. */
+/** Index used before a scan node has registered its statistics. */
 inline constexpr std::size_t k_unregistered_node_index = (std::numeric_limits<std::size_t>::max)();
 
 /** Per-scan-node statistics accumulated across rescans. */
@@ -29,7 +29,7 @@ struct alignment_node_stats {
     bioseq::pipeline_stats::pipeline_execution_stats pipeline{};
 };
 
-/** Mutable statement-level collector owned by the executor hook frame. */
+/** Alignment  statistics for one statement, owned by its executor hook. */
 struct alignment_execution_collector {
     alignment_execution_collector* root_collector = nullptr;
     std::uint32_t nested_alignment_executor_count = 0;
@@ -40,9 +40,10 @@ struct alignment_execution_collector {
 };
 
 /**
- * @brief Self-contained value published after a statement finishes.
+ * @brief Alignment statistics saved after a statement finishes.
  *
- * Borrowed executor and query-context addresses must never escape into this snapshot.
+ * Store values only. Executor pointers and query-context memory expire during
+ * cleanup and must not appear in this snapshot.
  */
 struct alignment_execution_snapshot {
     std::int64_t execution_id = 0;
@@ -56,19 +57,18 @@ struct alignment_execution_snapshot {
     bioseq::pipeline_stats::pipeline_execution_stats pipeline{};
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator persisted_gpu_operations{};
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Fixed-layout E2E proof stays outside the GPU/statistics ABI. Its producer
-    // rejects capacity overflow instead of publishing truncated origin evidence.
+    // Benchmark-only timing records are stored separately from GPU statistics.
     bioseq::simd::benchmark_e2e_interval_origin_buffer
         benchmark_e2e_interval_origins{};
 #endif
 };
 
 /**
- * @brief Frame-owned indirection retained by alignment scan nodes.
+ * @brief Connect scan nodes to their statement's statistics collector.
  *
- * Nodes retain a vector index instead of an element pointer because nested
- * executor registration may reallocate the collector vector. Retiring this
- * binding makes escaped portals fail closed after their root statement exits.
+ * Vector indices stay valid when nested executors add entries and move the
+ * vector's storage. Retire this binding  before freeing the collector so a
+ * cursor that outlives its root statement reports an error.
  */
 struct alignment_execution_binding {
     /** Stable association between a plan node ID and collector index. */
@@ -83,7 +83,7 @@ struct alignment_execution_binding {
     std::vector<node_registration> node_registrations{};
 };
 
-/** Non-owning registration retained by one alignment custom-scan node. */
+/** Borrowed connection from an alignment scan node to its statistics */
 struct alignment_node_registration_handle {
     alignment_execution_binding* binding = nullptr;
     std::uint32_t scan_node_id = 0;
@@ -94,20 +94,20 @@ struct alignment_node_registration_handle {
         return binding != nullptr;
     }
 
-    /** @return Whether the handle currently names a live collector entry. */
+    /** @return Whether the binding is actie and has a registered index. */
     [[nodiscard]] bool is_registered() const noexcept {
         return is_bound() && !binding->is_retired && binding->root_collector != nullptr &&
                node_index != k_unregistered_node_index;
     }
 };
 
-/** Callback supplied by the executor-hook owner to bind an `EState`. */
+/** Executor-hook callback that connects a scan node to an EState. */
 using alignment_node_binder = alignment_node_registration_handle (*)(EState*, std::uint32_t);
 
 inline alignment_node_binder alignment_node_binder_callback = nullptr;
 
 /**
- * @brief Install the executor-hook-owned node binder.
+ * @brief Install the callback that connects scan nodes to executor statistics.
  * @param binder Non-null callback. Reinstalling a different callback is an error.
  */
 inline void install_alignment_node_binder(alignment_node_binder binder) {
@@ -147,7 +147,7 @@ get_registered_alignment_node(alignment_node_registration_handle& handle) {
     return handle.binding->root_collector->alignment_nodes[handle.node_index];
 }
 
-/** Lazily register a node when its custom scan first executes. */
+/** Register a scan node on first use, or reuse its existing entry. */
 inline void ensure_alignment_node_registered(alignment_node_registration_handle& handle) {
     if (!handle.is_bound()) {
         return;
@@ -203,8 +203,8 @@ inline void ensure_alignment_node_registered(alignment_node_registration_handle&
 }
 
 /**
- * @brief Borrow the statement accumulator through a live node binding.
- * @return Non-owning accumulator pointer valid only until executor cleanup.
+ * @brief Borrow,  the statement's accumulator for persisted GPU operations.
+ * @return Pointer valid until executor cleanup.
  */
 [[nodiscard]] inline bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
 borrow_persisted_gpu_operation_accumulator(alignment_node_registration_handle& handle) {
@@ -217,7 +217,7 @@ borrow_persisted_gpu_operation_accumulator(alignment_node_registration_handle& h
     return &handle.binding->root_collector->persisted_gpu_operations;
 }
 
-/** Borrow the sole statement-owned downstream active-wall union tracker. */
+/** Borrow the statement timer that combines overlapping downstream work intervals. */
 [[nodiscard]] inline bioseq::simd::downstream_active_wall_tracker*
 borrow_downstream_active_wall_tracker(alignment_node_registration_handle& handle) {
     if (!handle.is_bound() || handle.binding->is_retired ||
@@ -229,7 +229,7 @@ borrow_downstream_active_wall_tracker(alignment_node_registration_handle& handle
     return &handle.binding->root_collector->downstream_active_wall;
 }
 
-/** Merge one successfully completed, non-empty dispatch batch exactly once. */
+/** Add a completed batch's statistics. The caller must submit each batch once. */
 inline void merge_alignment_batch(alignment_node_registration_handle& handle,
                                   const bioseq::pipeline_stats::pipeline_execution_stats& batch) {
     ensure_alignment_node_registered(handle);
@@ -241,7 +241,7 @@ inline void merge_alignment_batch(alignment_node_registration_handle& handle,
     node.pipeline.merge(batch);
 }
 
-/** Record EOF after the source and every buffered output cursor are empty. */
+/** Mark the current scan pass complete after all input and buffered output is consumed. */
 inline void mark_alignment_pass_fully_drained(alignment_node_registration_handle& handle) {
     ensure_alignment_node_registered(handle);
     if (handle.is_registered()) {
@@ -249,7 +249,7 @@ inline void mark_alignment_pass_fully_drained(alignment_node_registration_handle
     }
 }
 
-/** Record a rescan and retain whether the abandoned pass was incomplete. */
+/** Record a rescan and remember whether the abandoned pass was incomplete. */
 inline void record_alignment_rescan(alignment_node_registration_handle& handle) {
     if (!handle.is_registered()) {
         return;

@@ -1,6 +1,6 @@
 /**
  * @file index_chunk_io_test.cpp
- * @brief Tests chunk sizing, addressing, reads, and writes with small fake chunks.
+ * @brief Checks index chunk reads and writes, including row addresses and checksum failures.
  */
 
 #include <cstring>
@@ -39,13 +39,13 @@ using bioseq::indexing::index_sub_key_range;
 using bioseq::indexing::index_sub_key_request;
 using bioseq::indexing::index_sub_key_t;
 
-/// Small chunk size used to force multi-row test payloads.
+/// Small chunk limit that makes the fixtures span several rows.
 constexpr std::size_t k_maximum_chunk_bytes = 1024;
-/// Fake fragmented storage with the pinned chunk size.
+/// Fragment storage using the test chunk limit.
 using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
 
-/// Independent bit-at-a-time oracle for the normal (non-reflected),
-/// zero-initialized/no-final-XOR CRC-64/ECMA-182 convention.
+/// Reference CRC-64/ECMA-182 computed one bit at a time.
+/// Uses the non-reflected form with no final XOR and an initial state of zero by  default.
 [[nodiscard]] std::uint64_t reference_crc64_ecma182(
         std::span<const std::byte> bytes,
         std::uint64_t initial = 0u) noexcept {
@@ -63,8 +63,8 @@ using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
     return checksum;
 }
 
-/// Independent zero-byte state transition oracle. This deliberately does not
-/// use the production GF(2) operators or CRC lookup tables.
+/// Advances the reference CRC by feeding zero bytes one bit at a time.
+/// This checks the production code's faster checksum-combination operations.
 [[nodiscard]] std::uint64_t reference_crc64_ecma182_advance_zero_bytes(
         std::uint64_t checksum,
         std::uint64_t zero_byte_count) noexcept {
@@ -80,19 +80,19 @@ using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
     return checksum;
 }
 
-/// Generate one deterministic byte from a sub-key and global offset.
+/// Generates a repeatable byte from the subkey and position in the full payload.
 [[nodiscard]] char fill_byte(index_sub_key_t sub_key, std::size_t global_offset) {
     return static_cast<char>(
         (static_cast<std::size_t>(sub_key) * 1315423911u + global_offset * 2654435761u) & 0xFFu);
 }
 
-/// Store one declared qualified text chunk.
+/// Stores a text chunk and declares its address in the fake directory.
 void store_text(storage_type& storage, const index_chunk_address& address, std::string_view payload) {
     storage.store_qualified_chunk_for_test(
         address, std::span<const char>{payload.data(), payload.size()});
 }
 
-/// Store one physical text chunk without adding it to the logical declaration.
+/// Stores a text chunk without adding a fake directory entry.
 void store_undeclared_text(
         storage_type& storage,
         const index_chunk_address& address,
@@ -101,7 +101,7 @@ void store_undeclared_text(
         address, std::span<const char>{payload.data(), payload.size()});
 }
 
-/// Build a checksummed request for consecutive fixture chunks.
+/// Builds a read request with the total size and checksum of consecutive chunks.
 [[nodiscard]] index_sub_key_request extent_request(
         std::uint64_t generation_id,
         std::int32_t position_segment,
@@ -125,7 +125,7 @@ void store_undeclared_text(
     };
 }
 
-/// Callable used to check qualified-reader concept conformance.
+/// Empty callback used to check the qualified-reader nterface at compile time.
 struct qualified_sink_probe {
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -439,26 +439,26 @@ TEST_CASE("resize splits into ceil(bytes/p_max_chunk_size) chunks and round-trip
     storage_type storage;
     const index_sub_key_t sub_key = 3;
     const std::size_t total_bytes = k_maximum_chunk_bytes * 2 + 200;
-    // Three chunks contain 1024, 1024, and 200 bytes.
+    // Leave a short final chunk after two  full chunks.
     storage.resize(sub_key, total_bytes);
 
-    // Fill each chunk with a deterministic per-(sub_key, global-offset) pattern.
+    // Use a byte pattern that reveals misplaced or repeated chunks.
     std::size_t base = 0;
     storage.write_to_each<char>(
         sub_key, [&sub_key, &base](std::size_t chunk_no, char* buf, std::size_t cap) {
             for (std::size_t i = 0; i < cap; ++i)
                 buf[i] = fill_byte(sub_key, base + i);
             base += cap;
-            return chunk_no; // advance by 1
+            return chunk_no; // Returning the current number asks storage to advance one chunk
         });
 
     REQUIRE(storage.number_of_chunks(sub_key) == 3u);
     REQUIRE(storage.chunk_byte_size(sub_key, 0) == k_maximum_chunk_bytes);
     REQUIRE(storage.chunk_byte_size(sub_key, 1) == k_maximum_chunk_bytes);
     REQUIRE(storage.chunk_byte_size(sub_key, 2) == 200u);
-    REQUIRE(storage.chunk_byte_size(sub_key, 3) == 0u);      // absent
+    REQUIRE(storage.chunk_byte_size(sub_key, 3) == 0u);      // No fourth chunk exists.
 
-    // Read-back per chunk reassembles exactly the bytes we wrote.
+    // Read every chunk and compare it with the original payload pattern.
     std::size_t global = 0;
     for (std::size_t chunk_no = 0; chunk_no < storage.number_of_chunks(sub_key); ++chunk_no) {
         const std::size_t cb = storage.chunk_byte_size(sub_key, chunk_no);
@@ -497,7 +497,7 @@ TEST_CASE("resize_chunks honours an explicit small plan",
 TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order",
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
-    // Three sub_keys, each multi-chunk, written ascending.
+    // Give each of three subkeys more than one chunk.
     for (index_sub_key_t sub_key : {index_sub_key_t{0}, index_sub_key_t{1}, index_sub_key_t{2}}) {
         const std::size_t bytes =
             k_maximum_chunk_bytes + static_cast<std::size_t>(sub_key + 1) * 7u;
@@ -512,7 +512,7 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
             });
     }
 
-    // Expected: the per-chunk read_chunk<char> walk in (sub_key, chunk_no) order.
+    // Build the expected bytes and order by reading one chunk at a time.
     std::vector<char> expected;
     std::vector<std::pair<index_sub_key_t, std::size_t>> expected_order;
     for (index_sub_key_t sub_key = 0; sub_key < 3; ++sub_key) {
@@ -524,7 +524,7 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
         }
     }
 
-    // Actual: read_chunks_in_range over [0, 3).
+    // Read the same subkeys through the range callback.
     std::vector<char> got;
     std::vector<std::pair<index_sub_key_t, std::size_t>> got_order;
     std::map<index_sub_key_t, std::size_t> per_sub_chunk;
@@ -540,7 +540,7 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
     REQUIRE(got == expected);
     REQUIRE(got_order == expected_order);
 
-    // The emitted (sub_key, chunk_no) order is strictly ascending lexicographically.
+    // Chunks must arrive in subkey order, then chunk-number, order.
     for (std::size_t i = 1; i < got_order.size(); ++i)
         REQUIRE(got_order[i - 1] < got_order[i]);
 }
@@ -569,8 +569,8 @@ TEST_CASE("qualified bulk read is ordered, exact, and fully attested",
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
 
-    // Insert deliberately out of order. An intervening unrequested subkey
-    // exercises merge filtering and the exact skip-budget validation.
+    // Insert rows out of  order and leave a declared, unrequested subkey between them.
+    // The range read must skip that row and return requested chunks in order.
     store_text(storage, {2, 0, 0, 1}, "epsilon");
     store_text(storage, {1, 0, 12, 0}, "gamma");
     store_text(storage, {1, 1, 1, 3}, "delta");
@@ -747,8 +747,8 @@ TEST_CASE("skip budget is predeclared and undeclared wide-gap rows fail",
             index_chunk_cache_policy::bypass_one_shot,
             [&callbacks](const index_chunk_address&, const char*, std::size_t) { ++callbacks; }),
         fake_qualified_chunk_read_error);
-    // The declared subkey-2 row consumes the sole pre-scan budget. The first
-    // injected row at subkey 3 is rejected instead of enlarging that budget.
+    // Subkey 2 is the only declared gap row. Reading must fail at the first
+    // undeclared row, before reaching the requested row at subkey 100.
     REQUIRE(callbacks == 1);
 }
 
@@ -1001,9 +1001,8 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
                                     const char* payload,
                                     std::size_t bytes) { staged.emplace_back(payload, bytes); }),
             fake_qualified_chunk_read_error);
-        // Streaming is intentionally not transactional: row validation permits
-        // the callback, then the late aggregate mismatch rejects the group. The
-        // caller must keep this staged object unpublished and discard it.
+        // The callback receives the valid row before the total-size check fails.
+        // Callers must keep the collected data private until the whole read succeeds.
         REQUIRE((staged == std::vector<std::string>{"a"}));
     }
     SECTION("aggregate CRC must match the ordered extent") {
@@ -1026,7 +1025,7 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
     const index_sub_key_t sub_key = 9;
-    // k_maximum_chunk_bytes (1024) bytes / 8 = 128 int64 units per chunk; total 200 int64 => 2 chunks.
+    // Two hundred int64_t values span two chunks at this byte limit.
     const std::size_t total_units = 200;
     storage.resize(sub_key, total_units * sizeof(std::int64_t));
 
@@ -1034,10 +1033,8 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
     storage.write_to_each<std::int64_t>(
         sub_key,
         [&total_units, &base](std::size_t chunk_no, std::int64_t* buf, std::size_t cap_units) {
-            // cap_units is the chunk byte size / sizeof(int64), NEVER the byte size. The
-            // chunk is committed only AFTER this writer returns, so verify cap_units against
-            // the planned split (k_maximum_chunk_bytes/8 = 128 units for chunk 0; the remainder for
-            // chunk 1) rather than calling chunk_byte_size() mid-write.
+            // Capacity  is measured in int64_t elements. Check it against the write plan,
+            // since the chunk is stored only after this callback returns.
             REQUIRE(cap_units ==
                     (chunk_no == 0 ? k_maximum_chunk_bytes / sizeof(std::int64_t)
                                    : total_units - k_maximum_chunk_bytes / sizeof(std::int64_t)));
@@ -1049,7 +1046,7 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
         });
 
     REQUIRE(storage.number_of_chunks(sub_key) == 2u);
-    REQUIRE(storage.chunk_byte_size(sub_key, 0) == k_maximum_chunk_bytes);                 // 128 units
+    REQUIRE(storage.chunk_byte_size(sub_key, 0) == k_maximum_chunk_bytes);                 // 128 int64_t values.
     REQUIRE(storage.chunk_byte_size(sub_key, 1) == (total_units * 8 - k_maximum_chunk_bytes));
 
     std::size_t global = 0;

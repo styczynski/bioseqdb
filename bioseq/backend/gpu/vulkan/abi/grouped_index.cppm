@@ -1,9 +1,10 @@
 /**
  * @file vulkan/abi/grouped_index.cppm
- * @brief Defines the retained grouped-SoA resident-index Vulkan ABI.
+ * @brief GPU layouts for grouped indexes with separate hash, count, and position arrays.
  *
- * Partition descriptors and seed push constants are size- and offset-pinned by
- * static assertions so host uploads and shader loads stay byte-identical.
+ * Partition descriptions locate the arrays already loaded into GPU buffers.
+ * Static assertions keep their sizes  and field offsets equal to the shader
+ * layouts.
  */
 module;
 
@@ -15,48 +16,48 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-// Grouped-SoA controls retain their authenticated variable-width byte stream,
-// and positions remain segment-local `(bp << 1) | strand` scalars. A resident
-// loader rebases only aggregate-buffer offsets; it never decodes controls,
-// widens positions, or rebuilds a host hash table.
-/** @brief Wire revision of the retained grouped-SoA resident representation. */
+// Grouped-SoA buffers keep the stored field widths. Positions encode the
+// segment-local coordinate and strand as `(bp << 1) | strand`. Loading adjusts
+// array offsets for the combined GPU buffers while preserving the stored bytes.
+/** @brief Version of the, grouped-SoA layout kept in GPU memory. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_abi_revision = 3u;
-/** @brief Transient grouped-SoA seed shader/layout revision; persisted ABI remains revision 3. */
+/** @brief Version of the seed-shader parameters. Saved grouped indexes use revision 3. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_seed_push_abi_revision = 6u;
-/** @brief ABI revision of the bounded Format-5 two-phase stream. */
+/** @brief Version of the Format-5 control-then-position stream layout. */
 inline constexpr std::uint32_t k_gpu_shape_v5_stream_abi_revision = 3u;
-/** @brief Flag identifying untranscoded grouped-SoA control streams. */
+/** @brief Control arrays use their original grouped-SoA encoding. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_raw_soa = 1u << 0u;
-/** @brief Flag identifying segment-local encoded position scalars. */
+/** @brief Position values are relative to their segment. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_segment_local = 1u << 1u;
-/** @brief Flag identifying terminal-prefix control arrays. */
+/** @brief Prefix offsets include an extra entry marking the end of the last bucket. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_terminal_prefix = 1u << 2u;
-/** @brief Flags required on every admitted grouped-SoA partition. */
+/** @brief Flags required for  every grouped-SoA partgtion. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_required_flags =
     k_gpu_grouped_soa_partition_raw_soa | k_gpu_grouped_soa_partition_segment_local |
     k_gpu_grouped_soa_partition_terminal_prefix;
 
 /**
- * @brief Defines fail-closed status bits written by grouped-SoA seed shaders.
+ * @brief Error bits written by grouped-SoA seed shaders.
  *
- * The status word is outside the query-local prefix-scan range.
+ * Any set bit makes the result invalid The status word follows the query
+ * counts and is excluded from their prefix scan.
  */
 enum class gpu_grouped_soa_seed_status : std::uint32_t {
     none = 0u,           ///< No seed-shader failure recorded.
-    contract = 1u << 0u, ///< Push constants or admission contract violated.
+    contract = 1u << 0u, ///< Invalid shader parameters or buffer limits.
     query = 1u << 1u,    ///< Query minimizer stream or count invalid.
     control = 1u << 2u,  ///< Control stream decode or bounds failure.
     position = 1u << 3u, ///< Position stream decode or bounds failure.
     emission = 1u << 4u, ///< Anchor or count emission capacity exceeded.
 };
 
-/** @brief Selects the only two legal persisted-payload submission phases. */
+/** @brief Selects the control-array pass or the position-array pass. */
 enum class gpu_shape_v5_group_phase : std::uint32_t {
     controls = 1u,
     positions = 2u,
 };
 
-/** @brief Fail-closed status bits shared by the three stream shaders. */
+/** @brief Error bits shared by the control, approval, and position shaders. */
 enum class gpu_shape_v5_stream_status : std::uint32_t {
     none = 0u,
     contract = 1u << 0u,
@@ -73,11 +74,11 @@ encode_gpu_shape_v5_stream_status(gpu_shape_v5_stream_status status) noexcept {
 }
 
 /**
- * @brief Frozen phase-local Format-5 partition descriptor.
+ * @brief Describes one Format-5 partition in the currently bound buffer.
  *
- * `hash_array_offset` addresses H in a control submission and P in a
- * position submission. Prefix/count offsets are required to be zero for the
- * position phase. All offsets are local to the currently bound payload slot.
+ * During the control pass, `hash_array_offset` points to hashes. During the
+ * position  pass, it points to positions and the prefix/count offsets must be
+ * zero. All offsets are relative to this buffer slot.
  */
 struct alignas(8) gpu_shape_v5_partition_wire {
     std::uint32_t partition_id = 0u;
@@ -98,7 +99,7 @@ struct alignas(8) gpu_shape_v5_partition_wire {
     std::uint64_t max_occ_cap = 0u;
 };
 
-/** @brief Frozen query wire used when persisted minimizer hashes are 64-bit. */
+/** @brief Query-minimizer record for indexes with 64-bit hashes. */
 struct alignas(8) gpu_shape_v5_query_minimizer_h64_wire {
     std::uint64_t hash = 0u;
     std::uint32_t query_bp_strand = 0u;
@@ -107,7 +108,7 @@ struct alignas(8) gpu_shape_v5_query_minimizer_h64_wire {
     std::uint32_t reserved_zero = 0u;
 };
 
-/** @brief Query-minimizer state retained between controls and positions. */
+/** @brief Occurrence counts and output cursor kept between the two passes. */
 struct gpu_shape_v5_query_authorization_wire {
     std::uint32_t occurrence_count = 0u;
     std::uint32_t accepted_count = 0u;
@@ -115,7 +116,7 @@ struct gpu_shape_v5_query_authorization_wire {
     std::uint32_t reserved_zero = 0u;
 };
 
-/** @brief One control-phase match consumed by a later position group. */
+/** @brief Position range found by the control pass for a query minimizer. */
 struct alignas(8) gpu_shape_v5_authorization_range_wire {
     std::uint32_t directory_ordinal = 0u;
     std::uint32_t position_segment = 0u;
@@ -128,10 +129,10 @@ struct alignas(8) gpu_shape_v5_authorization_range_wire {
 };
 
 /**
- * @brief Host-only bounds and identity for one phase-local raw group.
+ * @brief CPU-side buffer references and limits for one control or position group.
  *
- * Opaque pointers avoid coupling this leaf ABI module to the Vulkan runtime;
- * callers bind them to concrete `buffer` objects before dispatch.
+ * The pointers refer to runtime buffer objects. Keeping their types opaque
+ * lets this layout module avoid importing the Vulkan runtime.
  */
 struct gpu_shape_v5_raw_group_inputs {
     const void* descriptors = nullptr;
@@ -178,7 +179,7 @@ struct gpu_shape_v5_group_push {
     std::uint32_t reserved_zero = 0u;
 };
 
-/** @brief Push constants for the controls-to-positions authorization barrier. */
+/** @brief Parameters for deciding which minimizers may emit positions after  counting. */
 struct gpu_shape_v5_authorization_push {
     std::uint32_t abi_revision = k_gpu_shape_v5_stream_abi_revision;
     std::uint32_t query_minimizer_count = 0u;
@@ -191,7 +192,7 @@ struct gpu_shape_v5_authorization_push {
     std::uint32_t reserved_zero1 = 0u;
 };
 
-/** @brief Durable private record retained before a physical slot is reused. */
+/** @brief Submission details sved after a GPU buffer slot is reused. */
 struct alignas(8) gpu_persisted_group_capture_wire {
     std::uint32_t phase = 0u;
     std::uint32_t group_ordinal = 0u;
@@ -243,9 +244,7 @@ static_assert(offsetof(gpu_persisted_group_capture_wire, capture_sha256) == 120u
 static_assert(offsetof(gpu_persisted_group_capture_wire, reserved_zero1) == 152u);
 
 /**
- * @brief Converts a grouped-SoA seed status to its shader-visible bit mask.
- * @param[in] status Status bit to encode.
- * @return Shader-visible unsigned mask.
+ * @brief Converts a seed error flag to the unsigned mask stored by the shader.
  */
 [[nodiscard]] constexpr std::uint32_t
 encode_gpu_grouped_soa_seed_status(gpu_grouped_soa_seed_status status) noexcept {
@@ -253,19 +252,19 @@ encode_gpu_grouped_soa_seed_status(gpu_grouped_soa_seed_status status) noexcept 
 }
 
 /**
- * @brief Describes one admitted grouped-SoA partition in resident buffers.
+ * @brief Locates one, grouped-SoA partition in the loaded GPU buffers.
  *
- * Byte offsets are absolute within aggregate control and position buffers.
- * Scalar widths are two, four, or eight bytes, and the four offsets address
- * hash, terminal-prefix, saturated-count, and raw-position arrays.
+ * Offsets are measured in bytes from the start of the combined control or
+ * position buffer Field widths may be 2, 4, or 8 bytes. The prefix array has
+ * one extra entry marking the end of the last bucket.
  */
 struct gpu_grouped_soa_resident_partition_descriptor {
-    std::uint32_t partition_id = 0;         ///< Stable partition identifier from ingest.
+    std::uint32_t partition_id = 0;         ///< Partition identifier copied from the saved directory.
     std::uint32_t directory_ordinal = 0;    ///< Index of this partition in the directory.
     std::uint32_t position_segment = 0;     ///< Segment index for segment-local positions.
     std::uint32_t flags = 0;                ///< Required grouped-SoA partition flag mask.
     std::uint64_t hash_byte_offset = 0;     ///< First hash scalar byte in the control buffer.
-    std::uint64_t prefix_byte_offset = 0;   ///< Terminal-prefix array byte offset in controls.
+    std::uint64_t prefix_byte_offset = 0;   ///< Byte offset  of bucket starts, including the final end offset.
     std::uint64_t count_byte_offset = 0;    ///< Saturated-count array byte offset in controls.
     std::uint64_t position_byte_offset = 0; ///< First position scalar byte in the position buffer.
     std::uint32_t control_count = 0;        ///< Number of control buckets in this partition.
@@ -281,10 +280,9 @@ struct gpu_grouped_soa_resident_partition_descriptor {
 };
 
 /**
- * @brief Carries grouped-SoA resident seed count and emit parameters.
+ * @brief Parameters for counting seed hits and writing anchors from a grouped index.
  *
- * The persisted occurrence cap is independent of the query threshold. A seed
- * dispatch is legal only when the query threshold does not exceed that cap.
+ * The query occurrence limit must not exceed the cap recorded in the saved index.
  */
 struct gpu_grouped_soa_seed_push {
     std::uint32_t abi_revision =
@@ -294,22 +292,22 @@ struct gpu_grouped_soa_seed_push {
     std::uint32_t hash_shift = 0;            ///< Right shift applied before hash lookup.
     std::uint32_t pos_bits = 0;              ///< Position field width used during decode.
     std::uint32_t kmer_size = 0;             ///< Minimizer k-mer length in symbols.
-    std::uint32_t partition_count = 0;       ///< Number of resident partitions in the dispatch.
+    std::uint32_t partition_count = 0;       ///< Exclusive end partition index for this dispatch.
     std::uint32_t max_occ = 0;               ///< Query-side occurrence threshold for this dispatch.
-    std::uint32_t emit_mode = 0;             ///< Seed emission mode selector for the bound shader.
+    std::uint32_t emit_mode = 0;             ///< Zero counts hits. One writes anchors.
     std::uint32_t record_count = 0;          ///< Number of query records covered by the dispatch.
     std::uint32_t target_ref_bits = 0;       ///< Target coordinate bit width for anchor rebasing.
     std::uint32_t query_minimizer_count = 0; ///< Total query minimizers in the bound buffer.
-    std::uint32_t control_word_count = 0;    ///< Control aggregate size in 32-bit words.
-    std::uint32_t position_word_count = 0;   ///< Position aggregate size in 32-bit words.
+    std::uint32_t control_word_count = 0;    ///< Combined control-buffer size in 32-bit words.
+    std::uint32_t position_word_count = 0;   ///< Combined position-buffer size in 32-bit words.
     std::uint32_t anchor_capacity = 0;       ///< Maximum anchors writable by the emit pass.
     std::uint32_t max_occ_cap_lo = 0;        ///< Low 32 bits of the persisted occurrence cap.
     std::uint32_t max_occ_cap_hi = 0;        ///< High 32 bits of the persisted occurrence cap.
-    // Query-local counts occupy [0, status_index); the final extra word is
-    // reserved for fail-closed shader status and is never part of prefix scan.
-    std::uint32_t status_index = 0; ///< Index of the fail-closed status word in query counts.
-    // Exact element extents derived from the first nine VkDescriptorBufferInfo ranges.
-    // They replace runtime-array .length()/OpArrayLength in cached metallibs.
+    // Query counts occupy [0, status_index). The extra word stores shader
+    // errors and is excluded from the prefix  scan.
+    std::uint32_t status_index = 0; ///< Index of the shader error word after the queuy counts.
+    // Element counts come from the first nine VkDescriptorBufferInfo ranges.
+    // Cached Metal shaders use these instead of runtime-array length queries.
     std::uint32_t minimizer_word_extent = 0;
     std::uint32_t partition_extent = 0;
     std::uint32_t control_word_extent = 0;
@@ -320,9 +318,9 @@ struct gpu_grouped_soa_seed_push {
     std::uint32_t anchor_extent = 0;
     std::uint32_t anchor_key_extent = 0;
     std::uint32_t partition_begin = 0; ///< First partition of this bounded dispatch.
-    std::uint32_t control_base_word = 0; ///< Bound control range's aggregate word offset.
-    std::uint32_t position_base_word = 0; ///< Bound position range's aggregate word offset.
-    std::uint32_t repetitive_word_extent = 0; ///< Flags followed by per-minimizer emit cursors.
+    std::uint32_t control_base_word = 0; ///< Start of the bound control range in the combined buffer, in words.
+    std::uint32_t position_base_word = 0; ///< Start of the bound position range in the combined buffer, in words.
+    std::uint32_t repetitive_word_extent = 0; ///< Buffer length for repetitive flags and per-minimizer output cursors.
 };
 
 static_assert(sizeof(gpu_grouped_soa_resident_partition_descriptor) == 104u);
@@ -376,12 +374,14 @@ static_assert(offsetof(gpu_grouped_soa_seed_push, repetitive_word_extent) == 120
 }
 
 /**
- * @brief Reports whether an aligned scalar range fits its aggregate buffer.
- * @param[in] byte_offset First scalar byte within the aggregate buffer.
- * @param[in] element_count Number of fixed-width scalars in the range.
- * @param[in] width Scalar width in bytes.
- * @param[in] buffer_bytes Aggregate buffer extent in bytes.
- * @return `true` when the aligned range is representable and in bounds.
+ * @brief Checks that a scalar array is aligned and fits inside  its buffer
+ * @param[in] byte_offset Start of the array in bytes.
+ * @param[in] element_count Number of values.
+ * @param[in] width Bytes per value, which must be 2, 4, or 8.
+ * @param[in] buffer_bytes Buffer size in bytes.
+ *
+ * Returns false for unsupported widths, misalignment, arithmetic overflow,
+ * or a range beyond the buffer.
  */
 [[nodiscard]] constexpr bool
 is_gpu_grouped_soa_scalar_range_valid(std::uint64_t byte_offset,
@@ -403,13 +403,13 @@ is_gpu_shape_v5_group_phase_valid(gpu_shape_v5_group_phase phase) noexcept {
            phase == gpu_shape_v5_group_phase::positions;
 }
 
-/** @brief Largest scalar representable by one supported persisted width. */
+/** @brief Largest unsigned, value that fits in the given supported byte width. */
 [[nodiscard]] constexpr std::uint64_t gpu_shape_v5_scalar_max(std::uint32_t width) noexcept {
     return width == 8u ? (std::numeric_limits<std::uint64_t>::max)()
                        : (std::uint64_t{1u} << (width * 8u)) - 1u;
 }
 
-/** @brief Validates the non-owning host call record for one raw group. */
+/** @brief Checks buffer pointers, non-empty counts, phase, and receipt identity. */
 [[nodiscard]] constexpr bool
 is_gpu_shape_v5_raw_group_inputs_valid(const gpu_shape_v5_raw_group_inputs& inputs) noexcept {
     return inputs.descriptors != nullptr && inputs.payload != nullptr &&
@@ -418,9 +418,11 @@ is_gpu_shape_v5_raw_group_inputs_valid(const gpu_shape_v5_raw_group_inputs& inpu
 }
 
 /**
- * @brief Validates a frozen descriptor against one phase-local payload slot.
+ * @brief Checks a partition against the buffer for the requested pass.
  *
- * The phase is explicit: a zero offset never selects or infers a phase.
+ * The caller supplies the phase. Control passes validate hash, prefix, and
+ * count arrays. Position passes validate  the position array and require the
+ * unused offsets to be zero. Widths must fit the recorded counts and segment.
  */
 [[nodiscard]] constexpr bool
 is_gpu_shape_v5_partition_wire_valid(const gpu_shape_v5_partition_wire& descriptor,
@@ -469,12 +471,11 @@ is_gpu_shape_v5_partition_wire_valid(const gpu_shape_v5_partition_wire& descript
 }
 
 /**
- * @brief Validates a resident descriptor against aggregate buffer extents.
- * @param[in] descriptor Partition descriptor to validate.
- * @param[in] control_buffer_bytes Aggregate control-buffer extent in bytes.
- * @param[in] position_buffer_bytes Aggregate position-buffer extent in bytes.
- * @return `true` when flags, widths, hash bounds, segment bounds, and all byte
- * ranges satisfy the grouped-SoA upload contract.
+ * @brief Checks that a partition can be reaa from the combined GPU buffers.
+ *
+ * Requires the expected flags, supported field widths, ordered hash and
+ * segment bounds, and aligned arrays that fit inside their buffers. The
+ * segment length must fit in the position encoding.
  */
 [[nodiscard]] constexpr bool is_gpu_grouped_soa_partition_descriptor_valid(
     const gpu_grouped_soa_resident_partition_descriptor& descriptor,
@@ -512,7 +513,7 @@ is_gpu_shape_v5_partition_wire_valid(const gpu_shape_v5_partition_wire& descript
                                                  position_buffer_bytes);
 }
 
-/// @brief Consecutive partitions covered by two aligned, bounded SSBO ranges.
+/// @brief Consecutive partitions covered by aligned control and position buffer ranges.
 struct gpu_grouped_soa_buffer_window {
     std::uint32_t partition_begin = 0u;
     std::uint32_t partition_end = 0u;
@@ -522,14 +523,17 @@ struct gpu_grouped_soa_buffer_window {
     std::uint64_t position_bytes = 0u;
 };
 
-/// @brief Plan the next complete-partition binding window without decoding payloads.
-/// @param[in] descriptors Byte-exact resident partition descriptors.
-/// @param[in] first First uncovered partition ordinal.
-/// @param[in] control_bytes Logical aggregate control extent.
-/// @param[in] position_bytes Logical aggregate position extent.
-/// @param[in] range_limit Device limit for each storage-buffer descriptor range.
-/// @param[in] offset_alignment Device storage-buffer offset alignment.
-/// @return The maximal consecutive window, or no value for malformed/unbindable input.
+/// @brief Finds the largest next group of whole partitions that fits the buffer limits.
+/// @param[in] descriptors Stored partition descriptors.
+/// @param[in] first First partition not yet  covered.
+/// @param[in] control_bytes Combined control-buffer size in bytes.
+/// @param[in] position_bytes Combined position-buffer size in bytes.
+/// @param[in] range_limit Maximum bytes in one storage-buffer binding
+/// @param[in] offset_alignment Required alignment of binding offsets.
+/// @return Consecutive partition window, or no value for invalid input or
+///         a first partition that cannot fit.
+///
+/// This reads the descriptors without decoding the index arrays.
 [[nodiscard]] inline std::optional<gpu_grouped_soa_buffer_window>
 plan_gpu_grouped_soa_buffer_window(std::span<const std::byte> descriptors,
                                    std::uint32_t first,

@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/persist_stage.cppm
- * @brief PostgreSQL asynchronous minimizer-sequence persistence staging implementation.
+ * @brief Prepare shared metadata for an asynchronous minimizer-sequence build.
  */
 module;
 
@@ -37,10 +37,9 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Fixed wire header for a metadata-only minimizer build DSM.
- *
- * The asserted size and offsets are shared with the worker parser. Function pointers and
- * process-local kernel tables never enter this representation.
+ * Shared-memory header describing how the worker should rebuild the index
+ * Keep its latout in sync with the worker parser. Save the selected Highway
+ * target as an identifier so the worker can find its own kernel pointers.
  */
 struct minimizer_sequence_build_dsm_header {
     std::uint32_t magic;
@@ -62,11 +61,7 @@ static_assert(offsetof(minimizer_sequence_build_dsm_header, highway_executed_tar
 static_assert(offsetof(minimizer_sequence_build_dsm_header, locator) == 48);
 static_assert(std::is_trivially_copyable_v<minimizer_sequence_build_dsm_header>);
 
-/**
- * @brief Checks whether a serialized minimizer backend is recognized.
- * @param[in] backend_value Serialized backend selector.
- * @return True for every supported wire value.
- */
+/** Check whether the saved backend selector names a known minimizer algorithm. */
 [[nodiscard]] constexpr bool
 valid_minimizer_sketch_backend_wire_value(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
@@ -80,11 +75,7 @@ valid_minimizer_sketch_backend_wire_value(std::int32_t backend_value) noexcept {
     return false;
 }
 
-/**
- * @brief Reports whether a queued backend requires an exact Highway target bit.
- * @param[in] backend_value Serialized backend selector.
- * @return True for Highway SIMD backends.
- */
+/** Check whether  this backend needs a saved Highway target to find its kernels. */
 [[nodiscard]] constexpr bool
 minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
@@ -93,11 +84,7 @@ minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
            backend == minimizer_sketch_backend::bounded_nthash_simd;
 }
 
-/**
- * @brief Checks whether the identity-only async payload can reproduce a backend.
- * @param[in] backend_value Serialized backend selector.
- * @return True when the worker can rebuild without additional scheme identity.
- */
+/** Check whether the job metadata is sufficient, to rebuild this minimizer format. */
 [[nodiscard]] constexpr bool
 minimizer_backend_allowed_in_async_minimizer_sequence(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
@@ -111,7 +98,7 @@ minimizer_backend_allowed_in_async_minimizer_sequence(std::int32_t backend_value
 inline bool g_persist_xact_callback_registered = false;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Stores the backend-local one-shot staging failure selector. */
+/** Failure to inject once when staging a job in this backend. */
 inline thread_local async_minimizer_sequence_stage_pg_failure
     g_async_minimizer_sequence_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
 /** @brief Counts process-local staging failures raised by test injection. */
@@ -119,9 +106,8 @@ inline thread_local std::uint64_t g_async_minimizer_sequence_stage_injected_fail
 #endif
 
 /**
- * @brief Arms one backend-local staging failure selector.
- * @param[in] point PostgreSQL leaf that should fail once.
- * @return True when test instrumentation accepted the selector.
+ * Select a staging operation to fail once in tests.
+ * Return false for an invalid selector or a build without test instrumentation.
  */
 [[nodiscard]] bool arm_async_minimizer_sequence_stage_pg_failure(
     async_minimizer_sequence_stage_pg_failure point) noexcept {
@@ -138,17 +124,14 @@ inline thread_local std::uint64_t g_async_minimizer_sequence_stage_injected_fail
 #endif
 }
 
-/** @brief Clears the backend-local staging failure selector. */
+/** Cancel this backend's pending staging failure injection. */
 void disarm_async_minimizer_sequence_stage_pg_failure() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     g_async_minimizer_sequence_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
 #endif
 }
 
-/**
- * @brief Reads the backend-local staging failure selector.
- * @return The armed leaf or `none` when instrumentation is unavailable.
- */
+/** Return the pending staging failure, or none  when test instrumentation is disabled. */
 [[nodiscard]] async_minimizer_sequence_stage_pg_failure
 async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -158,10 +141,7 @@ async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #endif
 }
 
-/**
- * @brief Reads the count of injected backend-local staging failures.
- * @return The process-local injected failure count.
- */
+/** Return this backend's injected staging failure count, or zero outside test builds. */
 [[nodiscard]] std::uint64_t async_minimizer_sequence_stage_injected_failure_count() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     return g_async_minimizer_sequence_stage_injected_failures;
@@ -170,10 +150,7 @@ async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #endif
 }
 
-/**
- * @brief Consumes an armed staging selector and raises PostgreSQL ERROR.
- * @param[in] point Leaf about to execute.
- */
+/** Raise a PostgreSQL error if this operation matches the pending test failure. */
 void inject_async_minimizer_sequence_stage_pg_failure_leaf(
     async_minimizer_sequence_stage_pg_failure point) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -192,11 +169,12 @@ void inject_async_minimizer_sequence_stage_pg_failure_leaf(
 }
 
 /**
- * @brief Executes one staging primitive inside a PostgreSQL error bridge.
- * @tparam p_function Callable returning the leaf result.
- * @param[in] point Failure selector associated with the primitive.
- * @param[in,out] function Callable invoked once after failure injection.
- * @return The callable result.
+ * Run a stagng operation through the PostgreSQL-to-C++ error bridge.
+ * Check for an injected test failure before calling the operation.
+ * @tparam p_function Callable returning the operation result.
+ * @param point Test failure location
+ * @param function Operation to run after checking the failure  selector.
+ * @return The operation's result.
  */
 template <class p_function>
 auto invoke_async_minimizer_sequence_stage_pg_leaf(async_minimizer_sequence_stage_pg_failure point,
@@ -210,8 +188,9 @@ auto invoke_async_minimizer_sequence_stage_pg_leaf(async_minimizer_sequence_stag
 }
 
 /**
- * @brief Releases a pinned DSM while preserving the initiating cleanup outcome.
- * @param[in] handle DSM handle, or `DSM_HANDLE_INVALID` when already released.
+ * Release the shared-memory segment's pin during cleanup.
+ * Ignore an invalid handle and keep cleanup errors from replacing the original
+ * transaction or worker error.
  */
 void release_pinned_dsm(dsm_handle handle) noexcept {
     if (handle == DSM_HANDLE_INVALID) {
@@ -220,17 +199,17 @@ void release_pinned_dsm(dsm_handle handle) noexcept {
     try {
         bioseq::postgres::support::invoke_pg_as_cpp([handle] { dsm_unpin_segment(handle); });
     } catch (...) {
-        // Transaction/worker cleanup must not longjmp across pending_persist_job
-        // owners. Supported PostgreSQL releases do not ERROR here; preserve
-        // the authoritative transaction/worker outcome if that changes.
+        // Keep a cleanup error from skipping C++ destructors or replacing the
+        // transaction or worker failure that brought us here.
     }
 }
 
 /**
- * @brief Validates and decodes metadata from a mapped DSM.
- * @param[in] base Start of the mapped bytes.
- * @param[in] mapped Accessible byte count.
- * @return Decoded metadata, or absence for any invalid identity or bound.
+ * Read a build request from mapped shared memory. Check the format and
+ * algorithm selectors, locator version, nonzero source version, and  name
+ * bounds before copying the metadata. Return no request if a check fails.
+ * @param base Start of the mapped bytes.
+ * @param mapped Accessible byte count.
  */
 [[nodiscard]] std::optional<minimizer_sequence_build_metadata>
 parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
@@ -270,7 +249,7 @@ parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
     return meta;
 }
 
-/** @brief Installs the transaction callback once after its PostgreSQL leaf succeeds. */
+/** Register the transaction callback once for this backend. */
 void ensure_persist_xact_callback_registered() {
     if (g_persist_xact_callback_registered) {
         return;
@@ -278,34 +257,33 @@ void ensure_persist_xact_callback_registered() {
     invoke_async_minimizer_sequence_stage_pg_leaf(
         async_minimizer_sequence_stage_pg_failure::register_xact_callback,
         [] { register_persist_xact_callback_pg_leaf(); });
-    // RegisterXactCallback can ERROR while allocating its callback node. Set
-    // the completion bit only after the bridged primitive returned, so retry
-    // never duplicates an already-installed callback.
+    // Mark, registration complete only after PostgreSQL accepts the callback.
+    // A failed allocation must leave registration available for a later retry.
     g_persist_xact_callback_registered = true;
 }
 
-/**
- * @brief Reports whether shared persistence slots are attached.
- * @return True when this backend can publish into supervisor shared memory.
- */
+/** Check whether this backend has attached the shared persistence quee. */
 [[nodiscard]] bool async_persist_queue_available() noexcept {
     return g_shared != nullptr;
 }
 
 /**
- * @brief Serializes one validated build identity into a pinned metadata DSM.
- * @param[in] target Relation, index, and sequence identity.
- * @param[in] locator Durable source location consumed by the worker.
- * @param[in] alphabet_code Serialized alphabet selector.
- * @param[in] storage_unit_byte_width Packed storage width in bytes.
- * @param[in] last_fragment_padding Padding symbols in the final fragment.
- * @param[in] pair_sort_impl Serialized pair sorter selector.
- * @param[in] pipeline_mode Serialized worker concurrency mode.
- * @param[in] max_concurrency Worker concurrency limit.
- * @param[in] index_memory_cap_mb Worker index-memory cap in MiB.
- * @param[in] index_sketch_backend Serialized minimizer backend selector.
- * @param[in] highway_executed_target Exact target bit selected before staging.
- * @return True when transaction-local pending work accepted the pinned DSM.
+ * Save an index-build request with the current transaction.
+ * Copy the source locator and build settings into  pinned shared memory so a
+ * worker can rebuild the index after commit. Unsupported requests or unavailable
+ * queue resources return false. Invalid algorithm settings raise an error.
+ * @param target Table, column, index, and sequence identity
+ * @param locator Stored sequence location used by the worker.
+ * @param alphabet_code Sequence alphabet code.
+ * @param storage_unit_byte_width Packed storage width in bytes.
+ * @param last_fragment_padding Unused symbol positions in the last fragment.
+ * @param pair_sort_impl Pair sorter selector.
+ * @param pipeline_mode Worker concurrency mode.
+ * @param max_concurrency Worker  thread limit.
+ * @param index_memory_cap_mb Worker memory cap in MiB.
+ * @param index_sketch_backend Minimizer algorithm selector.
+ * @param highway_executed_target Highway target selected before staging.
+ * @return True after the transaction list takes ownership of the pinned segment.
  */
 [[nodiscard]] bool
 stage_async_minimizer_sequence_build(const persist_target& target,
@@ -400,8 +378,8 @@ stage_async_minimizer_sequence_build(const persist_target& target,
             try {
                 bioseq::postgres::support::invoke_pg_as_cpp([attached] { dsm_detach(attached); });
             } catch (...) {
-                // The mapping remains ResourceOwner-owned. Preserve the
-                // staging error; transaction abort performs final cleanup.
+                // PostgreSQL still owns the mapping and will release it on abort.
+                // Keep the original staging error.
             }
         }
         if (dsm.unpin_cleanup_required && dsm.handle != DSM_HANDLE_INVALID) {
@@ -411,9 +389,7 @@ stage_async_minimizer_sequence_build(const persist_target& target,
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [handle] { dsm_unpin_segment(handle); });
             } catch (...) {
-                // dsm_unpin_segment is non-throwing in supported PostgreSQL,
-                // but never replace the original staging failure if that
-                // contract changes.
+                // Keep an unpin failure from replacing the original xtaging error.
             }
         }
     };
@@ -427,9 +403,8 @@ stage_async_minimizer_sequence_build(const persist_target& target,
             return false;
         }
 
-        // This DSM is metadata-only: locator/source identity, selected build
-        // policy, and the already-selected Highway target bit. Function/table
-        // pointers remain process-local and never cross this boundary.
+        // Save source identity and build settings, including the selected Highway
+        // target. The worker resolves its  own function pointers.
         char* base = static_cast<char*>(dsm_segment_address(dsm.attached));
         const minimizer_sequence_build_dsm_header header{
             .magic = k_minimizer_sequence_build_dsm_magic,
@@ -450,10 +425,8 @@ stage_async_minimizer_sequence_build(const persist_target& target,
         std::memcpy(base + sizeof(header), target.index_name.data(), target.index_name.size());
 
         dsm.handle = dsm_segment_handle(dsm.attached);
-        // Arm cleanup before entering the leaf. This covers both the injected
-        // pre-call failure and any future PostgreSQL implementation that could
-        // ERROR after making the pin effective; an unpin of an unpinned handle
-        // is itself bridged and swallowed while preserving the first error.
+        // Request unpin cleanup before calling PostgreSQL, covering an error
+        // during pinning as well as the injected test failure before the call.
         dsm.unpin_cleanup_required = true;
         invoke_async_minimizer_sequence_stage_pg_leaf(
             async_minimizer_sequence_stage_pg_failure::dsm_pin,
@@ -464,8 +437,8 @@ stage_async_minimizer_sequence_build(const persist_target& target,
         dsm.attached = nullptr;
 
         enqueue_pending_minimizer_sequence_build(target, dsm.handle, bytes_total);
-        // The pending transaction list now owns the pin. Disarm cleanup only
-        // after vector insertion (and every possible allocation) succeeded.
+        // The transaction list owns the pin after insertion succeeds. Keep local
+        // cleanup armed until any allocation needed by the insertion has finished.
         dsm.handle = DSM_HANDLE_INVALID;
         dsm.unpin_cleanup_required = false;
     } catch (...) {

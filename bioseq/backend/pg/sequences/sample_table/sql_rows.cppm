@@ -1,6 +1,6 @@
 /**
  * @file sql_rows.cppm
- * @brief Fixed SQL result-row shapes for sample-table locator inspection.
+ * @brief SQL result columns for sequence locator inspection.
  */
 module;
 
@@ -11,7 +11,7 @@ export module bioseq.postgres.sequences.sample_table.sql_rows;
 
 export namespace bioseq::sequences::generation::pg::result_rows {
 
-/// Stable SQL tuple shape describing one persisted sequence locator.
+/// Sequence length, padding, and locator fields returned by inspect_locator.
 struct locator_metadata final {
     std::int16_t version;
     std::int16_t bucket_idx;

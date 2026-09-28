@@ -1,6 +1,6 @@
 /**
  * @file lazy_sequence_storage_test.cpp
- * @brief Exercises physical letters, GUC parity, large lengths, and allocation guards.
+ * @brief Checks stored letters, sequence size limits, and allocation checks.
  */
 
 #include <cstdio>
@@ -216,9 +216,8 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
     REQUIRE(std::string_view{stdin_state} == "22023");
     PQclear(stdin_copy);
 
-    // The guard is target-column exact: omitting the typmodless letter column
-    // is valid, and binary COPY remains valid because its physical alphabet is
-    // checked by letter_recv.
+    // Text COPY can omit the letter column that has no alphabet declaration.
+    // Binary COPY can fill it because the input carries an alphabet  checked by letter_recv.
     exec_sql(ctx, fmt::format(
         "COPY public.sequence_acceptance_letters_typmodless_copy(id) "
         "FROM '{}' (FORMAT text);",
@@ -300,7 +299,7 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
         " (id int, value bioseq.letter('dna5')); "
         "CREATE TEMP VIEW sequence_acceptance_letters_dna5_view AS "
         " SELECT id,value FROM sequence_acceptance_letters_dna5;");
-    // Native DNA5 rank order is A, C, G, N, T; insertion order remains ACGTN.
+    // DNA5 sorts as ACGNT. Inserting ACGTN must preserve that separate insertion order.
     REQUIRE(query_scalar(
         ctx,
         "SELECT string_agg(value::text,'' ORDER BY value) "
@@ -517,10 +516,8 @@ TEST_CASE("synthetic logical lengths stay lazy through bigint limits",
     REQUIRE(above_flat[2] == "A");
     REQUIRE(above_flat[3] == "4294967296");
 
-    // A materialized CTE is an executor-copy boundary: PostgreSQL must ask
-    // the expanded value for a flat pgseq representation before tuplestore
-    // ownership can begin.  The same logical source that stays lazy above
-    // must therefore fail closed at the uint32 flat-format ceiling here.
+    // A materialized CTE copies the sequence into flat storage. This lazy value
+    // exceeds the flat format's 32-bit length limit, so that copy must fail.
     const auto materialized_cte_boundary = sql_error(
         ctx,
         "WITH v(s) AS MATERIALIZED ("
@@ -598,9 +595,8 @@ TEST_CASE("synthetic logical lengths stay lazy through bigint limits",
     REQUIRE(synthetic_index_boundary.sqlstate == "54000");
     REQUIRE(synthetic_index_boundary.contains("too long to flatten"));
 
-    // Retain a physically stored incompressible value as separate evidence of
-    // PostgreSQL's ordinary btree row-size boundary.  It complements rather
-    // than substitutes for the synthetic UINT32_MAX+1 expression above.
+    // Also test PostgreSQL's btree entry-size limit with a stored sequence that
+    // compresses poorly. This case should report an index-row size error.
     exec_sql(ctx,
         "CREATE TABLE public.sequence_acceptance_synthetic_length_real_index_input "
         " (id bigint, s bioseq.seq('dna4',8)); "
@@ -634,9 +630,8 @@ TEST_CASE("uint64 bigint and MaxAlloc alignment guards are exact",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
 
-    // Directly exercise the exported checked Size/flat-size helpers as well as
-    // the independent tree/ownership matrices, without allocating the
-    // represented MaxAlloc/UINT64 payloads.
+    // Check size limits and tree ownership with internal self-tests. The synthetic
+    // lengths let these tests reach the limits without allocating the full sequences.
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq_internal.materialization_size_self_test();") == "t");

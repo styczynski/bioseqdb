@@ -1,10 +1,9 @@
 /**
  * @file reader.cppm
- * @brief Public sequence reader entry points.
+ * @brief Reads sequence files as batches or streamed packed chunks.
  *
- * Re-exports the batch and view types from `:types`.  Pipeline partitions
- * expose no names but remain interface dependencies so exported reader
- * templates can instantiate their helper templates correctly.
+ * Batch and view types are re-exported from `:types`. The pipeline partitions
+ * provide template definitions needed when callers instantiate the public readers.
  */
 module;
 
@@ -22,9 +21,8 @@ module;
 export module bioseq.io.reader;
 
 export import :types;
-// These partitions intentionally export no names.  They are interface
-// dependencies so helper-template definitions used by this unit's exported
-// templates remain necessarily reachable in importing translation units.
+// Export these dependencies so importing code can instantiate the reader
+// templates with the helper definitions available.
 export import :batch_pipeline;
 export import :stream_pipeline;
 import bioseq.common.logging;
@@ -36,10 +34,10 @@ import bioseq.io.compression.parallel_gzip_source;
 
 export namespace bioseq::io {
 
-/// Public entry point. Reads FASTA / FASTQ from a file path, emits
-/// per-batch records via `handler_fn`, and reports the first terminal
-/// failure via `failure_fn`. Returns the count of records emitted on
-/// success, or the diagnostic message on failure (as a `std::expected`).
+/// Reads a FASTA or FASTQ file and sends batches to `handler_fn`.
+/// Reports the first input or parse error through `failure_fn`. Returns
+/// the emitted record count  or that diagnostic. `observed_backend`, when
+/// supplied, receives the source selected for this read.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_path,
@@ -63,9 +61,8 @@ read_sequences_file(p_path&& file_path,
     };
     record_backend(reader_backend::unknown);
 
-    // Prefer a mapped source, selecting the parallel or zlib gzip backend after
-    // magic-byte detection. Fall back to POSIX reads when mapping is unavailable.
-    // Explicit gzip detection without mapping uses the zlib backend.
+    // Try a mapping first and inspect gzip magic If mapping fails, the
+    // gzip-auto-detect setting chooses between zlib and ordinary file reads.
     if (options.io.prefer_mmap) {
         auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
         if (mmap_or_err) {
@@ -91,9 +88,8 @@ read_sequences_file(p_path&& file_path,
                                                      path_view,
                                                      pgz_or_err.error());
                 }
-                // Construction-time fallback. Mid-stream errors are
-                // TERMINAL — never restart from byte 0. That would
-                // re-emit records.
+                // This fallback is allowed before reading starts. Restarting after a
+                // decode error would send earlier records to the handler again.
                 auto gz_or_err = gzip_source::try_open(path_view);
                 if (!gz_or_err) {
                     failure_fn(std::string{gz_or_err.error()});
@@ -144,15 +140,11 @@ read_sequences_file(p_path&& file_path,
         options);
 }
 
-/// Bounded streaming read of a FASTA/FASTQ file into the
-/// caller's `p_storage_unit`-packed column layout. Unlike `read_sequences_file`
-/// (which accumulates whole `sequence_batch`es and is hard-wired to a
-/// `uint64_t` storage unit), this drives the per-record FSM single-threaded and
-/// emits bounded `packed_sequence_chunk<p_storage_unit>` values to `sink`, so a
-/// >MaxAllocSize record (e.g. a 6 Gbp reference) is never materialised as one
-/// buffer. Always single-threaded (the columnar write state + seq_caches are
-/// single-backend). The source still detects gzip by its magic bytes. Returns the
-/// record count, or the first terminal diagnostic.
+/// Reads FASTA or FASTQ on the calling thread and sends packed chunks to `sink`.
+/// The, caller selects the packed word type. Completed words can be delivered
+/// before a record ends, avoiding a whole-record sequence batch. Header and
+/// FASTQ quality parsing still  use scratch buffers. Returns the recrd count
+/// or the first input or parse error.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           sequence_file_format p_file_format,
@@ -163,8 +155,7 @@ stream_sequences_file(const char* path,
                       p_sink&& sink,
                       p_failure&& failure_fn,
                       reader_options options = default_reader_options) {
-    // Streaming is single-threaded by contract: no async workers and no
-    // mmap-parallel shards.
+    // Keep parsing and sink callbacks on the calling thread.
     options.concurrency.worker_count = 0;
     options.concurrency.parser_count = 1;
     const std::string_view path_view{path};
@@ -179,15 +170,13 @@ stream_sequences_file(const char* path,
         });
 }
 
-/// Read at most `max_bytes` of decompressed bytes from the start
-/// of `path`, using the same source selection as
-/// `stream_sequences_file` (`detail::with_selected_source`). Used by auto-mode
-/// header sampling. `gzip_source` transparently decompresses gzip input.
+/// Reads up to `max_bytes` from the decoded start of a file for header sampling.
+/// Uses the same source selection as `stream_sequences_file`.
 [[nodiscard]] inline std::expected<std::string, std::string>
 read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_options& options) {
     const std::string_view path_view{path};
     std::string open_error;
-    // Retain the first source-open diagnostic across fallback attempts.
+    // Save the first source-open error passed to this callback.
     auto on_open_fail = [&open_error](std::string&& msg) {
         if (open_error.empty())
             open_error = std::move(msg);

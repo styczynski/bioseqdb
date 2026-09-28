@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/entry_points.cppm
- * @brief Target-neutral index handoff and sketching entry-point support.
+ * @brief Prepare target indexes and keep sketch  memory alive across pipeline calls.
  */
 module;
 
@@ -61,30 +61,25 @@ import bioseq.parallelism.pipeline_ops;
 
 export {
 
-    // =============================================================================
-    // Public scheduler-facing entry points are target-neutral and receive
-    // the already-selected Highway table through minimap2_parameters.
-    // =============================================================================
+    // Scheduler entry points receive the selected Highway kernels through
+    // minimap2_parameters and share one interface acyoss CPU targets.
 
     namespace bioseq::simd {
 
-    // Keep canonical minimizer-index names in scope for these entry points.
+    // Use the index module's shared names at these entry points.
     using bioseq::indexing::minimizer_hashmap_fragment_index;
     using bioseq::indexing::minimizer_lookup_index;
     using bioseq::indexing::minimizer_seed_index;
 
     namespace pipe_entry_detail {
 
-    // Restrict fixed-allocation adoption to mmap-scale targets.  Within this route,
-    // a sparse result whose allocator pages were already resident retains its exact
-    // permit; query and ordinary small-target sketches keep the collector route.
+    // Adopt fixed Vulkan host buffers only for large targets. Sparse buffers
+    // keep their reservation when reused allocator pages hide, their footprint.
     inline constexpr std::uint64_t k_vulkan_fixed_host_adoption_target_minimum_bp =
         std::uint64_t{256} << 20u;
 
-    /// Select the fixed host-ownership transaction only for a large target sketch
-    /// whose complete execution tuple is accepted by the source-direct device ABI.
-    /// Query sketching and every incompatible target intentionally remain on the
-    /// established collector-compatible Vulkan route.
+    /// Select host-buffer adoption for a large Vulkan target sketch whose format
+    /// supports direct device indexing. Other targets use the sketch collector.
     template <class p_minimizer>
     [[nodiscard]] constexpr bool
     fixed_vulkan_target_host_adoption_route_selected(bool is_gpu_target_index_build,
@@ -100,11 +95,9 @@ export {
                target_bp >= k_vulkan_fixed_host_adoption_target_minimum_bp;
     }
 
-    /// Accounting receipt carried with the fixed Vulkan target host allocation. The host
-    /// allocation has exactly one accounting authority: either its fully-touched
-    /// bytes were reconciled into process footprint and the permit was released,
-    /// or an exact permit remains attached to the allocation.  Empty output is the
-    /// footprint-authoritative zero-byte case.
+    /// Record  how an adopted Vulkan host buffer is charged to the memory budget
+    /// A nonempty buffer keeps an exact reservation or is covered by measured
+    /// process memory. The record also checks that device storage was released.
     template <class p_minimizer> struct vulkan_sketch_host_adoption_receipt {
         const p_minimizer* source_data = nullptr;
         const p_minimizer* adopted_data = nullptr;
@@ -148,11 +141,9 @@ export {
         }
     };
 
-    /// Return-by-value lifetime owner for an adopted fixed Vulkan target sketch.
-    /// The permit is declared before the vector so normal reverse destruction frees
-    /// the allocation before returning its reservation.  Move assignment is
-    /// intentionally unavailable: memberwise assignment would release an existing
-    /// destination permit before freeing its destination vector.
+    /// Own an adopted target sketch and its optional memory reservation.
+    /// Free the vector before releasing its reservation. Move assignment is
+    /// disabled because memberwise replacement would reverse that order.
     template <class p_minimizer> struct fixed_vulkan_target_host_owner {
         std::optional<bioseq::parallelism::memory_permit> host_permit;
         std::vector<p_minimizer> minimizers;
@@ -164,8 +155,8 @@ export {
         fixed_vulkan_target_host_owner& operator=(fixed_vulkan_target_host_owner&&) = delete;
 
         fixed_vulkan_target_host_owner(fixed_vulkan_target_host_owner&& other) noexcept {
-            // Swap the allocation while the source permit is still live, then move
-            // its authority.  The destination is newly constructed and empty.
+            // Move the  buffer before its reservation so the allocation stays
+            // covered throughout construction of this empy owner.
             minimizers.swap(other.minimizers);
             adoption = other.adoption;
             other.adoption = {};
@@ -227,10 +218,8 @@ export {
         ledger.source_released_after_publication = resident_published;
     }
 
-    /// Exact accounting returned by the fixed Vulkan host-vector -> CPU index
-    /// handoff.  Keeping the transaction in one helper lets tests exercise the
-    /// same reserve/build/validate path used by `minimap2_port` instead of merely
-    /// reproducing its arithmetic.
+    /// Memory accounting for conversion of a Vulkan host sketch into a CPU index.
+    /// Records source release, index storage and the reservation kept for the index.
     struct vulkan_target_index_handoff_receipt {
         std::uint64_t admitted_position_headroom_bytes = 0u;
         std::uint64_t admitted_table_headroom_bytes = 0u;
@@ -287,10 +276,9 @@ export {
         }
     };
 
-    /// Owning return value for the strict fixed-Vulkan target-index handoff.  The
-    /// index permit precedes the index so reverse destruction releases table and
-    /// position storage first.  Move assignment is deleted to rule out releasing a
-    /// destination permit before its previous index storage is deallocated.
+    /// Own a CPU target index and its memory reservation. Destroy the index
+    /// before releasing the reservation. Move  assignment is disabled to, preserve
+    /// that order when replacing an existing owner.
     struct vulkan_admitted_target_index {
         std::optional<bioseq::parallelism::memory_permit> index_permit;
         minimizer_hashmap_fragment_index index;
@@ -303,8 +291,8 @@ export {
 
         vulkan_admitted_target_index(vulkan_admitted_target_index&& other) noexcept
             : index(std::move(other.index)), receipt(other.receipt) {
-            // Move storage while the source reservation remains authoritative,
-            // then transfer the reservation into this new empty owner.
+            // Move the index while its source reservation remains live, then
+            // transfer the reservation to the new owner.
             if (other.index_permit.has_value()) {
                 index_permit.emplace(std::move(*other.index_permit));
             }
@@ -347,8 +335,8 @@ export {
         const std::uint64_t position_payload_bytes = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(target_host.minimizers.size()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
-        // Empty sketches retain neither positions nor a table.  Do not turn the
-        // generic allocator slop allowance into a fictitious 128 KiB reservation.
+        // Empty sketches need no position or table storage, so skip the
+        // allocation headroom allowance for them.
         const std::uint64_t admitted_position_headroom_bytes =
             position_payload_bytes == 0u
                 ? 0u
@@ -377,10 +365,9 @@ export {
         auto& admission = bioseq::parallelism::memory_admission_controller::instance();
         const std::uint64_t reserved_bytes_before_index_admission = admission.reserved_bytes();
         if (source_host_permit_retained_during_build) {
-            // This deliberately counts the source reservation even if some reused
-            // allocator pages are visible in RSS.  The conservative overlap can
-            // deny a medium sparse result, but it never over-admits the real
-            // host-vector + positions + one-shot FOA-table build peak.
+            // Keep the source reservation during index construction, even if
+            // reused pages also appear in process memory This can reject a
+            // build earlier, but covers the source and index  while both exist.
             bioseq_log<logging_level::debug>(
                 "[vulkan sketch] strict target-index handoff keeps sparse host "
                 "permit through build: host={} index_peak={}",
@@ -429,17 +416,14 @@ export {
                 "Vulkan zero-copy target-index build exceeded admitted "
                 "host capacity"};
         }
-        // The source allocation is gone now and only now may its retained permit
-        // be returned.  On every earlier throw the by-value host owner unwinds its
-        // vector before its permit.
+        // Release the source reservation after its vector storage is gone.
+        // Earlier exceptions destoy the by-value owner in the same order.
         target_host.release_consumed_host_permit();
         const bool source_host_permit_cleared_after_consumption =
             !target_host.host_permit.has_value();
-        // Exact replacement accounting is deliberately all-or-nothing.  The
-        // footprint route may transfer its one-use authority only after every
-        // position is initialized and the source allocation is gone, and only
-        // when the replacement has exactly the same nonzero byte extent.  Any
-        // mismatch discards the old authority and retains the full index permit.
+        // Reuse measured source-memory accounting only for an equally sized,
+        // fully initialized position buffer after freeing the source. Otherwise
+        // keep the reservation for the entire index.
         const bool exact_position_footprint_replacement =
             source_footprint_authority_before_build &&
             source_host_capacity_bytes_before_build != 0u &&
@@ -517,14 +501,9 @@ export {
 
     } // namespace pipe_entry_detail
 
-    // The PostgreSQL scheduler erases physical sequence width before reaching
-    // these entries.  Keep the concrete post-erasure pipeline closures in this
-    // module's ordinary implementation units instead of implicitly rebuilding
-    // them in every generated alphabet x width x shape scheduler leaf.  Exact
-    // distinct non-template entries are a hard frontend boundary under reduced
-    // BMIs.  Their scheduler-only names keep ordinary Domain-N callers on the
-    // compatibility templates above and let the implementation units remain
-    // private to the PostgreSQL DSO.
+    // Compile scheduler entries once per alphabet in this module's
+    // implementation files. Sequence  word width is already hidden by the lazy
+    // view, so generated scheduler callers can share these compiled functions.
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_batch_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
@@ -652,10 +631,11 @@ export {
         bool allow_gpu_target_index_build = false);
 
     /**
-     * @brief Run the minimap2 pipeline against pre-built target minimizers.
+     * @brief Prepare a target index from supplied minimizers and run alignment.
      *
-     * Builds a target index from `target_minimizers` and delegates to
-     * `minimap2_port_with_index`.
+     * The selected GPU-build path passes an empty CPU index to the pipeline,
+     * which creates the device index. Other paths consume the target vector
+     * into a CPU index.
      */
 
     namespace pipe_entry_detail {
@@ -675,10 +655,8 @@ export {
         auto _scope = bioseq::instrumentation::region(_desc);
         const sequence_size_t target_len = target_seq.bp_size();
         minimizer_hashmap_fragment_index target_index;
-        // For the Stage C leaf with GPU index build active, leave
-        // the CPU index empty; `pipeline_run_impl_batch` must build it on the
-        // device. This is the line that removes the XXL_HIFI
-        // `target_index_build` bottleneck from the GPU row.
+        // Leave the CPU index empty when the selected pipeline builds the
+        // target index on the GPU. Release the unused target vector here.
         const bool is_gpu_target_index_build =
             ::bioseq::simd::pipe::is_gpu_target_index_build_active(params);
         if (!is_gpu_target_index_build) {
@@ -711,11 +689,10 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Fixed Vulkan target handoff for the selected query-independent source-direct
-    /// sorted-dense resident.  The adopted source is radix-sorted in place, counted
-    /// exactly, streamed into final mapped buffers, published under an
-    /// operation-unique key, and only then released.  No CPU FOA table or CPU
-    /// positions vector is constructed on this route.
+    /// Build a  sorted-dense device index directly from the adopted target sketch.
+    /// Sort and, count the source, reserve mapped buffers and publih them under
+    /// this operation's cache key before freeing the source Empty sketches
+    /// take the checked bypass. The CPU index stays empty.
     template <class p_pipeline_dispatch, class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection minimap2_port_with_fixed_vulkan_target_handoff_impl(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1061,9 +1038,8 @@ export {
                 operation_stats.gpu_index_max_load_ppm = 1'000'000u;
                 operation_stats.gpu_index_max_probe = 0u;
             }
-            // Seed lookup dispatch and biological-anchor stats were already
-            // recorded by seed_hit_stage. This operation stats deliberately leaves
-            // those generic fields zero so aggregation cannot double count them.
+            // seed_hit_stage already recorded seed lookups and anchor statistics.
+            // Add only index-preparation and lifetime counts here.
             result.record_partial_vulkan_execution_stats(operation_stats);
             return result;
         } catch (...) {
@@ -1100,27 +1076,11 @@ export {
         }
     }
 
-    // =============================================================================
-    // Sketch leaf and helpers
-    // =============================================================================
-    //
-    // Target and query minimizer sketching use these shared components:
-    //   - `sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>` — the chain's
-    //     terminal leaf; pins p_minimizer_algorithm at compile time and invokes the trait's
-    //     kernel directly.
-    //   - `sketch_traits<p_minimizer, p_collector, p_range>::leaf<p_minimizer_algorithm>` — the
-    //     alias-template wrapper exposing the leaf as a `template <auto>
-    //     class`.
-    //   - `sketch_one<p_minimizer>(...)` — one `dispatch_chain` instantiation
-    //     over `ma_step`.
-    //   - `sketch_into_collector<p_minimizer>(...)` — packages the per-pass
-    //     register_static_region + reserve + sketch_one into one inline call.
+    // Shared sketch result ownership and execution  statistics.
 
-    /// One operation-originated sketch stats, independent of whether the
-    /// dispatcher selected scalar, exact_simd, or Vulkan. The Vulkan member carries
-    /// only a role-neutral sketch token here. The caller that knows whether this
-    /// invocation sketched a query or target consumes it into the corresponding
-    /// match_result_collection stage counter.
+    /// Statistics returned by a sketch operation. The caller assigns them to the
+    /// query or target stage. Vulkan sketch completions remain unassigned until
+    /// that role is known.
     struct minimizer_sketch_execution_stats {
         scalar_minimizer_execution_stats scalar{};
         bool scalar_available = false;
@@ -1157,12 +1117,10 @@ export {
 #endif
     };
 
-    /// Transfer a fixed Vulkan host vector and whichever one accounting authority
-    /// it owns into a single return value.  Dense vectors normally arrive with a
-    /// footprint reconciliation and no permit.  Sparse non-empty vectors may carry
-    /// their exact permit because allocator-page reuse made the RSS delta
-    /// inconclusive.  Device ownership must be unique and is destroyed here before
-    /// any later CPU-index admission can begin.
+    /// Take ownership of a fixed Vulkan host sketch without copying its vector.
+    /// Keep its exact reservation when process memory does not cover the buffer.
+    /// Require unique device ownership and release  the device storage before
+    /// returning, so later index preparation does not overlap that allocation.
     template <class p_minimizer>
     [[nodiscard]] fixed_vulkan_target_host_owner<p_minimizer> adopt_fixed_vulkan_sketch_host_result(
         bioseq::gpu::vulkan::vulkan_sketch_result<p_minimizer> source) {
@@ -1334,10 +1292,9 @@ export {
         target,
     };
 
-    /// Consume one already-validated operation stats into its call-site role.
-    /// This function never consults the algorithm selector and never manufactures
-    /// counters from route identity: only counters carried by the returned stats
-    /// are transferred.
+    /// Add returned sketch statistics to the query or target stage.
+    /// The caller validates the selected roure first. This function copies
+    /// recorded work and assigns the neutral Vulkan sketch count its role.
     inline void
     record_minimizer_sketch_execution_stats(match_result_collection& destination,
                                             const minimizer_sketch_execution_stats& stats,
@@ -1376,10 +1333,9 @@ export {
 
     } // namespace pipe_entry_detail
 
-    // Width-erased scheduler calls bind to these non-template entries.  Their
-    // definitions live in same-module ordinary implementation units so the
-    // force-inline dispatch cascade is instantiated once per alphabet rather than
-    // once per generated scheduler leaf.
+    // Scheduler calls share these compiled entries after sequence width is
+    // hidden by the lazy view. Each alphabet's dispatch code is instantiated
+    // in this module's implementation files.
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_raw_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
                            bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,

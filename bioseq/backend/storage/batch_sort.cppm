@@ -1,11 +1,10 @@
 /**
  * @file
- * @brief PostgreSQL-free ordering of batches of lazy sequence views.
+ * @brief Sorts batches of lazy sequence views by returning their source indices.
  *
- * The sorter returns a permutation so tuple ownership remains with its caller.
- * Resident, worker-shareable batches may use the Vulkan sequence-sort path.
- * Every decline falls back to rank-stream comparison in the configured TBB
- * arena. Fragmented scanners are not flattened for the accelerator path.
+ * Compatible resident inputs can use Vulkan. If that  path declines, the CPU
+ * compares logical ranks. Worker-sareable inputs use the parallel pool, while
+ * other inputs are, sorted on the calling thread Fragmented inputs stay lazy.
  */
 module;
 
@@ -39,10 +38,10 @@ import bioseq.storage.scanner;
 export namespace bioseq::storage {
 
 /**
- * Planner-owned sequence ordering options without PostgreSQL types.
+ * Sequence sort options shared with the planner.
  *
- * Null placement is consumed by tuple orchestration because this value-only
- * sorter never receives null sequence views.
+ * The caller handles null placement. This sorter receives sequence views and
+ * reads descending and vulkan_enabled.
  */
 struct sequence_sort_options {
     bool descending = false;
@@ -64,14 +63,14 @@ namespace bioseq::storage::batch_sort_detail {
     return order;
 }
 
-/** @brief Upload payload and wire descriptors prepared for one GPU sort request. */
+/** Packed byte spans and sequence descriptors for one GPU sort request. */
 struct packed_sort_batch {
     std::vector<bioseq::gpu::vulkan::sequence_sort_upload_chunk> chunks;
     std::vector<bioseq::gpu::vulkan::sequence_descriptor_wire> descriptors;
     std::uint64_t packed_bytes{};
 };
 
-/** @brief Attempt an exact GPU permutation without materializing fragmented input. */
+/** Tries GPU sorting with compatible resident storage. Returns no value if declined. */
 template <class p_lazy_batch>
 [[nodiscard]] std::optional<std::vector<std::size_t>> try_sort_on_gpu(
         const p_lazy_batch& batch,
@@ -104,8 +103,8 @@ template <class p_lazy_batch>
         return std::nullopt;
     }
 
-    // The shader consumes one uniform packed layout. A fragmented or
-    // mixed-width batch declines without materializing a comparison tree.
+    // Every input must expose the same packed width from storage that workers
+    // can  share. Try the supported widths without copying sequence contents.
     std::uint8_t resident_width{};
     std::vector<descriptor_type> resident_descriptors;
     for (const std::uint8_t width : {8u, 4u, 2u, 1u}) {
@@ -329,8 +328,8 @@ template <class p_lazy_batch>
         return false;
     };
 
-    // Accept the prefix result only when the runtime records use of its dense
-    // scatter path; otherwise rerun with the full payload for exact ordering.
+    // A prefix sort is enough when the runtime used its dense scatter path.
+    // Otherwise submit complete sequences so equal prefixes can be resolved.
     if (sampled_first_unit_varies()) {
         if (auto prefix = pack_batch(units_for_first_64_bits)) {
             const std::uint64_t dense_before =
@@ -361,9 +360,11 @@ template <class p_lazy_batch>
 export namespace bioseq::storage {
 
 /**
- * Returns a total-order permutation for a random-access batch of lazy views.
- * Equal sequences use their source index as the secondary key, with the same
- * direction applied to both keys.
+ * Sorts a random-access batch by sequence ranks, returning source indices.
+ *
+ * Equal sequences are ordered by source index. Descending order reverses both
+ * sequence order and the index tie-break, so equal entries appear in reverse
+ * inut order when  descending is set.
  */
 template <
     sequence_alphabet p_alphabet,
@@ -373,12 +374,12 @@ template <
         && std::same_as<
             std::remove_cvref_t<std::ranges::range_value_t<p_batch>>,
             lazy_sequence_view<p_alphabet>>
-/** @brief Produces stable, index-tiebroken permutations of lazy sequence batches. */
+/** Sorter returning a permutation of the input batch. */
 struct sequence_batch_sorter {
     using sequence_view_type = std::ranges::range_value_t<p_batch>;
     using batch_type = p_batch;
 
-    /** @brief Sort with the tracked pool when every source is worker-shareable. */
+    /** Sorts with the parallel pool when all sources are worker-shareable, or locally otherwise. */
     [[nodiscard]] static std::vector<std::size_t> sort_on_cpu(
             const batch_type& batch,
             const sequence_sort_options& options,
@@ -412,7 +413,7 @@ struct sequence_batch_sorter {
         return order;
     }
 
-    /** @brief Prefer the eligible Vulkan path and otherwise return the CPU permutation. */
+    /** Tries Vulkan when enabled, then sorts on the CPU if the GPU path declines. */
     [[nodiscard]] static std::vector<std::size_t> sort(
             const batch_type& batch,
             const sequence_sort_options& options = {},

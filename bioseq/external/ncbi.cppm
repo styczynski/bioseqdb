@@ -1,9 +1,9 @@
 /**
  * @file external/ncbi.cppm
- * @brief NCBI Datasets OpenAPI descriptor assembled from provider partitions.
+ * @brief Assembles the OpenAPI document used to generate the NCBI client.
  *
- * This primary module is the generated client source key.
- * The spec_fragments declaration defines the complete descriptor byte sequence.
+ * The ordered spec_fragments list joins API metadata, endpoint definitions,
+ * and data types from the module partitions into one document.
  */
 module;
 
@@ -42,10 +42,10 @@ import :value_schemas;
 import :integration;
 
 /**
- * @brief Counts bytes in an ordered descriptor fragment list.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Sum of the fragment byte counts.
+ * @brief Counts the bytes in the OpenAPI text parts.
+ * @tparam p_fragment_count Number of parts.
+ * @param fragments Text parts in document order.
+ * @return Total bytes, excluding  a final null terminator.
  */
 template <std::size_t p_fragment_count>
 [[nodiscard]] consteval std::size_t
@@ -58,11 +58,11 @@ descriptor_size(const std::array<std::string_view, p_fragment_count>& fragments)
 }
 
 /**
- * @brief Copies ordered descriptor fragments into null-terminated storage.
- * @tparam p_payload_size Combined descriptor byte count.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Constant storage containing every fragment in order.
+ * @brief Joins OpenAPI text parts into null-terminated storage
+ * @tparam p_payload_size Total text size, excluding the null terminator.
+ * @tparam p_fragment_count Number of parts.
+ * @param fragments Text parts in document order.
+ * @return The combined text followed by a null byte.
  */
 template <std::size_t p_payload_size, std::size_t p_fragment_count>
 [[nodiscard]] consteval auto
@@ -75,7 +75,7 @@ concatenate_descriptor(const std::array<std::string_view, p_fragment_count>& fra
     return descriptor;
 }
 
-/** @brief Raw descriptor fragments in parser and composition order. */
+/** @brief OpenAPI text parts in the order required to form one YAML document. */
 static constexpr auto spec_fragments = std::to_array<std::string_view>({
     bioseq::external::ncbi::descriptor::document_preamble,
     bioseq::external::ncbi::descriptor::genome_accession_catalog_paths,
@@ -116,9 +116,9 @@ static constexpr auto spec_fragments = std::to_array<std::string_view>({
 static constexpr auto spec_storage =
     concatenate_descriptor<descriptor_size(spec_fragments)>(spec_fragments);
 
-/** @brief Exact OpenAPI document consumed by NCBI Datasets client generation. */
+/** @brief The assembled OpenAPI text passed to NCBI client generation. */
 static constexpr std::string_view spec{spec_storage.data(), spec_storage.size() - 1};
 
-/** @brief Code-generation anchor for the NCBI Datasets client. */
+/** @brief Declaration marked for NCBI client generation. */
 [[bioseq::api_client(spec)]] [[bioseq::api_client_fragments(
     spec_fragments)]] export struct bioseq_external_api_client;

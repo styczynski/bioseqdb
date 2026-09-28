@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/path.cppm
- * @brief Internal durable-file pathname validation and symlink classification.
+ * @brief Check file names and permissions, and recognize symlink open errors.
  */
 module;
 

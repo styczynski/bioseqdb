@@ -1,9 +1,8 @@
 /**
  * @file chunked_storage_test.cpp
- * @brief Verifies per-fragment index storage and assembly.
+ * @brief Checks stored index fragments and fallback to recomputing an index.
  *
- * The cases cover insert maintenance, row placement, recomputation, rollback,
- * reserved sub-keys, and missing manifests.
+ * Tests insert maintenamce, row numbers, rollback, and incomplete fragment data
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -14,7 +13,7 @@ import bioseq.tests.integration.support;
 using namespace bioseq_int_tests;
 
 namespace {
-/** @brief Seeds deterministic query and target rows with fragmented DNA4 targets. */
+/** @brief Creates repeatable query/target pairs with long DNA4 targets. */
 void seed_sample(const connection_test_context& ctx, std::string_view table_name, int row_count) {
     exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table_name);
     exec_sqlf(ctx,
@@ -24,7 +23,7 @@ void seed_sample(const connection_test_context& ctx, std::string_view table_name
               row_count);
 }
 
-/** @brief Returns the ordered alignment-coordinate set produced by mmsearch. */
+/** @brief Returns the distinct row IDs and target coordinates reported by mmsearch. */
 [[nodiscard]] std::set<std::tuple<long long, long long, long long>>
 mmsearch_set(const connection_test_context& ctx, std::string_view table_name) {
     const auto rows =
@@ -50,7 +49,7 @@ TEST_CASE("per-fragment storage is created on insert with the right query_keys",
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_insert") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_insert") == 3);
 
-    // Exact row-number placement: every indexed row has at least one sub-key.
+    // Each table row must have at least one stored index fragment under its row number.
     const auto row_numbers = query_int_column(
         ctx,
         "SELECT bioseq.column_row_number('chunked_storage_insert'::regclass, ctid) "
@@ -75,11 +74,11 @@ TEST_CASE("mmsearch per-fragment assemble == recompute (single-segment dna4)",
 
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = mmsearch_set(ctx, "chunked_storage_recompute");
-    REQUIRE(assembled.size() == 3); // non-empty result
+    REQUIRE(assembled.size() == 3); // all three queries matched
 
     exec_sqlf(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     const auto recomputed = mmsearch_set(ctx, "chunked_storage_recompute");
-    REQUIRE(assembled == recomputed); // strict byte-identical
+    REQUIRE(assembled == recomputed); // same row IDs and alignment coordinates
 }
 
 TEST_CASE("forced-scanner GUC disables stored assembly but results stay correct",
@@ -92,7 +91,7 @@ TEST_CASE("forced-scanner GUC disables stored assembly but results stay correct"
               "'minimizers_per_fragment');");
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     guc_scope chunked(
-        ctx, "bioseq.testing.chunked_scanner.enabled", "on"); // not the production scanner_pg path
+        ctx, "bioseq.testing.chunked_scanner.enabled", "on"); // use the test chunked scanner
     REQUIRE(mmsearch_set(ctx, "chunked_storage_forced_scanner").size() == 3);
 }
 
@@ -127,8 +126,7 @@ TEST_CASE("missing manifest forces recompute; reserved sentinels are ignored",
         "SELECT bioseq.column_row_number('chunked_storage_missing_manifest'::regclass, ctid) FROM "
         "chunked_storage_missing_manifest LIMIT 1");
 
-    // A reserved-band tuple (sub_key in the TEMP_RUN reserved range) must not count as a data
-    // fragment.
+    // Temporary-run entries use reserved  sub-keys and must be excluded from data fragments.
     const long long distinct_before = index_distinct_sub_keys(
         ctx, "minimizers_per_fragment", "chunked_storage_missing_manifest", sequence_row_number);
     exec_sqlf(
@@ -142,8 +140,7 @@ TEST_CASE("missing manifest forces recompute; reserved sentinels are ignored",
                                     "chunked_storage_missing_manifest",
                                     sequence_row_number) == distinct_before);
 
-    // Deleting the completeness manifest makes the row read as "absent" -> recompute (still
-    // correct, non-empty).
+    // Without a completeness manifest, mmsearch must recompute the index and still find the match.
     exec_sqlf(ctx,
               "SELECT "
               "bioseq_internal.delete_index_manifest('chunked_storage_missing_manifest'::regclass, "

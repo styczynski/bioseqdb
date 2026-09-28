@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_publish.cppm
- * @brief Alignment execution snapshot publication and accessors.
+ * @brief Save alignment statistics when the root query finishes.
  */
 module;
 
@@ -26,17 +26,20 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
 std::optional<alignment_exec::alignment_execution_snapshot>
 	last_alignment_execution_snapshot{};
-/* Completed-operation publication is stricter than the diagnostic SRFs:
- * partial roots remain visible there, but must not replace the last completed
- * operation ledger. Completed non-GPU roots publish an empty ledger so a
- * prior GPU operation cannot survive a later successful query. */
+/* Diagnostics include partial query results. The operation ledger keeps
+ * the lasq fully consumed alignment query. Completing a CPU alignment query
+ * replaces that ledger with an empty one, so its results cannot include
+ * GPU operations from  the previous query. */
 std::optional<alignment_exec::alignment_execution_snapshot>
 	last_completed_alignment_snapshot{};
 std::int64_t last_alignment_execution_id = 0;
 
 } // namespace
 
-/** @brief Aggregates and publishes one root executor's alignment snapshot. */
+/** @brief Combine scan-node statistics into a snapshot for the root query.
+ * Mark it partial if any scan pass or query output was left unfinished
+ * Update the completed-operation snapshot only when all output was consumed.
+ */
 void publish_alignment_root(alignment_executor_frame* frame)
 {
 	if (frame == nullptr || frame->nested
@@ -69,9 +72,9 @@ void publish_alignment_root(alignment_executor_frame* frame)
 	if (frame->collector.is_lifecycle_counter_saturated) {
 		statement_stats.operational.are_stats_saturated = true;
 	}
-	// ExecutorFinish is the first boundary at which every node, wave, segment,
-	// and tracked worker has joined. Finalize the statement-owned union exactly
-	// once here, never in a per-query result collection.
+	// All tracked work has joined by ExecutorFinish. Compute the total time
+	// covered by its intervals once for the statement, so overlapping work
+	// is counted only once.
 	auto downstream_active_wall =
 		frame->collector.downstream_active_wall.finalize();
 	statement_stats.operational.record_downstream_active_wall(
@@ -138,8 +141,8 @@ void publish_alignment_root(alignment_executor_frame* frame)
 }
 
 /**
- * @brief Returns the most recent complete or partial alignment snapshot.
- * @return A backend-local optional snapshot reference.
+ * @brief Borrow the latest alignment snapshot, including partial queries.
+ * @return Backend-local optional, empty  before any snapshot is published.
  */
 [[nodiscard]] const std::optional<
     bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
@@ -149,8 +152,8 @@ last_alignment_execution_snapshot_ref() noexcept
 }
 
 /**
- * @brief Returns the most recent fully drained alignment snapshot.
- * @return A backend-local optional snapshot reference.
+ * @brief Borrow the latest alignment snapshot whose output was fully consumed.
+ * @return Backend-local optional, empty before a query completes this way.
  */
 [[nodiscard]] const std::optional<
     bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&

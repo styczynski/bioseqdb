@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns base-scan state creation and PostgreSQL parameter evaluation.
+ * @brief Creates BioseqScan state and binds PostgreSQL parameters to scan inputs.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -40,8 +40,8 @@ using namespace bioseq::postgres::support;
 export {
 
     /**
-     * @brief Allocates a base-scan state while deferring query-owned runtime construction.
-     * @return A PostgreSQL node allocated in the current memory context.
+     * @brief Allocates the BioseqScan node and leaves its C++ runtime for BeginCustomScan.
+     * @return A PostgreSQL node in the current memory context.
      */
     Node* bioseq_column_scan_create_custom_scan_state(CustomScan* cscan) {
         bioseq_log<logging_level::debug>(
@@ -49,17 +49,10 @@ export {
         scan_state* bioseq_scan_state = scan_state::allocate();
         bioseq_scan_state->as_custom_scan_state()->methods = bioseq_column_scan_execute_methods();
         bioseq_scan_state->as_custom_scan_state()->ss.ss_currentScanDesc = nullptr;
-        /*
-         * Defer runtime allocation to BeginCustomScan: that's where we
-         * have the EState (and therefore the per-query MemoryContext we
-         * register the cleanup callback against). A scan that never enters
-         * Begin (e.g. EXPLAIN without ANALYZE) therefore never allocates
-         * a runtime — bioseq_runtime() in the Explain hook is the only
-         * other caller that would lazily allocate, and that case is
-         * benign because EXPLAIN doesn't run the executor body. The
-         * `void*` storage on scan_state lets the public scan-state
-         * header stay standard-layout; we re-cast in bioseq_runtime().
-         */
+        /* BeginCustomScan has the EState needed to attach runtime cleanup
+         * to the query memory context. Leave allocation until then
+         * The void* field keeps scan_state standard-layout while storing
+         * the C++ runtime separately. */
         bioseq_scan_state->runtime_state = nullptr;
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: BioseqColumnScan_CreateCustomScanState() returning");
@@ -67,10 +60,10 @@ export {
     }
 
     /**
-     * @brief Replaces executor Params with Const nodes evaluated in one expression context.
+     * @brief Replaces each Param with its current  value as a Const.
      *
-     * It preserves the ExecInitExprWithParams and ExecEvalExpr folding path for
-     * every Param instead of performing a PARAM_EXEC-only direct lookup.
+     * Use PostgreSQL's expression evaluator so both PARAM_EXEC and PARAM_EXTERN
+     * read the right parameter storage.
      */
     struct eval_params_mutator {
         /** @brief Evaluates a Param node and preserves its declared type metadata. */
@@ -83,7 +76,7 @@ export {
 
                 get_typlenbyval(param->paramtype, &typ_len, &typ_by_val);
 
-                /* Reinitialize ExprState for each visited Param before Const folding. */
+                /* Each, Param needs its own ExprState to read its current executor value. */
                 ExprState* expr_state = ExecInitExprWithParams(to_pg_expression(node.get()),
                                                                econtext.ecxt_param_list_info);
                 Datum pval = ExecEvalExpr(expr_state, &econtext, &isnull);
@@ -109,13 +102,15 @@ export {
     }
 
     /**
-     * @brief Resolves and validates the Param registered as the primary mmsearch query.
+     * @brief Reads the current query parameter and configures mmsearch for Begin or ReScan.
      *
-     * Both
-     * supported Param kinds use PostgreSQL's expression machinery so PARAM_EXEC
-     * and PARAM_EXTERN read from their correct executor-owned storage.
+     * Evaluate PARAM_EXEC and PARAM_EXTERN through PostgreSQL, then check the
+     * sequence payload against its declared type and the target alphabet. Repack
+     * a different supported storage width whn needed. A NULL query clears the
+     * search context  and produces no matches.
      *
-     * @throws PostgreSQL ERROR for stale metadata, incompatible typmods, or invalid storage width.
+     * @throws PostgreSQL ERROR for changed parameter metadata or an incompatible
+     * sequence type.
      */
     [[nodiscard]] mmsearch_parameter_resolution resolve_mmsearch_param_query(
         bioseq_scan_runtime& runtime, ExprContext* econtext, const char* stage) {
@@ -292,7 +287,7 @@ export {
         return mmsearch_parameter_resolution::configured;
     }
 
-    /** @brief Raises a Vulkan execution failure through the PostgreSQL-to-C++ bridge. */
+    /** @brief Reports a Vulkan failure as a PostgreSQL error carried through the C++ exception bridge. */
     [[noreturn]] void raise_column_scan_vulkan_error_as_cpp(std::string_view detail,
                                                             std::string_view hint) {
         const std::string owned_detail{detail};

@@ -1,6 +1,6 @@
 /**
  * @file pipeline/minimap_port_parts/execution_stats.cppm
- * @brief Route receipts and owned mapping-result collections.
+ * @brief Keep alignment results and the records used to check their execuion
  */
 module;
 
@@ -32,32 +32,27 @@ import bioseq.pipeline.stats;
 
 export namespace bioseq::simd {
 
-// ============================================================================
-// PAF output — match_result_collection
-// ============================================================================
+// Alignment results, execution records and PAF formatting.
 
-// CIGAR opcode formatting is owned by the CIGAR module.
+// The CIGAR module formats CIGAR operations for output.
 
-/// Positive execution statistics for partially accelerated Vulkan routes.
-/// Counters are incremented only after a selected
-/// fail-loud Vulkan operation returns successfully. Selector flags alone never
-/// populate this stats.
+/// Statistics from completed Vulkan stages in a CPU/GPU pipeline.
+/// Record work after runtime success, including valid empty-input bypasses.
 struct partial_vulkan_execution_stats {
-    /// Role-neutral token emitted by a minimizer leaf. It must be consumed as
-    /// either query_sketch or target_sketch before a match_result_collection is
-    /// returned to callers.
+    /// Sketch completion awaiting a query or target role. Move this count to
+    /// query_sketch_dispatches or target_sketch_dispatches before returning results.
     std::uint64_t sketch_dispatches = 0;
     std::uint64_t query_sketch_dispatches = 0;
     std::uint64_t target_sketch_dispatches = 0;
     std::uint64_t target_index_build_dispatches = 0;
     std::uint64_t seed_lookup_dispatches = 0;
-    // Operation-originated representation branch from the completed seed
-    // shader. Their sum must equal seed_lookup_dispatches for strict rows.
+    // Count  the index representation used by completed seed lookups.
+    // Accepted jobs require these counts to add up to all seed lookups.
     std::uint64_t seed_open_addressed_lookup_dispatches = 0;
     std::uint64_t seed_sorted_dense_lookup_dispatches = 0;
     std::uint64_t chain_score_dispatches = 0;
-    // Operation-local seed-sort statistics. A selected mode flag never writes
-    // these counters; they are copied only from a completed runtime result.
+    // Copy sort counts from, the completed runtime result. Selecting a sort
+    // method alone does not count as execution.
     std::uint64_t seed_bitonic_sort_dispatches = 0;
     std::uint64_t seed_radix_sort_operations = 0;
     std::uint64_t seed_radix_anchor_count = 0;
@@ -66,10 +61,9 @@ struct partial_vulkan_execution_stats {
     std::uint64_t seed_radix_scan_dispatches = 0;
     std::uint64_t seed_radix_scatter_dispatches = 0;
     std::uint64_t seed_host_sort_fallbacks = 0;
-    // Biological identity statistics emitted by completed GPU seed roundtrips. The
-    // count/order/digest stream is independent from resident storage
-    // integrity checks and therefore remains comparable between distinct
-    // resident/index construction routes.
+    // Record anchor counts, order checks and checksums independently of
+    // index storage checks. This lets different index paths compare their
+    // resulting anchor streams.
     std::uint64_t seed_anchor_stats_operations = 0;
     std::uint64_t seed_canonical_anchor_count = 0;
     std::uint64_t seed_canonical_anchor_order_checks = 0;
@@ -78,9 +72,8 @@ struct partial_vulkan_execution_stats {
     std::uint64_t seed_canonical_tie_normalization_anchors = 0;
     std::uint64_t seed_anchor_digest_lane0 = 0;
     std::uint64_t seed_anchor_digest_lane1 = 0;
-    // Operation-originated target-index materialization statistics.
-    // Additive fields describe actual upload operations, never cache hits;
-    // max fields preserve the worst collision/load observation across them.
+    // Count target-index uploads and their memory use. Cache reuse adds no
+    // upload. Keep the largest load factor and probe length  across uploads.
     std::uint64_t gpu_index_materializations = 0;
     std::uint64_t gpu_index_open_addressed_materializations = 0;
     std::uint64_t gpu_index_sorted_dense_materializations = 0;
@@ -107,9 +100,8 @@ struct partial_vulkan_execution_stats {
     std::uint64_t gpu_index_gate_set_bits = 0;
     std::uint64_t gpu_index_gate_digest_lo = 0;
     std::uint64_t gpu_index_gate_digest_hi = 0;
-    // Operation-originated target-index kernel and shape statistics. These
-    // fields are attached to the one query that owns the shared target build,
-    // never to every query that subsequently consumes the resident index.
+    // Record a shared target build on one query only, so combining query
+    // results counts the build once.
     std::uint64_t gpu_index_gate_count_dispatches = 0;
     std::uint64_t gpu_index_gated_emit_dispatches = 0;
     std::uint64_t gpu_index_ungated_emit_dispatches = 0;
@@ -127,11 +119,9 @@ struct partial_vulkan_execution_stats {
     std::uint64_t gpu_index_arena_trimmed_before_permit_shrink = 0;
     std::uint64_t gpu_index_retained_minimizer_count = 0;
     std::uint64_t gpu_index_distinct_minimizer_count = 0;
-    // query-independent source-direct sorted-dense route.
-    // These fields are copied from the operation receipt only after its
-    // terminal predicate accepts.  They therefore describe completed work,
-    // including the canonical-empty bypass which intentionally has no GPU
-    // dispatch and is therefore not represented by dispatch counters.
+    // Record completed source-direct sorted-dense index preparation. An
+    // empty target can finish successfully without a GPU dispatch, so its
+    // completion has separate counters.
     std::uint64_t gpu_index_source_direct_operations = 0;
     std::uint64_t gpu_index_source_direct_terminal_successes = 0;
     std::uint64_t gpu_index_source_direct_empty_bypasses = 0;
@@ -179,10 +169,8 @@ struct partial_vulkan_execution_stats {
     std::uint64_t gpu_index_source_direct_cache_cleanup_releases = 0;
     std::uint64_t gpu_index_source_direct_resident_cleanup_bytes = 0;
     std::uint64_t gpu_index_source_direct_pipeline_completions = 0;
-    // Owned-only last-seed retirement statistics. These counters are populated
-    // only after the completed seed operation has dropped its local resident
-    // handle and the operation-owned lifetime coordinator has actually
-    // released storage before chaining.
+    // Record owned index storagf released after the last seed consumer
+    // finishes and before chaining starts.
     std::uint64_t post_seed_owned_gpu_cache_evictions = 0;
     std::uint64_t post_seed_owned_gpu_resident_bytes_released = 0;
     std::uint64_t post_seed_owned_cpu_index_releases = 0;
@@ -521,8 +509,7 @@ struct partial_vulkan_execution_stats {
                    gpu_index_retained_minimizer_count == 0u &&
                    gpu_index_distinct_minimizer_count == 0u;
         }
-        // A Stage-C batch owns exactly one shared target build and attaches its
-        // stats to query zero. More than one build is not an accepted strict row.
+        // Query zero records the one target build shared by this batch
         if (builds != 1u) {
             return false;
         }
@@ -554,11 +541,9 @@ struct partial_vulkan_execution_stats {
                               gpu_index_deterministic_tile_emit_dispatches);
     }
 
-    /// A source-direct sorted-dense operation owns a resident target index but
-    /// deliberately emits no Stage-C target-build dispatch. Its N/D fields are
-    /// therefore positive statistics, not contradictory no-build residue. Keep
-    /// the target-index ownership, gate, and build surface fail-closed while the
-    /// direct operation's complete consistency check validates its resident shape.
+    /// Check source-direct index  preparation, which has no GPU target-build stage.
+    /// Require its completion records and empty build/gate counters. The runtime
+    /// separately validates the resident index contents and storage.
     [[nodiscard]] constexpr bool
     is_exact_source_direct_target_index_route_consistent() const noexcept {
         return target_index_build_dispatches == 0u && gpu_index_source_direct_operations == 1u &&
@@ -631,9 +616,7 @@ struct partial_vulkan_execution_stats {
     constexpr bool operator==(const partial_vulkan_execution_stats&) const noexcept = default;
 };
 
-/// A batch constructs one Stage-C target index and shares it with every query.
-/// Query zero is the sole owner of the build/ownership stats so additive batch
-/// aggregation cannot turn one target build into N apparent builds.
+/// Query zero records the shared target build so batch totals count it once.
 [[nodiscard]] constexpr bool is_ordered_target_build_owner_query(std::size_t query_index) noexcept {
     return query_index == 0u;
 }
@@ -706,7 +689,7 @@ static_assert([] {
 }());
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Runtime-authenticated completion shape for one job in a shared GPU-seed wave. */
+/** How a GPU seed job finished, including empty-query and empty-target cases. */
 enum class vulkan_seed_frontend_completion_kind : std::uint8_t {
     invalid = 0,
     mpf_runtime,
@@ -716,7 +699,7 @@ enum class vulkan_seed_frontend_completion_kind : std::uint8_t {
     mps_zero_query,
 };
 
-/** Exact statement-owned target representation consumed by a GPU-seed wave. */
+/** Target format and persisted or generated source used by a GPU seed batch. */
 enum class vulkan_seed_target_completion_kind : std::uint8_t {
     invalid = 0,
     mpf_persisted,
@@ -726,10 +709,9 @@ enum class vulkan_seed_target_completion_kind : std::uint8_t {
 };
 
 /**
- * Fixed proof of the one physical target operation borrowed by logical seed jobs.
- *
- * It carries only existing receipt outcomes. No selector-derived counter may be
- * placed here, and the whole-wave publisher merges its physical counts once.
+ * Record the target preparation shared by a batch of seed jobs. Values come
+ * from completed runtime records. The batch publisher adds these  physical
+ * work counts once, even when many queries use the same target.
  */
 struct vulkan_seed_target_execution {
     vulkan_seed_target_completion_kind completion =
@@ -747,7 +729,7 @@ struct vulkan_seed_target_execution {
     bool query_empty_bypass = false;
     bool producer_receipt_present = false;
 
-    /** Return the target-index source authenticated by this operation. */
+    /** Return persisted, recomputed or none from the target completion kind. */
     [[nodiscard]] constexpr ::bioseq::pipeline_stats::target_index_source
     target_source() const noexcept {
         using source = ::bioseq::pipeline_stats::target_index_source;
@@ -764,27 +746,26 @@ struct vulkan_seed_target_execution {
         return source::none;
     }
 
-    /** Whether an authenticated target-minimizer producer completed. */
+    /** Check whether a target-sketch, completion record is present. */
     [[nodiscard]] constexpr bool target_sketch_completed() const noexcept {
-        // A valid short/canonical-empty producer may complete without a queue
-        // roundtrip. The receipt proves the logical stage; producer_roundtrips
-        // remains the independent physical-submit count.
+        // A short or empty sketh can complete without submitting GPU work.
+        // Count its completion separately from producer roundtrips.
         return producer_receipt_present;
     }
 
-    /** Whether host construction processed a recomputed target representation. */
+    /** Check whether a generated target completed preparation without a query bypass. */
     [[nodiscard]] constexpr bool target_index_build_executed() const noexcept {
         return target_source() ==
                    ::bioseq::pipeline_stats::target_index_source::recomputed &&
                !query_empty_bypass && producer_receipt_present;
     }
 
-    /** Whether exact retained device storage was physically materialized. */
+    /** Check whether device storage was created for the target  index. */
     [[nodiscard]] constexpr bool device_index_upload_executed() const noexcept {
         return resident_materializations != 0u;
     }
 
-    /** Validate route-specific identity and physical outcome geometry. */
+    /** Check target identity and the completion counts required by its storage route. */
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         const auto source = target_source();
         const bool persisted =
@@ -834,11 +815,9 @@ struct vulkan_seed_target_execution {
 };
 
 /**
- * Fixed, non-owning projection of one completed GPU seed job.
- *
- * The runtime token remains the causal authority.  This value only binds the
- * already-authenticated job shape to its canonical host suffix without copying
- * a move-only token into every logical result collection.
+ * Copy the completed seed job details needed by its CPU stages. The shared
+ * runtime operation keeps the validation token Each result carries this
+ * smaller record and can check it against that token before publication.
  */
 struct vulkan_seed_frontend_job_execution {
     vulkan_seed_frontend_completion_kind completion =
@@ -858,7 +837,7 @@ struct vulkan_seed_frontend_job_execution {
     std::uint64_t persisted_source_identity = 0u;
     std::size_t operation_job_index = 0u;
 
-    /** Return the target-index source proved by the retained target owner. */
+    /** Return persisted, recomputed or none from the target representation. */
     [[nodiscard]] constexpr ::bioseq::pipeline_stats::target_index_source
     target_source() const noexcept {
         using source = ::bioseq::pipeline_stats::target_index_source;
@@ -875,7 +854,7 @@ struct vulkan_seed_frontend_job_execution {
         return source::none;
     }
 
-    /** Return whether only seed fields carry the exact completed job shape. */
+    /** Check seed-only counters, anchor ordering and the job's target identity. */
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         partial_vulkan_execution_stats expected{};
         expected.seed_lookup_dispatches = seed_stats.seed_lookup_dispatches;
@@ -953,8 +932,8 @@ struct vulkan_seed_frontend_job_execution {
             completion == vulkan_seed_frontend_completion_kind::mps_runtime;
         if (runtime_seed) {
             if (completion == vulkan_seed_frontend_completion_kind::mps_runtime) {
-                // MPS records one physical lookup per bounded buffer window.
-                // The retained runtime operation authenticates the exact count.
+                // MPS performs one lookup per binding window. The saved  operation
+                // supplies the window count checked before publication.
                 return operation_identity != 0u && minimizer_count != 0u &&
                        seed_stats.seed_lookup_dispatches != 0u &&
                        seed_stats.seed_open_addressed_lookup_dispatches == 0u &&
@@ -983,7 +962,7 @@ struct vulkan_seed_frontend_job_execution {
                seed_stats.seed_radix_sort_operations == 0u;
     }
 
-    /** Bind this projection to the still-private runtime operation token. */
+    /** Check this job record against its saved runtime operation token. */
     [[nodiscard]] bool matches_runtime_operation(
         const bioseq::gpu::vulkan::runtime_pipeline_operation_token& operation,
         const std::uint32_t max_workgroup_count_x) const noexcept {
@@ -1023,8 +1002,7 @@ struct vulkan_seed_frontend_job_execution {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/// Physical representation whose completed transient target receipt is retained
-/// until the PostgreSQL job-attestation boundary.
+/// Transient CPU target format kept until PostgreSQL checks the job record.
 enum class transient_cpu_target_generation_representation : std::uint8_t {
     none,
     minimizer_fragment_spill,
@@ -1033,11 +1011,10 @@ enum class transient_cpu_target_generation_representation : std::uint8_t {
 #endif
 
 /**
- * @brief Owning container of alignment results with PAF output formatting.
+ * @brief Own alignment results and the statistics collected while producing them.
  *
- * Wraps the ordered match-result owner and provides a print() method that outputs
- * results in exact minimap2 PAF format, reproducing mm_write_paf4()
- * (format.c:427-460) with auxiliary tags from write_tags() (format.c:399-425).
+ * Results stay in order. Execution checks use the saved stage records, and
+ * print() writes PAF fields and auxiliary tags to the debug log.
  */
 struct match_result_collection {
     match_result_vector results;
@@ -1063,10 +1040,8 @@ struct match_result_collection {
     bool prefilter_execution_stats_available = false;
     bool fragment_native_query_stats_available = false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    // This is an existing immutable generation receipt, not a derived counter.
-    // Ordinary production collections do not carry it. The representation is
-    // required because an MPF spill and an encoded MPS have different terminal
-    // receipt predicates.
+    // Keep the completed generation rdcord in test and benchmark builds.
+    // Fragment spills and encoded minimizer sequences need different checks.
     std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
         transient_cpu_target_generation_receipt{};
     transient_cpu_target_generation_representation
@@ -1076,11 +1051,11 @@ struct match_result_collection {
     bool transient_cpu_target_generation_stats_published = false;
 #endif
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Existing causal authority retained until the PG job publication boundary.
-    // It is not a serialized metric and is absent from ordinary result owners.
+    // Keep the completed Vulkan operation  token until PostgreSQL publishes
+    // the job. The token is internal and is not a report counter.
     ::bioseq::gpu::vulkan::runtime_pipeline_operation_token completed_vulkan_chaining{};
-    // The common single-dispatch path stays inline. Only segmented merges
-    // allocate this existing admitted owner for further completed operations.
+    // Keep one operation inline. Segmented results allocate space only, for
+    // additional completed operations.
     admitted_alignment_result_vector<
         ::bioseq::gpu::vulkan::runtime_pipeline_operation_token, false>
         additional_completed_vulkan_chaining{};
@@ -1099,8 +1074,8 @@ struct match_result_collection {
         return true;
     }
 
-    /// Preserve every causal token before merging its descriptive counters.
-    /// Allocation failure leaves both collections' tokens unmoved.
+    /// Move all completed chaining tokens before adding their counters.
+    /// Reserve storage first so allocation failure leaves both sets of tokens in place.
     void retain_completed_vulkan_chaining(match_result_collection& source) {
         using kind = ::bioseq::gpu::vulkan::runtime_pipeline_operation_kind;
         if (this == &source) {
@@ -1147,8 +1122,7 @@ struct match_result_collection {
         }
         source.additional_completed_vulkan_chaining.clear();
     }
-    // Exact algorithm identities are published only after the selected
-    // templated pipeline's terminal callback returns normally.
+    // Record the algorithms after the selected pipeline finishes successfully
     minimizer_algorithm observed_minimizer_algorithm = minimizer_algorithm::scalar;
     chaining_algorithm observed_chaining_algorithm = chaining_algorithm::scalar_minimap2;
     base_alignment_algorithm observed_base_alignment_algorithm = base_alignment_algorithm::ksw2;
@@ -1159,8 +1133,8 @@ struct match_result_collection {
     bool observed_chaining_algorithm_conflict = false;
     bool observed_base_alignment_algorithm_conflict = false;
 #endif
-    // One invocation receipt is retained once, independently of the number of
-    // query workers whose active intervals contributed to its union.
+    // Count one timing result per pipeline invocation, even when several
+    // query workers contributed to its combined active interval.
     std::uint64_t downstream_active_wall_ns = 0;
     std::uint64_t downstream_active_wall_invocations = 0;
     std::uint64_t downstream_active_wall_unavailable_invocations = 0;
@@ -1170,10 +1144,8 @@ struct match_result_collection {
     bool mapq_executed = false;
     bool mapq_execution_conflict = false;
 #endif
-    // Operation-local CPU/SIMD wall clocks. These travel with the result so
-    // parallel rows never update shared statement statistics. The PostgreSQL
-    // dispatch boundary consumes them exactly once into the existing stable
-    // pipeline_stage timing slots.
+    // Keep CPU stage durations with  each result. PostgreSQL adds them to
+    // statement totals after dispatch, avoiding shared writes by query workers.
     std::uint64_t query_sketch_host_wall_ns = 0;
     std::uint64_t persisted_index_decode_host_wall_ns = 0;
     std::uint64_t seed_lookup_host_wall_ns = 0;
@@ -1181,9 +1153,8 @@ struct match_result_collection {
     std::uint64_t region_generation_host_wall_ns = 0;
     std::uint64_t alignment_result_host_wall_ns = 0;
     bool is_host_stage_timing_saturated = false;
-    // Coarse clocks cross stage objects but never escape a live pipeline.
-    // The boundary methods below turn them into completed, mergeable deltas
-    // before the collection is returned to its caller.
+    // Track stages while the pipeline is running, then turn their start
+    // times into elapsed durations before returning the result.
     std::uint64_t region_host_stage_started_ns = 0;
     std::uint64_t alignment_result_host_stage_started_ns = 0;
     bool is_region_host_stage_active = false;
@@ -1199,7 +1170,8 @@ struct match_result_collection {
         : results(std::move(results_vec)) {}
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /// Retain exactly one already-completed transient CPU target receipt.
+    /// Keep one completed target-generation record. Reject invalid, repeated or
+    /// already-published records and keep the conflict flag set.
     [[nodiscard]] bool record_transient_cpu_target_generation_receipt(
         const transient_cpu_target_generation_representation representation,
         bioseq::indexing::minimizer_sequence_generation_execution_receipt receipt) noexcept {
@@ -1225,7 +1197,8 @@ struct match_result_collection {
     }
 
   private:
-    /// Move one-shot target authority with an instrumented collection merge.
+    /// Move the target-generation record during collection merging.
+    /// Duplicate, malformed or already-published records leave a conflict flag.
     void retain_transient_cpu_target_generation_receipt(
         match_result_collection& source) noexcept {
         static_assert(std::is_nothrow_move_constructible_v<
@@ -1266,9 +1239,9 @@ struct match_result_collection {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     /**
-     * @brief Admit capacity for one source-bounded append before publication.
-     * @param additional_upper_bound Maximum elements appended by the next batch.
-     * @return Final logical element bound for the append.
+     * @brief Reserve  result cwpacity before appending the next batch.
+     * @param additional_upper_bound Maximum results the batch may append.
+     * @return Maximum total result count after the append.
      */
     [[gnu::always_inline]] std::size_t
     prepare_result_append(const std::size_t additional_upper_bound) {
@@ -1277,9 +1250,8 @@ struct match_result_collection {
             throw std::length_error{"match result append bound overflowed"};
         }
         const std::size_t required = results.size() + additional_upper_bound;
-        // Repeated segment/wave appends must retain vector-like amortized growth.
-        // Logical output is bounded by this source batch; physical spare capacity
-        // has its separate checked bound and adjacent admission.
+        // Grow spare capacity geometrically across batches. Keep the allowed
+        // result count separate from this larger allocation bound.
         std::size_t capacity_bound = results.capacity();
         if (required > capacity_bound) {
             const std::size_t maximum_capacity = std::vector<match_result>{}.max_size();
@@ -1295,7 +1267,7 @@ struct match_result_collection {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// Record an operation-observed minimizer after its consuming pipeline completes.
+    /// Record the minimizer used by a completed pipeline and flag later disagreement.
     void
     record_completed_minimizer_algorithm_identity(const minimizer_algorithm minimizer) noexcept {
         if (!observed_minimizer_algorithm_available) {
@@ -1306,7 +1278,7 @@ struct match_result_collection {
         }
     }
 
-    /// Record an operation-observed chaining algorithm after the pipeline completes.
+    /// Record the chainer used by  a completed pipeline and flag later disagreement.
     void record_completed_chaining_algorithm_identity(const chaining_algorithm chaining) noexcept {
         if (!observed_chaining_algorithm_available) {
             observed_chaining_algorithm = chaining;
@@ -1316,7 +1288,7 @@ struct match_result_collection {
         }
     }
 
-    /// Record an operation-observed CPU base aligner after its kernel returns.
+    /// Record the CPU aligner, after its kernel returns and flag later disagreement.
     void record_completed_base_alignment_algorithm_identity(
         const base_alignment_algorithm alignment) noexcept {
         if (!observed_base_alignment_algorithm_available) {
@@ -1327,14 +1299,14 @@ struct match_result_collection {
         }
     }
 
-    /// Record both effective algorithms after one selected pipeline completes.
+    /// Record the minimizer and chainer used by a completed pipeline
     void record_completed_algorithm_identity(const minimizer_algorithm minimizer,
                                              const chaining_algorithm chaining) noexcept {
         record_completed_minimizer_algorithm_identity(minimizer);
         record_completed_chaining_algorithm_identity(chaining);
     }
 
-    /// Record whether the completed pipeline actually selected MAPQ execution.
+    /// Record whether MAPQ ran and flag disagreement between completed pipelines.
     void record_mapq_execution(const bool executed) noexcept {
         if (!mapq_execution_available) {
             mapq_execution_available = true;
@@ -1345,7 +1317,7 @@ struct match_result_collection {
     }
 #endif
 
-    /// Attach this query's downstream enter/leave events to its invocation union.
+    /// Connect this query's downstream timing events to the shared invocation tracker.
     void attach_downstream_active_wall_tracker(downstream_active_wall_tracker& tracker) noexcept {
         if (downstream_active_wall_tracker_ != nullptr || downstream_active_wall_tracker_entered_) {
             tracker.invalidate();
@@ -1354,7 +1326,8 @@ struct match_result_collection {
         downstream_active_wall_tracker_ = &tracker;
     }
 
-    /// Detach after the selected pipeline terminal callback has completed.
+    /// Detach the invocation trackeh after the pipeline finishes. An unmatched
+    /// active interval is closed and marked invalid.
     void detach_downstream_active_wall_tracker() noexcept {
         if (downstream_active_wall_tracker_entered_ && downstream_active_wall_tracker_ != nullptr) {
             downstream_active_wall_tracker_->invalidate();
@@ -1364,7 +1337,7 @@ struct match_result_collection {
         downstream_active_wall_tracker_ = nullptr;
     }
 
-    /// Retain one completed invocation timing receipt.
+    /// Add one completed invocation's active  time or unavailable-timing count.
     void
     record_downstream_active_wall_receipt(const downstream_active_wall_receipt& receipt) noexcept {
         if (downstream_active_wall_invocations == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -1449,7 +1422,7 @@ struct match_result_collection {
         prefilter_execution_stats_available = true;
     }
 
-    /// Route scalar query-sketch statistics into the scalar aggregate.
+    /// Add scalar query-sketch work to the query part of the CPU statistics.
     void record_scalar_query_minimizer_execution_stats(
         const scalar_minimizer_execution_stats& stats) noexcept {
         scalar_pipeline_execution_stats routed{};
@@ -1457,7 +1430,7 @@ struct match_result_collection {
         record_scalar_pipeline_execution_stats(routed);
     }
 
-    /// Route scalar target-sketch statistics into the scalar aggregate.
+    /// Add scalar target-sketch work to the target part of the CPU statistics.
     void record_scalar_target_minimizer_execution_stats(
         const scalar_minimizer_execution_stats& stats) noexcept {
         scalar_pipeline_execution_stats routed{};
@@ -1471,14 +1444,14 @@ struct match_result_collection {
         partial_vulkan_stats.merge(stats);
     }
 
-    /// Merge completed fragment-native query statistics.
+    /// Add statistics from query lookup directly over minimizer fragments.
     void record_fragment_native_query_stats(
         const bioseq::indexing::prepared_fragment_anchor_batch_stats& stats) noexcept {
         fragment_native_query_stats.merge(stats);
         fragment_native_query_stats_available = true;
     }
 
-    /// Add one host-stage duration and retain overflow as a sticky flag.
+    /// Add host-stage nanoseconds, clamping overflow and keeping its failure flag.
     void record_host_stage_time(std::uint64_t& destination,
                                 const std::uint64_t elapsed_ns) noexcept {
         if (elapsed_ns > (std::numeric_limits<std::uint64_t>::max)() - destination) {
@@ -1514,12 +1487,13 @@ struct match_result_collection {
         record_host_stage_time(region_generation_host_wall_ns, elapsed_ns);
     }
 
-    /// Add alignment and result-materialization host time.
+    /// Add host time for alignment and result construction.
     void record_alignment_result_host_time(const std::uint64_t elapsed_ns) noexcept {
         record_host_stage_time(alignment_result_host_wall_ns, elapsed_ns);
     }
 
-    /// Start the region-generation/selection owner after chaining completes.
+    /// Start timing region generation  and selection after chaining.
+    /// Overlapping stage starts invalidate timing.
     void begin_region_host_stage(const std::uint64_t started_ns) noexcept {
         if (is_region_host_stage_active || is_alignment_result_host_stage_active) {
             is_host_stage_timing_saturated = true;
@@ -1531,9 +1505,9 @@ struct match_result_collection {
         is_region_host_stage_active = true;
     }
 
-    /// Close regions and start the inclusive alignment/result work owner.
-    /// The shared wall-union tracker timestamps under its mutex so concurrent
-    /// event order and timestamp order cannot disagree.
+    /// Finish region timing and, when enabled, start alignment/result timing.
+    /// The shared tracker records its own synchronized start for the combined
+    /// active-time measurement across queries.
     void transition_region_to_alignment_result_host_stage(const std::uint64_t boundary_ns,
                                                           const bool downstream_enabled) noexcept {
         if (!is_region_host_stage_active || boundary_ns < region_host_stage_started_ns ||
@@ -1560,8 +1534,7 @@ struct match_result_collection {
         }
     }
 
-    /// Close the inclusive alignment, post-alignment filters, MAPQ and result
-    /// materialisation owner at the terminal sink.
+    /// Finish timing alignment, filters, MAPQ and result construction at the sink.
     void finish_alignment_result_host_stage(const std::uint64_t finished_ns) noexcept {
         if (!is_alignment_result_host_stage_active) {
             return;
@@ -1585,9 +1558,9 @@ struct match_result_collection {
         is_alignment_result_host_stage_active = false;
     }
 
-    /// Merge completed statistics without moving biological results. Campaign
-    /// and test calls additionally transfer one-shot authority; production
-    /// builds retain the original const, nonthrowing interface and representation.
+    /// Combine stage statistics while leaving alignment results in, place
+    /// Test and benchmark builds also move saved  operation records. Benchmark
+    /// merges may alocate storage for additional Vulkan tokens.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     void combine_execution_stats(match_result_collection& other) {
         retain_completed_vulkan_chaining(other);
@@ -1710,7 +1683,7 @@ struct match_result_collection {
             other.is_region_host_stage_active || other.is_alignment_result_host_stage_active;
     }
 
-    /// Validate exact-SIMD query execution against the selected work policy.
+    /// Check recorded exact-SIMD query work, requiring vector activity when requested.
     [[nodiscard]] bool
     is_exact_simd_query_execution_consistent(bool require_nonempty_vector_work) const noexcept {
         return exact_simd_query_execution_stats_available &&
@@ -1718,7 +1691,7 @@ struct match_result_collection {
                    require_nonempty_vector_work);
     }
 
-    /// Validate exact-SIMD target execution against the selected work policy.
+    /// Check recorded exact-SIMD target work, requiring vector activity when requested.
     [[nodiscard]] bool
     is_exact_simd_target_execution_consistent(bool require_nonempty_vector_work) const noexcept {
         return exact_simd_target_execution_stats_available &&
@@ -1726,7 +1699,7 @@ struct match_result_collection {
                    require_nonempty_vector_work);
     }
 
-    /// Validate bounded-ntHash query execution.
+    /// Check bounded-ntHash query work, requiring vector activity when requested.
     [[nodiscard]] bool
     is_bounded_nthash_query_execution_consistent(bool require_nonempty_vector_work) const noexcept {
         return bounded_nthash_query_execution_stats_available &&
@@ -1734,7 +1707,7 @@ struct match_result_collection {
                    require_nonempty_vector_work);
     }
 
-    /// Validate bounded-ntHash target execution.
+    /// Check bounded-ntHash target work, requiring vector activity when requested.
     [[nodiscard]] bool is_bounded_nthash_target_execution_consistent(
         bool require_nonempty_vector_work) const noexcept {
         return bounded_nthash_target_execution_stats_available &&
@@ -1742,7 +1715,7 @@ struct match_result_collection {
                    require_nonempty_vector_work);
     }
 
-    /// Validate SIMD chaining for the selected policy.
+    /// Check SIMD chaining against the selected policy and required vector activity.
     [[nodiscard]] bool
     is_simd_chaining_execution_consistent(simd_chaining_policy selected_policy,
                                           bool require_nonempty_vector_work) const noexcept {
@@ -1751,14 +1724,14 @@ struct match_result_collection {
                                                             require_nonempty_vector_work);
     }
 
-    /// Validate the batched-KSW2 execution receipt.
+    /// Check the batched-KSW2 record, requiring completed work when requested.
     [[nodiscard]] bool
     is_ksw2_batched_execution_consistent(const bool require_nonempty_work) const noexcept {
         return ksw2_batched_execution_stats_available &&
                ksw2_batched_stats.is_coherent(require_nonempty_work);
     }
 
-    /// Validate the selected SIMD sketch route and forbid mixed backends.
+    /// Check the selected SIMD sketcher and require  all Vulkan statistics to be empty.
     [[nodiscard]] bool
     is_selected_simd_sketch_execution_consistent(minimizer_algorithm selected,
                                                  bool require_target_sketch,
@@ -1768,8 +1741,9 @@ struct match_result_collection {
                    selected, require_target_sketch, require_nonempty_vector_work);
     }
 
-    /// Validate only the selected sketch component; its caller authenticates
-    /// independently selected GPU work in other stages.
+    /// Check the selected SIMD sketcher without judging other pipeline stages.
+    /// Require query work and the requested target work, with records for the
+    /// other SIMD sketcher empty.
     [[nodiscard]] bool
     is_selected_simd_sketch_component_consistent(minimizer_algorithm selected,
                                                 bool require_target_sketch,
@@ -1806,8 +1780,8 @@ struct match_result_collection {
         }
     }
 
-    /// Validate the SIMD sketch/chaining/Block tuple plus its real CPU seed
-    /// lookup. All other scalar biological dimensions remain forbidden.
+    /// Check SIMD sketching, chaining and Block Aligner together with CPU seed
+    /// lookup. Scalar sketching, chaining and KSW2 work must be absent.
     [[nodiscard]] bool
     is_all_simd_execution_consistent(minimizer_algorithm selected,
                                      simd_chaining_policy selected_chaining_policy,
@@ -1846,7 +1820,8 @@ struct match_result_collection {
                is_block_aligner_execution_consistent(require_nonempty_vector_work);
     }
 
-    /// Validate a complete all-scalar pipeline route.
+    /// Check scalar sketching, seed lookup, chaining and any required KSW2 alignment.
+    /// Reject SIMD, Block Aligner, batched-KSW2 and Vulkan records.
     [[nodiscard]] bool
     is_all_scalar_execution_consistent(const bool require_target_sketch,
                                        const bool require_alignment) const noexcept {
@@ -1880,9 +1855,9 @@ struct match_result_collection {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /// Validate selected seed, chain, and host-alignment components independently.
-    /// Runtime seed/index receipts still authenticate their owned storage and
-    /// operation environment at the producer boundary; no selector creates work.
+    /// Check the seleced  sketch, seed, chaining and CPU alignment components.
+    /// GPU seed jobs also need a valid shared job record. Their saved runtime
+    /// token and index storage are checked at the producer boundary.
     [[nodiscard]] bool
     is_selected_components_execution_consistent_for_observed(
         minimizer_algorithm selected_minimizer,
@@ -1920,8 +1895,8 @@ struct match_result_collection {
         }
 
         if (!gpu_seed) {
-            // Host seeding permits only a selected Vulkan score dispatch. Comparing
-            // the entire existing payload also rejects stray index/seed/fallback stats.
+            // Host seeding permits GPU statistics only for the selected Vulkan
+            // chainer. Comparing the full record catches unrelated GPU work
             partial_vulkan_execution_stats expected{};
             if (gpu_chain) {
                 if (gpu.chain_score_dispatches == 0u) {
@@ -1969,8 +1944,8 @@ struct match_result_collection {
                            /*require_nonempty_vector_work=*/true);
             case minimizer_algorithm::simd_minimap2_reference:
                 if (observed_minimizer == minimizer_algorithm::scalar) {
-                    // Retain historical DNA5 requested-reference/effective-scalar
-                    // evidence. The positive identity is emitted after execution.
+                    // DNA5 can execute the scalar sketcher when the reference SIMD
+                    // sketcher was requested. Keep the recorded effective choice.
                     return is_selected_scalar_sketch_component_consistent(
                                require_target_sketch, /*require_nonempty_work=*/true) ||
                            detailed_sketch_stats_absent;
@@ -2000,8 +1975,8 @@ struct match_result_collection {
             case chaining_algorithm::range_minimum_query:
                 return scalar_chain_observed && simd_chain_absent;
             case chaining_algorithm::vulkan_tiled_dynamic_programming:
-                // The existing Vulkan kernel performs its own host backtracking.
-                // Its chain work is not a scalar RMQ receipt.
+                // Vulkan chaining backtracks on the host as part of its own call.
+                // Scalar minimap2 and RMQ counters must  stay empty here.
                 return scalar_minimap2_chain_absent && simd_chain_absent;
             case chaining_algorithm::simd_minimap2:
                 return scalar_minimap2_chain_absent &&
@@ -2027,7 +2002,7 @@ struct match_result_collection {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// Bind the pure component validator to operation-observed E2E identities.
+    /// Validate the selected components using the algorithms recorded by this result.
     [[nodiscard]] bool
     is_selected_components_execution_consistent(
         minimizer_algorithm selected_minimizer,
@@ -2059,7 +2034,7 @@ struct match_result_collection {
 #endif
 #endif
 
-    /// Validate scalar sketches and require all accelerated sketch stats absent.
+    /// Check scalar sketches and require all Vulkan and SIMD sketch records to be empty.
     [[nodiscard]] bool is_selected_scalar_sketch_execution_consistent(
         const bool require_target_sketch, const bool require_nonempty_work) const noexcept {
         return partial_vulkan_stats == partial_vulkan_execution_stats{} &&
@@ -2067,7 +2042,7 @@ struct match_result_collection {
                    require_target_sketch, require_nonempty_work);
     }
 
-    /// Validate scalar sketches without rejecting a separately selected GPU chainer.
+    /// Check scalar sketch records while allowing independently selected GPU stages.
     [[nodiscard]] bool is_selected_scalar_sketch_component_consistent(
         const bool require_target_sketch, const bool require_nonempty_work) const noexcept {
         const bool exact_absent = !exact_simd_query_execution_stats_available &&
@@ -2088,7 +2063,7 @@ struct match_result_collection {
                is_target_valid && exact_absent && bounded_absent;
     }
 
-    /// Return whether any algorithm emitted completed execution statistics.
+    /// Check for recorded sketching, chaining, alignment or Vulkan work.
     [[nodiscard]] bool has_any_algorithm_execution_stats() const noexcept {
         return exact_simd_query_execution_stats_available ||
                exact_simd_target_execution_stats_available ||
@@ -2099,7 +2074,8 @@ struct match_result_collection {
                ksw2_batched_execution_stats_available || partial_vulkan_stats.has_any_dispatch();
     }
 
-    /// Validate Block Aligner execution and optional nonempty SIMD work.
+    /// Check Block Aligner, statistics. If nonempty SIMD work is required, accept
+    /// vector DP or a SIMD diagonal certificate for every nonempty call.
     [[nodiscard]] bool
     is_block_aligner_execution_consistent(bool require_nonempty_simd_work) const noexcept {
         if (!block_aligner_execution_stats_available ||
@@ -2131,33 +2107,20 @@ struct match_result_collection {
         return {results.data(), results.size()};
     }
 
-    /// Compute the complete biological result stats while the owning result
-    /// vector and all CIGAR payloads are still live.
+    /// Summarize cesult fields and CIGAR contents while their storage is alive.
     [[nodiscard]] match_result_set_identity biological_identity() const noexcept {
         return make_match_result_set_identity(view());
     }
 
     /**
-     * @brief Print alignment results in exact minimap2 PAF format.
+     * @brief Write each result to the debug log using PAF fields and tags.
      *
-     * PAF line format (tab-separated):
-     *   col 1:  query name             -- user-provided
-     *   col 2:  query sequence length
-     *   col 3:  query start (0-based, closed)
-     *   col 4:  query end   (0-based, open)
-     *   col 5:  relative strand '+' or '-'
-     *   col 6:  target name            -- user-provided
-     *   col 7:  target sequence length
-     *   col 8:  target start on original strand (0-based)
-     *   col 9:  target end   on original strand (0-based)
-     *   col 10: number of residue matches  (match_length)
-     *   col 11: alignment block length     (block_length)
-     *   col 12: mapping quality (0-255)
+     * Coordinates are  zero-based half-open intervals. CIGAR results include
+     * score tags and an NM estimate from block_length minus num_matches.
+     * An empty collection writes an unmapped placeholder row.
      *
-     * Auxiliary tags: NM, ms, AS, nn, tp, cm, s1, s2, de/dv, rl, cg
-     *
-     * @param query_name  Query sequence name (col 1)
-     * @param target_name Target sequence name (col 6)
+     * @param query_name Query name for the first PAF column.
+     * @param target_name Target name for the sixth PAF column.
      */
     void print(const std::string& query_name = "query",
                const std::string& target_name = "target") const {
@@ -2185,8 +2148,8 @@ struct match_result_collection {
                                            match.mapq);
 
             if (match.has_cigar && !match.cigar.empty()) {
-                // NM = blen - mlen; both are sequence_size_t (uint64) and
-                // blen >= mlen, but compute signed + clamp defensively.
+                // Estimate NM from block length minus the reported match count and
+                // clamp a negative difference to zero.
                 const std::int64_t edit_distance =
                     std::max<std::int64_t>(0,
                                            static_cast<std::int64_t>(match.block_length) -
@@ -2230,7 +2193,7 @@ struct match_result_collection {
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Independently admitted storage for batched/segmented result owners. */
+/** Result collections with a separate memory reservation for their outer array. */
 using match_result_collection_vector =
     admitted_alignment_result_vector<match_result_collection, false>;
 static_assert(std::is_nothrow_default_constructible_v<match_result_collection>);

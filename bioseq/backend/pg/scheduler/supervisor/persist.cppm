@@ -1,6 +1,6 @@
 /**
  * @file persist.cppm
- * @brief PostgreSQL asynchronous persistence staging and worker implementation.
+ * @brief Hold index-build jobs until their transaction commits.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -27,15 +27,13 @@ import bioseq.indexing.type;
 namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Owns one transaction-local persistence job until publish or rollback.
- *
- * Variable-length identity remains backend-local while the pinned DSM carries only fixed
- * metadata. The transaction callback releases the permit and every unpublished resource.
+ * Own a pending index-build job until its transaction commits or aborts.
+ * A successful commit transfers the pinned shared-memory segment to the
+ * worker queue. Failed publication and rollback release it locally.
  */
 struct pending_persist_job {
-    // `target.index_name` is deliberately empty after staging. The owned name
-    // below is the only variable-length identity and is serialized into the
-    // metadata-only DSM; no biological/index bytes enter this queue.
+    // Own the index name sepavately so target never keeps a dangling view.
+    // The shared-memory segment contains the name and build metadata only.
     persist_target target{};
     std::string index_name{};
     std::string temp_file_path{};
@@ -47,20 +45,18 @@ struct pending_persist_job {
     bioseq::parallelism::memory_permit permit{};
 };
 
-/**
- * @brief Returns the backend-local transaction queue.
- * @return Jobs awaiting the current transaction outcome.
- */
+/** Return this backend's jobs awaiting the transaction  outcome. */
 [[nodiscard]] std::vector<pending_persist_job>& pending_persist_jobs() {
     static std::vector<pending_persist_job> jobs;
     return jobs;
 }
 
 /**
- * @brief Transfers a pinned metadata DSM into transaction-local pending work.
- * @param[in] target Stable relation and sequence identity.
- * @param[in] handle Pinned metadata DSM released by publish failure or worker completion.
- * @param[in] payload_bytes Mapped metadata size in bytes.
+ * Add a pinned build request to the current transaction's pending jobs.
+ * The caller keeps cleanup responsibility until this insertion succeeds.
+ * @param target Table, column, index, and sequence identity to copy.
+ * @param handle Pinned shared-memory segment containing the build metadata.
+ * @param payload_bytes Size of the metadata in bytes.
  */
 void enqueue_pending_minimizer_sequence_build(const persist_target& target,
                                               dsm_handle handle,
@@ -76,9 +72,8 @@ void enqueue_pending_minimizer_sequence_build(const persist_target& target,
 }
 
 /**
- * @brief Publishes jobs after commit and releases them after abort or prepare.
- * @param[in] event PostgreSQL transaction event controlling queue publication.
- * @note Publication failure releases the job locally and does not escape the callback.
+ * Publish pending jobs on commit. Release them on abort, prepare, or a full
+ * shared queue, so a failed background request cannot undo the transaction.
  */
 void bioseq_persist_xact_callback(XactEvent event, void*) {
     std::vector<pending_persist_job>& jobs = pending_persist_jobs();
@@ -131,10 +126,7 @@ void bioseq_persist_xact_callback(XactEvent event, void*) {
     jobs.clear();
 }
 
-/**
- * @brief Registers the persistence transaction callback at the PostgreSQL leaf boundary.
- * @note Called once during backend initialization.
- */
+/** Register the callback that publishes or releases this transaction's jobs. */
 void register_persist_xact_callback_pg_leaf() {
     RegisterXactCallback(bioseq_persist_xact_callback, nullptr);
 }

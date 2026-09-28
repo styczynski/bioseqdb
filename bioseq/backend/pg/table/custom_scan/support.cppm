@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates shared runtime, catalog, expression, and semantic custom-scan support.
+ * @brief Shared custom-scan, data, expression checks, and saved execution settings.
  */
 export module bioseq.postgres.table:custom_scan_support;
 

@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/generation.cppm
- * @brief Aggregates grouped-SoA generation planning, emission, and validation.
+ * @brief Exports the modules that build and check grouped minimizer indexes.
  */
 export module bioseq.indexing.minimizer_hashmap:generation;
 

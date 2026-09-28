@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/support_schemas.cppm
- * @brief EBI Search support schema fragments.
+ * @brief Additional request and response schemas for the EBI client.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:support_schemas;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Streaming, domain, notification, sequence-tool, and term schemas. */
+/** Schemas for streaming results, domain metadata, notifications, sequence-tool settings, and term counts. */
 inline constexpr std::string_view support_schemas =
     R"bioseq_openapi(    StreamingResponseWSStreamingResult:
       type: object

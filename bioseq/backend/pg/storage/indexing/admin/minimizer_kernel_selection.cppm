@@ -1,6 +1,6 @@
 /**
  * @file admin/minimizer_kernel_selection.cppm
- * @brief Binds the exact minimizer kernel table for one owning operation.
+ * @brief Select the process-local SIMD kernels for an index build.
  */
 module;
 
@@ -14,7 +14,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing {
 
-/** Bind the process-local minimizer table without importing the policy catalog. */
+/** Return the selected SIMD kernel table, or null for a backend that needs no table. */
 [[nodiscard]] inline const bioseq::minimizers::minimizer_kernels*
 bind_selected_minimizer_kernels_for_operation(
     bioseq::minimizers::minimizer_sketch_backend backend, std::string_view operation) {

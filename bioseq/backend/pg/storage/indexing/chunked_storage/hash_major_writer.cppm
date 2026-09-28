@@ -1,11 +1,10 @@
 /**
  * @file hash_major_writer.cppm
- * @brief Bounded hash-major generation writer and atomic head publication.
+ * @brief Store a hash-major minimizer generation and publish its validated hbad.
  *
- * Index chunks are raw BYTEA tuples in heap relations (heap_form_tuple /
- * CatalogTupleInsert + systable_beginscan), bypassing columnarisation
- * (Invariant C). The per-sequence layouts co-locate with the sequence's
- * `(bucket, shard)`. The table layout shards via `index_table_shard`.
+ * Temporary files collect the directory, controls and postings. The  writer
+ * copies them into PostgreSQL rows and rereads every stream before allowing
+ * the new generation to become active.
  */
 module;
 
@@ -47,23 +46,23 @@ import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::invoke_pg_as_cpp
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
+import bioseq.indexing.storage;           // index storage concepts
 import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // minimizer fragment file format
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // decode sequence bases in batches
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -81,9 +80,7 @@ import :catalog;
 import :catalog_row_io;
 export namespace bioseq::storage::indexing {
 
-// =========================================================================
-//  hash-major PostgreSQL storage adapter
-// =========================================================================
+
 
 namespace hash_major_minimizer_pg_detail {
 
@@ -111,7 +108,7 @@ stream_sub_key(hash_major_minimizer_stream_kind kind) noexcept {
            (bytes % k_hash_major_minimizer_row_payload_bytes != 0u ? 1u : 0u);
 }
 
-/// Create one ResourceOwner-managed temporary stream spool.
+/// Create a temporary stream file managed by PostgreSQL.
 [[nodiscard]] inline BufFile* create_spool() {
     BufFile* file =
         bioseq::postgres::support::invoke_pg_as_cpp([] { return BufFileCreateTemp(false); });
@@ -122,7 +119,7 @@ stream_sub_key(hash_major_minimizer_stream_kind kind) noexcept {
     return file;
 }
 
-/// Append a non-empty logical stream fragment to a spool.
+/// Append a nonempty block to a temporary stream file.
 inline void append_spool(BufFile* file, std::span<const std::byte> bytes) {
     if (file == nullptr || bytes.empty()) {
         minimizer_generation_storage_error_as_cpp("hash-major logical stream append is invalid");
@@ -131,7 +128,7 @@ inline void append_spool(BufFile* file, std::span<const std::byte> bytes) {
         [file, bytes] { BufFileWrite(file, bytes.data(), bytes.size()); });
 }
 
-/// Rewind a completed spool for exact replay.
+/// Rewind a temporary stream file before copying it into table rows.
 inline void rewind_spool(BufFile* file) {
     if (file == nullptr || bioseq::postgres::support::invoke_pg_as_cpp(
                                [file] { return BufFileSeek(file, 0, 0, SEEK_SET); }) != 0) {
@@ -156,13 +153,13 @@ inline void close_spool(BufFile*& file) {
     }
 }
 
-/// Forget a spool after PostgreSQL ERROR leaves cleanup to ResourceOwner.
+/// Drop the local file handle and leave cleanup to PostgreSQL.
 inline void abandon_spool(BufFile*& file) noexcept {
-    // PostgreSQL ResourceOwner owns a file whose leaf raised ERROR.
+
     file = nullptr;
 }
 
-/// Form one authenticated hash-major stream tuple with an explicit checksum.
+/// Check a row's size  and checksum, then copy its bytes into a heap tuple.
 [[nodiscard]] inline HeapTuple form_row(Relation relation,
                                         std::uint64_t query_key,
                                         const index_chunk_address& address,
@@ -207,7 +204,7 @@ inline void abandon_spool(BufFile*& file) noexcept {
     return tuple;
 }
 
-/// Form one authenticated hash-major stream tuple and derive its row checksum.
+/// Compute the row checksum and copy the stream bytes into a heap tuple.
 [[nodiscard]] inline HeapTuple form_row(Relation relation,
                                         std::uint64_t query_key,
                                         const index_chunk_address& address,
@@ -229,7 +226,7 @@ inline void abandon_spool(BufFile*& file) noexcept {
 
 class ready_hash_major_minimizer_token;
 
-/// Receipt for a byte-exact head publication and any generation it replaced.
+/// Published head bytes and the ID of the generation they replaced, if any.
 struct ready_hash_major_minimizer_published_head_receipt {
     std::string table_name;
     std::uint64_t query_key = 0u;
@@ -238,12 +235,14 @@ struct ready_hash_major_minimizer_published_head_receipt {
     std::optional<std::uint64_t> replaced_generation_id{};
 };
 
-/// Publish the head authorized by a completed hash-major writer token.
+/// Publish a validated head in the transaction that built, its generation.
+/// Consume the ready token and return the stored head and replaced generation ID.
 [[nodiscard]] inline ready_hash_major_minimizer_published_head_receipt
 publish_ready_hash_major_minimizer_head_pg(ready_hash_major_minimizer_token&& token);
 
-/// Move-only authorization that the exact unpublished hash-major generation was
-/// authenticated from PostgreSQL rows and bound to the authoritative source.
+/// Proof that a generation was reread and matched its source sequence.
+/// Only the writer can create this token. Publication consumes it in the
+/// same  transaction, preventing an unchecked generation from begoming active
 class ready_hash_major_minimizer_token {
   private:
     minimizer_generation_administration_identity identity_{};
@@ -316,11 +315,10 @@ static_assert(std::is_nothrow_move_constructible_v<ready_hash_major_minimizer_to
 inline constexpr std::uint64_t k_hash_major_minimizer_publication_slice_bytes = std::uint64_t{8}
                                                                                 << 20u;
 
-/// PostgreSQL-owned bounded sink for the storage-neutral hash-major encoder.
-/// The callback path only appends to three ResourceOwner-managed BufFiles.
-/// Sealing replays exact 8,064-byte rows in postings -> controls -> directory
-/// order, writes the manifest, and rereads the complete unpublished generation
-/// before a private publication token can be produced.
+/// Collect hash-major streams in temporary files, then store them in PostgreSQL.
+/// Sealing writes postings, controls and the directory in batches, followed
+/// by the manifest. It rereads all streams and checks their sizes and CRCs
+/// before returning the token needed to publish the head.
 class index_storage_hash_major_minimizer_writer {
   private:
     enum class operation_state : std::uint8_t {
@@ -605,8 +603,8 @@ class index_storage_hash_major_minimizer_writer {
 
   public:
     index_storage_hash_major_minimizer_writer() = delete;
-    /// Bind a new unpublished generation, acquire its transaction lock, and
-    /// allocate the bounded PostgreSQL spool set.
+    /// Reserve the insert memory budget, lock this index for the transaction,
+    /// and open its generation table and three temporary stream files.
     index_storage_hash_major_minimizer_writer(minimizer_generation_administration_identity identity,
                                               std::uint64_t query_key,
                                               std::uint64_t generation_id)
@@ -709,7 +707,9 @@ class index_storage_hash_major_minimizer_writer {
         abandon_noexcept_();
     }
 
-    /// Append bytes to one logical stream while updating its exact CRC receipt.
+    /// Append to  a stream and update its byte count and CRC.
+    /// Return false if input is empty, its stream is invalid, the byte count
+    /// would overflow or the writer has stopped accepting bytes.
     [[nodiscard]] bool append_logical_bytes(hash_major_minimizer_stream_kind kind,
                                             std::span<const std::byte> bytes) {
         if (state_ != operation_state::accepting ||
@@ -726,7 +726,8 @@ class index_storage_hash_major_minimizer_writer {
         return true;
     }
 
-    /// Return the non-owning callback bridge consumed by the common encoder.
+    /// Borrow the callback through which the encoder appends stream bytes.
+    /// Keep the writer at the same address while using it.
     [[nodiscard]] hash_major_minimizer_logical_stream_sink_ref logical_stream_sink() noexcept {
         return {
             .context = this,
@@ -734,8 +735,9 @@ class index_storage_hash_major_minimizer_writer {
         };
     }
 
-    /// Replay, reread, and authenticate all streams before issuing publication
-    /// authority for the exact generation.
+    /// Store and reread every stream, then check the source sequence identity.
+    /// Return a publication token only after row counts, lengths and checksums
+    /// agree with the encoder metadata and source record.
     [[nodiscard]] ready_hash_major_minimizer_token
     seal_and_validate_ready(const hash_major_minimizer_encoded_metadata& metadata,
                             minimizer_generation_source_authorization source) {
@@ -784,10 +786,8 @@ class index_storage_hash_major_minimizer_writer {
                 }
             }
 
-            // Authority is persisted only after all postings, then controls,
-            // then the directory.  The primary-key layout remains unchanged;
-            // the head is still absent, so none of these rows is visible as a
-            // READY generation during replay.
+            // Write the  manifest after all three streams. The active head still
+            // points to the previous generation, if, one exists, until publication.
             replay_stream_(hash_major_minimizer_stream_kind::postings,
                            metadata.manifest.streams[2]);
             replay_stream_(hash_major_minimizer_stream_kind::controls,
@@ -1076,10 +1076,9 @@ publish_ready_hash_major_minimizer_head_pg(ready_hash_major_minimizer_token&& to
         replacement = nullptr;
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 
-        // systable_beginscan_ordered() rewrites heap attribute numbers in
-        // place to index ordinals. Reinitialize before reusing this array;
-        // passing the already-remapped keys through a second time produces
-        // the non-monotone ordinal sequence 2,1,4,3,5 for this primary key.
+        // systable_beginscan_ordered() changes these keys from heap column
+        // numbers to indjx positions. Rebuild them before the second scan
+        // so PostgreSQL does not translate the same keys twice
         ScanKeyInit(&keys[0],
                     k_minimizer_generation_index_generation_id,
                     BTEqualStrategyNumber,
@@ -1152,9 +1151,8 @@ publish_ready_hash_major_minimizer_head_pg(ready_hash_major_minimizer_token&& to
         token.invalidate_();
         return receipt;
     } catch (...) {
-        // Do not invoke PostgreSQL cleanup while propagating a translated
-        // ERROR. The current memory context and ResourceOwner retain every
-        // outstanding tuple/scan/relation object until statement abort.
+        // Let statement abort reclaim PostgreSQL tuples, scans and relations
+        // while the error propagates through C++ cleanup.
         replacement = nullptr;
         scan = nullptr;
         primary_index = nullptr;

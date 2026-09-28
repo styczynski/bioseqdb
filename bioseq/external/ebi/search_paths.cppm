@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/search_paths.cppm
- * @brief EBI Search query endpoint fragments.
+ * @brief OpenAPI definitions for EBI queries, suggestions, and, frequent terms.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:search_paths;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Domain autocomplete path entry. */
+/** Path for query suggestions within a domain. */
 inline constexpr std::string_view autocomplete_path = R"bioseq_openapi(  "/{domain}/autocomplete":
     get:
       tags:
@@ -93,7 +93,7 @@ inline constexpr std::string_view autocomplete_path = R"bioseq_openapi(  "/{doma
                 "$ref": "#/components/schemas/WSSuggestionResult"
 )bioseq_openapi";
 
-/** @brief Root and domain search path entries. */
+/** Root and domain  search paths, including metadata responses when no query is supplied. */
 inline constexpr std::string_view search_paths = R"bioseq_openapi(  "/":
     get:
       tags:
@@ -435,7 +435,7 @@ inline constexpr std::string_view search_paths = R"bioseq_openapi(  "/":
                 "$ref": "#/components/schemas/WSDomainMetadataResult"
 )bioseq_openapi";
 
-/** @brief Domain top-terms path entry. */
+/** Path for the most frequent terms in a domain field. */
 inline constexpr std::string_view top_terms_path =
     R"bioseq_openapi(  "/{domain}/topterms/{fieldid}":
     get:

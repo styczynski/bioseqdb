@@ -1,6 +1,6 @@
 /**
  * @file pipeline/minimap_port.cppm
- * @brief Public facade for the minimap2-compatible mapping pipeline.
+ * @brief Exports the mapping stages, results and execution statistics.
  */
 export module bioseq.pipeline.minimap_port;
 

@@ -1,6 +1,6 @@
 /**
  * @file toast_faults.cppm
- * @brief Constructs external-TOAST fixtures and verifies PostgreSQL fault unwinding.
+ * @brief Build external TOAST test data and check C++ cleanup after detoast errors.
  */
 module;
 

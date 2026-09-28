@@ -1,12 +1,10 @@
 /**
  * @file index.cppm
- * @brief Aggregate interface for shared compile-time and runtime-dispatch utilities.
+ * @brief Re-exports the shared template and runtime dispatch helpers.
  *
- * @details Re-exports structural template-value carriers, pack utilities,
- * runtime dispatch, dispatch chains, and enumeration maps. Component modules
- * remain independently importable.
+ * Individual helper modules can also be imported separately.
  */
-/** @brief Stable module symbol re-exporting the common templating utility surface. */
+/** @brief Shared template utilities. */
 export module bioseq.common.templating;
 
 export import bioseq.common.templating.compile_time_string;

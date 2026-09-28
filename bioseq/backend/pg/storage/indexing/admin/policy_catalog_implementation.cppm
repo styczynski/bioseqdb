@@ -1,6 +1,6 @@
 /**
  * @file admin/policy_catalog_implementation.cppm
- * @brief Implements policy operations that instantiate chunked storage handles.
+ * @brief Build insert-time indexes and estimate whether stored indexes are present.
  */
 module;
 
@@ -13,9 +13,9 @@ extern "C" {
 #include "utils/lsyscache.h"
 }
 
-// Clang 22 must see these textual libc++ declarations before deserializing
-// header-backed dependency BMIs; importing std first makes aligned operator new
-// appear as two unrelated candidates during container allocation.
+// Include libc++ declarations beforl loading dependency modules. With Clang 22,
+// importing std first can expose two aligned operator new declarations and
+// make container allocation ambiguous.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -245,7 +245,7 @@ void index_build_on_insert(Oid user_relid,
                                    static_cast<std::uint64_t>(row_key),
                                    caches,
                                    mctx);
-    // both layouts gate on the k_directory_sub_key witness written LAST.
+    // The directory chunk is written last, so its presence marks a completed row, index.
     try {
         const bool present = s.number_of_chunks(k_directory_sub_key) >= 1;
         s.close_checked();
@@ -261,7 +261,7 @@ estimate_index_presence(Oid user_relid, double estimated_total_rows, std::string
     if (estimated_total_rows <= 0)
         return 0.0f;
     const relation_identity rid = index_relation_identity(user_relid);
-    // Probe the bucket-0 shard-0 shard's reltuples (free, no scan).
+    // Use the bucket-0, shard-0 row estimate from pg_class without reading index rows.
     const std::string nm =
         format_seqidx_name(index_name, rid.db_oid, rid.tablespace_oid, rid.relfilenode, 0, 0, 0);
     const Oid ns = get_namespace_oid("bioseq_internal", true);
@@ -278,7 +278,7 @@ estimate_index_presence(Oid user_relid, double estimated_total_rows, std::string
             relation_close(r, AccessShareLock);
         }
     }
-    constexpr double k_fragment_count_estimate = 64.0; // coarse nominal
+    constexpr double k_fragment_count_estimate = 64.0; // assumed fragments per  sequence
     double est_rows = shard_reltuples < 0 ? (double)0 : shard_reltuples;
     double distinct_seq_est = est_rows / k_fragment_count_estimate;
     float cov = (float)std::min(1.0, distinct_seq_est / estimated_total_rows);

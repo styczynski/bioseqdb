@@ -1,6 +1,6 @@
 /**
  * @file external/providers/ncbi.cppm
- * @brief NCBI provider planning, retrieval, and Datasets archive handling.
+ * @brief Read NCBI Datasets metadata and fetch nucleotide FASTA records.
  */
 module;
 
@@ -41,7 +41,7 @@ import bioseq.common.context;
 import bioseq.parallelism.pool;
 import bioseq.common.templating.compile_time_string;
 
-/// NCBI Datasets metadata and sequence adapter.
+/// NCBI Datasets metadata and EFetch sequence adapter.
 export namespace bioseq::external::providers {
 
 namespace prov = bioseq::external::provider;
@@ -52,45 +52,45 @@ using prov::external_error_kind;
 using prov::make_external_error;
 using prov::provider_id;
 
-/// Returns the normalized NCBI provider identity.
+/// Return the provider ID used for NCBI rows and errors.
 inline prov::provider_id ncbi_provider_id() noexcept {
     return {.value = "ncbi"};
 }
 
-/// Returns the bounded display name used in normalized rows.
+/// Return the bounded NCBI display name stored in rows.
 inline prov::bounded_string<prov::maximum_provider_name_bytes> ncbi_provider_name() {
     return prov::bounded_string<prov::maximum_provider_name_bytes>::make_truncated("NCBI");
 }
 
-/// Copies an identifier into the provider-wide bounded representation.
+/// Copy an identifier, truncating it at the shared byte limit.
 inline prov::bounded_string<prov::maximum_identifier_bytes>
 ncbi_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// Validated NCBI request plan containing no credentials.
+/// NCBI operation and  looklp values chosen for a query.
 struct ncbi_plan {
     prov::query_target target{prov::query_target::taxonomy};
     std::string operation_id{"tax_name_query"};
-    // Path value for the taxon-keyed operations: a scientific/common name for
-    // tax_name_query, or a taxon-id string for taxonomy_data_report /
-    // genome_dataset_reports_by_taxon.
+    // Taxon name for tax_name_query, or a numeric TaxID written as text
+    // for taxonomy_data_report and genome_dataset_reports_by_taxon.
     std::string taxon_term;
-    // Path value for genome_dataset_report (a genome assembly accession).
+    // Assembly or sequence accession, or GeneID for a gene-location request
     std::string accession;
     std::optional<std::int64_t> taxon_id;
     std::optional<std::uint64_t> limit;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the plan and its strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         return sizeof(ncbi_plan) + operation_id.capacity() + taxon_term.capacity() +
                accession.capacity();
     }
 
-    /// Returns the deterministic execution identity for this plan.
+    /// Hash the operation, taxon term, and accession for plan identification.
+    /// The target and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        // Mix one plan component into the stable execution fingerprint.
+        // Add one text field to the plan hash.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -109,10 +109,10 @@ struct ncbi_plan {
     }
 };
 
-/// Executes one validated NCBI request plan.
+/// Fetch NCBI metadata or a nucleotide, sequence for one plan.
 class ncbi_session {
   public:
-    /// Opens a session over borrowed runtime services and an owning plan.
+    /// Own the plan while borrowing the memory  context and worker pool.
     ncbi_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ncbi_plan plan)
@@ -122,17 +122,13 @@ class ncbi_session {
     ncbi_session(ncbi_session&&) noexcept = default;
     ncbi_session& operator=(ncbi_session&&) noexcept = default;
 
-    /// Runs the request and emits normalized provider messages.
+    /// Fetch one metadata response or FASTA record and emit provider messages.
     std::expected<prov::provider_statistics, external_error>
     run(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
 
-        // Nucleotide sequence retrieval does not go through the Datasets v2 JSON
-        // client: that API returns bases only inside ZIP packages, which cannot
-        // pass through this JSON path and its body cap. The
-        // sequence / sequence_chunk targets fetch FASTA over HTTPS from NCBI's
-        // sequence locator and emit target-aware rows. This channel is separate
-        // from the Datasets metadata client.
+        // Datasets returns sequence bases in ZIP packages, so sequence targets use
+        // EFetch FASTA. Metadata requests use the Datasets JSON client below.
         if (plan_.target == prov::query_target::sequence ||
             plan_.target == prov::query_target::sequence_chunk) {
             return run_sequence_retrieval(sink, stop);
@@ -178,7 +174,7 @@ class ncbi_session {
         return stats;
     }
 
-    /// Requests cooperative session cancellation.
+    /// Ask the row and chunk emission loops to stop.
     void request_stop() noexcept {
         if (stop_) {
             stop_->store(true);
@@ -203,8 +199,7 @@ class ncbi_session {
                                   .location = api::parameter_location::path,
                                   .value = std::string_view{plan_.accession}});
         } else if (plan_.operation_id == "gene_dataset_reports_by_id") {
-            // gene_ids is an integer array path parameter. Supply the single
-            // queried gene id parsed from the accession predicate.
+            // Parse the queried GeneID for the generated integer path parameter.
             std::int64_t gene_id = 0;
             const auto [parsed_end, error_code] = std::from_chars(
                 plan_.accession.data(), plan_.accession.data() + plan_.accession.size(), gene_id);
@@ -218,7 +213,7 @@ class ncbi_session {
         return parameters;
     }
 
-    /// Returns the current completion timestamp at provider precision.
+    /// Return the current time at microsecond precision.
     static prov::external_timestamp completion_now() noexcept {
         return std::chrono::time_point_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now());
@@ -239,7 +234,7 @@ class ncbi_session {
         return sink.push_fn(sink.object, prov::owning_provider_message{std::move(diagnostic)});
     }
 
-    /// Emits a warning when a limit or page token makes the result partial.
+    /// Warn when emission reached the limit or a next-page token is present.
     std::expected<void, external_error>
     maybe_emit_partial(const bioseq::external::json::value& document,
                        prov::provider_message_sink_ref sink,
@@ -265,7 +260,7 @@ class ncbi_session {
         return {};
     }
 
-    /// Provider text identity and optional normalized numeric taxon identity.
+    /// Taxon identifief as text and as a number when parsing succeeds.
     struct parsed_taxon_identity {
         std::string provider_identifier;
         std::optional<std::int64_t> numeric_identifier;
@@ -296,7 +291,7 @@ class ncbi_session {
         return {};
     }
 
-    /// Normalizes absence-tolerant NCBI taxonomy payloads into taxonomy rows.
+    /// Read  taxonomy search or report JSON, leaving missing fields unset.
     std::expected<void, external_error> emit_taxonomy_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
                                                            prov::provider_statistics& stats,
@@ -329,9 +324,8 @@ class ncbi_session {
 
         bool handled = false;
 
-        // Shape A — tax_name_query: {"sci_name_and_ids":[{"sci_name":...,
-        // "tax_id":"9606","common_name":...,"rank":"SPECIES"}, ...]}. tax_id is
-        // a JSON string here.
+        // Name searches return sci_name_and_ids with fields such as sci_name
+        // and tax_id. The TaxID may be stored as text, for example "9606".
         if (const json::value* items = document->find_member("sci_name_and_ids");
             items != nullptr && items->is_array()) {
             handled = true;
@@ -370,10 +364,9 @@ class ncbi_session {
             }
         }
 
-        // Shape B — taxonomy_data_report: {"reports":[{"taxonomy":{"tax_id":
-        // 9606,"rank":"SPECIES","current_scientific_name":{"name":"Homo
-        // sapiens"},"parents":[...]}}]}. tax_id is a JSON integer here and the
-        // scientific name is nested under current_scientific_name.name.
+        // Taxonomy reports nest each record under reports[].taxonomy.
+        // Read the scientific name from current_scientific_name.name and
+        // accept an integer TaxID such as 9606.
         if (!handled) {
             if (const json::value* reports = document->find_member("reports");
                 reports != nullptr && reports->is_array()) {
@@ -415,8 +408,8 @@ class ncbi_session {
                         row.common_name = ncbi_bounded_id(*common);
                     }
 
-                    // parents[] is ordered from root to immediate parent. The last
-                    // entry is the direct parent taxon.
+                    // Treat the last entry in parents[] as the immediate parent
+                    // Keep the full list as the lineage.
                     if (const json::value* parents = taxonomy->find_member("parents");
                         parents != nullptr && parents->is_array()) {
                         std::vector<std::int64_t> lineage;
@@ -448,7 +441,7 @@ class ncbi_session {
         return maybe_emit_partial(*document, sink, stats, truncated);
     }
 
-    /// Parses an optional unsigned decimal string, returning zero on absence.
+    /// Read an unsigned decimal prefix, returning zero when absent or unparseable.
     static std::uint64_t parse_u64(std::optional<std::string_view> text) {
         std::uint64_t value = 0;
         if (text.has_value() && !text->empty()) {
@@ -457,8 +450,8 @@ class ncbi_session {
         return value;
     }
 
-    /// Parses an NCBI gene dataset report into record-location rows.
-    /// One-based inclusive NCBI ranges become zero-based half-open intervals.
+    /// Emit gene catalog rows containing their  genomic locations.
+    /// Convert one-based inclusive ranges to zero-based, half-open intervals.
     std::expected<void, external_error> emit_location_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
                                                            prov::provider_statistics& stats,
@@ -574,7 +567,7 @@ class ncbi_session {
         return {};
     }
 
-    /// Normalizes NCBI genome dataset reports into catalog rows.
+    /// Convert NCBI genome reports into assembly catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -673,13 +666,14 @@ class ncbi_session {
         return maybe_emit_partial(*document, sink, stats, truncated);
     }
 
-    // ----- Nucleotide sequence retrieval (sequences / sequence_chunks) ------
+    // Nucleotide sequences and chunks.
 
-    // Largest valid-base count for a non-final dna5/64 chunk: the largest
-    // multiple of the 21 bases-per-storage-unit not exceeding 1 Mi bases.
+    // Keep non-final chunks aligned to dna5/64 storage units of 21 bases.
+    // This is, the largest such chunk below 1 Mi bases.
     static constexpr std::uint64_t k_sequence_chunk_bases = 1048572;
 
-    /// Extracts the first FASTA record while dropping headers and whitespace.
+    /// Collect FASTA bases until a later header follows a nonempty sequence.
+    /// Skip headers, spaces, tabs, and line endings.
     static std::string parse_fasta_bases(std::string_view body) {
         std::string bases;
         bases.reserve(body.size());
@@ -691,7 +685,7 @@ class ncbi_session {
             i = (nl == std::string_view::npos) ? body.size() : nl + 1;
             if (!line.empty() && line.front() == '>') {
                 if (!bases.empty()) {
-                    break; // second record — keep only the first
+                    break; // A later record starts here. Keep the bases already collected.
                 }
                 continue;
             }
@@ -720,7 +714,7 @@ class ncbi_session {
         return payload;
     }
 
-    /// Emits a whole sequence or ordered bounded chunks for the requested target.
+    /// Emit the collecded bases as one row or as ordered sequence chunks.
     std::expected<std::uint64_t, external_error> emit_sequence_payloads(
         prov::provider_message_sink_ref sink, const std::string& bases, std::stop_token stop) {
         if (plan_.target == prov::query_target::sequence) {
@@ -764,7 +758,7 @@ class ncbi_session {
         return rows;
     }
 
-    /// Fetches FASTA over HTTPS and emits sequence rows for the active plan.
+    /// Download FASTA, collect  its first nonempty sequence, and emit rows.
     std::expected<prov::provider_statistics, external_error>
     run_sequence_retrieval(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
@@ -776,8 +770,7 @@ class ncbi_session {
                                     "NCBI sequence retrieval requires an accession predicate"));
         }
 
-        // Direct HTTPS FASTA locator. Efetch is unauthenticated, so credentials
-        // never enter the URL.
+        // Fetch nucleotide FASTA directly, without adding authentication parameters.
         bioseq::external::https_client client("eutils.ncbi.nlm.nih.gov");
         std::string path = "/entrez/eutils/efetch.fcgi?db=nuccore&id=";
         path += plan_.accession;
@@ -825,7 +818,7 @@ class ncbi_session {
 
 static_assert(prov::external_api_session_compatible<ncbi_session>);
 
-/// NCBI adapter implementing the external provider contract.
+/// Provider adapter for NCBI metadata and nucleotide sequences.
 struct ncbi_provider {
     static constexpr auto id = bioseq::common::templating::compile_time_string("ncbi");
     static constexpr auto name = bioseq::common::templating::compile_time_string("NCBI");
@@ -836,7 +829,7 @@ struct ncbi_provider {
     /// Session executing a prepared request plan.
     using session_type = ncbi_session;
 
-    /// Returns statically available NCBI capabilities.
+    /// Return the NCBI features advertised by this adapter.
     static prov::provider_capabilities make_potential_capabilities() {
         prov::provider_capabilities caps;
         caps.flags.set(static_cast<std::size_t>(prov::provider_capability::taxonomy_search));
@@ -850,17 +843,17 @@ struct ncbi_provider {
         return caps;
     }
 
-    /// Returns the request-policy profiles owned by this adapter.
+    /// Return an empty list of request-policy profiles.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
-    /// Returns the locator-policy profiles owned by this adapter.
+    /// Return an empty list of URL-policy profiles.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
-    /// Estimates the bounded resources required by one NCBI plan.
+    /// Estimate plan and buffer sizes, reserving a transfer for sequence targets.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,
@@ -876,13 +869,12 @@ struct ncbi_provider {
         return estimate;
     }
 
-    /// Lowers a normalized query into a validated NCBI plan.
+    /// Choose an NCBI operation from the query target and lookup filters.
     static std::expected<ncbi_plan, external_error>
     plan(const prov::normalized_external_query& query,
          const prov::provider_capability_snapshot&,
          const prov::external_slot_budget&) {
-        // Pull the first usable text/taxon/accession predicate out of the query
-        // so the plan targets a specific record when one was requested.
+        // Take the first usable name, TaxID, and accession filters for the request
         std::optional<std::string_view> text_term;
         std::optional<std::int64_t> taxon;
         std::optional<std::string_view> accession;
@@ -946,23 +938,21 @@ struct ncbi_provider {
                 plan.operation_id = "tax_name_query";
                 plan.taxon_term.assign(*text_term);
             } else {
-                // A bounded default keeps discovery probes well-formed.
+                // Default an unfiltered taxonomy  lookup to Homo sapiens.
                 plan.operation_id = "tax_name_query";
                 plan.taxon_term = "Homo sapiens";
             }
         } else if (query.target == prov::query_target::record_location) {
-            // record_locations lowers to the NCBI gene dataset report, keyed by
-            // the queried gene id (the accession predicate). Genomic intervals
-            // are parsed from the gene's per-assembly annotations.
+            // Gene-location queries use the accession filter as a GeneID.
+            // The session reads genomic intervals from each assembly annotation.
             plan.operation_id = "gene_dataset_reports_by_id";
             if (accession) {
                 plan.accession.assign(*accession);
             }
         } else if (query.target == prov::query_target::sequence ||
                    query.target == prov::query_target::sequence_chunk) {
-            // Nucleotide sequence retrieval is keyed by the queried accession.
-            // the session fetches FASTA over HTTPS (run_sequence_retrieval) and
-            // splits it into chunk rows for the sequence_chunk relation.
+            // Fetch the accession as nucleotide FASTA. sequence_chunk results
+            // split the collected bases into rows with increasing offsets.
             plan.operation_id = "efetch_nuccore_fasta";
             if (accession) {
                 plan.accession.assign(*accession);
@@ -984,7 +974,7 @@ struct ncbi_provider {
         return plan;
     }
 
-    /// Opens an execution session for a validated plan.
+    /// Open a session that owns a copy of the plan.
     static std::expected<ncbi_session, external_error>
     open(context::context& worker_memory,
          const bioseq::parallelism::global_pool& pool,

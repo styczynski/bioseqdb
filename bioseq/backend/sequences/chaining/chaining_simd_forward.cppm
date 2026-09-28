@@ -1,6 +1,6 @@
 /**
  * @file chaining_simd_forward.cppm
- * @brief Exact and bounded SIMD forward recurrences for chaining.
+ * @brief Finds predecessor links with exact-visited or bounded SIMD chaining.
  */
 module;
 
@@ -42,17 +42,14 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-/// @brief Runs exact visited-set dynamic programming for every anchor.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @param anchors Canonically ordered anchors.
-/// @param soa Structure-of-arrays coordinates for vector loads.
-/// @param best_scores Destination score for every anchor.
-/// @param predecessors Destination predecessor index for every anchor.
-/// @param peak_scores Destination peak score for every anchor.
-/// @param params Chaining distances, penalties, and skip limits.
-/// @param stats Optional full execution counters.
-/// @param route_summary Optional lightweight route counters.
+/// @brief Score chain extensions while preserving the scalar visited-anchor rules.
+/// Score candidates in SIMD batches, then apply improvements and skip counts
+/// in newest-first order A batch with no possible improvement can update
+/// the skip count without replaying every candidate.
+///
+/// anchors must be sorted for chaining, with  matching soa coordinates.
+/// Fill best_scores, predecessors, and peak_scores for every anchou.
+/// stats is required when p_collect_stats is true. route_summary is optional.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_exact(
     p_descriptor_type d,
@@ -162,12 +159,10 @@ void simd_dp_forward_pass_exact(
             const auto valid_scores = hn::And(
                 active, hn::Ne(scores, invalid_score));
 
-            // p[j] is always older than j. Therefore marking every valid
-            // predecessor in this batch before examining candidates produces
-            // the same generation observed by the descending scalar order:
-            // only a higher candidate can mark a lower candidate. Marks made
-            // below an eventual stop are harmless because this generation is
-            // never queried again after the stop.
+            // Every predecessor is older than its anchor. Marking the batch in
+            // advance therefore gives each candidate the same visited state
+            // as a newest-first scan. Marks beyond a later stop are harmless
+            // because this anchor's generation is never read, again.
             const auto predecessor_marks = hn::And(
                 valid_scores,
                 hn::Gt(predecessor_indices, hn::Set(d, -1)));
@@ -182,11 +177,9 @@ void simd_dp_forward_pass_exact(
                             predecessor_indices,
                             expected_contiguous_predecessors)));
             if (contiguous_predecessor_run) {
-                // NEON lowers MaskedScatterIndex to one extract/branch/store
-                // sequence per lane.  The common diagonal p[j] == j - 1 run
-                // has contiguous destinations, so one real vector store is
-                // exactly equivalent and leaves the general scatter path
-                // untouched for irregular or invalid candidates.
+                // Consecutive predecessor links have consecutive mark destinations.
+                // Use one  vector store for the run and keep masked scatter
+                // for irregular links.
                 hn::StoreN(
                     hn::Set(d, current_idx),
                     d,
@@ -239,9 +232,9 @@ void simd_dp_forward_pass_exact(
                 static_cast<std::uint64_t>(active_lanes));
 
             if (hn::AllFalse(d, can_improve)) {
-                // best_score can only increase, so if no lane beats it at
-                // batch entry no lane can improve later in this batch. Exact
-                // max-skip state is then just the number of visited hits.
+                // No candidate can improve the score in this batch. Count visited
+                // hits directly, locating the stopping candidate only if the
+                // batch would exceed max_chain_skip.
                 stats_add<p_collect_stats>(
                     stats,
                     &simd_chaining_execution_stats::
@@ -297,10 +290,9 @@ void simd_dp_forward_pass_exact(
                     skip_count += hit_count;
                 }
             } else {
-                // At least one vector-produced biological score may change
-                // scalar state. Replay only this batch's control decisions in
-                // exact descending order; no scalar score implementation is
-                // called.
+                // A candidate may improve the score. Apply the SIMD-produced scores
+                // in newest-first order to preserve updates to the winner
+                // and the skip count.
                 stats_add<p_collect_stats>(
                     stats,
                     &simd_chaining_execution_stats::
@@ -464,12 +456,9 @@ void simd_dp_forward_pass_exact(
     }
 }
 
-/// Explicitly approximate forward chaining. Every biological pair score,
-/// including masked tails and the one-candidate rescue, is produced by
-/// the specialized SIMD batch scorer. Scalar work is limited to batch
-/// orchestration and extracting the vector-reduced winning predecessor.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @return Mask of lanes that improved their retained winner.
+/// Keep a separate best chain extension in  each SIMD lane.
+/// Replace a lane's winner only on a strict score improvement, so an equal
+/// score keeps the newer predecessor visited earlier. Return the improved lanes.
 template<class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
     p_descriptor_type d,
@@ -499,12 +488,9 @@ HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
     return improved;
 }
 
-/// @brief Scores and folds one bounded predecessor batch into lane winners.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_full_batch Whether every physical lane contains a candidate.
-/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @return Mask of lanes that improved their retained winner.
+/// @brief Score a predecvssor batch and update each lane's best extension
+/// Mask tail lanes when p_full_batch is false. Return the lanes whose stored
+/// score improved, so the caller can update its stopping rule.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
     p_descriptor_type d,
@@ -562,10 +548,12 @@ HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
     }
 }
 
-/// @brief Runs bounded-batch dynamic programming for one penalty specialization.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @brief Build chains with a limit on consecutive non-improving SIMD batches.
+/// Each lane keeps its own winner. An  improvement in any lane resets the
+/// stopping count, and the final reduction chooses the best predecessor.
+/// If the search stops early, also test the cached highest-scoring anchor
+/// when it lies in the skipped range. This heuristic can choose different
+/// predecessors from exact-visited chaining.
 template<bool p_collect_stats, bool p_has_skip_penalty, class p_descriptor_type>
 void simd_dp_forward_pass_bounded_impl(
     p_descriptor_type d,
@@ -626,11 +614,10 @@ void simd_dp_forward_pass_bounded_impl(
                    anchors[current_idx].query_span));
         auto lane_best_predecessors = hn::Set(d, -1);
         std::int32_t consecutive_nonimproving = 0;
-        // No unscanned interval unless a cutoff replaces this with a value
-        // strictly greater than window_start.
+        // An early stop will record the end of the skipped candidate range here.
         std::int32_t unscanned_end_exclusive = window_start;
 
-        // Classifies one scored batch and applies the bounded non-improvement cutoff.
+        // Reset the stop count on, an improving batch, or stop after enough misses.
         auto record_batch = [&route_score_vector_batches,
                              &route_score_vector_lanes,
                              &route_score_masked_lanes,
@@ -804,8 +791,7 @@ void simd_dp_forward_pass_bounded_impl(
                 ? peak_scores[best_predecessor]
                 : best_score;
 
-        // The current anchor is the largest index and therefore replaces the
-        // cached winner on an equal score as well as a strict improvement.
+        // Keep the newest anchor when cached best scores tie.
         if (global_best_idx < window_start
             || best_scores[current_idx]
                 >= best_scores[global_best_idx])
@@ -850,9 +836,7 @@ void simd_dp_forward_pass_bounded_impl(
     }
 }
 
-/// @brief Selects the zero or nonzero skip-penalty bounded kernel.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @brief Choose the bounded kernel for  a zero or nonzero skip psnalty.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_bounded(
     p_descriptor_type d,
@@ -865,9 +849,8 @@ void simd_dp_forward_pass_bounded(
     simd_chaining_execution_stats* stats,
     simd_chaining_route_stats* route_summary)
 {
-    // Select the arithmetic policy once, outside every anchor/candidate loop.
-    // The zero-penalty specialization removes gap-length float work while the
-    // nonzero specialization preserves the general scoring formula.
+    // Choose once so a zero skip penalty adds no distance-conversion work
+    // inside the candidate loop.
     if (params.skip_penalty == 0.0F) {
         simd_dp_forward_pass_bounded_impl<p_collect_stats, false>(
             d,
@@ -893,13 +876,9 @@ void simd_dp_forward_pass_bounded(
     }
 }
 
-/// @brief Dispatches the selected policy outside the candidate loop.
-///
-/// Compile-time forward dispatch keeps the policy test outside the candidate
-/// loop while sharing allocation, SoA conversion, and backtracking.
-/// @tparam p_policy Forward-search policy selected at compile time.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @brief Run the forward-search policy selected at compile time.
+/// Both policies share the caller's coordinate arrays and output buffers,
+/// and use the same backtracking step after this pass
 template<simd_chaining_policy p_policy, bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass(
     p_descriptor_type d,

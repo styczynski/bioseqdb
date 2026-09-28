@@ -1,10 +1,10 @@
 /**
  * @file external/tests/io/sequence_stream_live_test.cpp
- * @brief Live NCBI streaming and bounded-channel cancellation tests.
+ * @brief Check live NCBI sequence chunks and channel capacity accounting.
  */
 
-// Exercise NCBI sequence streaming and deterministic bounded-channel
-// accounting. Provider-backed cases select the network resource explicitly.
+// Read sequences from NCBI and check channel, capacity in separate local tests.
+// Network cases carry the resource:network tag.
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -83,7 +83,7 @@ TEST_CASE(
     INFO("error: " << (stats.has_value() ? std::string{}
                                          : std::string(stats.error().message.view())));
     REQUIRE(stats.has_value());
-    // 4,641,652 bp / 1,048,572 => 4 full chunks + a 447,364 bp tail = 5 rows.
+    // Expect four full chunks and a 447,364-base tail for NC_000913.3.
     REQUIRE(collector.rows.size() == 5);
     std::uint64_t total = 0;
     for (std::size_t i = 0; i < collector.rows.size(); ++i) {
@@ -142,15 +142,15 @@ TEST_CASE("bounded_channel charges bytes/items and enforces backpressure",
         REQUIRE(channel.push(1, 100, std::stop_token{}).has_value());
         std::atomic<bool> second_pushed{false};
         std::thread producer([&channel, &second_pushed] {
-            // 100 more would exceed 150 with one item already charged and blocks.
+            // The second 100-byte item  must wait for the first item's charge to be released.
             (void)channel.push(2, 100, std::stop_token{});
             second_pushed.store(true);
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        REQUIRE_FALSE(second_pushed.load()); // backpressure held
+        REQUIRE_FALSE(second_pushed.load()); // Producer is still waiting for capacity
         auto lease = channel.pop_for(std::chrono::milliseconds(10));
         REQUIRE(lease.status == prov::pop_status::item);
-        lease.item->release(); // frees capacity -> producer proceeds
+        lease.item->release(); // Return capacity so the producer can continue.
         producer.join();
         REQUIRE(second_pushed.load());
         REQUIRE(channel.high_water_bytes() <= 200);

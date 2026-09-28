@@ -1,6 +1,6 @@
 /**
  * @file prefilter_execution_contract.cppm
- * @brief Target-neutral rank-prefilter execution statistics.
+ * @brief Counts completed prefilter work and checks the reported totals.
  */
 module;
 
@@ -15,21 +15,19 @@ export import bioseq.pipeline.runtime_contract;
 
 export {
 
-// Rank-prefilter stats is a target-independent statement observation. Keeping it
-// outside the Highway namespace gives every compiled SIMD target one shared
-// type, so PostgreSQL can aggregate operation statistics without translating or
-// mirroring their counters.
+// Keep one statistics type outside Highway's per-target namespaces so
+// PostgreSQL can combine results from every compiled SIMD target.
 namespace bioseq::prefilter {
 
-/// Algorithm resolved for one completed prefilter batch.
+/// Algorithm that ran a completed prefilter batch.
 enum class resolved_prefilter_algorithm : std::uint8_t {
     /// SneakySnake edit-distance filtering.
     sneaky_snake = 0u,
-    /// GateKeeper bit-mask filtering with exact rejection guards.
+    /// GateKeeper masks, with exact checks before accepting mask-based rejections.
     gatekeeper = 1u,
 };
 
-/** Return the stable name of a resolved prefilter algorithm. */
+/** Return the algorithm name used in reports, or "unknown". */
 [[nodiscard]] constexpr const char* prefilter_algorithm_name(
     resolved_prefilter_algorithm algorithm) noexcept
 {
@@ -40,13 +38,11 @@ enum class resolved_prefilter_algorithm : std::uint8_t {
     return "unknown";
 }
 
-/// Operation-originated statistics for the rank-prefilter stage.
+/// Counts work completed by the prefilter stage.
 ///
-/// A selector never populates this value.  The stage records one dispatch only
-/// after the selected backend has returned a complete result batch and the
-/// per-region survivor decision has been applied.  This makes the stats useful
-/// to benchmark and SQL callers that must distinguish requested policy from
-/// real maze execution.
+/// Record a batch  after its backend returns all results and the stage decides
+/// which regions survive. Reports can then show the algorithm that ran and
+/// the regions it rejected, even when the request allowed autmatic selection.
 struct prefilter_execution_stats {
     /// Completed prefilter batches.
     std::uint64_t dispatches = 0;
@@ -56,38 +52,38 @@ struct prefilter_execution_stats {
     std::uint64_t gatekeeper_dispatches = 0;
     /// Batches completed on the scalar backend.
     std::uint64_t scalar_dispatches = 0;
-    /// Batches completed on a Highway backend.
+    /// Batches completed by a Highway SIMD kernel.
     std::uint64_t simd_dispatches = 0;
     /// Batches completed on the Vulkan backend.
     std::uint64_t vulkan_dispatches = 0;
-    /// Jobs presented to completed batches.
+    /// Sequence-gap comparisons submitted in completed batches.
     std::uint64_t jobs = 0;
-    /// Jobs evaluated by the selected algorithm.
+    /// Jobs for which the selected prefilter returned a supported result
     std::uint64_t evaluated_jobs = 0;
-    /// Supported equal-length 64-symbol jobs that returned success.
+    /// Supported jobs with 64 symbols on each side, accepted or rejected.
     std::uint64_t length_64_jobs = 0;
-    /// Jobs bypassed because query and target lengths differ.
+    /// Unequal-length jobs checked using only the length-difference lower bound.
     std::uint64_t length_difference_jobs = 0;
-    /// Jobs outside the selected algorithm's supported shape.
+    /// Jobs accepted  without evaluation because their input shape is unsupported.
     std::uint64_t unsupported_jobs = 0;
     /// Jobs rejected by the prefilter.
     std::uint64_t rejected_jobs = 0;
-    /// Alignment regions rejected after job aggregation.
+    /// Regions rejected by a gap result or by their combined lower bound.
     std::uint64_t rejected_regions = 0;
-    /// Alignment regions retained after job aggregation.
+    /// Regions kept for alignment after combining their gap results.
     std::uint64_t surviving_regions = 0;
-    /// GateKeeper masks eligible for exact rejection checks.
+    /// Jobs whose GateKeeper mask suggests rejecting the sequence pair.
     std::uint64_t mask_rejection_candidates = 0;
-    /// Exact rejection checks executed after mask filtering.
+    /// Exact edit-distance checks made, to confirm mask-based rejections.
     std::uint64_t exact_guard_activations = 0;
-    /// Exact checks that confirmed a rejection.
+    /// Mask-based rejections confirmed by an exact edit-distance check.
     std::uint64_t guard_confirmed_rejections = 0;
-    /// Rejections confirmed by exact Hamming distance.
+    /// Zero-edit jobs rejected because the sequences differ at a position.
     std::uint64_t hamming_exact_rejections = 0;
-    /// Counter overflow or an invalid accounting transition was observed.
+    /// A counter overflowed or the reported counts failed a consistency check.
     bool is_saturated = false;
 
-    /** Add one counter with saturation recorded in the supplied flag. */
+    /** Add to a counter, clamping overflow  and setting saturated_flag. */
     static constexpr void add(
             std::uint64_t& destination,
             const std::uint64_t increment,
@@ -101,7 +97,7 @@ struct prefilter_execution_stats {
         destination += increment;
     }
 
-    /** Record one completed batch and validate its accounting relationships. */
+    /** Add a completed batch and check its algorithm-specific counts. */
     constexpr void record_batch(
             const resolved_prefilter_algorithm algorithm,
             const prefilter_backend backend,
@@ -157,7 +153,7 @@ struct prefilter_execution_stats {
                 add(vulkan_dispatches, 1u, is_saturated);
                 break;
             case prefilter_backend::automatic:
-                // AUTO must be resolved before an operation can be attested.
+                // Resolve AUTO to the backend that ran before recording the batch.
                 is_saturated = true;
                 break;
         }
@@ -179,13 +175,12 @@ struct prefilter_execution_stats {
             hamming_exact_rejection_count, is_saturated);
     }
 
-    /** Merge a completed batch or statement aggregate into this value. */
+    /** Add another batch or statement's counters and keep any invalid status. */
     constexpr void merge(
             const prefilter_execution_stats& other) noexcept {
-        // A caller that marks a stats present is attesting a complete batch
-        // or statement aggregate.  Malformed input must remain sticky:
-        // adding its numeric zeroes to a valid aggregate must never make the
-        // final stats appear valid.
+        // An invalid input must leave the merged result invalid, even when all
+        // its counters are ero. Otherwise a failed batch could disappear
+        // inside an aggregate with valid work.
         bool overflow = is_saturated || !other.is_internally_consistent();
         add(dispatches, other.dispatches, overflow);
         add(sneaky_snake_dispatches,
@@ -212,9 +207,9 @@ struct prefilter_execution_stats {
         is_saturated = overflow;
     }
 
-    /// Validate algorithm/backend accounting without requiring one backend.
-    /// A statement aggregate may legitimately contain more than one resolved
-    /// algorithm or backend across completed batches.
+    /// Check totals across completed batches. Several algorithms or backends
+    /// may contribute to one statement Optional checks require evaluated jobs
+    /// or  reject aggregates containing unsupported jobs.
     [[nodiscard]] constexpr bool is_internally_consistent(
             const bool require_evaluated_jobs = false,
             const bool forbid_unsupported_jobs = false) const noexcept {
@@ -250,7 +245,7 @@ struct prefilter_execution_stats {
             || (forbid_unsupported_jobs && unsupported_jobs != 0u));
     }
 
-    /** Validate accounting and require every dispatch to use one backend. */
+    /** Check the totals and require every batch to use the specified backend. */
     [[nodiscard]] constexpr bool is_backend_consistent(
             const prefilter_backend expected_backend,
             const bool require_evaluated_jobs = false,
@@ -277,7 +272,7 @@ struct prefilter_execution_stats {
         return false;
     }
 
-    /// Return the operation-proven algorithm identity of this aggregate.
+    /// Return the completed algorithm's name, "mixed", or "invalid".
     [[nodiscard]] constexpr const char* resolved_algorithm_name() const noexcept {
         if (!is_internally_consistent()) {
             return "invalid";
@@ -291,7 +286,7 @@ struct prefilter_execution_stats {
         return "mixed";
     }
 
-    /// Return the operation-proven backend identity of this aggregate.
+    /// Return the completed backend's name, "mixed", or "invalid".
     [[nodiscard]] constexpr const char* resolved_backend_name() const noexcept {
         if (!is_internally_consistent()) {
             return "invalid";

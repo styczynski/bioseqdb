@@ -507,7 +507,7 @@ attributes_named(
 
 }  // namespace detail
 
-/// Parses the exact closed emission-policy vocabulary.
+/// Reads selector_api or implementation_owners, rejecting other policy names.
 [[nodiscard]] inline emission_policy parse_emission_policy(
     std::string_view spelling) {
     if (spelling == "selector_api") {
@@ -678,7 +678,7 @@ void validate_coordinate_axis_domain(
     }
 }
 
-/// Returns whether a coordinate satisfies every selection clause.
+/// Checks that the chosen cases satisfy every condition on a declaration.
 [[nodiscard]] inline bool coordinate_matches(
     const materialization_coordinate& coordinate,
     const std::vector<selection_clause>& clauses) {
@@ -696,14 +696,14 @@ void validate_coordinate_axis_domain(
     return true;
 }
 
-/// Resolves a binding's replacement at one validated coordinate.
+/// Finds a binding's replacement for the chosen specialization.
 [[nodiscard]] inline const replacement_case& replacement_for(
     const binding_record& binding,
     const materialization_coordinate& coordinate) {
     return detail::selected_case(binding, coordinate);
 }
 
-/// Builds source-ordered, zipped axis groups from extracted bindings.
+/// Groups bindings that  choose matching labels together, preserving source order.
 [[nodiscard]] inline std::vector<axis_group> build_axis_groups(
     const materialization_region& region) {
     std::vector<axis_group> groups;
@@ -764,7 +764,7 @@ void validate_coordinate_axis_domain(
     return groups;
 }
 
-/// Expands a validated region into its closed coordinate product.
+/// Builds all combinations of the declared choices, up to the configured limit.
 [[nodiscard]] inline topology_plan build_topology_plan(
     materialization_region region,
     const std::size_t maximum_coordinates = 4096u) {
@@ -845,7 +845,7 @@ void validate_coordinate_axis_domain(
     return plan;
 }
 
-/// Closed semantic template-flatten profile vocabulary.
+/// Supported template-flatten build profiles.
 inline constexpr std::array<std::string_view, 6u>
     template_flatten_profiles{
         "dna4_uint64",
@@ -856,14 +856,14 @@ inline constexpr std::array<std::string_view, 6u>
         "full_specialization",
     };
 
-/// Returns whether a semantic template-flatten profile is supported.
+/// Checks whether the build profile is supported.
 [[nodiscard]] inline bool template_flatten_profile_supported(
     const std::string_view profile) noexcept {
     return std::ranges::find(template_flatten_profiles, profile)
         != template_flatten_profiles.end();
 }
 
-/// Returns whether a semantic profile includes a coordinate.
+/// Checks whether a build profile includes this, combination of choices.
 [[nodiscard]] inline bool coordinate_enabled_for_profile(
     const materialization_coordinate& coordinate,
     std::string_view profile) {
@@ -895,7 +895,7 @@ inline constexpr std::array<std::string_view, 6u>
     return true;
 }
 
-/// Returns all supported profiles that include a coordinate.
+/// Lists the build profiles that include this combination of choices.
 [[nodiscard]] inline std::vector<std::string> enabled_profiles_for(
     const materialization_coordinate& coordinate) {
     std::vector<std::string> result;
@@ -907,9 +907,8 @@ inline constexpr std::array<std::string_view, 6u>
     return result;
 }
 
-/// Shared configure/structural handshake used by production generation and
-/// mutation contracts. A topology change always requires CMake to rebuild its
-/// source graph; generation never chooses one side of a mismatch.
+/// Checks that the source-derived topology matches the CMake configuration
+/// A mismatch requires reconfiguring the build so CMake sees the new files.
 inline void validate_configure_topology_digest(
     const topology_plan& topology,
     std::string_view configured_digest) {
@@ -928,7 +927,7 @@ inline void validate_configure_topology_digest(
     }
 }
 
-/// Verifies the exact enabled-coordinate list for a profile.
+/// Checks that the enabled specialization list exactly matches the selected profile.
 inline void validate_enabled_ordinals(
     const topology_plan& topology,
     std::string_view profile,
@@ -956,7 +955,8 @@ inline void validate_enabled_ordinals(
     }
 }
 
-/// Verifies unique generated entry ownership for every identity.
+/// Checks that each generated API entry  and shared definition has one
+/// implementation owner per specialization identity.
 inline void validate_entry_ownership(const topology_plan& topology) {
     if (topology.region.policy == emission_policy::implementation_owners) {
         for (const owned_declaration& declaration
@@ -1144,7 +1144,9 @@ inline void validate_entry_ownership(const topology_plan& topology) {
     }
 }
 
-/// Verifies owner-mode body-free redeclarations against the imported primary.
+/// Checks implementation-owner probes against declarations imported from the primary module.
+/// Each expected declaration must appeer once, keep its identity and module
+/// attachment, and contain no implementation body.
 inline void validate_implementation_owner_declaration_probes(
     const topology_plan& topology,
     const std::vector<structural_analysis::translation_unit>& probes) {
@@ -1306,7 +1308,7 @@ inline void validate_implementation_owner_declaration_probes(
     }
 }
 
-/// Verifies that body-free probes cover the logical topology exactly once.
+/// Checks that declaration probes cover every expected binding and API entry once.
 inline void validate_declaration_probes(
     const topology_plan& topology,
     const std::vector<structural_analysis::translation_unit>& probes) {
@@ -1514,7 +1516,8 @@ inline void validate_declaration_probes(
     }
 }
 
-/// Verifies the authored boundary and all controlled declarations.
+/// Checks the source namespace, replacement bindings and selected declarations
+/// before any specialization is generated.
 inline void validate_materialization_region(
     const materialization_region& region,
     std::string_view source_text) {
@@ -1819,10 +1822,10 @@ inline void validate_materialization_region(
     }
 }
 
-/// The explicit-axis scheduler may consume the ordinary target-neutral
-/// dispatch contract, but it must never become a Highway target source or
-/// import the generated target graph. Exact token records keep this check
-/// independent of comments and substrings in unrelated identifiers.
+/// Keeps scheduler generation  separate from Highway target generation.
+/// The scheduler may import the ordinary dispatch contract. Generated target
+/// imports, Highway target macros and SIMD namespace markers are rejected
+/// using parsed imports and tokens.
 inline void validate_scheduler_highway_source_separation(
     const structural_analysis::translation_unit& unit,
     std::string_view output_module) {
@@ -1860,9 +1863,8 @@ inline void validate_scheduler_highway_source_separation(
     }
 }
 
-/// Recheck the same boundary against the authenticated module identities from
-/// PREPARE so an indirect generated provider cannot be laundered through an
-/// otherwise neutral direct import.
+/// Checks indirect dependencies from PREPARE for forbidden Highway target
+/// modules, including those reached through otherwise allowed imports.
 inline void validate_scheduler_highway_prepared_closure(
     std::string_view output_module,
     const structural_analysis::dependency_compilation_validation& prepared) {
@@ -1881,7 +1883,7 @@ inline void validate_scheduler_highway_prepared_closure(
     }
 }
 
-/// Extracts and validates one materialization region from a token slice.
+/// Reads the annotated namespace and validates which declarations may be copied.
 [[nodiscard]] inline materialization_region extract_materialization_region(
     const structural_analysis::translation_unit& unit,
     std::string configured_output_module_name,

@@ -1,39 +1,16 @@
 /**
  * @file pipeline/pipe.cppm
- * @brief Compile-time dispatched sequence-alignment pipeline.
+ * @brief Select and run the sequence-alignment pipeline.
  *
- * This module implements the compile-time dispatched stage graph used by the
- * scheduler-facing mapping entry points. It sits above kernel functions in
- * the target-neutral `bioseq::simd` namespace and provides:
- *
- *   - Compile-time parameter packs
- * (`static_aligner_parameters<p_window_size,p_runtime_kmer_size,p_bucket_width,
- *                            p_physical_kmer_size>` /
- *     `fallback_aligner_parameters<p_bucket_width,p_physical_kmer_size>`).
- *   - stage skeletons (`bare_stage<p_self>`, `stage_base<p_self,p_output>`,
- *     `stage<p_aligner_parameters,p_self,p_sink>`).
- *   - `make_pipeline<p_aligner_parameters>` variadic composer.
- *   - Concrete stages — every pipeline stage exposed as a stand-alone struct
- *     whose `process<p_aligner_parameters>` body forwards to the existing kernel function
- *     (collect_seed_hits, chain_anchors_*, generate_regions, etc.).
- *   - Top-level `dispatch_pipeline(...)` cascade that fixes (p_aligner_parameters,
- * p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point) at compile
- * time before driving the pipeline.
- *   - `pipeline_description` metadata surface for the Postgres EXPLAIN
- *     renderer.
- *
- * The pipeline calls into the existing kernels directly. Stages adapt
- * span-based I/O to the kernel's `std::vector`
- * signatures by materialising the kernel's output into arena-backed slabs
- * after the kernel returns.  The wire type between stages is `std::span<p_element>`
- * (with mutating stages taking non-const elements and read-only stages
- * taking const).
+ * Entry points accept raw sequences, prepared minimizers or a target index.
+ * Runtime settings select compiled stage implementations, while typed inputs
+ * keep their storage layout. The module also describes the selected stages
+ * for PostgreSQL EXPLAIN without running their kernels.
  */
 module;
 
 
-// Production and package profiles compile the recursive dispatch cascade at
-// -O3, so its inlining contract is unconditional.
+// Inline the dispatch steps so calls reach the selected implementation  directly.
 #define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
 #define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
@@ -113,11 +90,8 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 
-// This target-independent execution value deliberately precedes Highway
-// target toggling: these types describe
-// a whole statement and must have one ABI regardless of the compiled simd
-// target. algorithm_type-local statistics are mapped into this model at dispatch
-// boundaries; no Highway namespace owns an alias of it.
+// Use one statistics layout across CPU targets. Dispatch code copies
+// target-specific kernel records into this shared statement, format
 export import bioseq.pipeline.stats;
 
 export import :stage_graph;
@@ -181,8 +155,7 @@ export {
 #endif
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
-            // Both parameter specializations are available; the runtime condition
-            // selects the matching specialization.
+            // Use the specialized parameters when runtime k and w atch them.
             if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
                 return pipeline_run_impl<specialized_parameters,
                                          p_alignment_algorithm,
@@ -244,7 +217,7 @@ export {
                                        p_minimizer_algorithm>;
     };
 
-    /** @brief Selects only the existing suffix algorithms for a canonical seed job. */
+    /** Select chaining and alignment for a job whose seed records are already prepared. */
     template <sequence_alphabet p_alphabet, class p_minimizer,
               base_alignment_algorithm p_alignment_algorithm,
               chaining_algorithm p_chaining_algorithm>
@@ -306,11 +279,8 @@ export {
             p_alignment_algorithm, p_chaining_algorithm>;
     };
 
-    // Scheduler-owned raw entries have already selected the representation from
-    // the same `(kmer_size, max(query_bp, target_bp))` values consumed by the
-    // pipeline cascade.  Preserve those two pinned values while dispatching the
-    // remaining algorithm axes, instead of rebuilding every impossible sibling
-    // representation below each already-selected outer leaf.
+    // The caller already selected the minimizer storage layout. Keep its
+    // position width and physical k while choosing the remaining algorithms.
     template <pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer,
@@ -330,10 +300,8 @@ export {
                                        p_minimizer_algorithm>;
     };
 
-    /// Common leaf body shared by specialized and fallback parameter branches in
-    /// `describe_leaf::call`. Declared before
-    /// `describe_leaf` so its unqualified call inside `describe_leaf::call`
-    /// resolves at the point of template definition.
+    /// Build the shared EXPLAIN description for specialized or runtime parameters.
+    /// Define this before describe_leaf so template name lookup  can find it.
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
@@ -357,8 +325,8 @@ export {
         minimizer_hashmap_fragment_index empty_index{};
         match_result_collection ignored_out{};
         const auto& sm = thread_local_scoring_matrix<p_alphabet>(params);
-        // Cold metadata construction does not execute a kernel or touch Vulkan.
-        // The statement already owns its neutral Highway binding.
+        // EXPLAIN builds stage descriptions without running kernels. Empty
+        // alignment function pointers are sufficient for this graph.
         const ::bioseq::simd::alignment_kernels<p_alphabet> description_alignment_kernels{};
 
         auto pipeline =
@@ -390,10 +358,8 @@ export {
         return description;
     }
 
-    // Describe-side leaf — p_entry_point/p_minimizer_algorithm remain pinned so the structural
-    // stage skeleton does not multiply describe instantiations.  The exact query-minimizer Highway
-    // function is resolved neutrally from the frozen runtime enum and attached to the plan-only
-    // QuerySketchStage above.
+    // Keep one entry/minimizer template shape for EXPLAIN. Add the actual
+    // query-sketch description from the frozen runtime selection.
     template <sequence_alphabet p_alphabet,
               std::size_t p_bucket_width,
               std::size_t p_kmer_size,
@@ -459,7 +425,7 @@ export {
     };
 
     template <sequence_alphabet p_alphabet> struct describe_traits {
-        // The chain pins p_kmer_size before p_bucket_width.
+        // Dispatch supplies k before the position width that depends on it.
         template <auto p_kmer_size,
                   auto p_bucket_width,
                   auto p_alignment_algorithm,
@@ -473,18 +439,13 @@ export {
 
     } // namespace detail
 
-    // =============================================================================
-    // Top-level runtime cascade entry
-    // =============================================================================
-    //
-    // The runtime cascade is one `dispatch_chain<...>::run<>(...)` over the
-    // bucket-width, k-mer-size, alignment, chaining, and minimizer dimensions.
+    // Runtime entry points select the compiled algorithm implementations.
 
     /**
-     * @brief Dispatches one owned canonical seed job through the shared suffix.
+     * @brief Run chaining and alignment for one prepared seed job.
      *
-     * Physical minimizer geometry is already fixed by the input owner. This
-     * boundary adds neither a minimizer/entry/index axis nor a second stage graph.
+     * The seed and query-minimizer owners already  fix the input layout. This
+     * dispatch selects the suffix algorithms and reuses the shared stage graph.
      */
     template <sequence_alphabet p_alphabet, class p_minimizer>
     inline void dispatch_post_seed_job(
@@ -517,7 +478,7 @@ export {
                 );
     }
 
-    /// Resolve every dynamic pipeline axis and execute its compile-time leaf.
+    /// Select algorithms for typed minimizers and run the pipeline.
     template <pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer,
@@ -542,8 +503,8 @@ export {
         using traits_type = detail::pipeline_run_pinned_shape_traits<
             p_entry_point, p_alphabet, p_minimizer, p_index,
             record_layout::k_position_bits, record_layout::k_physical_kmer_size>;
-        // The caller already owns typed records. Never redispatch their physical
-        // K from biological k/w, which may intentionally describe another shape.
+        // Keep the input record layout. Runtime biological k and w can differ
+        // from the physical laiout chosen to store these records.
         return detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
@@ -565,11 +526,9 @@ export {
     }
 
     /**
-     * Scheduler-private counterpart of `dispatch_pipeline` for a raw
-     * representation leaf whose k-mer and sequence-length bucket were fixed by
-     * the outer raw cascade.  The leaf body remains the sole owner of the
-     * full-specialization specialised/fallback branch. Only the redundant second
-     * k-mer/bucket cascade is removed.
+     * Run a scheduler entry with its minimizer layout already selected
+     * Dispatch the algorithms and let the shared implementation  choose
+     * specialized or runtime parameters.
      */
     template <std::size_t p_bucket_width,
               std::size_t p_kmer_size,
@@ -622,16 +581,10 @@ export {
                            transient_target_index_owner);
     }
 
-    // =============================================================================
-    // describe_pipeline_for (EXPLAIN path)
-    // =============================================================================
-    //
-    // One chain instantiation over four steps (p_bucket_width, p_kmer_size, p_alignment_algorithm,
-    // p_chaining_algorithm). p_entry_point and p_minimizer_algorithm are pinned constants inside
-    // `describe_leaf`; algorithm-specific query-sketch metadata is added through the neutral
-    // enum-to-kernel mapping above.
+    // EXPLAIN selects layout, alignment, and chaining. Query-sketch metadata
+    // comes from the runtime selection without another template dispatch.
 
-    /// Describe the typed pipeline selected for representative query and target values.
+    /// Describe the selected pipeline using the supplied query and target lengths.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR pipeline_description describe_pipeline_for(
         statement_execution_plan_owner execution_plan,
@@ -646,7 +599,7 @@ export {
         const sequence_size_t target_len = target_seq_proto.bp_size();
 
         using traits_type = detail::describe_traits<p_alphabet>;
-        // Pin p_kmer_size before the dependent p_bucket_width step.
+        // Select k before choosing a position width for that record layout.
         return detail::dispatch_chain<pipeline_description,
                                       traits_type::template leaf,
                                       detail::kmer_size_step,
@@ -662,9 +615,9 @@ export {
     }
 
     /**
-     * Cold typed EXPLAIN entry. The owning metadata registry selects `p_alphabet`
-     * and supplies its runtime code together, so this layer neither redispatches
-     * nor maintains a second type/code map.
+     * Describe a pipeline for the registry's alphabet type and runtime code.
+     * Check the code against the statement plan, then build the graph with empty
+     * sequence views. A supplied Highway table also checks the type/code mapping.
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline pipeline_description describe_pipeline_for(
@@ -701,7 +654,7 @@ export {
     }
 
 
-    /// Synchronous non-executor metadata facade: freeze before any preparation.
+    /// Copy settings into  a statement plan, then describe the supplied sequence views.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline pipeline_description describe_pipeline_for(
         const minimap2_parameters& params,
@@ -712,7 +665,7 @@ export {
                                      query_seq_proto, target_seq_proto, route);
     }
 
-    /// Synchronous typed metadata facade for callers without an executor owner.
+    /// Set the alphabet code and create a plan for a synchronous EXPLAIN request.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline pipeline_description describe_pipeline_for(
         minimap2_parameters params,
@@ -728,13 +681,10 @@ export {
     namespace bioseq::simd {
 
     /**
-     * @brief Run the minimap2 pipeline against a pre-built target index using a
-     * caller-supplied query minimiser vector.
+     * @brief Align a qurry using its prepared minimizers and a target index.
      *
-     * Single-query convenience wrapper that hands off to
-     * `pipe::dispatch_pipeline<p_entry_point::with_prebuilt_minimizers>(...)`.  All algorithm-
-     * choice and bucket dispatch happens inside the pipe cascade — no
-     * `(p_alignment_algorithm, p_chaining_algorithm)` switch at this layer.
+     * Keep the shared query owner alive through execution and let the pipeline
+     * choose chaining and alignment from the statement plan.
      */
     template <class p_minimizer,
               sequence_alphabet p_alphabet,
@@ -772,7 +722,7 @@ export {
                      allow_gpu_target_index_build);
     }
 
-    /// Run against a host/device minimizer batch and one prebuilt target index.
+    /// Align a query using a minimizer batch and a prebuilt target index.
     template <class p_minimizer,
               sequence_alphabet p_alphabet,
               ::bioseq::indexing::minimizer_seed_index p_index>
@@ -804,9 +754,9 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Resolve every dynamic shape axis through the ordinary pipeline cascade.
+    /// Forward typed input to the ordinary  pipeline algorithm dispatcher.
     struct dynamic_shape_pipeline_dispatch {
-        /// Execute one fully typed dynamic-shape leaf.
+        /// Run the selected entry point with its typed minimizers and index
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
                   sequence_alphabet p_alphabet,
                   class p_minimizer,
@@ -840,10 +790,10 @@ export {
         }
     };
 
-    /// Preserve an already-selected representation shape while dispatching algorithms.
+    /// Keep a selected minimizer layout while dispatching the algorithms.
     template <std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct pinned_shape_pipeline_dispatch {
-        /// Execute one fully typed leaf without redispatching k-mer or width.
+        /// Run an entry point with the fixed k and position width.
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
                   sequence_alphabet p_alphabet,
                   class p_minimizer,
@@ -885,7 +835,7 @@ export {
 
     } // namespace pipe_entry_detail
 
-    /// Run against caller-supplied query and target minimizer vectors.
+    /// Build a target index from supplied minimizers, then align the query.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
     minimap2_port(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -909,7 +859,7 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Preserve the adopted Vulkan target host owner through pipeline handoff.
+    /// Pass the Vulkan-produced target buffer and its memory ownership to the pipeline.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection minimap2_port_with_fixed_vulkan_target_handoff(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -923,7 +873,7 @@ export {
             query_seq, target_seq, query_minimizers, std::move(target_host), execution_plan);
     }
 
-    /// Dispatch one requested minimizer algorithm into its trait-owned kernel.
+    /// Run one compiled minimizer kernel and return its execution statistics.
     template <class p_minimizer,
               class p_collector,
               class p_range,
@@ -1011,9 +961,7 @@ export {
         using leaf = sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>;
     };
 
-    /// One-step chain over the p_minimizer_algorithm dimension. The chain pins
-    /// p_minimizer_algorithm at compile time and the
-    /// leaf dispatches via the trait's kernel.
+    /// Select the compiled sketch  kernel from the requested minimizer algorithm.
     template <class p_minimizer, class p_collector, class p_range>
     BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR minimizer_sketch_execution_stats
     sketch_one(p_collector& collector,
@@ -1028,8 +976,7 @@ export {
             template run<>(params, collector, range, window_len, kmer_len);
     }
 
-    /// Packages the per-pass instrumentation scope, collector reservation, and
-    /// sketch dispatch into one inline call.
+    /// Reserve an initial, sketch buffer and measure the selected sketch call.
     template <class p_minimizer, class p_range>
     BIOSEQ_PIPELINE_INLINE_ATTR minimizer_sketch_execution_stats
     sketch_into_collector(basic_sketch_collector<p_minimizer>& collector,
@@ -1044,15 +991,11 @@ export {
     }
 
     /**
-     * @brief Per-bucket helper for the from-sequence `minimap_port` entry.
+     * @brief Prepare minimizers and align raw sequences using one storage layout.
      *
-     * Owns one `Arena::chain` scope around the target minimiser sketching + index
-     * build. Sketching is dispatched via `sketch_into_collector<p_minimizer>` and
-     * a single-step `dispatch_chain` in `sketch_one` resolves the requested
-     * minimizer algorithm. Once the
-     * target index is built, the function delegates to `minimap2_port_with_index`
-     * so the per-query minimizer_stage inside `pipe::dispatch_pipeline` handles
-     * query sketching.
+     * Sketch the query here and prvpare the target on the selected host or Vulkan
+     * path. Check the sketch statistics against the requested algorithms before
+     * passing the results to index construction and alignment.
      */
     template <class p_pipeline_dispatch, class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
@@ -1076,12 +1019,10 @@ export {
         const std::size_t window_len = static_cast<std::size_t>(params.window_size);
         const std::size_t kmer_len = static_cast<std::size_t>(params.kmer_size);
 
-        // — skip the host target sketch for the Stage C GPU-index leaf;
-        // the device index build sketches the target itself. If that selected GPU
-        // path cannot run, the pipeline throws instead of rebuilding on CPU.
-        // The fixed Vulkan host vector carries either footprint authority or its
-        // exact retained permit. Its dedicated handoff owns the later CPU-index
-        // permit locally and destroys the nested index before releasing it.
+        // A GPU target-index build sketches the target itself. Other routes
+        // prepare the  target sketch here. The adopted Vulkan host buffer stays
+        // accounted for through its measured memory usage or a matching reservation
+        // until the handoff frees it.
         std::vector<p_minimizer> target_minimizers;
         std::optional<fixed_vulkan_target_sketch<p_minimizer>> fixed_target_sketch;
         minimizer_sketch_execution_stats target_sketch_stats{};
@@ -1108,9 +1049,9 @@ export {
         }
 
         const std::uint64_t query_sketch_started_ns = pipe::host_stage_now_ns();
-        // Query results are intentionally left on the collector-compatible route.
-        // Small/repeated allocations can reuse already-resident allocator pages,
-        // so a footprint-delta release is not reliable authority for them.
+        // Keep query sketches in collector-owned storage Reused allocator
+        // pages make a change in process footprint unreliable for charging
+        // these small or repeated allocations.
         basic_sketch_collector<p_minimizer> query_collector;
         const minimizer_sketch_execution_stats query_sketch_stats =
             sketch_into_collector<p_minimizer>(
@@ -1176,16 +1117,15 @@ export {
                 result, target_sketch_stats, minimizer_sketch_role::target);
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Both sketch operations and the selected consuming pipeline returned
-        // normally. Retain the identity emitted by the completed query sketch;
-        // route validation above already required the target sketch to agree.
+        // The query sketch and pipeline completed. Keep the query's recorded
+        // algorithm, which was checked against any separately sketched target.
         result.record_completed_minimizer_algorithm_identity(
             query_sketch_stats.observed_algorithm);
 #endif
         return result;
     }
 
-    /// Execute the dynamic-shape from-sequence route for one representation.
+    /// Align raw sequences with  the supplied minimizer record type.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
     minimap_port_with_repr(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1196,16 +1136,10 @@ export {
                                            p_alphabet>(query_seq, target_seq, execution_plan);
     }
 
-    // =============================================================================
-    // From-sequence cascade leaf and traits
-    // =============================================================================
-    //
-    // `minimap_port` uses one `dispatch_chain<...>::run<>(...)` over
-    // two steps (p_bucket_width, p_kmer_size).  The leaf below pins `(p_bucket_width, p_kmer_size)`
-    // into the `minimizer_representation<p_bucket_width, p_kmer_size>` storage type and delegates
-    // to `minimap_port_with_repr<p_minimizer>`.
+    // Raw-sequence dispatch selects k and position width, then calls the
+    // matching minimizer representation.
 
-    /// Bind one dynamic from-sequence representation leaf.
+    /// Run raw-sequence preparation with one selecved minimizer layout.
     template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct minimap_port_repr_leaf {
         static_assert(
@@ -1226,13 +1160,13 @@ export {
         }
     };
 
-    /// Map the dynamic representation cascade onto its typed leaves.
+    /// Map the selected k and position width to the raw-sequence implementation.
     template <sequence_alphabet p_alphabet> struct minimap_port_traits {
         template <auto p_kmer_size, auto p_bucket_width>
         using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
     };
 
-    /// Bind one generated-owner representation leaf with its shape pinned.
+    /// Run a generated entry with its minimizer layout fixed.
     template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct minimap_port_owned_repr_leaf {
         static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>);
@@ -1252,13 +1186,13 @@ export {
         }
     };
 
-    /// Map the generated-owner representation cascade onto pinned leaves.
+    /// Map the selected layout to its generated entry  implementation.
     template <sequence_alphabet p_alphabet> struct minimap_port_owned_traits {
         template <auto p_kmer_size, auto p_bucket_width>
         using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
     };
 
-    /** Resolve generated runtime capabilities before entering the typed pipeline. */
+    /** Select a registered minimizer layout before preparing raw sequences. */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection minimap_port_registered_shape(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1275,8 +1209,8 @@ export {
         }
         const auto k = static_cast<std::uint16_t>(params.kmer_size);
         const auto w = static_cast<std::uint16_t>(params.window_size);
-        // The ordinary adapter prefers u32; a generated u64-only capability
-        // selects its matching input owner without hard-coding a biological K.
+        // Prefer a native 32-bit layout when registered. A 64-bit-only kernel
+        // selects the, corresponding owner from the registry.
         const auto selection = pipe::select_minimizer_execution_layout_prefer_native<p_alphabet>(
             params.minimizer_algorithm, maximum_bp, k, w, 32u);
         return ::bioseq::minimizers::visit_minimizer_physical_layout(
@@ -1289,7 +1223,7 @@ export {
             });
     }
 
-    /// Execute the raw generated-owner route without repeating shape dispatch.
+    /// Select a raw input layout for a generated entry, then keep it through execution.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
     minimap_port_owned_pinned_shape(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1318,15 +1252,11 @@ export {
     } // namespace pipe_entry_detail
 
     /**
-     * @brief Top-level minimap2 entry for raw query and target sequences.
+     * @brief Align raw query and target sequences using the statement plan.
      *
-     * One `dispatch_chain<...>::run<>(...)` line over `seq_len_log2_step` +
-     * `kmer_size_step`. Each pinned
-     * `(p_bucket_width, p_kmer_size)` selects a `minimizer_representation<p_bucket_width,
-     * p_kmer_size>` and forwards to `pipe_entry_detail::minimap_port_with_repr<p_minimizer>` which
-     * sketches both target and query minimisers, builds the target index, and delegates to
-     * `minimap2_port_with_index` (which in turn calls
-     * `pipe::dispatch_pipeline<p_entry_point::with_prebuilt_minimizers>`).
+     * Select a supported minimizer layout, prepare query and target sketches,
+     * and run index lookup, chaining and  alignment Registered layouts are used
+     * when available, with the generic scalar path allowed by the request.
      */
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
@@ -1344,7 +1274,7 @@ export {
             }
         }
         using traits_type = pipe_entry_detail::minimap_port_traits<p_alphabet>;
-        // Pin p_kmer_size before the dependent p_bucket_width step.
+        // Select k before choosing its position wipth.
         return ::bioseq::simd::pipe::detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
@@ -1355,7 +1285,7 @@ export {
                                                                                    execution_plan);
     }
 
-    /// Freeze one non-executor request before sketching or index preparation.
+    /// Copy request settings into a plan before sketching or index preparation.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline match_result_collection minimap_port(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1366,7 +1296,7 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Dispatch segmented work through the dynamic fragment-index entry.
+    /// Run target segments through the ordinary fragment-index entry.
     struct segmented_dynamic_index_dispatch {
         /// Execute one segment against its transient fragment index.
         template <sequence_alphabet p_alphabet>
@@ -1395,9 +1325,9 @@ export {
         }
     };
 
-    /// Dispatch segmented work through an alphabet-owned fragment-index entry.
+    /// Run target segments through the generated entry for their alphabet.
     struct segmented_owned_index_dispatch {
-        /// Execute one segment through its generated alphabet owner.
+        /// Run one segment through the generated alphabet-specific  entry.
         template <sequence_alphabet p_alphabet>
         BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1426,7 +1356,7 @@ export {
 
     } // namespace pipe_entry_detail
 
-    /// Execute the dynamic segmented route for one alphabet.
+    /// Align target segments, optionally returning their fragment index.
     template <sequence_alphabet p_alphabet, class p_fragment_index_storage = std::nullptr_t>
     [[nodiscard]] match_result_collection
     minimap_port_segmented(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1439,7 +1369,7 @@ export {
             query_seq, target_seq, execution_plan, fragment_index_out);
     }
 
-    /// Freeze one synchronous non-executor segmented request before preparation.
+    /// Create a statement plan before running a synchronous segmented request.
     template <sequence_alphabet p_alphabet, class p_fragment_index_storage = std::nullptr_t>
     [[nodiscard]] inline match_result_collection minimap_port_segmented(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1452,7 +1382,7 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Execute the generated-owner segmented route for one alphabet.
+    /// Align target segments through generated entries for this alphabet.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection minimap_port_segmented_owned_dispatch(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1465,9 +1395,9 @@ export {
 
     } // namespace pipe_entry_detail
 
-    // The three-argument scheduler route always uses a null fragment-index output.
-    // Own that concrete post-erasure specialization out of line while retaining
-    // the four-argument template for callers that request index materialization.
+    // Scheduler calls discard the fragment index. Compile these alphabet
+    // overloads out of line for that case. The template entry still supports
+    // callers that request the index as output.
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_segmented_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
                                  bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,

@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_dataset_report_paths.cppm
- * @brief NCBI gene dataset report endpoint fragments.
+ * @brief OpenAPI requests for NCBI gene data reports.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_dataset_report_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene dataset report path entries. */
+/** @brief Gene reports by GeneID, accession, locus tag, or taxon, including symbol searches within a taxon. */
 inline constexpr std::string_view gene_dataset_report_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/dataset_report:
     get:

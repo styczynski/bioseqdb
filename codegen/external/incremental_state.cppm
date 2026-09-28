@@ -1,6 +1,6 @@
 /**
  * @file incremental_state.cppm
- * @brief Current-schema incremental state for external-client generation.
+ * @brief Saves and reloads the infprmation used  to skip unchanged client generation.
  */
 module;
 
@@ -26,17 +26,17 @@ namespace fs = std::filesystem;
 
 namespace bioseq::codegen::external {
 
-/// @brief Incremental state loaded from the generator-owned TSV artifact.
+/// @brief Source records and reuse status loaded from generation_state.tsv.
 struct loaded_incremental_state {
     /// @brief Whether the signature and every row match the current schema.
     bool is_reusable{};
-    /// @brief Valid current-schema snapshots, also used for stale-output cleanup.
+    /// @brief Valid source records, kept even when regeneration is required.
     source_snapshots snapshots;
 };
 
-/// @brief Splits a current-schema state row into its eight required columns.
-/// @param row One TSV row without its line terminator.
-/// @return Column views, or absence when the row shape is invalid.
+/// @brief Splits a saved source record into eight tab-separated fields.
+/// @param row TSV row without its line ending
+/// @return Field views, or std::nullopt if the field count is wrong.
 [[nodiscard]] auto split_source_snapshot_columns(std::string_view row) noexcept
     -> std::optional<std::array<std::string_view, 8>> {
     std::array<std::string_view, 8> columns{};
@@ -56,11 +56,11 @@ struct loaded_incremental_state {
     return columns;
 }
 
-/// @brief Parses an integer only when the complete field has the requested representation.
-/// @tparam p_integer_type Integer destination type.
+/// @brief Reads an integer, rejecting incomplete values and overflow.
+/// @tparam p_integer_type Integer type to read.
 /// @param text Field text.
-/// @param base Numeric base accepted by `std::from_chars`.
-/// @return Parsed integer, or absence for malformed or out-of-range input.
+/// @param base Number base accepted by std::from_chars.
+/// @return Parsed value, or std::nullopt for invalid input.
 template <class p_integer_type>
 [[nodiscard]] auto parse_state_integer(std::string_view text, int base = 10) noexcept
     -> std::optional<p_integer_type> {
@@ -73,9 +73,9 @@ template <class p_integer_type>
     return value;
 }
 
-/// @brief Parses one strict current-schema source snapshot row.
-/// @param row One TSV row without its line terminator.
-/// @return Relative source path and snapshot, or absence when any field is invalid.
+/// @brief Reads and validates one  saved source record.
+/// @param row TSV row without its line ending.
+/// @return Relative source path and saved metadata, or std::nullopt for invalid input.
 [[nodiscard]] auto parse_source_snapshot_row(std::string_view row)
     -> std::optional<std::pair<std::string, source_snapshot>> {
     const std::optional<std::array<std::string_view, 8>> columns =
@@ -121,10 +121,12 @@ template <class p_integer_type>
     };
 }
 
-/// @brief Loads current per-source metadata and validates its registry signature.
-/// @param state_path Generator-owned state file path.
-/// @param expected_signature Signature for the active generator configuration.
-/// @return Parsed snapshots plus a single reuse decision.
+/// @brief Loads saved source records and checks whether they can be reused.
+/// @param state_path Path to generation_state.tsv.
+/// @param expected_signature Signature of the current generator configuration.
+/// @return Valid records and a reuse flag.
+/// @details A signature mismatch or invalid row requires regeneration. Valid rows
+/// remain available so the builder can remove obsolete output.
 [[nodiscard]] auto load_incremental_state(const fs::path& state_path,
                                           std::string_view expected_signature)
     -> loaded_incremental_state {
@@ -157,10 +159,12 @@ template <class p_integer_type>
     return loaded_state;
 }
 
-/// @brief Fingerprints processors, compilers, parser input, and generator binary.
-/// @param options Active generator configuration.
-/// @param registry Registered annotation processors.
-/// @return Hexadecimal FNV-1a signature for the current state contract.
+/// @brief Hashes the generator configurhtion to decide whether  saved state is reusable.
+/// @param options Generator settings.
+/// @param registry Registered, annotation handlers.
+/// @return FNV-1a hash written in hexadecimal.
+/// @details The signature includes handler names, compiler identity and the paths,
+/// sizes or write times used to identify the Clang and generator binaries.
 [[nodiscard]] auto compute_generation_state_signature(const generation_options& options,
                                                       const annotation_registry& registry)
     -> std::string {
@@ -186,10 +190,10 @@ template <class p_integer_type>
     return signature.str();
 }
 
-/// @brief Serializes one source snapshot using the current eight-column TSV contract.
-/// @param state_output State stream to extend.
+/// @brief Writes one source record in the eight-field TSV format.
+/// @param state_output Output stream for the state file.
 /// @param relative_source Source path relative to the scan root.
-/// @param snapshot Metadata to persist.
+/// @param snapshot Source information to save.
 auto append_source_snapshot(std::ostringstream& state_output,
                             std::string_view relative_source,
                             const source_snapshot& snapshot) -> void {
@@ -200,10 +204,10 @@ auto append_source_snapshot(std::ostringstream& state_output,
                  << snapshot.owned_output_path << '\n';
 }
 
-/// @brief Checks whether original and normalized parser copies are staged.
-/// @param output_root Generator-owned artifact root.
+/// @brief Checks that the saved source  and its cppast input copy both exist
+/// @param output_root Directory for generated output.
 /// @param relative_source Descriptor path relative to the scan root.
-/// @return True when both staged source files exist.
+/// @return True when both files exist.
 [[nodiscard]] auto has_staged_parser_sources(const fs::path& output_root,
                                              const fs::path& relative_source) -> bool {
     fs::path parser_relative = relative_source;

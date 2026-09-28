@@ -1,9 +1,11 @@
 /**
  * @file hash_major_minimizer_index/codec.cppm
- * @brief Hash-major wire types, digests, and byte-exact codecs.
+ * @brief Encode and decode the stored index ordered by minimizer hash.
  *
- * Fixed-width fields use little-endian encoding. Controls retain strictly increasing hashes,
- * encode deltas least-significant-bit first, and keep exact posting counts beside each block.
+ * Fixed-width fields use little-endian byte order. Each control block stores
+ * increasing hashes as offsets from its first hash, packed into the fewest bits
+ * needed by that block. Posting counts remain exact, with separate entries for
+ * counts of 65,535 or more.
  */
 module;
 
@@ -30,8 +32,8 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::indexing::hash_major_minimizer_detail {
 
-/// Store one unsigned integer in the persisted little-endian byte order.
-/// @tparam p_unsigned_integer Unsigned integer type that fixes the encoded width.
+/// Write an unsigned integer in little-endian byte order. The output range must fit.
+/// @tparam p_unsigned_integer Integer type that determines the field width
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 constexpr void write_le(
@@ -52,8 +54,8 @@ constexpr void write_le(
     }
 }
 
-/// Load one unsigned integer from the persisted little-endian byte order.
-/// @tparam p_unsigned_integer Unsigned integer type that fixes the encoded width.
+/// Read an unsigned  integer in little-endian byte order. The input range must fit.
+/// @tparam p_unsigned_integer Integer type that determines the field width.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 [[nodiscard]] constexpr p_unsigned_integer read_le(
@@ -77,8 +79,8 @@ requires std::is_unsigned_v<p_unsigned_integer>
     }
 }
 
-/// Copy a fixed-width byte field into an encoded record.
-/// @tparam p_byte_count Persisted field width in bytes.
+/// Copy a byte array into an encoded record. The destination range must fit.
+/// @tparam p_byte_count Number of bytes in the field.
 template <std::size_t p_byte_count>
 constexpr void write_bytes(
         std::span<std::byte> output,
@@ -89,8 +91,8 @@ constexpr void write_bytes(
     }
 }
 
-/// Copy a fixed-width byte field out of an encoded record.
-/// @tparam p_byte_count Persisted field width in bytes.
+/// Copy a byte field out of an encoded record. The input range must fit.
+/// @tparam p_byte_count Number of bytes in the fteld.
 template <std::size_t p_byte_count>
 [[nodiscard]] constexpr std::array<std::byte, p_byte_count> read_bytes(
         std::span<const std::byte> input,
@@ -111,7 +113,7 @@ template <std::size_t p_byte_count>
     return true;
 }
 
-/// Add two layout quantities without allowing unsigned wraparound.
+/// Add two sizes, returning false on overflow and leaving output unchanged.
 [[nodiscard]] constexpr bool checked_add(
         std::uint64_t left,
         std::uint64_t right,
@@ -124,7 +126,7 @@ template <std::size_t p_byte_count>
     return true;
 }
 
-/// Multiply two layout quantities without allowing unsigned wraparound.
+/// Multiply two sizes, returning false on overflow and leaving  output unchanged.
 [[nodiscard]] constexpr bool checked_multiply(
         std::uint64_t left,
         std::uint64_t right,
@@ -137,7 +139,7 @@ template <std::size_t p_byte_count>
     return true;
 }
 
-/// Compute the number of fixed-capacity units needed to hold a value.
+/// Round a size up to a number of units. Divisor must be nonzero.
 [[nodiscard]] constexpr std::uint64_t ceil_div(
         std::uint64_t value,
         std::uint64_t divisor) noexcept {
@@ -167,13 +169,13 @@ inline constexpr std::array<std::byte, 18> storage_profile_domain{
 
 export namespace bioseq::indexing {
 
-/// Current serialized hash-major layout revision.
+/// Stored format revision for the index ordered by hash.
 inline constexpr std::uint16_t k_hash_major_minimizer_layout_revision = 6u;
-/// Encoded publication-head size in bytes.
+/// Encoded size of the head that selects the published generation.
 inline constexpr std::size_t k_hash_major_minimizer_head_bytes = 224u;
 /// Fixed manifest prefix size in bytes.
 inline constexpr std::size_t k_hash_major_minimizer_manifest_header_bytes = 192u;
-/// Encoded logical-stream descriptor size in bytes.
+/// Encoded size of one stream descriptor.
 inline constexpr std::size_t k_hash_major_minimizer_stream_descriptor_bytes = 48u;
 /// Complete encoded manifest size in bytes.
 inline constexpr std::size_t k_hash_major_minimizer_manifest_bytes = 336u;
@@ -181,25 +183,25 @@ inline constexpr std::size_t k_hash_major_minimizer_manifest_bytes = 336u;
 inline constexpr std::size_t k_hash_major_minimizer_directory_entry_bytes = 80u;
 /// Fixed control-block prefix size in bytes.
 inline constexpr std::size_t k_hash_major_minimizer_control_header_bytes = 64u;
-/// Maximum controls carried by one independently authenticated block.
+/// Maximum number of hashes in one separately checksummed control block.
 inline constexpr std::uint32_t k_hash_major_minimizer_controls_per_block = 4096u;
 /// Payload capacity of one storage row in bytes.
 inline constexpr std::size_t k_hash_major_minimizer_row_payload_bytes = 8064u;
-/// Maximum contiguous read slab requested by the selective reader.
+/// Maximum byte range read into one reusable buffer.
 inline constexpr std::size_t k_hash_major_minimizer_read_slab_bytes = 8u * 1024u * 1024u;
-/// Maximum number of selected hashes admitted to one posting-read wave.
+/// Maximum selected hashes processed in one batch of posting reads.
 inline constexpr std::size_t k_hash_major_minimizer_posting_request_wave_hashes =
     1'048'576u;
-/// Maximum number of control blocks decoded in one selective-read wave.
+/// Maximum, control blocks processed in one batch of selective reads.
 inline constexpr std::size_t k_hash_major_minimizer_control_read_wave_blocks = 1'024u;
-/// Largest encoded control block accepted into reusable decode scratch.
+/// Maximum encoded control  size accepted by the fixed decode buffers.
 inline constexpr std::size_t k_hash_major_minimizer_maximum_control_block_bytes =
     k_hash_major_minimizer_control_header_bytes
     + k_hash_major_minimizer_controls_per_block * 4u
     + k_hash_major_minimizer_controls_per_block * 2u
     + k_hash_major_minimizer_controls_per_block * 12u;
 
-/** @brief Closed diagnostics for hash-major encoding, opening, and lookup. */
+/** @brief Errors while encoding, opening, or querying the stored hash index. */
 enum class hash_major_minimizer_error : std::uint8_t {
     encoded_size,
     magic,
@@ -225,14 +227,14 @@ enum class hash_major_minimizer_error : std::uint8_t {
     state,
 };
 
-/** @brief Independently addressed and checksummed logical byte streams. */
+/** @brief Directory, controls, and postings stored as separately checksummed streams. */
 enum class hash_major_minimizer_stream_kind : std::uint16_t {
     directory = 1u,
     controls = 2u,
     postings = 3u,
 };
 
-/** @brief Hash, alphabet, position, and producer identity bound into an image. */
+/** @brief Hashing rules, alphabet, field widths, and producer recorded with an index */
 struct hash_major_minimizer_storage_profile {
     std::uint32_t hash_scheme_identity = 0;
     std::uint16_t hash_scheme_revision = 0;
@@ -253,7 +255,7 @@ struct hash_major_minimizer_storage_profile {
         const hash_major_minimizer_storage_profile&) const = default;
 };
 
-/** @brief Immutable source and storage-profile inputs for one generation. */
+/** @brief Source identity and storage settings used to build one generation. */
 struct hash_major_minimizer_generation_options {
     std::uint64_t generation_id = 0;
     std::uint64_t query_key = 0;
@@ -263,7 +265,7 @@ struct hash_major_minimizer_generation_options {
     hash_major_minimizer_storage_profile storage_profile{};
 };
 
-/** @brief Optional authenticated dense-heap publication identity. */
+/** @brief Identifies the optional dense-heap opy associated with a published generation. */
 struct hash_major_minimizer_dense_seal {
     std::int64_t sub_key = 0;
     std::int64_t position_segment = 0;
@@ -277,7 +279,7 @@ struct hash_major_minimizer_dense_seal {
     [[nodiscard]] bool operator==(const hash_major_minimizer_dense_seal&) const = default;
 };
 
-/** @brief Small atomically published head selecting one complete generation. */
+/** @brief Head record that selects the complete generation visible to readers. */
 struct hash_major_minimizer_head {
     std::uint64_t generation_id = 0;
     std::uint64_t query_key = 0;
@@ -293,7 +295,7 @@ struct hash_major_minimizer_head {
     [[nodiscard]] bool operator==(const hash_major_minimizer_head&) const = default;
 };
 
-/** @brief Size, row, element, and checksum metadata for one logical stream. */
+/** @brief Sizes, row locations, and checksum for  one stored stream. */
 struct hash_major_minimizer_stream_descriptor {
     hash_major_minimizer_stream_kind kind = hash_major_minimizer_stream_kind::directory;
     std::uint16_t encoding_revision = 1;
@@ -308,7 +310,7 @@ struct hash_major_minimizer_stream_descriptor {
         const hash_major_minimizer_stream_descriptor&) const = default;
 };
 
-/** @brief Authenticated generation manifest shared by writers and cold readers. */
+/** @brief Metadata and checksums needed to interpret one stored generation. */
 struct hash_major_minimizer_manifest {
     std::uint64_t generation_id = 0;
     std::uint64_t source_epoch = 0;
@@ -348,7 +350,7 @@ struct hash_major_minimizer_directory_entry {
         const hash_major_minimizer_directory_entry&) const = default;
 };
 
-/** @brief Decoded fixed prefix of one compressed hash-control block. */
+/** @brief Header of one compressed block of hashes and posting counts. */
 struct hash_major_minimizer_control_header {
     std::uint64_t first_hash = 0;
     std::uint32_t control_count = 0;
@@ -366,14 +368,14 @@ struct hash_major_minimizer_control_header {
         const hash_major_minimizer_control_header&) const = default;
 };
 
-/** @brief Owning decoded control block for validation and non-hot consumers. */
+/** @brief Decoded hashes and counts in vectors that own their storage. */
 struct decoded_hash_major_minimizer_control_block {
     hash_major_minimizer_control_header header{};
     std::vector<std::uint64_t> hashes{};
     std::vector<std::uint64_t> exact_counts{};
 };
 
-/** @brief Reusable bounded storage for allocation-free hot-path decoding. */
+/** @brief Fixed buffers reused to decode one control block without allocating. */
 struct hash_major_minimizer_control_scratch {
     std::array<std::byte, k_hash_major_minimizer_maximum_control_block_bytes>
         encoded{};
@@ -382,24 +384,24 @@ struct hash_major_minimizer_control_scratch {
         exact_counts{};
 };
 
-/** @brief Borrowed view into one decoded control block scratch allocation. */
+/** @brief Decoded hashes and counts borrowed from scratch until it is reused. */
 struct decoded_hash_major_minimizer_control_block_view {
     hash_major_minimizer_control_header header{};
     std::span<const std::uint64_t> hashes{};
     std::span<const std::uint64_t> exact_counts{};
 };
 
-/// Fixed-width little-endian publication-head bytes.
+/// Fixed-size encoded generation head.
 using encoded_hash_major_minimizer_head =
     std::array<std::byte, k_hash_major_minimizer_head_bytes>;
-/// Fixed-width little-endian generation-manifest bytes.
+/// Fixed-size encoded generation manifest.
 using encoded_hash_major_minimizer_manifest =
     std::array<std::byte, k_hash_major_minimizer_manifest_bytes>;
-/// Fixed-width little-endian hash-directory record bytes.
+/// Fixed-size encoded hash directory entry.
 using encoded_hash_major_minimizer_directory_entry =
     std::array<std::byte, k_hash_major_minimizer_directory_entry_bytes>;
 
-/** @brief Derives the stable 128-bit source identity from publication inputs. */
+/** @brief Derive a source ID from its query key, epoch, content checksum, and length. */
 [[nodiscard]] inline std::array<std::byte, 16>
 hash_major_minimizer_source_identity(
         std::uint64_t query_key,
@@ -418,7 +420,7 @@ hash_major_minimizer_source_identity(
     return identity;
 }
 
-/** @brief Hashes storage-profile fields with their original serialized widths. */
+/** @brief Compute the SHA-256 digest of  the format revision and storage settings. */
 [[nodiscard]] inline std::array<std::byte, 32>
 hash_major_minimizer_storage_profile_digest(
         const hash_major_minimizer_storage_profile& profile) noexcept {
@@ -442,13 +444,13 @@ hash_major_minimizer_storage_profile_digest(
     return sha.finalize();
 }
 
-/** @brief Selects four-byte postings when every encoded position fits. */
+/** @brief Check whether target coordinates plus the strand bit fit in four bytes. */
 [[nodiscard]] constexpr bool hash_major_minimizer_uses_u32_postings(
         std::uint64_t target_length) noexcept {
     return target_length <= (std::uint64_t{1} << 31u);
 }
 
-/** @brief Validates an authenticated storage profile for a target length. */
+/** @brief Check field widths and generated minimizer settings for this target length. */
 [[nodiscard]] constexpr bool is_valid_hash_major_minimizer_storage_profile(
         const hash_major_minimizer_storage_profile& value,
         std::uint64_t target_length) noexcept {
@@ -469,12 +471,9 @@ hash_major_minimizer_storage_profile_digest(
         return false;
     }
 
-    // The revision-6 hash-major format predates physical-record and packed-input
-    // identity fields. Preserve that legitimate unbound boundary by accepting a
-    // biological profile only when at least one generated binding supplies its
-    // exact alphabet, k/w, hash width, scheme, and effective producer. The
-    // generated selector remains the authority; this codec does not recreate a
-    // finite campaign-pair or alphabet list.
+    // Format 6 stores alphabet, K/W, hash scheme, and, producer, but no packed
+    // input or physical record ID. Accept these settings only when a generated
+    // runtime profile supports them.
     for (const auto& candidate :
          bioseq::minimizers::registered_minimizer_runtime_profiles()) {
         if (candidate.alphabet_id != value.alphabet_code) {
@@ -517,7 +516,7 @@ hash_major_minimizer_storage_profile_digest(
     return false;
 }
 
-/** @brief Returns the maximum hash representable by the selected hash scheme. */
+/** @brief Return the largest hash allowed by the selected hashing scheme. */
 [[nodiscard]] constexpr std::uint64_t hash_major_minimizer_max_hash(
         const hash_major_minimizer_storage_profile& profile) noexcept {
     if (profile.hash_scheme_identity != 0u || profile.hash_scheme_revision != 0u) {
@@ -545,7 +544,7 @@ namespace bioseq::indexing::hash_major_minimizer_detail {
         : static_cast<std::uint8_t>(64u - std::countl_zero(value));
 }
 
-/// Store a value into a least-significant-bit-first packed field.
+/// Set the value's bits in a zeroed packed field, starting with the least sinificant bit
 constexpr void store_packed_lsb(
         std::span<std::byte> bytes,
         std::uint64_t bit_offset,
@@ -559,7 +558,8 @@ constexpr void store_packed_lsb(
     }
 }
 
-/// Load a least-significant-bit-first packed value across at most two words.
+/// Read a packed field  of up to 64 bits, starting with its least significant bit.
+/// The caller must supply an in-range field.
 [[nodiscard]] constexpr std::uint64_t load_packed_lsb_wordwise(
         std::span<const std::byte> bytes,
         std::uint64_t bit_offset,
@@ -597,7 +597,14 @@ constexpr void store_packed_lsb(
 
 export namespace bioseq::indexing {
 
-/** @brief Encodes a compressed control block without changing posting order. */
+/**
+ * @brief Encode increasing hashes and exact counts into one control block.
+ *
+ * Store hashes as offsets from the first hash using one bit width for the block.
+ * Counts below 65,535 fit directly. All other counts use a marker and a separate
+ * entry with the exact count. The caller supplies the posting location and
+ * checksum because the postings are stored separately.
+ */
 [[nodiscard]] inline std::expected<
     std::vector<std::byte>, hash_major_minimizer_error>
 encode_hash_major_minimizer_control_block(
@@ -716,7 +723,13 @@ encode_hash_major_minimizer_control_block(
     return output;
 }
 
-/** @brief Decodes a control block into caller-owned reusable scratch. */
+/**
+ * @brief Check and decode a control block into reusable scratch.
+ *
+ * Verify the  control checksum, hash order, and exact counts. The returned spans
+ * borrow scratch and remain valid until the next decode into that scratch.
+ * Posting bytes are checked separately by the reader.
+ */
 [[nodiscard]] inline std::expected<
     decoded_hash_major_minimizer_control_block_view, hash_major_minimizer_error>
 decode_hash_major_minimizer_control_block_into(
@@ -880,7 +893,7 @@ decode_hash_major_minimizer_control_block_into(
     };
 }
 
-/** @brief Decodes a control block into owning vectors. */
+/** @brief Check and decode a control block into vectors that own the result. */
 [[nodiscard]] inline std::expected<
     decoded_hash_major_minimizer_control_block, hash_major_minimizer_error>
 decode_hash_major_minimizer_control_block(
@@ -914,7 +927,7 @@ namespace bioseq::indexing::hash_major_minimizer_detail {
         || kind == hash_major_minimizer_stream_kind::postings;
 }
 
-/// Validate the fixed dense-heap identity fields carried by an optional head seal.
+/// Check the dense-heap address, format, and nonempty incarnation fields.
 [[nodiscard]] constexpr bool valid_dense_seal(
         const hash_major_minimizer_dense_seal& seal) noexcept {
     return seal.sub_key == (std::numeric_limits<std::int64_t>::max)() - 2
@@ -926,7 +939,7 @@ namespace bioseq::indexing::hash_major_minimizer_detail {
         && !all_zero(seal.incarnation);
 }
 
-/// Encode one stream descriptor into its fixed little-endian manifest slot.
+/// Write a stream descriptor into its fixed, little-endian manifest slot.
 constexpr void write_stream_descriptor(
         std::span<std::byte> output,
         std::size_t offset,
@@ -944,7 +957,7 @@ constexpr void write_stream_descriptor(
     write_le(output, offset + 40u, descriptor.first_row_ordinal);
 }
 
-/// Decode one fixed little-endian stream descriptor without validating its shape.
+/// Read a stream descriptor. The  caller checks its values and reserved bytes.
 [[nodiscard]] constexpr hash_major_minimizer_stream_descriptor
 read_stream_descriptor(
         std::span<const std::byte> input,
@@ -975,7 +988,7 @@ read_stream_descriptor(
                         k_hash_major_minimizer_row_payload_bytes);
 }
 
-/// Check cross-stream counts, byte lengths, row ordinals, and storage-profile identity.
+/// Check thgt stream sizes, counts, row ranges, and the storage profile agree
 [[nodiscard]] inline bool valid_manifest_shape(
         const hash_major_minimizer_manifest& manifest) noexcept {
     if (manifest.generation_id == 0u
@@ -1091,7 +1104,9 @@ constexpr void write_manifest_fields(
     }
 }
 
-/// Derive the generation checksum after normalizing receipt fields in encoded bytes.
+/// Compute the generation checksum from a full encoded manifest.
+/// Zero the source-content and directory/generation checksum fields, then
+/// include the three stream checksums in their stored order.
 [[nodiscard]] inline std::uint64_t generation_crc_from_encoded_manifest(
         std::span<const std::byte> encoded) noexcept {
     std::array<std::byte, k_hash_major_minimizer_manifest_bytes> normalized{};
@@ -1119,7 +1134,7 @@ constexpr void write_manifest_fields(
 
 export namespace bioseq::indexing {
 
-/** @brief Encodes and checksums the atomically published generation head. */
+/** @brief Encode the generation head and calculate its checksum. */
 [[nodiscard]] inline std::expected<
     encoded_hash_major_minimizer_head, hash_major_minimizer_error>
 encode_hash_major_minimizer_head(const hash_major_minimizer_head& head) noexcept {
@@ -1165,7 +1180,7 @@ encode_hash_major_minimizer_head(const hash_major_minimizer_head& head) noexcept
     return output;
 }
 
-/** @brief Decodes and authenticates one fixed-size generation head. */
+/** @brief Decode the generation head and check its format and checksum. */
 [[nodiscard]] inline std::expected<
     hash_major_minimizer_head, hash_major_minimizer_error>
 decode_hash_major_minimizer_head(std::span<const std::byte> input) noexcept {
@@ -1246,7 +1261,7 @@ decode_hash_major_minimizer_head(std::span<const std::byte> input) noexcept {
     return head;
 }
 
-/** @brief Encodes the complete authenticated stream manifest. */
+/** @brief Check manifest fields, then encode them with a generation checksum. */
 [[nodiscard]] inline std::expected<
     encoded_hash_major_minimizer_manifest, hash_major_minimizer_error>
 encode_hash_major_minimizer_manifest(
@@ -1263,7 +1278,7 @@ encode_hash_major_minimizer_manifest(
     return output;
 }
 
-/** @brief Decodes and authenticates the complete stream manifest. */
+/** @brief Decode the manifest and check  its fields and generation checksum. */
 [[nodiscard]] inline std::expected<
     hash_major_minimizer_manifest, hash_major_minimizer_error>
 decode_hash_major_minimizer_manifest(
@@ -1340,7 +1355,7 @@ decode_hash_major_minimizer_manifest(
     return manifest;
 }
 
-/** @brief Encodes one fixed-size hash directory entry. */
+/** @brief Check basic block bounds and encode one hash directory entry. */
 [[nodiscard]] inline std::expected<
     encoded_hash_major_minimizer_directory_entry, hash_major_minimizer_error>
 encode_hash_major_minimizer_directory_entry(
@@ -1370,7 +1385,7 @@ encode_hash_major_minimizer_directory_entry(
     return output;
 }
 
-/** @brief Decodes and validates one fixed-size hash directory entry. */
+/** @brief Read one directory entry and check its basic block bounds. */
 [[nodiscard]] inline std::expected<
     hash_major_minimizer_directory_entry, hash_major_minimizer_error>
 decode_hash_major_minimizer_directory_entry(
@@ -1397,7 +1412,7 @@ decode_hash_major_minimizer_directory_entry(
     return entry;
 }
 
-/** @brief Binds a directory entry to its control and posting checksums. */
+/** @brief Checksum a directory entry together with its control and posting checksums. */
 [[nodiscard]] inline std::uint64_t hash_major_minimizer_block_crc64(
         const hash_major_minimizer_directory_entry& entry,
         std::uint64_t control_crc64,

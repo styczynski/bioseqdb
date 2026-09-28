@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_contract.cppm
- * @brief Contract for chunked-per-fragment PostgreSQL storage and spill ownership.
+ * @brief Read and write fragment index chunks and manage sorted runs during index builds.
  */
 module;
 
@@ -30,12 +30,12 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_contract;
 import std;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support; // PostgreSQL relation and catalog helpers.
 import bioseq.postgres.support.datums;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
+import bioseq.postgres.storage.manager; // Sequence storage, locators and table-name helpers.
+import bioseq.indexing.type; // Index layouts, chunk limits and  reserved keys.
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
@@ -47,19 +47,20 @@ import :hash_major_writer;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Records a successful serialized index refresh in the age catalog.
- * @param[in] user_relid Owning user relation OID.
- * @param[in] main_relfilenode Current main relation relfilenode.
- * @param[in] column_attno One-based PostgreSQL column number.
- * @param[in] index_name Refreshed index policy name.
+ * @brief Record the refresh time after an encoded index has been written successfully
+ * @param[in] user_relid User table OID.
+ * @param[in] main_relfilenode Current main table file number.
+ * @param[in] column_attno Sequence column number, starting at one.
+ * @param[in] index_name Refreshed index name.
  */
 void mark_serialized_index_write_successful_pg(Oid user_relid,
                                                Oid main_relfilenode,
                                                std::int16_t column_attno,
                                                std::string_view index_name);
 
-/// PostgreSQL adapter for chunked-per-fragment rows, generation sidecars, and
-/// spill runs owned by one logical index handle.
+/// PostgreSQL storage for one sequence index.
+/// Read and write chunk rows, open index generations, and keep sorted build runs
+/// in memory or temporary files.
 struct fragment_index_storage {
     using generation_read_session = index_storage_fragment_generation_read_session;
     using generation_row_sink = index_storage_fragment_generation_row_sink;
@@ -80,9 +81,9 @@ struct fragment_index_storage {
     mutable std::size_t decoded_bytes_ = 0;
     mutable index_sub_key_t decoded_sub_ = k_directory_sub_key;
     mutable std::size_t decoded_chunk_ = std::numeric_limits<std::size_t>::max();
-    /// One admitted immutable chunk retained by the backend-local read cache.
+    /// A cached chunk whose bytes are covered by a memory reservation.
     struct cached_chunk {
-        // Admission outlives the bytes it covers (reverse member destruction).
+        // Declare  the reservation first so it is released after the byte buffer.
         bioseq::parallelism::memory_permit permit;
         index_sub_key_t sub_key = k_directory_sub_key;
         std::size_t chunk_no = std::numeric_limits<std::size_t>::max();
@@ -98,15 +99,15 @@ struct fragment_index_storage {
     std::int64_t* scratch_ = nullptr;
     std::size_t scratch_units_ = 0;
     std::size_t run_buffer_override_bytes_ = 0;
-    // per-sub_key byte plan recorded by resize/resize_chunks, consumed by write_to_each.
+    // Payload sizes set by resize or resize_chunks for the next write_to_each call.
     std::map<index_sub_key_t, std::vector<std::size_t>> chunk_payload_bytes_;
     std::optional<sorted_pair_run_store> sorted_runs_;
 
   private:
-    /// Own the PostgreSQL resources used by one direct fragment read while the
-    /// surrounding C++ frame is live.  Destruction deliberately performs no
-    /// PostgreSQL work: a healthy path must close explicitly, while a translated
-    /// PostgreSQL ERROR must abandon the handles for transaction-abort cleanup.
+    /// Track the, relation, sxan and temporary payload for a direct chunk read.
+    /// Close them explicitly after success. After a PostgreSQL error, clear the
+    /// handles and leave resource release to transaction cleanup. The destructor
+    /// checks that one of these cleanup paths has run.
     struct fragment_read_resources {
         Relation relation = nullptr;
         Relation ordered_index_relation = nullptr;
@@ -200,11 +201,10 @@ struct fragment_index_storage {
     static_assert(
         noexcept(std::declval<fragment_read_resources&>().abandon_after_pg_error_noexcept()));
 
-    /// Own every PostgreSQL object used by the direct fragment writer while
-    /// the surrounding minimizer build still owns vectors, run stores and
-    /// admission permits.  The destructor deliberately performs no PostgreSQL
-    /// work: normal paths close explicitly and translated PostgreSQL errors
-    /// abandon the handles for transaction-abort cleanup.
+    /// Track the relation and temporary row objects for a direct chunk  write.
+    /// Close them explicitly after success, or abandon the handles after a
+    /// PostgreSQL error so transaction cleanup can release them. The destructor
+    /// checks that cleanup was requested.
     struct fragment_write_resources {
         Relation relation = nullptr;
         SysScanDesc scan = nullptr;
@@ -291,15 +291,13 @@ struct fragment_index_storage {
     static_assert(
         noexcept(std::declval<fragment_write_resources&>().abandon_after_pg_error_noexcept()));
 
-    // Authority-bearing minimizer-sequence spill state is intentionally not part of the
-    // otherwise duck-typed storage surface.  Callers may observe its immutable
-    // binding and mutate it only through the narrow logical-event APIs below.
+    // Keep segment runs private so every change can update the replay identity.
     using segment_run_entry_type = std::pair<std::uint32_t, sorted_pair_run_store>;
-    // Reverse destruction drops stores/vector nodes before metadata admission.
+    // Destroy the segment stores before releasing their metadata reservation
     bioseq::parallelism::memory_permit segment_sorted_runs_metadata_permit_;
     std::vector<segment_run_entry_type> segment_sorted_runs_;
-    // Ordinal, never an iterator: segment-store insertion may relocate every entry.
-    // The named store is the only one allowed to own the reusable spill writer.
+    // Store the segment number because vector insertion can move its entries.
+    // Only this segment may hold the reusable write buffer.
     std::optional<std::uint32_t> active_segment_write_buffer_owner_;
     inline static std::atomic<std::uint64_t> next_segment_spill_generation_token_{1u};
     direct_minimizer_spill_storage_binding segment_spill_binding_{};
@@ -308,7 +306,7 @@ struct fragment_index_storage {
     [[nodiscard]] bool ensure_segment_run_metadata_capacity_(std::size_t required);
 
   public:
-    /// Create an unbound handle that acquires PostgreSQL ownership explicitly.
+    /// Create an empty handle to be bound to PostgreSQL storage by  its caller.
     fragment_index_storage() = default;
     fragment_index_storage(const fragment_index_storage&) = delete;
     fragment_index_storage& operator=(const fragment_index_storage&) = delete;
@@ -320,18 +318,18 @@ struct fragment_index_storage {
         release_();
     }
 
-    /// Transfer every C++ and PostgreSQL handle without releasing the source.
+    /// Move resources and identity here, then clear the source handle.
     void steal_(fragment_index_storage&& o) noexcept;
-    /// Drop resident spill buffers without invoking PostgreSQL cleanup.
+    /// Discard runs kept only in mmory and invalidate saved segment replay state.
     void release_resident_runs_noexcept() noexcept;
-    /// Assert that checked close or PG-error abandonment already ran.
+    /// Finish destruction after checked close or PostgreSQL error cleanup preparation.
     void release_() noexcept;
 
-    /// Raise a PostgreSQL data-corruption error at the C++ boundary.
+    /// Report corrupt index data as a PostgreSQL error wrapped in a C++ exception.
     [[noreturn]] void index_error(std::string_view message) const;
 
-    // ---- validators (translate to ereport on the pg side) ----
-    /// Decode and authenticate a complete persisted minimizer fragment header.
+    // Check stored index formats.
+    /// Check the minimizer payload header, format version and size implied by its counts.
     [[nodiscard]] minimizer_hashmap_fragment_index::encoded_header validate_minimizer_blob_or_error(
         const char* p,
         std::size_t bytes,
@@ -354,90 +352,84 @@ struct fragment_index_storage {
         }
         return header;
     }
-    /// Authenticate a persisted grouped-directory image before exposing it.
+    /// Check the directory header  size, magic value and format version.
     void validate_minimizer_directory_or_error(const char* p, std::size_t bytes) const;
-    /// Reject reserved keys, directory chunk misuse, and invalid chunk sizes.
+    /// Check that the recorded chunk size meets the minimum required by the reader.
     void validate_minimizer_chunk_metadata_or_error(index_sub_key_t sk,
                                                     std::size_t chunk_no,
                                                     std::size_t min_bytes,
                                                     std::size_t /*alignment*/) const;
 
-    // ---- relation resolution ----
-    /// Derive the physical fragment-table name from the logical handle.
+    // Find or create index tables.
+    /// Build the fragment index table name from this handle's storage identity.
     [[nodiscard]] std::string this_table_name() const;
 
-    /// Remove every backend-local object derived from this logical minimizer
-    /// sidecar.  Relcache invalidation supplies a physical sidecar OID, whereas
-    /// the cache keys use the owning user relation, so schema replacement must
-    /// evict by the complete logical identity explicitly.
+    /// Invalidate this handle's decoded chunk and cached bytes for the owning table and index.
+    /// Cache keys use the user table identity, so replacing an, index table must
+    /// invalidate them through that identity.
     void evict_generation_storage_residency_();
 
-    /// Ensure the same-name minimizer sidecar has the one canonical generation
-    /// schema. Normal ensure is deliberately non-destructive: an exact relation
-    /// is reused by OID and any malformed same-name object fails closed.
-    /// Explicit clear/reset owns the destructive replacement boundary.
+    /// Find or create the minimizer generation  table and check its schema
+    /// Reuse a matching table. An incompatible existing table requires an explicit reset.
     [[nodiscard]] Oid ensure_minimizer_generation_storage();
 
-    /// Transactionally remove the complete physical generation family for
-    /// this one logical minimizer index.  Head, manifest, immutable payload,
-    /// and temporary-run objects are row classes in the canonical sidecars,
-    /// so dropping every table under the exact identity prefix clears all of
-    /// them together.
+    /// Drop this logical index's generation tables and refresh-time metadata.
+    /// Check ownership and scema before removing each table, including all
+    /// generation headers, payload rows and temporary runs stored there.
     [[nodiscard]] minimizer_generation_clear_result clear_minimizer_generation_storage();
 
-    /// Open the current-generation reader against the exact physical name,
-    /// bypassing the cached OID. A five-column relation therefore fails schema
-    /// validation rather than entering the generation route.
+    /// Open a reader by the current index table name and the caller's snapshot.
+    /// The reader checks the generation schema before reading rows.
     [[nodiscard]] generation_read_session
     begin_generation_read(std::uint64_t query_key,
                           Snapshot executor_snapshot,
                           expected_minimizer_generation_identity expected) const;
 
-    /// Open the exact common-encoder row sink after atomically ensuring the
-    /// canonical same-name relation.  The caller still owns generation
-    /// encoding, complete reread, and READY-head publication.
+    /// Open a row writer  after finding or creating the checked generation table.
+    /// The build must finish validation before publishing the generation as active.
     [[nodiscard]] generation_row_sink begin_generation_write(std::uint64_t query_key,
                                                              std::uint64_t generation_id);
 
-    /// Open a hash-major writer bound to this handle and unpublished generation.
+    /// Open a writer for a new minimizer generation grouped by hash.
     [[nodiscard]] hash_major_minimizer_generation_writer
     begin_hash_major_minimizer_generation_write(std::uint64_t query_key,
                                                 std::uint64_t generation_id);
 
-    /// Resolve or create the legacy fragment relation for this exact handle.
+    /// Find the direct fragment table, creating it if requested.
     [[nodiscard]] Oid resolve_relid_(bool create_if_missing) const;
-    /// Open the resolved fragment relation under the caller-selected lock.
+    /// Open and check the direct fragment table with the requested lock.
     [[nodiscard]] Relation open_index_relation_(bool create_if_missing, LOCKMODE lock) const;
 
-    /// Grow the MemoryContext-owned decode buffer without changing its owner.
+    /// Grow the read buffer in the handle's PostgreSQL memory context.
     void ensure_buffer_(std::size_t units) const;
-    /// Return a scratch region large enough for the requested 64-bit units.
+    /// Return a temporary write buffer with room for this  many 64-bit units.
     [[nodiscard]] std::int64_t* scratch_buffer_(std::size_t units);
-    /// Report the currently retained scratch capacity in bytes.
+    /// Report the allocated scratch capacity in bytes.
     [[nodiscard]] std::size_t scratch_buffer_bytes_() const;
 
-    /// Form the complete logical and physical identity of one cached chunk.
+    /// Build the cache key for this table, sequence, sub-key and chunk.
     [[nodiscard]] index_chunk_key chunk_cache_key_(index_sub_key_t sub_key,
                                                    std::size_t chunk_no) const noexcept;
 
-    /// Admit a copied payload only while its memory permit remains owned.
+    /// Offer a chunk copy to the backend cache, which may refuse it when memory is tight
     void admit_cached_chunk_(index_sub_key_t sub_key,
                              std::size_t chunk_no,
                              std::span<const char> payload,
                              bool written_in_current_xact) const;
 
-    /// Read and validate one tuple into the reusable decode buffer.
+    /// Copy a chunk from the cache or its PostgreSQL row into the read buffer.
     void load_chunk_into_buffer_(index_sub_key_t sub_key, std::size_t chunk_no) const;
 
-    // ---- const metadata queries (total: 0/empty on absent) ----
-    /// Count distinct persisted sub-keys for this query identity.
+    // Stored chunk counts and wizes. Missing rows or tables give zero.
+    /// Count stored data sub-keys for this sequence, excluding temporary runs.
     [[nodiscard]] std::size_t number_of_sub_keys() const;
-    /// Count contiguous chunks for one persisted sub-key.
+    /// Count stored chunk rows for one sub-key.
     [[nodiscard]] std::size_t number_of_chunks(index_sub_key_t sub_key) const;
-    /// Return the authenticated payload size of one chunk.
+    /// Return the payload byte count recorded in the chunk  row.
     [[nodiscard]] std::size_t chunk_byte_size(index_sub_key_t sub_key, std::size_t chunk_no) const;
 
-    /// Return one decoded chunk using the handle-owned reusable buffer.
+    /// Read a chunk through the handle's reusable buffer.
+    /// The returned pointer remains valid until the, buffer is reused or the handle closes.
     template <class p_value_type>
     [[nodiscard]] const p_value_type* read_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
         static_assert(alignof(p_value_type) <= alignof(std::int64_t),
@@ -448,14 +440,14 @@ struct fragment_index_storage {
         return reinterpret_cast<const p_value_type*>(decoded_);
     }
 
-    /// Record a single-chunk byte plan for a sub-key.
+    /// Split a payload size into a plan of chunks within the storage size limit.
     void resize(index_sub_key_t sub_key, std::size_t bytes_count);
-    /// Record the exact payload size of every planned chunk for a sub-key.
+    /// Set the payload size for each chunk in the next write.
     void resize_chunks(index_sub_key_t sub_key, std::span<const std::size_t> per_chunk_bytes);
-    /// Warm one chunk through the same validated cache path as a read.
+    /// Load a chunk into the read buffer if it is not already there.
     void prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no);
 
-    /// Replace one exact chunk tuple while the caller owns writer resources.
+    /// Insert a chunk row, replacing any row at the same sequence, sub-key and chunk number.
     void upsert_chunk_row_(fragment_write_resources& resources,
                            std::uint64_t query_key,
                            index_sub_key_t sub_key,
@@ -463,14 +455,16 @@ struct fragment_index_storage {
                            std::size_t chunk_bytes,
                            std::span<const char> payload);
 
-    /// Persist an already serialized chunk and preserve cache visibility rules.
+    /// Store encoded chunk bytes and offer  them to the backend cache.
     void write_serialized_chunk_checked(std::uint64_t query_key,
                                         index_sub_key_t sub_key,
                                         std::size_t chunk_no,
                                         std::span<const char> payload,
                                         bool written_in_current_xact);
 
-    /// Materialize and persist every chunk in the recorded plan.
+    /// Fill and write chunks from the preceding resize plan.
+    /// The callback receives a temporary buffer and may return a later chunk number
+    /// to skip ahead. Returning the current number advances to the next chunk
     template <class p_value_type, class p_callback>
     void write_to_each(index_sub_key_t sub_key, p_callback&& writer) {
         static_assert(bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>,
@@ -502,7 +496,7 @@ struct fragment_index_storage {
                 index_error("fragment write relation could not be opened");
             }
             for (std::size_t chunk_no = 0; chunk_no < n;
-                 /* writer may skip */) {
+                 /* callback chooses the next chunk */) {
                 const std::size_t payload_bytes = plan[chunk_no];
                 if (scratch_buffer_bytes_() < payload_bytes) {
                     index_error("fragment write scratch is undersized");
@@ -532,7 +526,8 @@ struct fragment_index_storage {
         }
     }
 
-    /// Visit validated cached or copied chunks in a half-open sub-key range.
+    /// Visit chunks with sub-keys in [lo, hi), in index order.
+    /// Each callback borrows the payload bytes only for that call.
     template <class p_callback>
     void read_chunks_in_range(index_sub_key_t lo, index_sub_key_t hi, p_callback&& cb) {
         if (hi <= lo)
@@ -669,7 +664,7 @@ struct fragment_index_storage {
         }
     }
 
-    /// Visit each persisted data sub-key once for the bound query identity.
+    /// Visit stored data sub-keys for this sequence, exclding temporary runs.
     template <class p_callback> void for_each_sub_key(p_callback&& fn) const {
         fragment_read_resources resources{AccessShareLock};
         try {
@@ -738,69 +733,69 @@ struct fragment_index_storage {
         }
     }
 
-    // ---- lifecycle ----
-    /// Delete all rows or one inclusive sub-key range for the bound query.
+    // Delete stored chunks and release resources.
+    /// Delete this sequence's chunks in an inclusive sub-key  range, or all its chunks.
     void delete_where_(
         std::optional<std::pair<index_sub_key_t, index_sub_key_t>> inclusive_sub_key_range);
-    /// Remove every sub-key owned by the bound query identity.
+    /// Delete all chunks for this sequence.
     void clear_entity();
-    /// Remove an inclusive range of sub-keys from the bound query identity.
+    /// Delete this sequence's chunks whose sub-keys lie in the inclusive range.
     void discard_sub_keys(index_sub_key_t lo, index_sub_key_t hi);
-    /// Drop every physical shard belonging to the named logical index.
+    /// Drop the tables whose names identify shards of the named index.
     void clear(std::string_view name);
 
-    /// Derive the admitted external-sort budget for this index handle.
+    /// Choose the sorted-run memory budget, using a handle override when supplied.
     [[nodiscard]] std::size_t run_buffer_bytes() const;
 
-    // ---- external sort spill (BufFile-backed sorted runs) ----
-    /// Lazily create the whole-index sorted-run store.
+    // Sorted runs kept in memory or PostgreSQL temporary files.
+    /// Return the general sorted-run store, creating it on first use.
     [[nodiscard]] sorted_pair_run_store& sorted_runs_ensure_();
-    /// Spill a borrowed sorted run into ResourceOwner-managed storage.
+    /// Add a borrowed sorted run to temporary storage.
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted);
-    /// Spill a sorted vector by transferring its resident allocation.
+    /// Transfer a sorted vector to the run store, spilling it if memory cannot  be reserved.
     std::size_t spill_sorted_run_owned(std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted);
-    /// Spill an owned run while transferring its existing admission permit.
+    /// Transfer a sorted vector and its existing memory reservation to the run store.
     std::size_t
     spill_sorted_run_owned_admitted(std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
                                     std::uint64_t admitted_bytes,
                                     bioseq::parallelism::memory_permit permit);
-    /// Demote resident runs until the requested admission can succeed.
+    /// Move runs to temporary files to free memory for the next reservation.
     void demote_resident_runs_until_available(std::uint64_t bytes_needed);
-    /// Merge whole-index runs in key order without materializing the result.
+    /// Merge runs and visit each hash with a cursor over its positions.
     template <class p_callback> void merge_runs(p_callback&& on_kmer);
-    /// Spill one position segment under the active generation binding.
+    /// Store a sorted run for one, target-position segment and update its reblay identity
     std::size_t
     spill_sorted_segment_run(std::uint32_t position_segment,
                              std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted);
-    /// Repartition admitted segment runs when the segment span changes.
+    /// Redistribute stored positions when the target segment size changes.
     bool reroute_segment_runs(std::uint64_t old_span,
                               std::uint64_t new_span,
                               std::uint64_t target_length);
-    /// Merge segment runs in segment and k-mer order.
+    /// Visit merged runs in segment order, then hash order within  each segment.
     template <class p_callback> void merge_segment_runs(p_callback&& on_segment_kmer);
-    /// Begin a new identity-bound segment spill generation.
+    /// Close previous segment runs and assign a new identity for the next build.
     [[nodiscard]] direct_minimizer_spill_storage_binding begin_segment_spill_generation();
-    /// Return the current segment spill identity without transferring it.
+    /// Return a copy of the current segment spill identity.
     [[nodiscard]] direct_minimizer_spill_storage_binding
     segment_spill_storage_binding() const noexcept;
-    /// Aggregate retained and spilled run statistics for this handle.
+    /// Return general-run statistics, or zero counters if that store is absent.
     [[nodiscard]] sorted_run_store_stats sorted_run_stats() const noexcept;
-    /// Preserve statistics before releasing their underlying run stores.
+    /// Save general-run statistics for SQL diagnostics before releasing the store.
     void snapshot_sorted_run_stats_before_release();
-    /// Abandon run handles after a translated PostgreSQL failure.
+    /// Drop run handles without PostgreSQL calls and invalidate replay state.
     void release_runs_noexcept() noexcept;
-    /// Release every run through checked PostgreSQL cleanup.
+    /// Close all run stores, allowing PostgreSQL cleanup failures to  propagate.
     void release_runs();
-    /// Close PostgreSQL state and then release admitted C++ storage.
+    /// Close run stores and delete the handle's PostgreSQL memory context.
     void close_checked();
-    /// Forget PostgreSQL aliases that transaction-abort cleanup now owns.
+    /// Clear handles after a PostgreSQL error and leave its resources to transaction cleanup.
     void abandon_after_pg_error_noexcept() noexcept;
 };
 
 /**
- * @brief Merges all general runs and visits each hash with its position cursor.
- * @tparam p_callback Callable accepting a hash and read-only position cursor.
- * @param[in] on_kmer Callback invoked in canonical hash order.
+ * @brief Merge general runs and visit each minimizer hash with its positions.
+ * @tparam p_callback Callable accepting a hash and a read-only position cursor.
+ * @param[in] on_kmer Callback invoked in hsh order.
  */
 template <class p_callback> inline void fragment_index_storage::merge_runs(p_callback&& on_kmer) {
     if (!sorted_runs_.has_value()) {
@@ -812,9 +807,9 @@ template <class p_callback> inline void fragment_index_storage::merge_runs(p_cal
 }
 
 /**
- * @brief Merges per-segment runs and visits each segment/hash position cursor.
- * @tparam p_callback Callable accepting segment, hash, and read-only position cursor.
- * @param[in] on_segment_kmer Callback invoked in segment and canonical hash order.
+ * @brief Merge runs and visit positions in segment order, then hash order.
+ * @tparam p_callback Callable accepting a segment, hash and read-only position cursor.
+ * @param[in] on_segment_kmer Callback invoked for each segment and  hash.
  */
 template <class p_callback>
 inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_kmer) {
@@ -829,9 +824,8 @@ inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_k
     }
     g_last_index_merge_run_count = std::max(g_last_index_merge_run_count, total_runs);
     try {
-        // Every segment spill has completed before replay begins. Release all
-        // reusable writers as one phase so the first store's readers do not
-        // compete with later stores' dead writer capacities.
+        // All spills have finished. Release every completed write buffer before
+        // reserving memory for merge readers.
         for (auto& [segment, runs] : segment_sorted_runs_) {
             (void)segment;
             runs.release_completed_write_buffer();
@@ -863,8 +857,8 @@ inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_k
 }
 
 /**
- * @brief Detects accidental public exposure of segment-spill lifecycle state.
- * @tparam p_storage Storage adapter type examined by the compile-time gate.
+ * @brief Check that callers cannot directly change private segment spill state
+ * @tparam p_storage Storage adapter type to inspect.
  */
 template <class p_storage>
 concept publicly_mutable_minimizer_sequence_segment_spill_state = requires(p_storage& storage) {

@@ -1,9 +1,8 @@
 /**
  * @file gpu_mmsearch_test.cpp
- * @brief Verifies mmsearch through fragment hydration and in-memory dispatch.
+ * @brief Checks mmsearch on sequences stored in fragments.
  *
- * Inserts write fragment rows and a parent stub. The scan stitches those rows
- * into a bounded varlena before dispatch.
+ * Tests a constant query and a self-join against the alignment fixture.
  */
 
 #include <fmt/format.h>
@@ -24,11 +23,8 @@ TEST_CASE("mmsearch on the canonical alignment dataset returns the expected matc
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
     auto ctx = fresh_context({k_alignment_table});
     seed_hoe_fixture(ctx, k_alignment_table);
-    // The canonical probe matches seq0 of rows 1 and 2, which contain the
-    // exact substring "CTAGTCACTGTAGCCTGATCGTAGCTAGT") plus other rows
-    // where the chainer finds a fuzzy hit. Verify at least one match: the
-    // dispatch_buffer -> fetch_payload -> with_lazy_in_memory pipeline
-    // must produce a non-empty result set against per-fragment storage.
+    // Searching  fragment-backed sequences must find the exact matches in rows 1 and 2.
+    // The query may alfo return approximate matches.
     const auto hits =
         query_rows(ctx,
                    fmt::format("SELECT pk FROM {} "
@@ -57,12 +53,11 @@ TEST_CASE("mmsearch self-join reads fragment storage through the in-memory pipel
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     auto ctx = fresh_context({k_alignment_table});
     seed_hoe_fixture(ctx, k_alignment_table);
-    // Self-join via mmsearch exercises the dispatch buffer's bulk-fetch +
-    // with_lazy_in_memory pipeline against per-fragment storage.
+    // Search pairs from the same fragment-backed table.
     const auto rows = query_rows(ctx,
                                  fmt::format("SELECT t1.pk, t2.pk FROM {0} t1 JOIN {0} t2 "
                                              "  ON mmsearch(t1.seq0, t2.seq0) ORDER BY 1, 2;",
                                              k_alignment_table));
-    // Self-join must yield >0 matches.
+    // Require at least one matching pair.
     REQUIRE(!rows.empty());
 }

@@ -1,6 +1,6 @@
 /**
  * @file traceback_test.cpp
- * @brief Exercises block-aligner traceback, orientation, and adaptive paths.
+ * @brief Checks block alignment CIGARs, reversed input and changing block sizes.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -33,8 +33,8 @@ TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",
     context::installed_context_scope scope(ctx);
     const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
 
-    // scan_block.rs::test_no_x_drop uses Gaps{-11,-1}; q=10,e=1 is the
-    // equivalent public convention because open=-(q+e).
+    // The public gap settings charge opening plus extension for the firqt base.
+    // q=10 and e=1 therefore match the reference's opening score of -11.
     block_aligner_parameters global = global_params();
     global.gap_open = 10;
     const reference_run both_empty = run_block("", "", nw1, global);
@@ -85,9 +85,8 @@ TEST_CASE("Block packed traceback coalesces mismatch-rich diagonals",
     }
 
     block_aligner_parameters params = global_params(64, 64);
-    // Make a gap much more expensive than any diagonal choice. The exact
-    // alignment therefore alternates 32 matches and 32 mismatches, while the
-    // packed minimap result must expose one canonical M run.
+    // Expensive gaps keep this alignment on the diagonal. Matches and mismatches
+    // must combine into one M run in the packed CIGAR.
     params.gap_open = 30;
     const reference_run run = run_block(query, reference, scoring, params);
 
@@ -105,8 +104,8 @@ TEST_CASE("Block Aligner native XDrop matches scan_block.rs and reports terminat
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    // On the A/C-only fixtures, simple DNA +4/-1 is exactly the BLOSUM62
-    // A/A and A/R slice used by scan_block.rs::test_x_drop.
+    // Scores +4 for A/A and -1 for A/C reproduce the A/A and A/R comparisons
+    // in the reference X-drop fixture.
     const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
     const block_aligner_parameters right = xdrop_params(
         block_alignment_stage::right_extension, block_input_order::forward);
@@ -115,8 +114,7 @@ TEST_CASE("Block Aligner native XDrop matches scan_block.rs and reports terminat
     CHECK(complete.result.score == 14);
     CHECK(complete.result.max_q == 5);
     CHECK(complete.result.max_t == 5);
-    // Packed minimap CIGAR projects the reference's Eq/X runs to M and must
-    // canonicalize adjacent projected operations.
+    // Matches and mismatches both  become M, so their adjacent runs must, merge.
     CHECK(packed_cigar_string(complete.result.cigar) == "6M");
     CHECK_FALSE(complete.result.is_z_dropped);
     CHECK(complete.stats.native_x_drop_terminations == 0);
@@ -147,9 +145,8 @@ TEST_CASE("Block left extension reverses compact input without scalar fallback",
     const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
     const std::string query(44, 'A');
 
-    // Reversing this source region yields the exact 15A/16R/13A research
-    // fixture. The Block left extension therefore must reproduce score 60 at
-    // exclusive endpoint 15 while emitting the CIGAR in source order.
+    // Left extension reads the target backwards: 15 A bases, 16 C bases, then 13 A.
+    // It should stop after the first matching run and report its CIGAR in source order.
     const std::string source_reference = std::string(13, 'A')
         + std::string(16, 'C') + std::string(15, 'A');
     const reference_run left = run_block(
@@ -177,9 +174,8 @@ TEST_CASE("Block reversed packed traceback preserves multi-run source order",
     context::installed_context_scope scope(ctx);
     const auto scoring = scoring_matrix<dna4_u64>::generate(4, 6, 1);
 
-    // In working (reversed) order the unique high-scoring path is
-    // 4M4I4M4D6M. The left-extension contract must return those operations in
-    // source order, 6M4D4M4I4M, without swapping insertion/deletion meaning.
+    // Reading backwards gives 4M4I4M4D6M. Returning the CIGAR in source order
+    // reverses the runs to 6M4D4M4I4M while keeping I and D unchanged.
     const std::string source_query = "AAAAAAGGGGCCCCAAAA";
     const std::string source_reference = "AAAAAATTTTGGGGAAAA";
     block_aligner_parameters params = xdrop_params(
@@ -266,12 +262,8 @@ TEST_CASE("Block adaptive path grows then shrinks with upstream semantics",
     const reference_run adaptive = run_block(
         query, reference, nw1, global_params(16, 64));
 
-    // Verified directly against the untouched local Rust reference
-    // (`scan_block.rs`, NucMatrix{1,-1}, Gaps{-2,-1}, 16..=64).  Adaptive
-    // Block Aligner is heuristic and this fixture deliberately exposes its
-    // documented slight loss versus full DP: it chooses two insertion runs
-    // and scores 244.  This is the authoritative adaptive result, not the
-    // recurrence-derived full-DP optimum.
+    // The adaptive search can miss the best alignment This fixture expects
+    // two insertion runs and score 244 with block sizes 16 through 64.
     CHECK(adaptive.result.score == 244);
     CHECK(adaptive.result.max_q == 327);
     CHECK(adaptive.result.max_t == 287);
@@ -281,10 +273,8 @@ TEST_CASE("Block adaptive path grows then shrinks with upstream semantics",
     CHECK(adaptive.stats.adaptive_shrink_events > 0);
     CHECK(adaptive.stats.is_internally_consistent());
 
-    // The same upstream reference with a fixed 64-cell block reaches the
-    // affine optimum: 288 matches - (open 2 + 39 extensions) = 247.  Keeping
-    // both goldens prevents an adaptive heuristic result from being mistaken
-    // for a recurrence/checkpoint/traceback defect.
+    // A fixed 64-cell  block finds one 40-base insertion and scores 247.
+    // Keep this result beside the adaptive case to catch changes in either search.
     const reference_run fixed = run_block(
         query, reference, nw1, global_params(64, 64));
     CHECK(fixed.result.score == 247);

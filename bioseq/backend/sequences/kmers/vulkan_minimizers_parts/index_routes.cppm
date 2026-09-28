@@ -1,6 +1,6 @@
 /**
  * @file index_routes.cppm
- * @brief Resident whole-target and segment index routes.
+ * @brief Builds GPU target indexes from packed sequences or unit intervals.
  */
 module;
 
@@ -51,15 +51,16 @@ import :batch;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Builds a device-resident minimizer index from a contiguous sequence.
- * @tparam p_minimizer_type Packed minimizer record emitted by the sketch kernel.
- * @tparam p_sequence Contiguous packed sequence type.
+ * @brief Builds a GPU minimizer index for a contiguous packed target
+ *
+ * Checks the alphabet and k-mer/window sizes, then borrows the  sequence bytes
+ * for the synchronous build.
  * @param seq Target sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional rejection record.
- * @return Resident index, or no value when shape or resources are rejected.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering target hashes.
+ * @param decline_out Optional rejection details.
+ * @return Device index, or no value when the input or available resources are unsuitable.
  * @throws vulkan_runtime_error If Vulkan execution fails.
  */
 template <class p_minimizer_type, class p_sequence>
@@ -126,17 +127,18 @@ template <class p_minimizer_type, class p_sequence>
 }
 
 /**
- * @brief Builds a device-resident minimizer index for one packed segment.
- * @tparam p_minimizer_type Packed minimizer record emitted by the sketch kernel.
- * @tparam p_sequence Contiguous packed sequence type.
- * @param seq Target sequence.
- * @param lo_unit Inclusive packed unit index.
- * @param hi_unit Exclusive packed unit index.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional rejection record.
- * @return Resident index with positions local to `lo_unit`, or no value.
+ * @brief Builds a GPU minimizer index for a packed target interval.
+ *
+ * Clamps the unit bounds to the sequence. Index positions are measured from the
+ * clamped first unit. Intervals shorter than window_size + kmer_size are rejected.
+ * @param seq Target, sequence.
+ * @param lo_unit First packed unit, inclusive.
+ * @param hi_unit Last packed unit, exclusive.
+ * @param window_size K-mers per  window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering target hashes.
+ * @param decline_out Optional rejecton details.
+ * @return Device index, or no value when the interval or resources are unsuitable.
  * @throws vulkan_runtime_error If Vulkan execution fails.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN build_gpu_segment_index_on_device_resident_impl

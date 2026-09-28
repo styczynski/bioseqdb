@@ -1,12 +1,7 @@
-/*-------------------------------------------------------------------------
- *
- * Annotated bioseq_cache SQL catalog.
- *
- * The extension control file provisions the fixed production schema.  This
- * module owns its ACLs and exports the typed production SQL routines; the
- * test-support profile adds the conditional test-control partition.
- *
- *-------------------------------------------------------------------------
+/*
+ * Declare the bioseq_cache SQL functions and schema permissions.
+ * The extension control file creates the fixed schema. Test builds also
+ * export the test-control functions.
  */
 export module bioseq.cache.pg.sql;
 
@@ -22,7 +17,7 @@ export import :test_controls;
 
 export namespace bioseq::cache::pg::sql_catalog {
 
-/** Fixed namespace provisioned by bioseq_cache.control. */
+/** The fixed schema created from bioseq_cache.control. */
 [[bioseq_sql::schema({
     .provision = bioseq::sql::schema_provision::extension_control,
 })]]

@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/error.cppm
- * @brief Internal durable-file error construction and fault injection.
+ * @brief Build  file-error records and let tests inject system-call failures.
  */
 module;
 

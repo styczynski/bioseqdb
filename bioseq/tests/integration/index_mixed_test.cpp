@@ -1,8 +1,9 @@
 /**
  * @file index_mixed_test.cpp
- * @brief Verifies a scan containing indexed and unindexed rows.
+ * @brief Checks mmsearch over indexed and unindexed rows in one scan.
  *
- * Indexed rows use stored assembly while unindexed rows use recomputation.
+ * Stored index reads can use the first two rows' indexes. The  other rows
+ * require minimizers to be computed during the query.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -32,7 +33,7 @@ inline void insert_pair(const connection_test_context& ctx,
                         std::string_view table_name,
                         int primary_key,
                         std::uint64_t seed) {
-    const std::string target = generate_dna4(40000, seed); // ~2 fragments
+    const std::string target = generate_dna4(40000, seed); // crosses a 32 Ki-base fragment boundary
     const std::string query = target.substr(12000, 1500);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES ({}, '{}'::bioseq.seq('dna4',32), "
@@ -59,7 +60,7 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
     insert_pair(ctx, "mixed_index_rows", 3, 33); // Unindexed.
     insert_pair(ctx, "mixed_index_rows", 4, 44); // Unindexed.
 
-    // Index-table row counts reflect only indexed rows.
+    // Only the first two rows should have stored index fragments.
     auto row_number_for = [&ctx](int primary_key) {
         return query_scalar_int(
             ctx,
@@ -76,8 +77,7 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
     REQUIRE(index_distinct_sub_keys(
                 ctx, "minimizers_per_fragment", "mixed_index_rows", row_number_for(4)) == 0);
 
-    // With sequence-index reads enabled, mmsearch returns matches for both
-    // indexed (assemble) and unindexed (recompute) rows.
+    // With stored reads enabled, mmsearch must still search the unindexed rows.
     auto find_primary_keys = [&ctx](const char* sequence_read_value) {
         guc_scope sequence_read_scope(
             ctx, "bioseq.index.sequence_read.enabled", sequence_read_value);
@@ -93,7 +93,7 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
     };
     const auto with_index_reads = find_primary_keys("on");
     const auto without_index_reads = find_primary_keys("off");
-    REQUIRE(with_index_reads.size() == 4); // all 4 rows found (mixed assemble + recompute)
+    REQUIRE(with_index_reads.size() == 4); // both indexed and unindexed rows matched
     REQUIRE(
         std::includes(with_index_reads.begin(),
                       with_index_reads.end(),

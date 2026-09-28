@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution_scalar_highway.cppm
- * @brief Runs scalar and Highway pipeline stages.
+ * @brief Connect minimier, chaining and alignment kernels to the pipeline.
  */
 module;
 
@@ -60,27 +60,15 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // =============================================================================
-    // Concrete stages
-    // =============================================================================
-    //
-    // Each stage's `process*<p_aligner_parameters>(...)` body forwards to the existing kernel
-    // function in the target-neutral pipeline or its selected kernel table
-    // without renaming the kernel.  Wire-type between stages is `std::span<p_element>`
-    // directly; arena ownership is provided by `arena_slab<p_element>` materialised
-    // inside each stage before the downstream call.
+    // Stages call their selected kernels and pass spans to the next stage.
+    // Each output owner stays  alive throughout the synchronous downstream call.
 
     /**
-     * @brief Minimizer extraction stage.
+     * @brief Sketch the query stored in this stage with the selected minimizer kernel.
      *
-     * Templated on `p_kernel` — the algorithm-specific call surface exposed by
-     * `algorithm_traits<minimizer_algorithm::X>::kernel_type`.
-     * The stage body has zero `if constexpr` over enum
-     * values. Adding a new minimizer-extraction algorithm is a single trait
-     * specialisation in the kernel's own module.
-     *
-     * The stage ignores its input batch and instead sketches the pre-captured
-     * `query_seq_` pointer.
+     * The input batch only starts execution. CPU output uses an arena slab.
+     * A Vulkan result can keep its host minimizers and device buffer together
+     * for the following seed lookup.
      */
     template <class p_minimizer, class p_kernel, sequence_alphabet p_alphabet>
     struct minimizer_stage
@@ -90,11 +78,10 @@ export {
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
         std::int32_t runtime_w;
         std::int32_t runtime_k;
-        // Runtime parameters let the Vulkan kernel inspect `vulkan_enabled`;
-        // CPU kernels ignore them.
+        // Shared settings include the selected Highway kernels and Vulkan flags.
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
@@ -102,12 +89,9 @@ export {
         match_result_collection* stats_dst = nullptr;
         match_result_collection* host_timing_dst = nullptr;
 
-        // The kernel writes directly into the per-query arena slab via
-        // `sketch_collector_arena_adapter`, avoiding an intermediate copy. The
-        // specialised path calls `call_constexpr<p_window_size, p_kmer_size, p_minimizer>(...)` so
-        // the (p_window_size, p_kmer_size) pair propagates as integer immediates through the
-        // window-loop bounds and unrolls.
-        /// Sketch the captured query and emit its admitted minimizer batch.
+        // The collector appends CPU minimizers to the query arena. Specialized
+        // calls pass  window and k-mer sizes as template arguments.
+        /// Sketch the stored query, record completed work and pass its minimizers onward.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& /*ignored*/, emit_token<p_sink>&& token) {
@@ -120,15 +104,12 @@ export {
                                               ? static_cast<std::size_t>(runtime_k)
                                               : p_aligner_parameters::kmer_len;
 
-            // Validate the zero-based position domain before any scalar, simd, or
-            // Vulkan kernel can construct a masked minimizer_representation. A query shorter
-            // than k is valid and naturally emits an empty minimizer batch.
+            // Check that query positions fit the minimizer record before a kernel
+            // packs them. Queries shorter than k produce an empty sketch.
             require_representable_minimizer_query_length<p_minimizer>(query_seq_.bp_size());
 
-            // Only the Vulkan kernel exposes the device-minimizer
-            // `call_result`. Retain its admitted host vector and device span in
-            // one real owner so the handoff needs neither a host copy nor a
-            // second query-minimizer upload.
+            // Keep the Vulkan host result and device span under one shared owner.
+            // Seed lookup can then reuse the query aleady on the device.
             if constexpr (requires { p_kernel::may_emit_device_minimizers; }) {
                 if constexpr (p_kernel::may_emit_device_minimizers) {
                     if (auto gpu_result = p_kernel::template call_result<p_minimizer>(
@@ -293,7 +274,7 @@ export {
                 std::span<const p_minimizer>{sketches_slab.data(), sketches_slab.size()});
         }
 
-        /// Describe the selected query-sketch kernel and output estimate.
+        /// Describe the selected minimizer kernel and estimate its output size for EXPLAIN.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -304,10 +285,8 @@ export {
             algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
             algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
             desc.algorithm = std::move(algo);
-            // Reserve the estimated sketch count for the arena slab. `query_seq_`
-            // is borrowed; on
-            // the describe path the proto is empty so bp_size() is zero — which
-            // still yields the +64 safety margin from `estimated_sketch_count`.
+            // With  an empty EXPLAIN query, this estimate contains only the
+            // collector's initial spare capacity
             desc.estimated_batch_size = detail::estimated_sketch_count(
                 query_seq_.bp_size(), runtime_w > 0 ? runtime_w : 10);
             return desc;
@@ -315,16 +294,15 @@ export {
     };
 
     /**
-     * @brief Pass-through stage that decorates downstream with the target index.
+     * @brief Pass query minimizers to seed lookup together with the target index.
      *
-     * Converts the sink shape from `on_batch(span<p_minimizer>)` upstream to
-     * `on_batch_with_index(span<p_minimizer>, p_index const&)` downstream.  Inlines
-     * away at -O3 (zero runtime cost).
+     * The, stage borrows the index and forwards the existing minimizer batch.
+     * Its cache identity tells Vulkan lookup which target segment the index holds.
      */
     template <class p_index>
     struct index_stage
         : stage_base<index_stage<p_index>,
-                     p_index /* pass-through; downstream sees the same sketch span */> {
+                     p_index /* forwards the same minimizer batch */> {
         static constexpr std::string_view stage_name = "index_stage";
 
         const p_index* index_;
@@ -334,10 +312,9 @@ export {
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& sketches, emit_token<p_sink>&& token) {
-            // Whole in-memory targets keep pointer identity (`{}`); segmented
-            // recompute/assembly passes a nonzero
-            // identity so a reused stack index object cannot alias another segment
-            // in the GPU resident cache.
+            // A segment identity distinguishes indexes rebuilt in the same stack
+            // object. Otherwise the GPU cache could reuse a different  segment
+            // just because its host index has the same address.
             if constexpr (is_minimizer_batch_view_v<p_batch>) {
                 return std::move(token).emit_minimizer_batch_with_index(
                     std::forward<p_batch>(sketches), *index_, identity_);
@@ -351,7 +328,7 @@ export {
             }
         }
 
-        /// Describe the target-index decoration stage.
+        /// Describe the target-index handoff for EXPLAIN.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -362,17 +339,10 @@ export {
     };
 
     /**
-     * @brief Anchor chaining stage.
+     * @brief Group the incoming seed anchors into chains with the selected kernel.
      *
-     * Templated on `p_kernel` — the algorithm-specific call surface exposed by
-     * `algorithm_traits<chaining_algorithm::X>::kernel_type`.
-     * The stage body has zero `if constexpr` over enum
-     * values — adding a new chaining algorithm is a single trait specialisation
-     * in the kernel's own module.
-     *
-     * The chosen kernel writes its `(chains, reordered_anchors)` output directly
-     * into caller-provided arena_slab parameters. No intermediate vector is
-     * materialised inside the stage.
+     * Keep chains and their reordered anchors in separate arena slabs. Both
+     * remain alive while the following stages build and align regions.
      */
     template <class p_kernel> struct chain_stage : stage_base<chain_stage<p_kernel>, chain> {
         static constexpr std::string_view stage_name = "chain_stage";
@@ -387,7 +357,7 @@ export {
         ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_chaining = nullptr;
 #endif
 
-        /// Collect seed hits and execute the selected chaining kernel.
+        /// Chain the supplied anchors and pass the chains with their reordered anchors onward.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& anchors_in, emit_token<p_sink>&& token) {
@@ -405,10 +375,8 @@ export {
             auto reordered_slab = make_arena_slab<anchor>();
             if (active_cp.coordinate_only) {
                 chains_slab.reserve(1);
-                // Reserve the full upstream bound before the Vulkan backend opens
-                // its nested DP arena scope. A >65,536-anchor coordinate trace
-                // must never grow this output slab inside that inner scope, whose
-                // allocations are reclaimed before the stage emits downstream.
+                // Allocate output before Vulkan opens its temporary DP arena  ucope.
+                // The returned anchors must survive after that inner scope closes.
                 reordered_slab.reserve(anchors_in.size());
             } else {
                 if constexpr (requires { p_kernel::storage_requirements(anchors_in.size(), active_cp); }) {
@@ -419,7 +387,7 @@ export {
                     chains_slab.reserve(storage_plan->output.initial_chain_capacity);
                     reordered_slab.reserve(storage_plan->output.reordered_anchor_capacity);
                 } else {
-                    // Vulkan retains its existing shape/driver allocation plan.
+                    // Vulkan uses the anchor count to size its host output buffers.
                     chains_slab.reserve(
                         detail::estimated_chain_count(anchors_in.size(), active_cp.min_seed_count));
                     reordered_slab.reserve(anchors_in.size());
@@ -434,9 +402,7 @@ export {
                 }
                 scalar_pipeline_execution_stats stats{};
                 p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab, &stats);
-                /* This receipt is written after the kernel returns, so a zero-hit
-                 * negative is attested without claiming scalar score/backtrack
-                 * work that the kernel correctly skipped. */
+                /* Record completion even when no anchors need scoring or backtracking. */
                 stats.record_scalar_chain_stage_completion(
                     static_cast<std::uint64_t>(anchors_span.size()));
                 stats_dst->record_scalar_pipeline_execution_stats(stats);
@@ -496,9 +462,8 @@ export {
                     stats_dst->record_partial_vulkan_execution_stats(stats);
                 }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-                // The existing kernel returns false for a successful no-work
-                // input. Attribute the completed selection without inventing a
-                // device dispatch; nonempty admitted work retains its real count.
+                // Empty input can complete without a GPU dispatch. Record the selected
+                // algorithm after return and count dispatches only above
                 stats_dst->record_completed_chaining_algorithm_identity(
                     chaining_algorithm::vulkan_tiled_dynamic_programming);
 #endif
@@ -522,7 +487,7 @@ export {
                 std::span<anchor>{reordered_slab.data(), reordered_slab.size()});
         }
 
-        /// Describe the selected chaining kernel and parameters.
+        /// Describe the selected chaining kernel and its parameters for EXPLAIN.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -535,34 +500,22 @@ export {
             algo.parameters.push_back({"max_chain_iter", std::to_string(cp.max_chain_iter)});
             algo.parameters.push_back({"bandwidth", std::to_string(cp.bandwidth)});
             algo.parameters.push_back({"max_gap", std::to_string(cp.max_gap)});
-            // Let the selected kernel append its own runtime params (e.g. the
-            // Vulkan backend's stage / vulkan_enabled markers) so the
-            // EXPLAIN metadata is not dead code. No-op for the scalar/simd/range_minimum_query
-            // kernels.
+            // Include parameters supplied by the selected kernel in EXPLAIN.
             p_kernel::populate_runtime_params(cp, algo.parameters);
             algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
             algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
             desc.algorithm = std::move(algo);
-            // chain stage's two arena slabs are sized from the runtime
-            // anchor count (which is unknown at describe time), so we leave
-            // `estimated_batch_size` empty rather than fabricate a per-query
-            // figure that doesn't reflect the actual reserve.  The
-            // `[reserved: ...]` line in EXPLAIN is therefore omitted for
-            // chain_stage; the runtime `chains_slab.reserve(...)` call still
-            // sizes from `estimated_chain_count(anchors_in.size(), ...)`.
+            // Output  capacity depends on the, anchor count, which EXPLAIN does not
+            // have. Leave the reservation estimate empty for this stage.
             return desc;
         }
     };
 
     /**
-     * @brief Chain-to-region conversion stage.
+     * @brief Build an alignment region for each chain.
      *
-     * Wraps the `generate_regions` kernel, which writes its
-     * `alignment_region`-per-chain output directly into a caller-provided
-     * arena_slab via placement-new. `alignment_region` owns a `std::vector<cigar_operation>`,
-     * so it is not trivially-destructible. The slab's destructor walks
-     * `[0, len_)` and calls `~alignment_region()` on each live element before the
-     * arena reclaims the storage.
+     * The arena slab owns the regions and destroys them before releasing storage,
+     * including any CIGAR vectors filled by later alignment stages.
      */
     struct region_stage : stage_base<region_stage, alignment_region> {
         static constexpr std::string_view stage_name = "region_stage";
@@ -570,7 +523,7 @@ export {
         sequence_size_t query_len = 0;
         match_result_collection* host_timing_dst = nullptr;
 
-        /// Convert chains into arena-owned alignment regions.
+        /// Build arena-owned regions and keep their anchors available for alignment.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_chain_batch,
                   class p_anchor_batch,
@@ -581,8 +534,7 @@ export {
             if (host_timing_dst != nullptr) {
                 host_timing_dst->begin_region_host_stage(host_stage_now_ns());
             }
-            // `alignment_region` owns a `std::vector<cigar_operation>` so the slab uses the
-            // placement-new pattern; no intermediate `std::vector` is needed.
+            // The slab constructs and destroys each region, including its CIGAR vector.
             auto regions_slab = make_arena_slab<alignment_region>();
             generate_regions(std::span<chain>{chains.data(), chains.size()},
                              std::span<const anchor>{anchors.data(), anchors.size()},
@@ -594,7 +546,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe chain-to-region projection.
+        /// Describe region generation for EXPLAIN.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -603,20 +555,17 @@ export {
             algo.name = "Region generation";
             algo.parameters.push_back({"query_len", std::to_string(query_len)});
             desc.algorithm = std::move(algo);
-            // One region per chain (exact); the actual chain count is only
-            // known at runtime so the describe-time figure is left empty.  The
-            // runtime reserve in process_pair sizes the slab from chains.size().
+            // Each hhain produces a region. The chain count is available at runtime,
+            // so EXPLAIN leaves this  output estimate empty.
             return desc;
         }
     };
 
     /**
-     * @brief In-place primary/secondary classification stage.
+     * @brief Mark primary regions and their overlapping secondary candidates.
      *
-     * Mutates the regions span via `classify_primary_secondary` (which takes
-     * std::vector<alignment_region>& and modifies parent / score fields).  The
-     * vector-wrapper here copies in and out. The touched region count is bounded
-     * by best_n + 16 so the cost is negligible.
+     * Update parent links and competing scores in the existing region span.
+     * The next filter uses these relationships to select secondary results.
      */
     struct primary_secondary_stage : stage_base<primary_secondary_stage, alignment_region> {
         static constexpr std::string_view stage_name = "primary_secondary_stage";
@@ -634,7 +583,7 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
-            // The kernel mutates in place through a span without a vector round-trip.
+            // Update the regions in their current storage.
             classify_primary_secondary(std::span<alignment_region>{regions.data(), regions.size()},
                                        mask_level,
                                        mask_len,
@@ -644,7 +593,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe primary/secondary classification parameters.
+        /// Describe the overlap and score thresholds used for classification.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -660,9 +609,7 @@ export {
         }
     };
 
-    /**
-     * @brief In-place secondary-region filtering stage.
-     */
+    /** @brief Keep primary regions and the allowed secondary matches. */
     struct secondary_filter_stage : stage_base<secondary_filter_stage, alignment_region> {
         static constexpr std::string_view stage_name = "secondary_filter_stage";
 
@@ -679,8 +626,8 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
-            // The kernel filters in place via a span; the returned effective size
-            // gives the downstream stage a shorter prefix.
+            // The filter compacts survivors at the front of the existing storage.
+            // Pass only that prefix to the next stage
             const std::size_t new_size = filter_secondary_regions(
                 std::span<alignment_region>{regions.data(), regions.size()},
                 pri_ratio,
@@ -691,7 +638,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe secondary-region filtering parameters.
+        /// Describe the score thresholds and limit for secondary matches.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -707,9 +654,7 @@ export {
         }
     };
 
-    /**
-     * @brief Conditional divergence-estimation stage.
-     */
+    /** @brief Estimate  sequence divergence from matching seeds when enabled. */
     template <class p_minimizer,
               class p_query_minimizers = minimizer_batch_view<p_minimizer>>
     struct divergence_stage
@@ -723,7 +668,7 @@ export {
         std::int32_t runtime_kmer_size;
         bool enabled;
 
-        /// Estimate divergence when enabled and preserve the paired batch.
+        /// Estimate divergence when enabled, then pass the regions and anchors onward.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -750,7 +695,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe the optional divergence-estimation stage.
+        /// Describe seed-based divergence estimation when it is enabled.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -765,26 +710,24 @@ export {
     };
 
     /**
-     * Authoritative exact edit-distance predicate gate.
-     *
-     * This runs after traceback has populated `alignment_region::edit_distance` and
-     * before the final primary/secondary and MAPQ pass.  Consequently a candidate
-     * that does not satisfy the SQL predicate cannot influence the classification
-     * or mapping-quality metadata of a candidate that does.  The earlier
-     * rank-prefilter stage remains only a conservative work-avoidance gate.
+     * Apply the edit limit to completed alignments.
+     * Remove regions whose counted edits reach the exclusive upper bound, then
+     * reset the survivors for final classification and MAPQ. Rejected alignments
+     * cannot affect those final scores. The earlier xrefilter skips work, when
+     * an edit-distance lower bound  already rules out a match.
      */
     struct exact_edit_filter_stage : stage_base<exact_edit_filter_stage, alignment_region> {
         static constexpr std::string_view stage_name = "exact_edit_filter_stage";
 
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
         }
 
-        /// Retain only exact-edit survivors and reset their classification fields.
+        /// Keep alignments below the edit limit and clear their earlier classification.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -834,7 +777,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe the authoritative exact-edit predicate.
+        /// Describe the final edit limit when this filter is enabled.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -854,10 +797,10 @@ export {
     };
 
     /**
-     * @brief Conditional base-level alignment stage.
+     * @brief Align the selected regions when base-level alignment is enabled.
      *
-     * Algorithm dispatch occurs through `p_kernel = kernel_t<p_alignment_algorithm>`.
-     * runtime parameters are populated by `p_kernel::populate_runtime_params(...)`.
+     * The chosen kernel fills CIGAR and alignment scores. Worker contexts keep
+     * temporary allocations separate when regions can be aligned in parallel.
      */
     template <class p_kernel, sequence_alphabet p_alphabet>
     struct align_stage : stage_base<align_stage<p_kernel, p_alphabet>, alignment_region> {
@@ -865,7 +808,7 @@ export {
 
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
@@ -883,7 +826,7 @@ export {
             current_benchmark_e2e_operation_binding();
 #endif
 
-        /// Execute the selected base-alignment kernel and record its statistics.
+        /// Run  the selected alignment kernel when enabled and record its work.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -985,8 +928,8 @@ export {
                         }
                     }
 #endif
-                    // A nonzero count with no factory is an explicit serial cap;
-                    // zero remains the ordinary non-campaign "unspecified" value.
+                    // A count of one caps this call at serial execution without a worker
+                    // factory. Zero leaves concurrency unspecified for ordinary calls.
                     worker_factory.maximum_concurrency = worker_count;
                     if (worker_count > 1u) {
                         admitted_workers.emplace(worker_count, *attempt_memory);
@@ -1087,7 +1030,7 @@ export {
                 std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()});
         }
 
-        /// Describe the enabled base-alignment kernel.
+        /// Describe the alignment kernel when this stage is enabled.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -1106,17 +1049,17 @@ export {
     };
 
     /**
-     * @brief Conditional mapping-quality stage.
+     * @brief Compute mapping quality when enabled and pass regions to the result sink
      *
-     * Accepts a `(regions, anchors)` pair upstream but only uses the regions
-     * span. It emits the regions span downstream as a single batch.
+     * Anchors are no longer needed after alignment, so the paired input becomes
+     * a singve region batch here.
      */
     struct mapq_stage : stage_base<mapq_stage, alignment_region> {
         static constexpr std::string_view stage_name = "mapq_stage";
 
         statement_execution_plan_owner execution_plan;
 
-        /// Borrow the sole immutable statement snapshot.
+        /// Read  the settings shared by this statement.
         [[nodiscard, gnu::always_inline]] const minimap2_parameters&
         parameters() const noexcept {
             return execution_plan->frozen_parameters;
@@ -1137,8 +1080,8 @@ export {
             if (enabled) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                 {
-                    // Classification and downstream emission are outside this
-                    // compute_mapping_quality-only interval.
+                    // Time only MAPQ computation. Classification and result delivery have
+                    // their own place in the surrounding pipeline.
                     benchmark_e2e_interval_scope benchmark_e2e_mapq_scope{
                         parameters().downstream_active_wall,
                         true,
@@ -1163,10 +1106,8 @@ export {
                 std::span<alignment_region>{regions.data(), regions.size()});
         }
 
-        //: pair → single delegation.  The outer body has no
-        // surviving `emit_token<p_sink>` after the inner call moves it, so a
-        // second emit is structurally blocked.
-        /// Drop the paired anchor batch and delegate to the single-batch path.
+        // Delegate with the same output token so this path emits one batch.
+        /// Pass the regions to the single-batch path after the final use of anchors.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -1179,7 +1120,7 @@ export {
                                                  std::move(token));
         }
 
-        /// Describe the optional mapping-quality stage.
+        /// Describe mapping-quality calculation when it is enabled.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -1193,11 +1134,7 @@ export {
         }
     };
 
-    /**
-     * @brief Terminal sink: push converted MatchResults into the collection.
-     *
-     * Not a `bare_stage` — appears as the tail of `make_pipeline<p_aligner_parameters>(...)`.
-     */
+    /** @brief Finish the pipeline by moving each region into the result collection. */
     struct sink_stage {
         match_result_collection* dst_;
         sequence_size_t query_len = 0;
@@ -1205,7 +1142,7 @@ export {
         match_result_collection* host_timing_dst_ = nullptr;
         statement_execution_plan_owner execution_plan;
 
-        /// Convert regions into final match results and close host timing.
+        /// Append converted match results and finish any  active result-stage timer.
         [[gnu::always_inline]] inline void on_batch(std::span<alignment_region> regions) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             const auto tail_storage_plan = derive_alignment_tail_storage_plan(regions.size());
@@ -1216,9 +1153,8 @@ export {
 #else
             dst_->results.reserve(dst_->results.size() + regions.size());
 #endif
-            // `region_slot` is move-consumed into the converted match_result; the
-            // slot is left in a valid-but-moved-from state and reclaimed by
-            // whichever owner (arena slab or std::vector) holds the span.
+            // Conversion moves each CIGAR into the result. The original region
+            // remains, valid for destruction by the owner of this span.
             for (auto& region_slot : regions) {
                 dst_->results.push_back(
                     region_to_match_result(std::move(region_slot), query_len, target_len));
@@ -1229,7 +1165,7 @@ export {
             }
         }
 
-        /// Close host timing when upstream completes without a final batch.
+        /// Finish any active result-stage timer when upstream signals completion.
         [[gnu::always_inline]] inline void on_completed() noexcept {
             if (host_timing_dst_ != nullptr &&
                 host_timing_dst_->is_alignment_result_host_stage_active) {
@@ -1238,16 +1174,13 @@ export {
         }
     };
 
-    // =============================================================================
-    // Out-of-line pipeline-description walker
-    // =============================================================================
+    // Build EXPLAIN descriptions by walking the connected stages.
 
-    /// Describe this stage and append the recursively described sink stages.
+    /// Describe this stage followed by each downstream stage that provides a description.
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     [[nodiscard]] pipeline_description
     stage<p_aligner_parameters, p_self, p_sink>::describe() const {
-        // Every concrete stage description uses the same parameter specialization
-        // as the runtime path.
+        // Use the parameter pecialization stored in this pipeline type
         pipeline_description d;
         d.stages.push_back(self_.template describe<p_aligner_parameters>());
         if constexpr (requires { sink_.describe(); }) {
@@ -1260,9 +1193,9 @@ export {
     }
 
     /**
-     * @brief Injects the p_aligner_parameters computed properties as a leading entry in the
-     * pipeline description so the EXPLAIN renderer sees w/k/p_bucket_width beside the first
-     * stage.
+     * @brief Add compile-time window, k-mer and sequence-size settings to EXPLAIN.
+     * Put  these properties on the first stage, creating its algorithm description
+     * if needed.
      */
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     [[nodiscard]] pipeline_description

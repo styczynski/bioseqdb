@@ -1,9 +1,7 @@
 /**
  * @file index.cppm
- * @brief Target-neutral scalar minimizer hasher facade.
- *
- * @details Re-exports the scalar hasher base, lexicographic policy, and minimap2 integer
- * permutation under one import path for target-neutral minimizer code.
+ * @brief Exports the scalar lexicographic,  and minimap2 integer hashers together.
+ * Also exports their shared alphabet and strand helpers.
  */
 export module bioseq.sequences.kmers.hashers;
 

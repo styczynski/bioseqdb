@@ -1,16 +1,10 @@
 /**
  * @file
- * Defines vector comparison SQL owners for PostgreSQL temporal types.
+ * Compare a date or time vector with a scalar of the  same SQL type.
+ * Exactly one operand must be a vector. NULL rows stay NULL in the result.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/types/date.cppm
- *
- * Vector comparison owners for PostgreSQL temporal types.
- *
- *-------------------------------------------------------------------------
- */
+
 module;
 
 #include <bioseq/pg_compat.h>
@@ -26,7 +20,7 @@ export namespace bioseq::vector::sql_routines {
 
 using bioseq::column::vec::comparison_operation;
 
-/** Compares DATE vector operands for equality. */
+/** Compare DATE values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_eq(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -35,7 +29,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares DATE vector operands for inequality. */
+/** Test whether DATE values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_ne(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -44,7 +38,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares DATE vector operands for greater-than ordering. */
+/** Test left > right for DATE values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_gt(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -53,7 +47,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares DATE vector operands for less-than ordering. */
+/** Test left < right for DATE values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_lt(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -62,7 +56,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares DATE vector operands for less-than-or-equal ordering. */
+/** Test left <= right for DATE values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_le(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -71,7 +65,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares DATE vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for DATE values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vdate_ge(bioseq::postgres::support::vector_operand<bioseq::sql::pg::date, DateADT> left,
@@ -80,7 +74,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIME vector operands for equality. */
+/** Compare TIME values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_eq(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -89,7 +83,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares TIME vector operands for inequality. */
+/** Test whether TIME values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_ne(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -98,7 +92,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIME vector operands for greater-than ordering. */
+/** Test left > right for TIME values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_gt(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -107,7 +101,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares TIME vector operands for less-than ordering. */
+/** Test left < right for TIME values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_lt(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -116,7 +110,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares TIME vector operands for less-than-or-equal ordering. */
+/** Test left <= right for TIME values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_le(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -125,7 +119,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIME vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for TIME values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool>
         vtime_ge(bioseq::postgres::support::vector_operand<bioseq::sql::pg::time, TimeADT> left,
@@ -134,7 +128,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for equality. */
+/** Compare TIMESTAMP values for equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -143,7 +137,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for inequality. */
+/** Test whether TIMESTAMP values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -152,7 +146,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for greater-than ordering. */
+/** Test left > right for TIMESTAMP values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -161,7 +155,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for less-than ordering. */
+/** Test left < right for TIMESTAMP values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -170,7 +164,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for less-than-or-equal ordering. */
+/** Test left <= right for TIMESTAMP values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -179,7 +173,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMP vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for TIMESTAMP values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamp_ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamp, Timestamp> left,
@@ -188,7 +182,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for equality. */
+/** Compare TIMESTAMPTZ values for equality */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,
@@ -198,7 +192,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for inequality. */
+/** Test whether TIMESTAMPTZ values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,
@@ -208,7 +202,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for greater-than ordering. */
+/** Test left > right for TIMESTAMPTZ values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_gt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,
@@ -218,7 +212,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                   std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for less-than ordering. */
+/** Test left < right for TIMESTAMPTZ values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_lt(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,
@@ -228,7 +222,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for less-than-or-equal ordering. */
+/** Test left <= right for TIMESTAMPTZ values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_le(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,
@@ -238,7 +232,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compares TIMESTAMPTZ vector operands for greater-than-or-equal ordering. */
+/** Test left >= right for TIMESTAMPTZ values. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_ge(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,

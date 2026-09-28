@@ -1,6 +1,6 @@
 /**
  * @file alignment_stats.cppm
- * @brief Alignment execution statistics formatting and SQL row materialization.
+ * @brief Convert alignment statistics into SQL rows and JSON values.
  */
 module;
 
@@ -56,27 +56,23 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-/** @brief Column count for one alignment execution statistics SRF row. */
+/** @brief Number of SQL columns in each alignment statistics row. */
 inline constexpr int k_alignment_stats_column_count = 151;
 
-/** @brief Serializes cold-index preparation counters from @p stats into a JSON object string. */
+/** @brief Encode the work needed to open and read an index for the first time */
 [[nodiscard]] auto
 cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_stats& stats)
     -> std::string {
     /*
-     * Keep the cold-read diagnostic surface self-contained
-     * without permanently widening the already-large SRF by one column per
-     * counter.  Values are saturated before reaching this boundary, so every
-     * JSON number remains representable as a SQL bigint. Head/directory/range
-     * scan counts and TOAST/detoast counts remain in their pre-existing scalar
-     * SRF columns; duplicating those five values here would create two public
-     * names for the same measurement. are_stats_saturated is repeated deliberately
-     * so a consumer can validate this object without consulting another column.
-     * payload_ns is one inclusive wall interval from the first payload scan to
-     * final payload validation, including callbacks. Internal decode/transfer
-     * counters remain zero, while their public JSON values are null and their
-     * availability flags are false: measuring them at tuple/chunk granularity
-     * would add O(rows) clock overhead to the benchmarked path.
+     * Group cold-index counters in JSON so each counter does not need a SQL
+     * column. Values are capped at the SQL bigint limit before formatting.
+     * The object repeats are_stats_saturated to allow a separate validity check.
+     * Existing columns carry scan  and TOAST counts.
+     *
+     * payload_ns includes scanning, callbacks and final validation. Decode
+     * and transfer tmes are unavailable because timing each tuple or chunk
+     * would add a clock call for every item read during the benchmark.
+     * Their JSON values are null.
      */
     std::string result =
         R"({"schema":"bioseq.cold_index_preparation","revision":1,"timing_semantics":"payload_inclusive_wall","decode_timing_available":false,"transfer_timing_available":false)";
@@ -146,15 +142,12 @@ cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_s
     return result;
 }
 
-/** @brief Serializes SIMD counters and E2E snapshot evidence into a JSON object string. */
+/** @brief Encode SIMD work counters and optional benchmark timing intervals. */
 [[nodiscard]] auto
 simd_execution_stats_json(const alignment_exec::alignment_execution_snapshot& snapshot)
     -> std::string {
-    /*
-     * One compact object carries the exact SIMD execution counters without
-     * widening the scalar row for each new counter. Every value comes from the
-     * immutable alignment snapshot copied before the SRF emits its stage rows.
-     */
+    /* Keep SIMD counters in one JSON column. Read all values from the saved
+     * query snapshot so every stage row describes the same execution. */
     const auto& stats = snapshot.pipeline;
     const auto& operational = stats.operational;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -218,8 +211,9 @@ simd_execution_stats_json(const alignment_exec::alignment_execution_snapshot& sn
            operational.downstream_active_wall_invocations);
     append("downstream_active_wall_unavailable_invocation_count",
            operational.downstream_active_wall_unavailable_invocations);
-    // Rows 12--19 remain useful as aggregate work diagnostics. They may overlap
-    // across task-parallel workers and therefore never feed wall subtraction.
+    // MAPQ and later stages can run at the same  time in different workers.
+    // Their summed times measure work and cannot be subtracted from query
+    // wall time as though the intervals were separate.
     std::uint64_t downstream_work_ns = 0u;
     bool downstream_work_saturated = operational.are_stats_saturated;
     for (std::size_t stage =
@@ -424,7 +418,7 @@ simd_execution_stats_json(const alignment_exec::alignment_execution_snapshot& sn
     return result;
 }
 
-/** @brief Sequential writer for one alignment statistics PostgreSQL datum row. */
+/** @brief Fill a PostgreSQL statistics row one column at a time. */
 template <int p_column_count> struct alignment_stats_row_builder {
     bioseq::postgres::support::pg_datum_list<p_column_count> row{};
     int next_attnum = 1;
@@ -449,7 +443,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
         row.set(next_attnum++, value);
     }
 
-    /** @brief Appends @p value as a SQL integer when it fits the SQL integer range. */
+    /** @brief Append an unsigned value as SQL integer, raising, an error on overflow. */
     void unsigned_integer(std::uint32_t value) {
         if (value > bioseq::pipeline_stats::k_sql_integer_value_max) {
             bioseq::postgres::support::raise_sql_error(
@@ -464,7 +458,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
         row.set(next_attnum++, value);
     }
 
-    /** @brief Appends @p value as a SQL bigint when it fits the SQL bigint range. */
+    /** @brief Append an unsigned value as SQL bigint, raising an error on overflow. */
     void bigint(std::uint64_t value) {
         if (value > bioseq::pipeline_stats::k_sql_bigint_value_max) {
             bioseq::postgres::support::raise_sql_error(
@@ -482,7 +476,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
         row.set_raw(next_attnum++, bioseq::postgres::support::pg_datum::from_pointer(datum));
     }
 
-    /** @brief Appends @p encoded as a PostgreSQL jsonb datum in the next column. */
+    /** @brief Parse JSON text and append the resulting PostgreSQL jsonb value */
     void jsonb(std::string_view encoded) {
         const std::string terminated{encoded};
         const Datum datum = bioseq::postgres::support::invoke_pg_as_cpp([&terminated] {
@@ -514,22 +508,19 @@ template <int p_column_count> struct alignment_stats_row_builder {
 
 namespace bioseq::pg::detail {
 
-/** @brief Resolves the environment backend for @p snapshot after validating zero-work and GPU
- * fields. */
+/** @brief Check that the recorded execution environment matches the backend.
+ * Accept an unused environment  for a query that did no alignment work.
+ * Invalid CPU or GPU details raise an error. Return the recorded backend.
+ */
 [[nodiscard]] auto validate_alignment_snapshot_environment(
     const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot)
     -> bioseq::pipeline_stats::executed_backend {
     const auto& stats = snapshot.pipeline;
     bioseq::pipeline_stats::executed_backend environment_backend = stats.actual_backend;
     if (!bioseq::pipeline_stats::is_concrete_backend(environment_backend)) {
-        /*
-         * A statement whose alignment child is genuinely empty still publishes
-         * one row per pipeline stage. Both backend identities and the environment remain
-         * exactly unset and every job counter is zero.  Do not force a concrete
-         * backend onto this shape (which would launder an empty statement into
-         * backend acceptance), but do allow the SRF to materialise its twenty
-         * zero-work rows.
-         */
+        /* An empty alignment scan still gets a statistics row for every stage.
+         * Keep its backend and envixonment unset, with zero job counts, so
+         * the rows do not imply that a CPU or GPU alignment ran. */
         const bool exact_zero_work_snapshot =
             environment_backend == bioseq::pipeline_stats::executed_backend::none &&
             stats.requested_backend == bioseq::pipeline_stats::executed_backend::none &&
@@ -571,7 +562,7 @@ namespace bioseq::pg::detail {
 
 namespace {
 
-/** @brief Materializes one alignment statistics datum row for @p snapshot at @p stage. */
+/** @brief Build one stage row, combining its counters with query-wide totals. */
 [[nodiscard]] auto
 make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& snapshot,
                          bioseq::pipeline_stats::pipeline_stage stage)
@@ -788,18 +779,21 @@ make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& sna
     return out.row;
 }
 
-/** @brief Marks non-optional alignment SQL field types for @ref alignment_stats_field. */
+/** @brief Required SQL fields use their C++ type directly. */
 template <class p_value> struct alignment_optional_traits {
     static constexpr bool k_is_optional = false;
 };
 
-/** @brief Marks @c std::optional alignment SQL field types for @ref alignment_stats_field. */
+/** @brief Optional SQL fields use std::optional and can hold SQL NULL. */
 template <class p_value> struct alignment_optional_traits<std::optional<p_value>> {
     static constexpr bool k_is_optional = true;
     using contained_type = p_value;
 };
 
-/** @brief Reads column @p attnum from @p raw into type @c p_value. */
+/** @brief Read a one-based SQL column as  the requested C++ type.
+ * Copy text and JSON into owned strings. SQL NULL becomes std::nullopt for
+ * optional types and raises an error for required fields.
+ */
 template <class p_value, std::size_t p_column_count>
 [[nodiscard]] auto
 alignment_stats_field(const bioseq::postgres::support::pg_datum_list<p_column_count>& raw,
@@ -1004,7 +998,7 @@ alignment_stats_field(const bioseq::postgres::support::pg_datum_list<p_column_co
     .cold_index_preparation =                                                                      \
         alignment_stats_field<bioseq::postgres::support::jsonb_value>(raw, 150),
 
-/** @brief Builds an owned alignment execution stats row for @p snapshot at @p stage. */
+/** @brief Build a stage row whose text and JSON values own their storage. */
 [[nodiscard]] auto
 make_owned_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& snapshot,
                                const bioseq::pipeline_stats::pipeline_stage stage)
@@ -1024,7 +1018,9 @@ namespace bioseq::pg::sql_routines {
 
 using bioseq::pg::detail::validate_alignment_snapshot_environment;
 
-/** @brief Returns one stats row per pipeline stage from the last alignment execution snapshot. */
+/** @brief Return one row per pipeline stage for the latest alignment query.
+ * Include partial queries. Return no rows before the first saved snapshot.
+ */
 bioseq::postgres::support::table_rows<bioseq::postgres::sql_rows::alignment_execution_stats_row>
 last_alignment_execution_stats() {
     const auto& last_alignment_execution_snapshot =

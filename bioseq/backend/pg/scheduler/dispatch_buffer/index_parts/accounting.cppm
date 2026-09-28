@@ -1,6 +1,6 @@
 /**
  * @file index_parts/accounting.cppm
- * @brief Exports fixed dispatch cardinalities and fail-closed outcome accounting.
+ * @brief Set batch limits and check alignment counters before reporting them.
  */
 module;
 
@@ -13,14 +13,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// Shared limits and accounting rules for scan and join batches.
 export module bioseq.postgres.scheduler.dispatch_buffer:accounting;
 
 import bioseq.indexing.type;
@@ -31,9 +24,9 @@ export namespace bioseq::scheduler {
 
 constexpr size_t dispatch_batch_capacity = 8192;
 
-/// Merge one PostgreSQL-local cold-index delta through the
-/// pipeline_operational_stats saturating path. This function performs only a
-/// field mapping. It cannot change backend/source/fallback stats.
+/// Add PostgreSQL index-preparation counters to the pipeline statistics.
+/// The destination merge records overflow. Backend choice and index-source
+/// outcomes are left unchanged.
 inline void merge_cold_index_preparation_stats(
     ::bioseq::pipeline_stats::pipeline_operational_stats& destination,
     const bioseq::storage::indexing::cold_index_preparation_stats& source) noexcept {
@@ -144,10 +137,9 @@ inline void map_hash_major_index_reader_stats(
     output.is_saturated = input.saturated;
 }
 
-/// Publish one authenticated generation-session read exactly once.  GPU and
-/// CPU prepared targets use the same PostgreSQL reader, so their physical I/O
-/// stats must be mapped identically instead of being inferred from backend
-/// selection labels.
+/// Add one stored-index read session to the  pipeline statistics.
+/// CPU and GPU targets use the same PostgreSQL reader counters. The caller
+/// must add each session only once
 inline void merge_generation_read_stats(
     ::bioseq::pipeline_stats::pipeline_operational_stats& destination,
     const bioseq::storage::indexing::minimizer_generation_read_stats& source) noexcept {
@@ -267,12 +259,12 @@ enum class shared_join_target_outcome_topology : std::uint8_t {
     gpu_shared_target,
 };
 
-/* Requested-backend identity is an attestation result, not a dispatch-shape
- * discriminator. A deliberately unattested mixed CPU tuple still emits one
- * raw target outcome per target-query pair. The Vulkan dispatcher also records
- * one outcome per completed query, even when its target is shared. Derive topology from the
- * immutable selected params and keep the backend identity only as a coherence
- * check. */
+/*
+ * Determine whether the request uses CPU or a complete Vulkan pipeline from
+ * its selected options. A mixed set of CPU algorithms can have a
+ * mixed_invalid backend label and still report valid per-query counts.
+ * Both routes report one raw target outcome for each query.
+ */
 [[nodiscard]] constexpr shared_join_target_outcome_topology
 classify_shared_join_target_outcome_topology(const bool any_vulkan_component_requested,
                                              const bool complete_vulkan_tuple_requested) noexcept {
@@ -309,10 +301,8 @@ shared_join_raw_target_shape_valid(const shared_join_target_outcome_topology top
             backend == ::bioseq::pipeline_stats::executed_backend::vulkan_gpu) {
             return false;
         }
-        /* mixed_invalid is the correct fail-closed identity for a
-         * heterogeneous CPU tuple such as scalar sketch/chaining plus
-         * Block Aligner. It remains unattested while retaining CPU
-         * per-pair target accounting. */
+        /* CPU algorithms from different implementations can produce
+         * mixed_invalid while still reporting one target outcoe per query. */
         expected = query_count;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
@@ -350,8 +340,8 @@ static_assert(
                                        16,
                                        16,
                                        16));
-/* Later waves must still carry native raw target/source stats.  Only the
- * batch join owner suppresses their normalized publication. */
+/* Every wave reports its full target counts. The join owner later counts
+ * the shared physical  target once across all waves. */
 static_assert(
     shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::cpu_per_pair,
                                        ::bioseq::pipeline_stats::executed_backend::simd_cpu,
@@ -433,19 +423,19 @@ shared_join_raw_source_shape_valid(const ::bioseq::pipeline_stats::target_index_
         return false;
     }
     if (actual == ::bioseq::pipeline_stats::target_index_source::persisted) {
-        /* A recompute-only request must never discover/use persisted payload. */
+        /* A request to recompute must not read a stored index. */
         return requested == ::bioseq::pipeline_stats::target_index_source::persisted &&
                persisted_rows == raw_target_rows && recomputed_rows == 0 && missing_rows == 0;
     }
-    /* The only remaining concrete actual source is recomputed. */
+    /* The remaining valid source is an index computed for, this request. */
     if (persisted_rows != 0 || recomputed_rows != raw_target_rows) {
         return false;
     }
     if (requested == ::bioseq::pipeline_stats::target_index_source::recomputed) {
         return missing_rows == 0;
     }
-    /* An allow-mode persisted request may truthfully miss and recompute, but
-     * the producer must report one missing outcome for every raw target. */
+    /* If a requested stored index was missing, every recomputed target must
+     * also have a missing-index count. */
     return requested == ::bioseq::pipeline_stats::target_index_source::persisted &&
            missing_rows == raw_target_rows;
 }
@@ -500,13 +490,10 @@ static_assert(
                                         0));
 
 /*
- * The typed processor is a generic row-pair consumer: some target/index
- * outcome paths still report one operational observation per pair.  A
- * bioseq batch join wave, by contrast, owns exactly one physical target and
- * repeats only its query side.  Collapse that generic stats at the owner
- * boundary after first proving that it is internally consistent.  This is
- * deliberately not a permissive clamp: mixed target sources, missing source
- * outcomes, or counts outside the physical wave shape fail closed.
+ * A join reuses one target for many queries, but the processor reports one
+ * target outcome per pair. Check those counts and index sources first.
+ * Then count the physical target once, or omit it  if an earlier wave already
+ * counted it. Inconsistent input raises a PostgreSQL error.
  */
 inline void
 normalize_shared_join_target_outcomes(::bioseq::pipeline_stats::pipeline_execution_stats& stats,

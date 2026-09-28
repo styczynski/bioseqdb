@@ -121,18 +121,18 @@ HWY_NOINLINE V CallAtanh(const D d, VecArg<V> x) {
   return Atanh(d, x);
 }
 
-// Atan2 was added later and some users may be implementing it themselves, so
-// notify them that this version of Highway defines it already.
+// Lets callers check whether this Highway version provides Atan2.
 #ifndef HWY_HAVE_ATAN2
 #define HWY_HAVE_ATAN2 1
 #endif
 
 /**
- * Highway SIMD version of std::atan2(x).
+ * Computes atan2(y, x) for each float32 or float64 lane.
  *
- * Valid Lane Types: float32, float64
- * Correctly handles negative zero, infinities, and NaN.
- * @return atan2 of 'y', 'x'
+ * Handles infinities and returns NaN when either input is NaN. The result
+ * keeps the sign of y. A negative zero in x is treated as zero when choosing
+ * the quadrant.
+ * @return Angle in radians.
  */
 template <class D, class V>
 HWY_INLINE V Atan2(D d, V y, V x);
@@ -307,13 +307,11 @@ HWY_NOINLINE V CallTanh(const D d, VecArg<V> x) {
 }
 
 /**
- * Highway SIMD version of SinCos.
- * Compute the sine and cosine at the same time
- * The performance should be around the same as calling Sin.
+ * Computes sine and cosine together  for each float32 or float64 lane.
+ * Both results share the angle reduction. Writes sine to s and cosine to c.
  *
- * Valid Lane Types: float32, float64
- *        Max Error: ULP = 1
- *      Valid Range: [-39000, +39000]
+ * Maximum error: 1 ULP.
+ * Valid range: [-39000, +39000].
  */
 template <class D, class V>
 HWY_INLINE void SinCos(D d, V x, V& s, V& c);
@@ -323,12 +321,13 @@ HWY_NOINLINE void CallSinCos(const D d, VecArg<V> x, V& s, V& c) {
 }
 
 /**
- * Highway SIMD version of Hypot
+ * Computes sqrt(a*a + b*b) for each float32 or float64 lane. Scales the
+ * inputs first to avoid overflow while squaring finite inputs whose result
+ * is representable.
  *
- * Valid Lane Types: float32, float64
- *        Max Error: ULP = 4
- *      Valid Range: float32[-FLT_MAX, +FLT_MAX], float64[-DBL_MAX, +DBL_MAX]
- * @return hypotenuse of a and b
+ * Maximum error: 4 ULP.
+ * Valid range: float32[-FLT_MAX, +FLT_MAX], float64[-DBL_MAX, +DBL_MAX].
+ * @return Hypotenuse of a and b.
  */
 template <class D, class V>
 HWY_INLINE V Hypot(D d, V a, V b);
@@ -337,15 +336,15 @@ HWY_NOINLINE V CallHypot(const D d, VecArg<V> a, VecArg<V> b) {
   return Hypot(d, a, b);
 }
 
-////////////////////////////////////////////////////////////////////////////////
+
 // Implementation
-////////////////////////////////////////////////////////////////////////////////
+
 namespace impl {
 
-// Estrin's Scheme is a faster method for evaluating large polynomials on
-// super scalar architectures. It works by factoring the Horner's Method
-// polynomial into power of two sub-trees that can be evaluated in parallel.
-// Wikipedia Link: https://en.wikipedia.org/wiki/Estrin%27s_scheme
+// Estrin's scheme groups polynomial terms by powers of two so independent
+// groups can be evaluated in parallel. The overloads below use epeated
+// squaring and multiply-add operations for each polynomial  size.
+// https://en.wikipedia.org/wiki/Estrin%27s_scheme
 template <class T>
 HWY_INLINE HWY_MAYBE_UNUSED T Estrin(T x, T c0, T c1) {
   return MulAdd(c1, x, c0);
@@ -545,7 +544,7 @@ struct SinCosImpl {};
 
 template <>
 struct AsinImpl<float> {
-  // Polynomial approximation for asin(x) over the range [0, 0.5).
+  // Polynomial correction used to approximate asin(x) for 0 <= x < 0.5.
   template <class D, class V = VFromD<D>, HWY_IF_F32_D(D)>
   HWY_INLINE V AsinPoly(D d, V x2, V /*x*/) {
     const auto k0 = Set(d, +0.1666677296f);
@@ -562,7 +561,7 @@ struct AsinImpl<float> {
 
 template <>
 struct AsinImpl<double> {
-  // Polynomial approximation for asin(x) over the range [0, 0.5).
+  // Polynomial correction used to approximate asin(x) for 0 <= x < 0.5.
   template <class D, class V = VFromD<D>, HWY_IF_F64_D(D)>
   HWY_INLINE V AsinPoly(D d, V x2, V /*x*/) {
     const auto k0 = Set(d, +0.1666666666666497543);
@@ -667,7 +666,7 @@ struct CosSinImpl<float> {
     const V kHalfPiPart2f = Set(d, -0.5f * 6.2771141529083251953e-7f);
     const V kHalfPiPart3f = Set(d, -0.5f * 1.2154201256553420762e-10f);
 
-    // Extended precision modular arithmetic.
+    // Subtract, q * pi/2 in parts to limit rounding error.
     const V qf = ConvertTo(d, q);
     x = MulAdd(qf, kHalfPiPart0f, x);
     x = MulAdd(qf, kHalfPiPart1f, x);
@@ -685,7 +684,7 @@ struct CosSinImpl<float> {
     const V kPiPart2f = Set(d, -6.2771141529083251953e-7f);
     const V kPiPart3f = Set(d, -1.2154201256553420762e-10f);
 
-    // Extended precision modular arithmetic.
+    // Subtract q * pi in parts to limit rounding error.
     const V qf = ConvertTo(d, q);
     x = MulAdd(qf, kPiPart0f, x);
     x = MulAdd(qf, kPiPart1f, x);
@@ -744,7 +743,7 @@ struct CosSinImpl<double> {
     const V kHalfPiPart2d = Set(d, -0.5 * 1.2246467864107188502e-16);
     const V kHalfPiPart3d = Set(d, -0.5 * 1.2736634327021899816e-24);
 
-    // Extended precision modular arithmetic.
+    // Subtract q * pi/2 in parts to limit rounding error
     const V qf = PromoteTo(d, q);
     x = MulAdd(qf, kHalfPiPart0d, x);
     x = MulAdd(qf, kHalfPiPart1d, x);
@@ -762,7 +761,7 @@ struct CosSinImpl<double> {
     const V kPiPart2d = Set(d, -1.2246467864107188502e-16);
     const V kPiPart3d = Set(d, -1.2736634327021899816e-24);
 
-    // Extended precision modular arithmetic.
+    // Subtract q * pi in parts to limit rounding error.
     const V qf = PromoteTo(d, q);
     x = MulAdd(qf, kPiPart0d, x);
     x = MulAdd(qf, kPiPart1d, x);
@@ -824,7 +823,7 @@ struct ExpImpl<float> {
     return BitCast(d, ShiftLeft<23>(Add(x, kOffset)));
   }
 
-  // Sets the exponent of 'x' to 2^e.
+  // Multiplies x by 2^e in two steps to keep each scale factor in range.
   template <class D, class V = VFromD<D>, class VI32 = Vec<Rebind<int32_t, D>>,
             HWY_IF_F32_D(D)>
   HWY_INLINE V LoadExpShortRange(D d, V x, VI32 e) {
@@ -839,7 +838,7 @@ struct ExpImpl<float> {
     const V kLn2Part0f = Set(d, -0.693145751953125f);
     const V kLn2Part1f = Set(d, -1.428606765330187045e-6f);
 
-    // Extended precision modular arithmetic.
+    // Subtract q * ln(2) in parts to limit rounding error.
     const V qf = ConvertTo(d, q);
     x = MulAdd(qf, kLn2Part0f, x);
     x = MulAdd(qf, kLn2Part1f, x);
@@ -866,7 +865,8 @@ struct LogImpl<float> {
     return Sub(BitCast(di32, ShiftRight<23>(BitCast(du32, x))), kBias);
   }
 
-  // Approximates Log(x) over the range [sqrt(2) / 2, sqrt(2)].
+  // Polynomial correction for log, after mapping its reduced input y to
+  // x = (y - 1) / (y + 1), where sqrt(2)/2 <= y <= sqrt(2).
   template <class D, class V = VFromD<D>, HWY_IF_F32_D(D)>
   HWY_INLINE V LogPoly(D d, V x) {
     const V k0 = Set(d, 0.66666662693f);
@@ -922,7 +922,7 @@ struct ExpImpl<double> {
     return BitCast(d, ShiftLeft<52>(PromoteTo(di64, Add(x, kOffset))));
   }
 
-  // Sets the exponent of 'x' to 2^e.
+  // Multiplies x by 2^e in two steps to keep each  scale factor in range.
   template <class D, class V = VFromD<D>, class VI32 = Vec<Rebind<int32_t, D>>,
             HWY_IF_F64_D(D)>
   HWY_INLINE V LoadExpShortRange(D d, V x, VI32 e) {
@@ -937,7 +937,7 @@ struct ExpImpl<double> {
     const V kLn2Part0d = Set(d, -0.6931471805596629565116018);
     const V kLn2Part1d = Set(d, -0.28235290563031577122588448175e-12);
 
-    // Extended precision modular arithmetic.
+    // Subtract q * ln(2) in parts to limit rounding error.
     const V qf = PromoteTo(d, q);
     x = MulAdd(qf, kLn2Part0d, x);
     x = MulAdd(qf, kLn2Part1d, x);
@@ -964,7 +964,8 @@ struct LogImpl<double> {
                Set(di64, 0x3FF));
   }
 
-  // Approximates Log(x) over the range [sqrt(2) / 2, sqrt(2)].
+  // Polynomial correction for log, after mapping its reduced input y to
+  // x = (y - 1) / (y + 1), where sqrt(2)/2 <= y <= sqrt(2).
   template <class D, class V = VFromD<D>, HWY_IF_F64_D(D)>
   HWY_INLINE V LogPoly(D d, V x) {
     const V k0 = Set(d, 0.6666666666666735130);
@@ -992,7 +993,7 @@ HWY_INLINE V Log(const D d, V x) {
 
   constexpr bool kIsF32 = (sizeof(T) == 4);
 
-  // Float Constants
+  // Floating-point constants
   const V kLn2Hi = Set(d, kIsF32 ? static_cast<T>(0.69313812256f)
                                  : static_cast<T>(0.693147180369123816490));
   const V kLn2Lo = Set(d, kIsF32 ? static_cast<T>(9.0580006145e-6f)
@@ -1003,7 +1004,7 @@ HWY_INLINE V Log(const D d, V x) {
   const V kScale = Set(d, kIsF32 ? static_cast<T>(3.355443200e+7f)
                                  : static_cast<T>(1.8014398509481984e+16));
 
-  // Integer Constants
+  // Exponent and mantissa constants
   using TI = MakeSigned<T>;
   const Rebind<TI, D> di;
   using VI = decltype(Zero(di));
@@ -1020,29 +1021,29 @@ HWY_INLINE V Log(const D d, V x) {
   const VI kManMask = Set(di, kIsF32 ? static_cast<TI>(0x7FFFFFL)
                                      : static_cast<TI>(0xFFFFF00000000LL));
 
-  // Scale up 'x' so that it is no longer denormalized.
+  // Scale subnormal inputs into the normal range before extracting the exponent.
   VI exp_bits;
   V exp;
   if (kAllowSubnormals == true) {
     const auto is_denormal = Lt(x, kMinNormal);
     x = IfThenElse(is_denormal, Mul(x, kScale), x);
 
-    // Compute the new exponent.
+    // Account for the scale factor when extracting the exponent.
     exp_bits = Add(BitCast(di, x), kExpMagicDiff);
     const VI exp_scale =
         BitCast(di, IfThenElseZero(is_denormal, BitCast(d, kExpScale)));
     exp = ConvertTo(d, Add(exp_scale, impl.Log2p1NoSubnormal(d, exp_bits)));
   } else {
-    // Compute the new exponent.
+    // Extract the exponent directly when subnormal handling is disabled.
     exp_bits = Add(BitCast(di, x), kExpMagicDiff);
     exp = ConvertTo(d, impl.Log2p1NoSubnormal(d, exp_bits));
   }
 
-  // Renormalize.
+  // Put the mantissa in the interval  used by the logarithm approxivation.
   const V y = Or(And(x, BitCast(d, kLowerBits)),
                  BitCast(d, Add(And(exp_bits, kManMask), kMagic)));
 
-  // Approximate and reconstruct.
+  // Approximate log of the reduced value, then add the exponent contribution.
   const V ym1 = Sub(y, kOne);
   const V z = Div(ym1, Add(y, kOne));
 
@@ -1055,7 +1056,7 @@ HWY_INLINE V Log(const D d, V x) {
 // Based on "sse_mathfun.h", by Julien Pommier
 // http://gruntthepeon.free.fr/ssemath/
 
-// Third degree poly
+// Sine and cosine approximation using three coefficients for each correction.
 template <class D, class V = VFromD<D>>
 HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
                         V& s, V& c) {
@@ -1089,7 +1090,7 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   sign_bit_sin = x;
   x = Abs(x);
 
-  /* extract the sign bit (upper one) */
+  /* Keep the input sign for the final sine result. */
   sign_bit_sin = And(sign_bit_sin, BitCast(d, sign_mask));
 
   /* scale by 4/Pi */
@@ -1111,12 +1112,11 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
 
   V swap_sign_bit_sin = BitCast(d, imm0);
 
-  /* get the polynomial selection mask for the sine*/
+  /* Choose the sine or cosine polynomial for this region */
   imm2 = And(imm2, ci_2);
   M poly_mask = RebindMask(d, Eq(imm2, ci_0));
 
-  /* The magic pass: "Extended precision modular arithmetic"
-  x = ((x - y * DP1) - y * DP2) - y * DP3; */
+  /* Reduce the angle with three parts of pi/4 to limit rounding error. */
   x = MulAdd(y, DP1, x);
   x = MulAdd(y, DP2, x);
   x = MulAdd(y, DP3, x);
@@ -1129,7 +1129,7 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
 
   sign_bit_sin = Xor(sign_bit_sin, swap_sign_bit_sin);
 
-  /* Evaluate the first polynomial  (0 <= x <= Pi/4) */
+  /* Approximate cosine of the reduced angle. */
   V z = Mul(x, x);
 
   y = MulAdd(cos_p0, z, cos_p1);
@@ -1139,7 +1139,7 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   y = NegMulAdd(z, Set(d, 0.5f), y);
   y = Add(y, Set(d, 1));
 
-  /* Evaluate the second polynomial  (Pi/4 <= x <= 0) */
+  /* Approximate sine of the reduced,  angle. */
   V y2 = MulAdd(sin_p0, z, sin_p1);
   y2 = MulAdd(y2, z, sin_p2);
   y2 = Mul(y2, z);
@@ -1149,12 +1149,12 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   xmm1 = IfThenElse(poly_mask, y2, y);
   xmm2 = IfThenElse(poly_mask, y, y2);
 
-  /* update the sign */
+  /* Restore the signs for the original angle. */
   s = Xor(xmm1, sign_bit_sin);
   c = Xor(xmm2, sign_bit_cos);
 }
 
-// Sixth degree poly
+// Sine and cosine approximation using six coefficients for each correction.
 template <class D, class V = VFromD<D>>
 HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
                         V& s, V& c) {
@@ -1195,7 +1195,7 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   sign_bit_sin = x;
   x = Abs(x);
 
-  /* extract the sign bit (upper one) */
+  /* Keep the input sign for the final sine result. */
   sign_bit_sin = And(sign_bit_sin, BitCast(d, sign_mask));
 
   /* scale by 4/Pi */
@@ -1217,12 +1217,11 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
 
   V swap_sign_bit_sin = BitCast(d, imm0);
 
-  /* get the polynomial selection mask for the sine*/
+  /* Choose the sine or cosine polynomial for this region. */
   imm2 = And(imm2, ci_2);
   M poly_mask = RebindMask(d, Eq(imm2, ci_0));
 
-  /* The magic pass: "Extended precision modular arithmetic"
-    x = ((x - y * DP1) - y * DP2) - y * DP3; */
+  /* Reduce the angle with three parts of pi/4 to limit rounding error. */
   x = MulAdd(y, DP1, x);
   x = MulAdd(y, DP2, x);
   x = MulAdd(y, DP3, x);
@@ -1234,7 +1233,7 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   V sign_bit_cos = BitCast(d, imm4);
   sign_bit_sin = Xor(sign_bit_sin, swap_sign_bit_sin);
 
-  /* Evaluate the first polynomial  (0 <= x <= Pi/4) */
+  /* Approximate cosine of the reduced angle. */
   V z = Mul(x, x);
 
   y = MulAdd(cos_p0, z, cos_p1);
@@ -1247,7 +1246,7 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   y = NegMulAdd(z, Set(d, 0.5f), y);
   y = Add(y, Set(d, 1.0f));
 
-  /* Evaluate the second polynomial  (Pi/4 <= x <= 0) */
+  /* Approximate sine of the reduced angle. */
   V y2 = MulAdd(sin_p0, z, sin_p1);
   y2 = MulAdd(y2, z, sin_p2);
   y2 = MulAdd(y2, z, sin_p3);
@@ -1260,7 +1259,7 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   xmm1 = IfThenElse(poly_mask, y2, y);
   xmm2 = IfThenElse(poly_mask, y, y2);
 
-  /* update the sign */
+  /* Restore the signs for the  original angle. */
   s = Xor(xmm1, sign_bit_sin);
   c = Xor(xmm2, sign_bit_cos);
 }
@@ -1462,20 +1461,20 @@ HWY_INLINE V Cos(const D d, V x) {
   using T = TFromD<D>;
   impl::CosSinImpl<T> impl;
 
-  // Float Constants
+  // Floating-goint constants
   const V kOneOverPi = Set(d, static_cast<T>(0.31830988618379067153));
 
-  // Integer Constants
+  // Integer constants
   const Rebind<int32_t, D> di32;
   using VI32 = decltype(Zero(di32));
   const VI32 kOne = Set(di32, 1);
 
   const V y = Abs(x);  // cos(x) == cos(|x|)
 
-  // Compute the quadrant, q = int(|x| / pi) * 2 + 1
+  // Select the half-pi interval used to reduce the angle.
   const VI32 q = Add(ShiftLeft<1>(impl.ToInt32(d, Mul(y, kOneOverPi))), kOne);
 
-  // Reduce range, apply sign, and approximate.
+  // Evaluate the polynomial on the reduced angle with its quadrant sign.
   return impl.Poly(
       d, Xor(impl.CosReduce(d, y, q), impl.CosSignFromQuadrant(d, q)));
 }
@@ -1493,11 +1492,11 @@ HWY_INLINE V Exp(const D d, V x) {
 
   impl::ExpImpl<T> impl;
 
-  // q = static_cast<int32>((x / log(2)) + ((x < 0) ? -0.5 : +0.5))
+  // Choose the integer exponent q for writing exp(x) as a small exponential times 2^q.
   const auto q =
       impl.ToInt32(d, MulAdd(x, kOneOverLog2, Or(kHalf, And(x, kNegZero))));
 
-  // Reduce, approximate, and then reconstruct.
+  // Approximate exp on the reduced input, then scale by 2^q.
   const V y = impl.LoadExpShortRange(
       d, Add(impl.ExpPoly(d, impl.ExpReduce(d, x, q)), kOne), q);
   return IfThenElseZero(Ge(x, kLowerBound), y);
@@ -1513,10 +1512,10 @@ HWY_INLINE V Exp2(const D d, V x) {
 
   impl::ExpImpl<T> impl;
 
-  // q = static_cast<int32_t>(std::lrint(x))
+  // Split x into an integer exponent and a small fractional  remainder.
   const auto q = impl.ToNearestInt32(d, x);
 
-  // Reduce, approximate, and then reconstruct.
+  // Approximate the fractional power, then scale by 2^q
   const V y = impl.LoadExpShortRange(
       d, Add(impl.ExpPoly(d, impl.Exp2Reduce(d, x, q)), kOne), q);
   return IfThenElseZero(Ge(x, kLowerBound), y);
@@ -1537,11 +1536,11 @@ HWY_INLINE V Expm1(const D d, V x) {
 
   impl::ExpImpl<T> impl;
 
-  // q = static_cast<int32>((x / log(2)) + ((x < 0) ? -0.5 : +0.5))
+  // Choose the integer exponent q for writing exp(x) as a small exponential times 2^q.
   const auto q =
       impl.ToInt32(d, MulAdd(x, kOneOverLog2, Or(kHalf, And(x, kNegZero))));
 
-  // Reduce, approximate, and then reconstruct.
+  // Evaluate exp(x)-1 directly near zero to avoid subtracting nearly equal values.
   const V y = impl.ExpPoly(d, impl.ExpReduce(d, x, q));
   const V z = IfThenElse(Lt(Abs(x), kLn2Over2), y,
                          Sub(impl.LoadExpShortRange(d, Add(y, kOne), q), kOne));
@@ -1568,10 +1567,8 @@ HWY_INLINE V Log1p(const D d, V x) {
   const Mask<D> not_pole = Ne(y, kOne);
   // If y == 1, divisor becomes 1 (dummy), avoiding division by zero.
   const V divisor = MaskedSubOr(y, not_pole, y, kOne);
-  // Ensure exactly 1.0 when x == divisor. This is necessary because some
-  // platforms (like Armv7) use Newton-Raphson for division, which can return
-  // 0.0, instead of 1.0 when the reciprocal calculation underflows
-  // for very large x.
+  // Return an exact ratio of 1 when x equals the divisor. On Armv7, the
+  // reciprocal used for division can underflow for large values and produce 0.
   const V div_res = MaskedDivOr(kOne, Ne(x, divisor), x, divisor);
   const auto non_pole =
       Mul(impl::Log<D, V, /*kAllowSubnormals=*/false>(d, y), div_res);
@@ -1589,21 +1586,21 @@ HWY_INLINE V Sin(const D d, V x) {
   using T = TFromD<D>;
   impl::CosSinImpl<T> impl;
 
-  // Float Constants
+  // Floating-point constants
   const V kOneOverPi = Set(d, static_cast<T>(0.31830988618379067153));
   const V kHalf = Set(d, static_cast<T>(0.5));
 
-  // Integer Constants
+  // Integer tag for the angle reduction
   const Rebind<int32_t, D> di32;
   using VI32 = decltype(Zero(di32));
 
   const V abs_x = Abs(x);
   const V sign_x = Xor(abs_x, x);
 
-  // Compute the quadrant, q = int((|x| / pi) + 0.5)
+  // Choose, the nearest multiple of  pi for the angle reduction.
   const VI32 q = impl.ToInt32(d, MulAdd(abs_x, kOneOverPi, kHalf));
 
-  // Reduce range, apply sign, and approximate.
+  // Evaluate the reduced zngle and restore the signs from x and the quadrant.
   return impl.Poly(d, Xor(impl.SinReduce(d, abs_x, q),
                           Xor(impl.SinSignFromQuadrant(d, q), sign_x)));
 }
@@ -1664,16 +1661,14 @@ HWY_INLINE V Hypot(const D d, V a, V b) {
           static_cast<unsigned>(kMaxBiasedExp),
       "kExpBias + kNumOfMantBits < kMaxBiasedExp must be true");
 
-  // kMinValToSquareBiasedExp is the smallest biased exponent such that
-  // pow(pow(2, kMinValToSquareBiasedExp - kExpBias) * x, 2) is either a normal
-  // floating-point value or infinity if x is a non-zero, non-NaN value
+  // Lower exponent target for scaling small inputs before squaring. It leaves
+  // enough room for the significand so the square stays in the normal range.
   constexpr int kMinValToSquareBiasedExp = (kExpBias / 2) + kNumOfMantBits;
   static_assert(kMinValToSquareBiasedExp < kExpBias,
                 "kMinValToSquareBiasedExp < kExpBias must be true");
 
-  // kMaxValToSquareBiasedExp is the largest biased exponent such that
-  // pow(pow(2, kMaxValToSquareBiasedExp - kExpBias) * x, 2) * 2 is guaranteed
-  // to be a finite value if x is a finite value
+  // Upper exponent target leaves room for two squared inputs to be added
+  // without overflowing.
   constexpr int kMaxValToSquareBiasedExp = kExpBias + ((kExpBias / 2) - 1);
   static_assert(kMaxValToSquareBiasedExp > kExpBias,
                 "kMaxValToSquareBiasedExp > kExpBias must be true");
@@ -1705,41 +1700,27 @@ HWY_INLINE V Hypot(const D d, V a, V b) {
   // exp_b[i] is the biased exponent of abs_b[i]
   const VI exp_b = BitCast(di, ShiftRight<kNumOfMantBits>(BitCast(du, abs_b)));
 
-  // max_exp[i] is equal to HWY_MAX(exp_a[i], exp_b[i])
+  // Use the larger input exponent to bound the scale factor.
 
-  // If abs_a[i] and abs_b[i] are both NaN values, max_exp[i] will be equal to
-  // the biased exponent of the larger value. Otherwise, if either abs_a[i] or
-  // abs_b[i] is NaN, max_exp[i] will be equal to kMaxBiasedExp.
+  // A NaN input gives max_exp the all-ones exponent field.
   const VI max_exp = BitCast(
       di, Max(BitCast(d_exp_min_max, exp_a), BitCast(d_exp_min_max, exp_b)));
 
-  // If either abs_a[i] or abs_b[i] is zero, min_exp[i] is equal to max_exp[i].
-  // Otherwise, if abs_a[i] and abs_b[i] are both nonzero, min_exp[i] is equal
-  // to HWY_MIN(exp_a[i], exp_b[i]).
+  // Ignore a zero input  when choosing the lower exponent for scaling.
   const VI min_exp = IfThenElse(
       Or(Eq(BitCast(di, abs_a), zero), Eq(BitCast(di, abs_b), zero)), max_exp,
       BitCast(di, Min(BitCast(d_exp_min_max, exp_a),
                       BitCast(d_exp_min_max, exp_b))));
 
-  // scl_pow2[i] is the power of 2 to scale abs_a[i] and abs_b[i] by
+  // Choose a shared power-of-two scale for both inputs.
 
-  // abs_a[i] and abs_b[i] should be scaled by a factor that is greater than
-  // zero but less than or equal to
-  // pow(2, kMaxValToSquareBiasedExp - max_exp[i]) to ensure that that the
-  // multiplications or addition operations do not overflow if
-  // std::hypot(abs_a[i], abs_b[i]) is finite
+  // Scale small values up to avoid losing their squares to underflow Limit
+  // this increase, or scale down, so the sum of squares stays finite whenever
+  // the final hypotenuse is representable.
 
-  // If either abs_a[i] or abs_b[i] is a a positive value that is less than
-  // pow(2, kMinValToSquareBiasedExp - kExpBias), then scaling up abs_a[i] and
-  // abs_b[i] by pow(2, kMinValToSquareBiasedExp - min_exp[i]) will ensure that
-  // the multiplications and additions result in normal floating point values,
-  // infinities, or NaNs.
 
-  // If HWY_MAX(kMinValToSquareBiasedExp - min_exp[i], 0) is greater than
-  // kMaxValToSquareBiasedExp - max_exp[i], scale abs_a[i] and abs_b[i] up by
-  // pow(2, kMaxValToSquareBiasedExp - max_exp[i]) to ensure that the
-  // multiplication and addition operations result in a finite result if
-  // std::hypot(abs_a[i], abs_b[i]) is finite.
+
+
 
   const VI scl_pow2 = BitCast(
       di,

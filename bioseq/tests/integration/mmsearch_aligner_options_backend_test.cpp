@@ -1,4 +1,7 @@
-/** @file Per-call mmsearch backend and Vulkan policy scenarios. */
+/**
+ * @file mmsearch_aligner_options_backend_test.cpp
+ * @brief Tests per-call aligner settings and Vulkan backend selection.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -13,8 +16,7 @@ import bioseq.tests.integration.mmsearch_test_support;
 using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::mmsearch_test_support;
 
-// Each named override field is a separate TEST_CASE; the helper keeps the body
-// of each call site to a single line.
+// Run the same execution check for each named aligner option.
 namespace {
 void check_aligner_options_partial_override(std::string_view named_arg_sql) {
     auto ctx = fresh_context({k_hoe});
@@ -26,8 +28,8 @@ void check_aligner_options_partial_override(std::string_view named_arg_sql) {
         "ORDER BY pk;",
         k_hoe, hoe_probe_literal(), named_arg_sql);
 
-    // We assert the query executes and stays inside the seeded pk domain;
-    // the override may shift the match set but must not raise.
+    // An override may change the matches. The query must succeed and return
+    // only keys present in the fixture.
     const auto pks = query_int_column(ctx, overridden_sql);
     const std::set<long long> seeded{1, 2, 3, 4, 5};
     for (const auto pk : pks) {
@@ -41,9 +43,8 @@ TEST_CASE("aligner_options(kmer_size => 11) executes without errors",
     check_aligner_options_partial_override("kmer_size => 11");
 }
 
-// A per-call `kmer_size` override must produce the same row set as setting the
-// corresponding `bioseq.aligner.minimizer.kmer_size` GUC before a plain
-// two-argument mmsearch.
+// A per-call kmer_size setting must return the qame rows as the matching
+// bioseq.aligner.minimizer.kmer_size session setting.
 TEST_CASE("aligner_options(kmer_size => K) matches SET bioseq.aligner.minimizer.kmer_size = K",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_hoe});
@@ -54,7 +55,7 @@ TEST_CASE("aligner_options(kmer_size => K) matches SET bioseq.aligner.minimizer.
     rowset_t via_options;
     rowset_t via_guc;
     {
-        // Per-call override leaves session GUCs untouched.
+        // Set kmer_size for this call.
         const std::string sql = fmt::format(
             "SELECT pk FROM {} "
             "WHERE mmsearch(seq0, {}, aligner_options(kmer_size => {})) "
@@ -255,9 +256,7 @@ TEST_CASE("selected Vulkan seed and chain use the selected host CIGAR and MAPQ s
     exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_build.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
-    // The canonical probe is only 29 bp. Exact minimap2 tiled-DP chaining
-    // scores its overlapping k=15 seeds by newly covered distance, so its
-    // legitimate maximum is below the production default threshold of 40.
+    // Set a threshold that lets the 29-base probe produce a tiled-DP match.
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 20;");
 
     const std::string sql = fmt::format(
@@ -302,8 +301,8 @@ TEST_CASE("selected Vulkan seed and chain use the selected host CIGAR and MAPQ s
     REQUIRE(plan_contains(plan, "GPU dispatch [seed="));
     REQUIRE_FALSE(plan_contains(plan, "GPU dispatch [seed=0 "));
     REQUIRE_FALSE(plan_contains(plan, " chain=0 chain_backtrack="));
-    // The selected tiled-DP implementation computes scores/predecessors on
-    // Vulkan and uses its existing host backtracker; this is not a GPU kernel.
+    // Tiled DP runs on Vulkan, then the CPU follows the predecessors to
+    // recover each chain. There  should be no GPU backtracking dispatch.
     REQUIRE(plan_contains(plan, " chain_backtrack=0 "));
     const auto tiled_chain_dispatches =
         find_explain_property(plan, "GPU Chain Dispatches");

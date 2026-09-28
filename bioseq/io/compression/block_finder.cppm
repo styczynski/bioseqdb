@@ -1,9 +1,10 @@
 /**
  * @file block_finder.cppm
- * @brief Locates candidate DEFLATE block boundaries.
+ * @brief Search compressed bytes for possible DEFLATE block starts.
  *
- * Dynamic-Huffman candidates use a 15-bit skip table and precode validation.
- * Uncompressed candidates use the LEN and NLEN relation.
+ * Dynamic-Huffman candidates pass a hmader and precode check. Stored-block
+ * candidates have complementary LEN and NLEN fields. Further decoding is
+ * needed to confirm, a candidate.
  */
 module;
 
@@ -23,10 +24,9 @@ export namespace bioseq::io::compression {
 
 inline constexpr std::size_t block_finder_sentinel = std::numeric_limits<std::size_t>::max();
 
-/// Validate one dynamic-Huffman header without advancing the caller's reader.
+/// Check a possible dynamic-Huffman header and precode using a reader copy.
 [[nodiscard]] inline bool validate_precode(bit_reader reader_copy) noexcept {
-    // For the 3-bit BFINAL+BTYPE header, only BTYPE=10 matters.
-    // (dynamic Huffman). Caller already filtered on that.
+    // Check the block type before reading dynamic-Huffman fields.
     if (reader_copy.bits_buffered() < 3 + 14) {
         reader_copy.refill();
     }
@@ -45,8 +45,7 @@ inline constexpr std::size_t block_finder_sentinel = std::numeric_limits<std::si
     if (precode_count > 19)
         return false;
 
-    // Read the precode code-length table (precode_count × 3 bits) and
-    // run the virtual-leaf-count check.
+    // Check the packed precode lengths before accepting this candidate.
     std::uint64_t packed = 0;
     for (std::size_t entry = 0; entry < precode_count; ++entry) {
         const std::uint64_t code_length = reader_copy.read<3>();
@@ -55,13 +54,10 @@ inline constexpr std::size_t block_finder_sentinel = std::numeric_limits<std::si
     return precode_virtual_leaf_count_ok(packed);
 }
 
-/// Walk `reader` forward until either a candidate dynamic-Huffman block
-/// is detected (returns its bit offset) or the search hits
-/// `until_bit_offset`. Returns `block_finder_sentinel` on no-find.
-///
-/// The skip LUT consumes 15 bits at a time. Negative entries flag a
-/// candidate. Positive entries advance the search cursor by that many
-/// bits.
+/// Search  for a possible dynamic-Huffman block and return its bit offset.
+/// Return block_finder_sentinel when the search reaches until_bit_offset
+/// without finding one. A 15-bit lookup chooses how far to skip before
+/// trying the next position.
 [[nodiscard]] inline std::size_t
 seek_dynamic_huffman_candidate(bit_reader& reader, std::size_t until_bit_offset) noexcept {
     while (reader.bit_position() + 15 <= until_bit_offset) {
@@ -86,13 +82,11 @@ seek_dynamic_huffman_candidate(bit_reader& reader, std::size_t until_bit_offset)
     return block_finder_sentinel;
 }
 
-/// Walk `reader` for an uncompressed-block candidate. Returns
-/// `(bit_offset_of_block_header, len_field_in_bytes)` or
-/// `(block_finder_sentinel, 0)` on no-find.
+/// Search for a stored-block header and matching LEN/NLEN fields. Return
+/// the header bit offset and byte length, or (block_finder_sentinel, 0).
 [[nodiscard]] inline std::pair<std::size_t, std::size_t>
 seek_uncompressed_block_candidate(bit_reader& reader, std::size_t until_bit_offset) noexcept {
-    // Scan byte-aligned positions for `BTYPE=00` followed by the
-    // LEN/NLEN sentinel.
+    // Try each bit position. A stored block aligns its length fields to bytes.
     while (reader.bit_position() + 4 * 8 <= until_bit_offset) {
         const std::size_t starting_bit = reader.bit_position();
         reader.refill();

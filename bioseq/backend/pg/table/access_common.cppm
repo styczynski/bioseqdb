@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shared table-access helpers independent of routine assembly.
+ * @brief Shared helpers for reading and  writing Bioseq table rows.
  */
 module;
 
@@ -26,7 +26,7 @@ namespace {
 
 TupleTableSlotOps column_slot_operations{};
 
-/** Materialize a virtual source slot at PostgreSQL's heap-tuple boundary. */
+/** Copy a vistual slot and record any full sequence copies as heap-tuple materialization. */
 void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
     const auto previous_scope = exchange_slice_materialization_scope({
         .attachment = nullptr,
@@ -81,24 +81,24 @@ void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
 
 } // namespace
 
-/** Fetch the next visible row through the table-AM exception boundary. */
+/** Read the next visible row and report C++ failures as PostgreSQL errors. */
 bool bioseq_getnextslot(TableScanDesc scan,
                         ScanDirection direction,
                         TupleTableSlot* slot);
 
-/** Apply speculative-source state changes for one transaction event. */
+/** Check or clear unfinished speculative sequence writes at transaction boundaries. */
 void handle_pending_speculative_xact_event(XactEvent event);
 
-/** Apply speculative-source state changes for one subtransaction event. */
+/** Move pending speculative writes to the parent subtransaction, or discard aborted writes. */
 void handle_pending_speculative_subxact_event(SubXactEvent event,
                                               SubTransactionId my_subid,
                                               SubTransactionId parent_subid);
 
 /**
- * @brief Initialize the immutable tuple-slot operation table.
+ * @brief Set up Bioseq tuple slots before the table access method is used.
  *
- * Call once during extension initialization before publishing the table-AM
- * routine. All unspecified operations retain PostgreSQL virtual-slot behavior.
+ * Start with PostgreSQL virtual-slot operations and replace the two copy
+ * callbacks so sequence  materialization is recorded. Call once at startup.
  */
 export void initialize_column_tuple_slot_operations() {
     column_slot_operations = TTSOpsVirtual;
@@ -118,7 +118,7 @@ export [[nodiscard]] MemoryContext create_column_scan_memory_context() {
         CurrentMemoryContext, "BioseqColumn Scan Context", ALLOCSET_DEFAULT_SIZES);
 }
 
-/** Return the write-side sequence cache owned by a column write state. */
+/** Get or create the sequence cache for this column write state and check its storage identity */
 [[nodiscard]] inline bioseq::storage::seq_caches*
 ensure_write_side_seq_caches(Relation relation, column_write_state* write_state) {
     if (relation == nullptr || write_state == nullptr
@@ -165,10 +165,10 @@ ensure_write_side_seq_caches(Relation relation, column_write_state* write_state)
 }
 
 /**
- * @brief Build one-based attribute numbers selected by a zero-based bitmap.
- * @param tuple_descriptor Relation tuple descriptor.
- * @param attributes_needed Zero-based attributes required by the scan.
- * @return PostgreSQL list allocated in the current memory context.
+ * @brief Convert selected columns into PostgreSQL attribute numbers.
+ *
+ * The input bitmap uses zero-based positions. The returned list uses one-based
+ * attribute numbers, skips dropped columns, and belongs to the current context.
  */
 export [[nodiscard]] List*
 build_needed_column_list(TupleDesc tuple_descriptor,
@@ -220,11 +220,14 @@ init_bioseq_read_state(
 }
 
 /**
- * @brief Translate C++ failures after a table-AM callback unwinds its owners.
+ * @brief Run a table-access callback and turn C++ exceptions into PostgreSQL errors.
+ *
+ * C++ cleanup finishes before raising the PostgreSQL error, whose longjmp would
+ * otherwise skip destructors. Existing PostgreSQL errors keep their details.
  * @tparam p_function Callback body type.
- * @param operation Stable operation name used in PostgreSQL diagnostics.
- * @param function Callback body invoked inside the exception boundary.
- * @return The callback result when @p function is non-void.
+ * @param operation Callback name  included in diagnostics.
+ * @param function Callback body.
+ * @return The callback result, if it has one.
  */
 template <class p_function>
 decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& function) {
@@ -249,8 +252,8 @@ decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& funct
     } catch (...) {
         unknown_cpp_error = true;
     }
-    // Every callback owner has unwound. Only fixed diagnostic state remains at
-    // this PostgreSQL C boundary.
+    // Callback-local C++ objects hahe been destroyed, so a PostgreSQL error
+    // can jump back to its handler.
     if (exact_error != nullptr) {
         ReThrowError(exact_error);
     }
@@ -268,10 +271,7 @@ decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& funct
     pg_unreachable();
 }
 
-/**
- * @brief Reject writes whose changes cannot be represented by logical replication.
- * @param relation Target Bioseq table relation.
- */
+/** Reject inserts into a Bioseq table included in an INSERT publication. */
 export void validate_logical_replication_write(Relation relation) {
     if (!is_publishable_relation(relation)) {
         return;
@@ -287,13 +287,17 @@ export void validate_logical_replication_write(Relation relation) {
 }
 
 /**
- * @brief Replace sequence locator stubs in a slot with materialized values.
- * @param relation Relation that owns the sequence fragments.
- * @param slot Populated tuple slot to hydrate in place.
- * @param caches Per-column fragment caches, or null when hydration is disabled.
- * @param table_cache Sequence-column metadata for `relation`.
- * @param snapshot Explicit visibility snapshot used for fragment reads.
- * @param payload_context Memory context that owns hydrated values.
+ * @brief Replace sequence locators in a tuple slot with full sequence values.
+ *
+ * Read fragments using the supplied snapshot and allocate the values in
+ * payload_context. Null columns and values that are already stored in full
+ * stay as they are. A null cache disables this step.
+ * @param relation Table that owns the sequence fragments.
+ * @param slot Populated slot to update.
+ * @param caches Fragment caches, or null to leave the slot unchanged.
+ * @param table_cache Sequence-column metadata for,  the table.
+ * @param snapshot Visibility snapshot for fragment reads.
+ * @param payload_context Memory context for the full values.
  */
 export [[gnu::always_inline]] inline void
 hydrate_sequence_columns_in_slot(Relation relation,
@@ -351,10 +355,13 @@ hydrate_sequence_columns_in_slot(Relation relation,
 }
 
 /**
- * @brief Hydrate a scan slot unless the scan explicitly defers hydration.
- * @param table_scan PostgreSQL scan descriptor created by this table AM.
- * @param slot Populated tuple slot to update in place.
- * @param force Ignore the scan's deferred-hydration mode when true.
+ * @brief Load full sequence values into a scan slot.
+ *
+ * A scan can defer this work until a value is needed. Setting force to true
+ * loads the values immediately, using the scan reader's snapshot and context
+ * @param table_scan Scan created by this table access method.
+ * @param slot Populated slot to update.
+ * @param force Load sequences even when the scan defers that work.
  */
 export void hydrate_scan_slot(TableScanDesc table_scan, TupleTableSlot* slot, bool force) {
     auto* scan = reinterpret_cast<column_scan_handle>(table_scan);

@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa/validation.cppm
- * @brief Validates grouped-SoA geometry, identity, and metadata equations.
+ * @brief Checks saved index layouts and agreement between their metadata records.
  */
 export module bioseq.indexing.minimizer_hashmap:grouped_soa_validation;
 
@@ -34,7 +34,7 @@ import :grouped_soa_codecs;
 
 export namespace bioseq::indexing {
 
-/// Half-open logical-rank bounds for one persisted position segment.
+/// Base range [begin_bp, end_bp) covered by one saved position segment.
 struct minimizer_position_segment_bounds {
     /// Inclusive segment start in global base-pair coordinates.
     std::uint64_t begin_bp = 0u;
@@ -44,7 +44,8 @@ struct minimizer_position_segment_bounds {
     [[nodiscard]] bool operator==(const minimizer_position_segment_bounds&) const = default;
 };
 
-/// Derive the overflow-safe half-open core for one persisted segment ordinal.
+/// Find a segment's base range, shortening the last segment at the target end.
+/// Reject invalid metadata, an out-of-range segment or arithmetic overflow.
 [[nodiscard]] constexpr std::expected<minimizer_position_segment_bounds,
                                       minimizer_generation_encoding_error>
 derive_minimizer_position_segment_bounds(const minimizer_generation_manifest& manifest,
@@ -70,7 +71,8 @@ derive_minimizer_position_segment_bounds(const minimizer_generation_manifest& ma
     return minimizer_position_segment_bounds{begin, begin + width};
 }
 
-/// Map a half-open base-pair range to the covering persisted segment ordinals.
+/// Find the saved segments that  cover [begin_bp, end_bp).
+/// An empty base range returns an empty segment range.
 [[nodiscard]] constexpr std::expected<minimizer_position_segment_range,
                                       minimizer_generation_encoding_error>
 minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& manifest,
@@ -100,7 +102,8 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
                                             static_cast<std::uint32_t>(last + 1u)};
 }
 
-/// Compute the storage-contract identity from every named semantic/ABI axis.
+/// Calculate a checksum of the, minimizer settings, algorithm identity and storage layout.
+/// Readers use it to detect changes that would make an index incompatible.
 [[nodiscard]] constexpr std::uint64_t compute_minimizer_generation_storage_contract_checksum(
     const minimizer_generation_manifest& manifest) noexcept {
     const auto profile = derive_grouped_soa_minimizer_profile(manifest);
@@ -129,8 +132,8 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
     crc.update_little_endian(manifest.algorithm_identity.record_position_log2);
     crc.update_little_endian(manifest.algorithm_identity.physical_kmer_size);
     crc.update_little_endian(manifest.algorithm_identity.payload_layout_abi_revision);
-    // Named schemes extend the checksum with their frozen wire
-    // identity so otherwise identical indexes cannot cross scheme boundaries.
+    // Minimap uses the base checksum. Include the scheme ID and revision
+    // for other schemes.
     if (manifest.minimizer_scheme_id != k_minimap_scheme_id ||
         manifest.minimizer_scheme_revision != k_minimap_scheme_revision) {
         crc.update_little_endian(manifest.minimizer_scheme_id);
@@ -149,8 +152,8 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
     return crc.checksum();
 }
 
-/// Reject a persisted generation that does not match the caller's biological
-/// minimizer scheme or the fixed representation axes used to consume it.
+/// Check that the saved index matches the reader's algorithm, minimizer settings
+/// and packed format, including the occurrence imit.
 [[nodiscard]] constexpr std::expected<void, minimizer_generation_encoding_error>
 validate_minimizer_generation_storage_contract(
     const minimizer_generation_manifest& manifest,
@@ -197,7 +200,8 @@ validate_minimizer_generation_storage_contract(
     return {};
 }
 
-/// Validate head/manifest/directory equations once all metadata objects exist.
+/// Check that the  head, manifest and directory describe the same index.
+/// Verify metadata checksums and compare directory totals with the manifest
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 validate_minimizer_generation_metadata(const minimizer_generation_head& head,
                                        const minimizer_generation_manifest& manifest,
