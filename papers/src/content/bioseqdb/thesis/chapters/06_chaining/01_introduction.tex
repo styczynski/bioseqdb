@@ -48,19 +48,19 @@ diagonal changes receive a penalty or are not considered at all.
 \begin{tikzpicture}[x=0.12cm,y=0.075cm,font=\small]
   \draw[->] (0,0) -- (78,0) node[right] {reference coordinate \(r\)};
   \draw[->] (0,0) -- (0,66) node[above] {query coordinate \(q\)};
-  \draw[dashed,gray!65] (4,5) -- (70,58);
+  \draw[dashed,ThesisGray!65] (4,5) -- (70,58);
   \foreach \x/\y in {7/8,14/14,22/21,30/27,39/35,48/42,58/50,68/57}
-    \fill[blue!70!black] (\x,\y) circle (2.2pt);
-  \draw[very thick,blue!60!black]
+    \fill[ThesisBlue!70!black] (\x,\y) circle (2.2pt);
+  \draw[very thick,ThesisBlue!60!black]
     (7,8)--(14,14)--(22,21)--(30,27)--(39,35)--(48,42)--(58,50)--(68,57);
   \foreach \x/\y in {10/48,18/39,33/54,43/18,55/26,65/12,72/40}
-    \draw[red!75!black,thick] (\x-1.6,\y-1.6)--(\x+1.6,\y+1.6)
+    \draw[ThesisRed!75!black,thick] (\x-1.6,\y-1.6)--(\x+1.6,\y+1.6)
       (\x-1.6,\y+1.6)--(\x+1.6,\y-1.6);
-  \draw[<->,orange!80!black,thick] (39,32) -- (39,38);
-  \node[orange!80!black,anchor=west] at (42,32)
+  \draw[<->,ThesisOrange!80!black,thick] (39,32) -- (39,38);
+  \node[ThesisOrange!80!black,anchor=west] at (42,32)
     {diagonal deviation};
-  \node[blue!70!black,below right] at (54,50) {selected chain};
-  \node[red!75!black,above] at (18,39) {incompatible hits};
+  \node[ThesisBlue!70!black,below right] at (54,50) {selected chain};
+  \node[ThesisRed!75!black,above] at (18,39) {incompatible hits};
 \end{tikzpicture}
 \caption{Chaining selects growing, approximately
 collinear path so we can get closer to the final result. Base-level alignment (later stage of the pipeline) will later resolve gaps between anchors.}
@@ -167,12 +167,12 @@ For example,
 
 \raggedbottom
 
-\definecolor{chainGray}{HTML}{A0A0A0}
-\definecolor{chainBlue}{HTML}{4C78A8}
-\definecolor{chainOrange}{HTML}{F28E2B}
-\definecolor{chainGreen}{HTML}{59A14F}
+\colorlet{chainGray}{ThesisGray}
+\colorlet{chainBlue}{ThesisBlue}
+\colorlet{chainOrange}{ThesisOrange}
+\colorlet{chainGreen}{ThesisGreen}
 \tikzset{
-  chain stage/.style={draw=black!65,fill=gray!7,rounded corners,
+  chain stage/.style={draw=black!65,fill=ThesisGray!7,rounded corners,
     align=center,minimum height=.78cm,inner sep=4pt},
   chain blue/.style={chain stage,draw=chainBlue!90!black,fill=chainBlue!11},
   chain orange/.style={chain stage,draw=chainOrange!90!black,fill=chainOrange!14},
@@ -235,7 +235,7 @@ Our final score is then something of the following structure:
   dist excess/.style={-{Latex[length=1.7mm]},very thick,
     draw=chainOrange!95!black},
   dist measure/.style={<->,thin,draw=chainBlue!90!black},
-  dist summary/.style={draw=black!55,fill=gray!4,rounded corners=0pt,
+  dist summary/.style={draw=black!55,fill=ThesisGray!4,rounded corners=0pt,
     text width=3.75cm,align=center,inner sep=3pt}]
 
   \begin{scope}[xshift=0cm]
@@ -380,7 +380,7 @@ The problem is that the new linear gap scoring is very simplistic and does not e
   link path/.style={-{Latex[length=1.8mm]},very thick,
     draw=chainGreen!80!black},
   link measure/.style={<->,thin,draw=chainBlue!90!black},
-  link summary/.style={draw=black!55,fill=gray!4,rounded corners=0pt,
+  link summary/.style={draw=black!55,fill=ThesisGray!4,rounded corners=0pt,
     text width=5.0cm,align=center,inner sep=3pt}]
 
   \begin{scope}[xshift=0cm]

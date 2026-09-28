@@ -58,23 +58,23 @@ In paper authors want to look at the left side first, for example $(-1, -2, -3, 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=-1cm,>=Latex,font=\small,
-  wire/.style={blue!65!black,line width=.45pt},
-  net/.style={red!75!black,line width=1.1pt},
+  wire/.style={ThesisBlue!65!black,line width=.45pt},
+  net/.style={ThesisRed!75!black,line width=1.1pt},
   obstacle/.style={fill=black!80,draw=white,line width=.3pt}]
   \node[anchor=west,font=\bfseries\small] at (-.15,-.2) {(a) Construct column 6};
   \node[anchor=west,font=\bfseries\small] at (6.6,-.2) {(b) Chip maze and signal net};
 
   % One reference symbol fans out to the seven query symbols Q_3,...,Q_9.
   \foreach \base [count=\j] in {G,G,T,G,C,A,G,A,G,C,T,C} {
-    \node[font=\scriptsize,text=gray] at ({.75+.37*\j},.27) {\j};
+    \node[font=\scriptsize,text=ThesisGray] at ({.75+.37*\j},.27) {\j};
     \node[font=\ttfamily\small] (ref\j) at ({.75+.37*\j},.68) {\base};
   }
   \node[anchor=east] at (.8,.68) {$R$};
-  \draw[blue!65!black,thick,rounded corners=1pt]
+  \draw[ThesisBlue!65!black,thick,rounded corners=1pt]
     ($(ref6.center)+(-.17,-.2)$) rectangle ($(ref6.center)+(.17,.2)$);
   \foreach \base [count=\j] in {G,G,T,G,A,G,A,G,T,T,G,T} {
     \ifnum\j>2\ifnum\j<10
-      \fill[blue!8] ({.75+.37*\j-.17},1.65) rectangle ({.75+.37*\j+.17},2.05);
+      \fill[ThesisBlue!8] ({.75+.37*\j-.17},1.65) rectangle ({.75+.37*\j+.17},2.05);
     \fi\fi
     \node[font=\ttfamily\small] (query\j) at ({.75+.37*\j},1.85) {\base};
   }
@@ -94,22 +94,22 @@ In paper authors want to look at the left side first, for example $(-1, -2, -3, 
       \node[fill=black!80,text=white,minimum size=.31cm,inner sep=0pt,font=\scriptsize]
         at (.65,\rowy) {1};
     \else
-      \node[draw=teal!65!black,fill=teal!8,minimum size=.31cm,inner sep=0pt,font=\scriptsize]
+      \node[draw=ThesisTeal!65!black,fill=ThesisTeal!8,minimum size=.31cm,inner sep=0pt,font=\scriptsize]
         at (.65,\rowy) {0};
     \fi
   }
-  \node[font=\scriptsize,text=blue!65!black] at (3.25,5.95)
+  \node[font=\scriptsize,text=ThesisBlue!65!black] at (3.25,5.95)
     {$R_6=\mathtt A,\quad Z_{\cdot,6}=(0,1,1,1,0,1,1)^{\mathsf T}$};
 
   % Full 7 x 12 maze; bit rows use delta = -1,-2,-3,0,+1,+2,+3.
   \begin{scope}[shift={(7.05,2.72)},x=.48cm,y=-.47cm]
-    \fill[blue!10] (4.66,-.45) rectangle (5.34,6.45);
+    \fill[ThesisBlue!10] (4.66,-.45) rectangle (5.34,6.45);
     \foreach \j in {0,...,11} {
-      \draw[gray!40,densely dashed,thin] (\j,-.35) -- (\j,6.35);
+      \draw[ThesisGray!40,densely dashed,thin] (\j,-.35) -- (\j,6.35);
       \node[font=\scriptsize] at (\j,-.8) {\pgfmathparse{int(\j+1)}\pgfmathresult};
     }
     \foreach \i in {0,...,6} {
-      \draw[gray!45,line width=1.5pt] (-.4,\i) -- (11.4,\i);
+      \draw[ThesisGray!45,line width=1.5pt] (-.4,\i) -- (11.4,\i);
       \node[font=\scriptsize,anchor=east] at (-.55,\i) {\pgfmathparse{int(\i+1)}\pgfmathresult};
     }
     \node[font=\scriptsize] at (-1.1,-.8) {$i\backslash j$};
@@ -133,18 +133,18 @@ In paper authors want to look at the left side first, for example $(-1, -2, -3, 
     \draw[net,->] (4.42,0) -- (9.42,0);
     \draw[net,->] (9.42,0) -- (11.55,0);
     \foreach \col/\row in {4/3,9/0,11/0} {
-      \draw[orange!85!black,line width=.9pt] (\col,\row) circle[radius=.25];
+      \draw[ThesisOrange!85!black,line width=.9pt] (\col,\row) circle[radius=.25];
     }
     \foreach \col/\label in {-.55/1,4.48/6,9.48/11} {
-      \draw[teal!65!black,densely dashed] (\col,-1.55) -- (\col,6.4);
-      \node[font=\scriptsize,text=teal!65!black,anchor=south] at (\col,-1.65) {$c=\label$};
+      \draw[ThesisTeal!65!black,densely dashed] (\col,-1.55) -- (\col,6.4);
+      \node[font=\scriptsize,text=ThesisTeal!65!black,anchor=south] at (\col,-1.65) {$c=\label$};
     }
   \end{scope}
   \draw[net,->] (6.8,6.03) -- (7.5,6.03);
   \node[anchor=west,font=\scriptsize] at (7.65,6.03) {signal net};
   \path[obstacle] (9.45,5.94) rectangle (9.63,6.12);
   \node[anchor=west,font=\scriptsize] at (9.78,6.03) {obstacle};
-  \draw[teal!65!black,densely dashed] (11.55,5.88) -- (11.55,6.18);
+  \draw[ThesisTeal!65!black,densely dashed] (11.55,5.88) -- (11.55,6.18);
   \node[anchor=west,font=\scriptsize] at (11.7,6.03) {checkpoint};
 \end{tikzpicture}
 \caption{Example similar to original figure from paper: Fig.~2(a,b) in

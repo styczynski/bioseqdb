@@ -72,6 +72,9 @@
 % authorship: !partial
 %   title: Authorship, development and AI assistance
 %   path: chapters/18_authorship
+% resources: !partial
+%   title: Provided resources
+%   path: chapters/19_provided_resources
 % appendices:
 %   - !partial
 %     title: A runnable SQL walkthrough
@@ -80,6 +83,8 @@
 %     title: Configuration reference
 %     path: appendices/03_configuration_reference
 % xrenderonly: chapters/05_minimizers
+
+\input{figure_palette.tex}
 
 % Keep thesis hyperlinks legible on a white page.  `breaklinks` also permits
 % linked bibliography fields (for example, long conference titles) to wrap.
@@ -138,14 +143,31 @@ In the implemetation I provide multi-platform implementations that can execute o
     The thesis is structured in the way that each stage of pipeline prosecessing is discussed in chronological order, while the Postgres storage details are addressed later.
     At the end of the thesis I provide samples of usage to demonstrate all the features and unprocessed benchmark results for different scenarios and machines.
 
-    % Keep the chapter roadmap together before the development timeline.
+
+  % Keep the chapter roadmap together before the development timeline.
+  \begin{itemize}
+    \setlength{\itemsep}{0pt}
+    \setlength{\parsep}{0pt}
+    \foreachdata{chapters}{\chapteri} {
+        \chapterbrief{r:\data{chapters.\chapteri.ref}}{\data{chapters.\chapteri.description}}
+    }
+  \end{itemize}
+
+\subsubsection{Main goals}
+
+    The main goals of BioseqDB were:
     \begin{itemize}
-        \setlength{\itemsep}{0pt}
-        \setlength{\parsep}{0pt}
-        \foreachdata{chapters}{\chapteri} {
-            \chapterbrief{r:\data{chapters.\chapteri.ref}}{\data{chapters.\chapteri.description}}
-        }
+      \item Explore existing algorithms and literature and provide easy way to understand various approaches and their trade-offs, so this thesis is a form of educational material
+      \item Port existing algorithms to modern C++ by writing them from scratch, so they run on any device
+      \item Integrate state-of-the-art algorithms into one pipeline
+      \item Create own optimisations and measure them on randomized data
+      \item Provide first of its kind integration of aligner software into relational database
+      \item Optimise pipeline until it's more performant than baseline tool (I compare myself to minimap2)
+      \item Provide support for very large sequences, so storage doesn't require any external tools to split or reorder or process in other ways the input sequences
+      \item Directly integrate with SQL api in a way that's intuitive
     \end{itemize}
+
+\subsubsection{Work context}
 
     This thesis required several years of exploration and experiments.
     I began without a formal background in computational biology, thus
@@ -165,9 +187,9 @@ In the implemetation I provide multi-platform implementations that can execute o
       timeline event/.style={anchor=west,align=left,text width=11.8cm,
         inner sep=0pt},
       timeline dot/.style={circle,inner sep=0pt,minimum size=5pt}]
-      \definecolor{timelineConcept}{HTML}{366B98}
-      \definecolor{timelinePython}{HTML}{438452}
-      \definecolor{timelineBioseq}{HTML}{B36A1F}
+      \colorlet{timelineConcept}{ThesisBlue}
+      \colorlet{timelinePython}{ThesisTeal}
+      \colorlet{timelineBioseq}{ThesisOrange}
 
       % A separate striped bar marks the career period beside the milestones.
       \fill[timelineConcept!8] (0,-0.4) rectangle (0.18,-4.8);
@@ -266,9 +288,13 @@ In the implemetation I provide multi-platform implementations that can execute o
     \datapartial{chapters.\chapteri}
 }
 
-\chapter*{Authorship, development and AI assistance}
-\addcontentsline{toc}{chapter}{Authorship, development and AI assistance}
+\chapter*{Authorship and other notes}
+\addcontentsline{toc}{chapter}{Authorship and other notes}
 \datapartial{authorship}
+
+\chapter*{Provided resources}
+\addcontentsline{toc}{chapter}{Provided resources}
+\datapartial{resources}
 
 \else
 \foreachdata{chapters}{\chapteri} {

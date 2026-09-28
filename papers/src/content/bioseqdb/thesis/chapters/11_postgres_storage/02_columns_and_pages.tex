@@ -455,8 +455,6 @@ If the NULLs are very frequent, I will save the space by not storing them.
   \draw[storage arrow] (8.0,.25)--(9.0,.25);
   \node[storage cell,fill=storageOrange!12,minimum width=2.25cm]
     at (10.25,.25) {compress values};
-  \node[anchor=west,text=black!65] at (2.15,-.5)
-    {Only four values are stored; the bitmap keeps their six row positions.};
 \end{tikzpicture}
 \caption{Presence bitmap is useful to enable better NULL compression}
 \label{fig:storage-column-streams}

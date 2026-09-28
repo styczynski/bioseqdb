@@ -159,6 +159,8 @@ In case of \textbf{\texttt{CHUNKED\_PER\_TABLE}} we only store chunk number and 
 \label{fig:index-storage-layouts}
 \end{figure}
 
+% Keep the schema introduction, caption and SQL together across page breaks.
+\noindent\begin{minipage}{\linewidth}
 In reality the fragment's number can be viewed as a generic sub-key. This distorts the original meaning of \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}}, because in relity it's just 
 "per-sequence" but with extra key: $\langle$query\_key,\\sub\_key,\\chunk\_no$\rangle$, while \textbf{\texttt{CHUNKED\_PER\_TABLE}} has $\langle$chunk\_no$\rangle$.
 This idea is depicted below by real SQL schema of internal storage:
@@ -176,6 +178,7 @@ CREATE TABLE bioseq_internal.seqidx_mpf_... (
   PRIMARY KEY (query_key, sub_key, chunk_no)
 );
 \end{lstlisting}
+\end{minipage}
 
 The payload of an index is one byte array.
 \texttt{CHUNKED\_PER\_FRAGMENT} stores that array as rows of Listing~\ref{lst:chunked-per-fragment-row}.

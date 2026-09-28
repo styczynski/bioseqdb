@@ -1,7 +1,7 @@
-\definecolor{rewriteGray}{HTML}{A0A0A0}
-\definecolor{rewriteBlue}{HTML}{4C78A8}
-\definecolor{rewriteOrange}{HTML}{F28E2B}
-\definecolor{rewriteGreen}{HTML}{59A14F}
+\colorlet{rewriteGray}{ThesisGray}
+\colorlet{rewriteBlue}{ThesisBlue}
+\colorlet{rewriteOrange}{ThesisOrange}
+\colorlet{rewriteGreen}{ThesisGreen}
 
 \tikzset{
   rewrite cell/.style={draw=black!75,minimum width=.66cm,
@@ -87,9 +87,9 @@ selection of window that its belongs to and dedupliction of hashes.
   y=.72cm,
   font=\footnotesize,
   cell/.style={draw,minimum width=.50cm,minimum height=.50cm,inner sep=0pt},
-  tracked/.style={draw=orange!85!black,very thick,fill=orange!13,
+  tracked/.style={draw=ThesisOrange!85!black,very thick,fill=ThesisOrange!13,
                   minimum width=.50cm,minimum height=.50cm,inner sep=0pt},
-  context/.style={draw,fill=orange!8,minimum width=.50cm,
+  context/.style={draw,fill=ThesisOrange!8,minimum width=.50cm,
                   minimum height=.50cm,inner sep=0pt}
 ]
   \node[anchor=east] at (4.35,4.10) {input sequence};
@@ -97,9 +97,9 @@ selection of window that its belongs to and dedupliction of hashes.
     \node[cell] (s\i) at (5+\i,4.10) {\texttt{\v}};
   \foreach \i/\v in {5/G,6/A,7/A,8/T,9/T}
     \node[context] at (5+\i,4.10) {\texttt{\v}};
-  \draw[orange!85!black,very thick,rounded corners]
+  \draw[ThesisOrange!85!black,very thick,rounded corners]
     (9.53,3.72) rectangle (14.47,4.48);
-  \node[orange!85!black] at (12,4.78) {$K_5$, $k=5$};
+  \node[ThesisOrange!85!black] at (12,4.78) {$K_5$, $k=5$};
 
   \node[anchor=east] at (4.35,2.90) {$k$-mer hashes};
   \foreach \i/\v in {0/58,1/23,2/42,3/78,4/34,5/12,6/74,7/80,8/9,9/34,10/3,11/83}
@@ -107,12 +107,12 @@ selection of window that its belongs to and dedupliction of hashes.
   \foreach \i/\v in {3/78,4/34,6/74}
     \node[context] at (5+\i,2.90) {\v};
   \node[tracked] at (10,2.90) {12};
-  \draw[orange!85!black,thick,rounded corners]
+  \draw[ThesisOrange!85!black,thick,rounded corners]
     (7.52,2.51) rectangle (11.48,3.29);
-  \node[anchor=west,orange!85!black] at (17.10,2.90)
+  \node[anchor=west,ThesisOrange!85!black] at (17.10,2.90)
     {one window of $w=4$};
   \foreach \i in {0,...,11}
-    \node[gray!75] at (5+\i,2.37) {\i};
+    \node[ThesisGray!75] at (5+\i,2.37) {\i};
 
   \node[anchor=east,align=right] at (4.35,1.35)
     {minimum position\\for each window};
@@ -124,7 +124,7 @@ selection of window that its belongs to and dedupliction of hashes.
   \foreach \i/\v in {0/1,1/5,2/8,3/10}
     \node[cell] at (5+\i,.25) {\v};
   \node[tracked] at (6,.25) {5};
-  \draw[->,thick,orange!85!black] (s5.south) to[out=-90,in=90] (h5.north);
+  \draw[->,thick,ThesisOrange!85!black] (s5.south) to[out=-90,in=90] (h5.north);
 \end{tikzpicture}
 \caption{Minimizer extraction for $k=5$ and $w=4$ with illustrative hashes.}
 \label{fig:minimizer-walkthrough}
@@ -259,14 +259,14 @@ cause lots of false positives not contributing to the final result)
   y=.82cm,
   font=\footnotesize,
   >=Latex,
-  stage/.style={draw,rounded corners,fill=blue!8,align=center,
+  stage/.style={draw,rounded corners,fill=ThesisBlue!8,align=center,
                 minimum height=.72cm},
-  seq/.style={draw=orange!75!black,rounded corners,fill=orange!8,
+  seq/.style={draw=ThesisOrange!75!black,rounded corners,fill=ThesisOrange!8,
               align=center,minimum height=.72cm},
-  index/.style={draw,very thick,rounded corners,fill=yellow!14,
+  index/.style={draw,very thick,rounded corners,fill=ThesisYellow!14,
                 align=left,inner sep=5pt},
-  output/.style={draw=ForestGreen!70!black,rounded corners,
-                 fill=green!7,align=left,inner sep=5pt}
+  output/.style={draw=ThesisGreen!70!black,rounded corners,
+                 fill=ThesisGreen!7,align=left,inner sep=5pt}
 ]
   \node[font=\small\bfseries] at (3.1,4.55) {Build the reference index};
   \node[seq,minimum width=5.7cm] (ref) at (3.1,3.65)
@@ -305,10 +305,10 @@ cause lots of false positives not contributing to the final result)
   \draw[->,thick] (rhash) to[out=-90,in=160] (table.west);
   \draw[->,thick] (query) -- (qseed);
   \draw[->,thick] (qseed) -- (qhash);
-  \draw[->,thick,blue!65!black] (qhash) to[out=-90,in=30] (table.east);
-  \draw[->,thick,ForestGreen!70!black] (table.east) -- (anchors.west);
-  \draw[->,thick,red!70!black] (qhash.east) to[out=0,in=90]
-    node[pos=.55,right,align=left,text=red!70!black] {$h_4$: absent\\no anchor}
+  \draw[->,thick,ThesisBlue!65!black] (qhash) to[out=-90,in=30] (table.east);
+  \draw[->,thick,ThesisGreen!70!black] (table.east) -- (anchors.west);
+  \draw[->,thick,ThesisRed!70!black] (qhash.east) to[out=0,in=90]
+    node[pos=.55,right,align=left,text=ThesisRed!70!black] {$h_4$: absent\\no anchor}
     (13.9,-.10);
 \end{tikzpicture}
 \caption{Reference-index construction and query lookup. Positions are seed
@@ -476,17 +476,17 @@ Each SIMD lane will load fragments of input data:
 \centering
 \begin{tikzpicture}[
   font=\footnotesize,
-  context/.style={draw,fill=gray!16,minimum height=.46cm,inner sep=0pt},
-  mainspan/.style={draw=blue!70!black,fill=blue!8,
+  context/.style={draw,fill=ThesisGray!16,minimum height=.46cm,inner sep=0pt},
+  mainspan/.style={draw=ThesisBlue!70!black,fill=ThesisBlue!8,
                     minimum height=.46cm,inner sep=0pt},
   cell/.style={draw,minimum width=.62cm,minimum height=.46cm,inner sep=0pt},
-  inputcell/.style={draw=blue!70!black,fill=blue!8,
+  inputcell/.style={draw=ThesisBlue!70!black,fill=ThesisBlue!8,
                     minimum width=.62cm,minimum height=.46cm,inner sep=0pt},
-  mincell/.style={draw=orange!85!black,very thick,fill=orange!13,
+  mincell/.style={draw=ThesisOrange!85!black,very thick,fill=ThesisOrange!13,
                   minimum width=.62cm,minimum height=.46cm,inner sep=0pt},
-  maskcell/.style={draw,fill=gray!10,minimum width=.62cm,
+  maskcell/.style={draw,fill=ThesisGray!10,minimum width=.62cm,
                     minimum height=.42cm,inner sep=0pt},
-  outcell/.style={draw=orange!85!black,thick,fill=orange!10,
+  outcell/.style={draw=ThesisOrange!85!black,thick,fill=ThesisOrange!10,
                   minimum width=1.42cm,minimum height=.48cm,inner sep=2pt},
   stage/.style={draw,minimum width=2.25cm,minimum height=.96cm,
                 text width=2.00cm,align=center,inner sep=3pt},
@@ -498,14 +498,14 @@ Each SIMD lane will load fragments of input data:
   \foreach \r/\start in {0/1.65,1/3.35,2/5.05,3/6.75} {
     \pgfmathsetmacro{\yy}{9.95-.54*\r}
     \node[anchor=east] at (1.43,\yy) {lane \r};
-    \draw[fill=gray!16] (\start,{\yy-.23})
+    \draw[fill=ThesisGray!16] (\start,{\yy-.23})
       rectangle ({\start+.78},{\yy+.23});
-    \draw[draw=blue!70!black,fill=blue!8] ({\start+.78},{\yy-.23})
+    \draw[draw=ThesisBlue!70!black,fill=ThesisBlue!8] ({\start+.78},{\yy-.23})
       rectangle ({\start+2.48},{\yy+.23});
   }
-  \draw[fill=gray!16] (9.72,10.12) rectangle (10.18,10.48);
+  \draw[fill=ThesisGray!16] (9.72,10.12) rectangle (10.18,10.48);
   \node[anchor=west] at (10.32,10.30) {warm-up context};
-  \draw[draw=blue!70!black,fill=blue!8]
+  \draw[draw=ThesisBlue!70!black,fill=ThesisBlue!8]
     (9.72,9.55) rectangle (10.18,9.91);
   \node[anchor=west] at (10.32,9.73) {later lane steps};
   \node[anchor=north west,align=left,text width=3.05cm] at (9.48,9.30)
@@ -592,9 +592,9 @@ The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This
   y=.72cm,
   font=\footnotesize,
   cell/.style={draw,minimum width=.56cm,minimum height=.52cm,inner sep=0pt},
-  first/.style={draw=orange!85!black,very thick,fill=orange!12,
+  first/.style={draw=ThesisOrange!85!black,very thick,fill=ThesisOrange!12,
                 minimum width=.56cm,minimum height=.52cm,inner sep=0pt},
-  second/.style={draw=blue!70!black,very thick,fill=blue!10,
+  second/.style={draw=ThesisBlue!70!black,very thick,fill=ThesisBlue!10,
                   minimum width=.56cm,minimum height=.52cm,inner sep=0pt}
 ]
   \node[anchor=east] at (4.25,3.25) {$k$-mer hashes};
@@ -603,9 +603,9 @@ The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This
                             8/13.70/7,9/14.70/3,10/15.70/12,11/16.70/9}
     \node[cell] (a\i) at (\x,3.25) {\v};
   \foreach \i/\x/\v in {2/7.00/10,3/8.00/5,4/9.35/1,5/10.35/11}
-    \node[cell,fill=orange!12] at (\x,3.25) {\v};
+    \node[cell,fill=ThesisOrange!12] at (\x,3.25) {\v};
   \foreach \i/\x/\v in {7/12.35/8,8/13.70/7,9/14.70/3,10/15.70/12}
-    \node[cell,fill=blue!10] at (\x,3.25) {\v};
+    \node[cell,fill=ThesisBlue!10] at (\x,3.25) {\v};
   \draw[<->,thick] (4.70,3.83) -- (8.30,3.83)
     node[midway,above] {$w=4$};
 
@@ -625,9 +625,9 @@ The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This
   \node[first] at (7.00,.85) {5};
   \node[second] at (12.35,.85) {8};
 
-  \node[anchor=west,orange!85!black] at (4.65,-.15)
+  \node[anchor=west,ThesisOrange!85!black] at (4.65,-.15)
     {$j=2$: $\min(Q_2,P_5)=\min(5,1)=1$};
-  \node[anchor=west,blue!70!black] at (11.40,-.15)
+  \node[anchor=west,ThesisBlue!70!black] at (11.40,-.15)
     {$j=7$: $\min(Q_7,P_{10})=\min(8,3)=3$};
 \end{tikzpicture}
 \caption{Sliding minima from blockwise prefixes and suffixes. The two shaded crossing windows each use
@@ -645,15 +645,15 @@ block.}
   y=.68cm,
   font=\footnotesize,
   >=Latex,
-  owned/.style={draw=blue!70!black,fill=blue!10,minimum height=.58cm},
-  halo/.style={draw=orange!80!black,fill=orange!12,minimum height=.58cm},
-  stage/.style={draw,rounded corners,fill=gray!8,align=center,
+  owned/.style={draw=ThesisBlue!70!black,fill=ThesisBlue!10,minimum height=.58cm},
+  halo/.style={draw=ThesisOrange!80!black,fill=ThesisOrange!12,minimum height=.58cm},
+  stage/.style={draw,rounded corners,fill=ThesisGray!8,align=center,
                 minimum width=2.25cm,minimum height=1.05cm,inner sep=3pt}
 ]
   \node[anchor=east] at (1.30,6.05) {sequence $S$};
   \draw[thick] (1.55,5.72) rectangle (19.65,6.38);
   \foreach \x in {5.55,9.55,13.55,17.55}
-    \draw[gray!70] (\x,5.72) -- (\x,6.38);
+    \draw[ThesisGray!70] (\x,5.72) -- (\x,6.38);
   \foreach \x/\v in {3.55/$C_0$,7.55/$C_1$,11.55/$C_2$,15.55/$C_3$}
     \node at (\x,6.05) {\v};
   \node at (18.60,6.05) {$\cdots$};
@@ -668,7 +668,7 @@ block.}
   \node at (10.55,3.94) {context};
   \node[anchor=west] at (12.05,4.38)
     {$g=k+w-2$ bases of context};
-  \node[anchor=west,gray!75] at (12.05,3.82)
+  \node[anchor=west,ThesisGray!75] at (12.05,3.82)
     {I didn't illustrate remaining chunks here};
   \draw[->] (3.55,5.70) -- (3.55,5.16);
   \draw[->] (7.55,5.70) -- (7.55,4.27);
@@ -712,9 +712,9 @@ positions that changed. At the end duplicates for windows needs to be removed.
   font=\footnotesize,
   >=Latex,
   cell/.style={draw,minimum width=.52cm,minimum height=.52cm,inner sep=0pt},
-  trace/.style={draw=orange!85!black,very thick,fill=orange!12,
+  trace/.style={draw=ThesisOrange!85!black,very thick,fill=ThesisOrange!12,
                 minimum width=.52cm,minimum height=.52cm,inner sep=0pt},
-  carry/.style={draw=gray!70,fill=gray!10,text=gray!80,
+  carry/.style={draw=ThesisGray!70,fill=ThesisGray!10,text=ThesisGray!80,
                 minimum width=.52cm,minimum height=.52cm,inner sep=0pt}
 ]
   \node[font=\small\bfseries] at (2.50,4.15) {events by vector step};
@@ -748,11 +748,11 @@ positions that changed. At the end duplicates for windows needs to be removed.
     \node[trace] at (\x,3) {\v};
   \foreach \x/\v in {16.9/12,17.9/13}
     \node[cell] at (\x,2) {\v};
-  \node[anchor=west,gray!75] at (16.65,1) {no new position};
+  \node[anchor=west,ThesisGray!75] at (16.65,1) {no new position};
   \foreach \x/\v in {16.9/35,17.9/36}
     \node[cell] at (\x,0) {\v};
   \foreach \r in {0,...,3}
-    \draw[->,gray!70] (15.95,3-\r) -- (16.50,3-\r);
+    \draw[->,ThesisGray!70] (15.95,3-\r) -- (16.50,3-\r);
 \end{tikzpicture}
 \caption{How transposition of the results is done to get consecutive positions in each vector. Then SIMD-Minimizers do deduplication for four vectors}
 \label{fig:transpose-dedup}
@@ -1325,7 +1325,7 @@ The scalar part involves unavoidable SIMD overhead of collecting results into ma
 
 \begin{figure}[H]
   \centering
-  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_PURPLE__}{\ThesisPurpleHex}, set placeholder eval={__THESIS_RED__}{\ThesisRedHex}, set placeholder eval={__THESIS_GRAY__}{\ThesisGrayHex}}
     import matplotlib.pyplot as plt
     import matplotlib
     import numpy as np
@@ -1343,10 +1343,10 @@ The scalar part involves unavoidable SIMD overhead of collecting results into ma
     mm_sketch_wrapper = [14.94, 12.43, 8.62, 8.62, 5.76, 12.50]
     sketch_total = [a+b for a,b in zip(mm_sketch_simd, mm_sketch_wrapper)]
     x = np.arange(len(iterations))
-    ax.bar(x, mm_sketch_wrapper, label='mm\\_sketch (wrapper)', color='#9999cc')
+    ax.bar(x, mm_sketch_wrapper, label='mm\\_sketch (wrapper)', color='#__THESIS_PURPLE__')
     ax.bar(x, mm_sketch_simd, bottom=mm_sketch_wrapper,
-            label='mm\\_sketch\\_simd (inner)', color='#cc4444')
-    ax.axhline(12.50, linestyle='--', linewidth=1, color='#444444',
+            label='mm\\_sketch\\_simd (inner)', color='#__THESIS_RED__')
+    ax.axhline(12.50, linestyle='--', linewidth=1, color='#__THESIS_GRAY__',
                 label='scalar mm\\_sketch')
     for i, total in enumerate(sketch_total):
         ax.text(i, total + 0.5, f'{total:.1f}', ha='center', fontsize=7)
@@ -1405,7 +1405,7 @@ covered in previous section.
 
 \begin{figure}[H]
   \centering
-  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_PURPLE__}{\ThesisPurpleHex}, set placeholder eval={__THESIS_BLUE__}{\ThesisBlueHex}, set placeholder eval={__THESIS_TEAL__}{\ThesisTealHex}, set placeholder eval={__THESIS_ORANGE__}{\ThesisOrangeHex}, set placeholder eval={__THESIS_RED__}{\ThesisRedHex}, set placeholder eval={__THESIS_GRAY__}{\ThesisGrayHex}}
     import matplotlib.pyplot as plt
     import matplotlib
     import numpy as np
@@ -1419,12 +1419,12 @@ covered in previous section.
     fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
     configs = ['scalar', 'V6 SIMD', 'V8 two-stack', 'V12', 'V13 (divergence fix)']
     phases = [
-        ('mm\\_sketch + mm\\_sketch\\_simd', [12.50, 38.82, 32.43, 14.99, 14.52], '#9999cc'),
-        ('target\\_index\\_build',         [16.0,  14.3,  14.6,  26.38, 23.83], '#1f77b4'),
-        ('collect\\_seed\\_hits',          [6.5,   11.0,  11.3,  12.32, 12.0],  '#2ca02c'),
-        ('mg\\_lchain\\_dp/simd',          [16.0,  8.9,   8.9,   8.88,  8.78],  '#ff7f0e'),
-        ('mm\\_est\\_err',                 [0.7,   7.2,   7.1,   7.88,  0.85],  '#d62728'),
-        ('mm\\_align\\_skeleton',          [87.5,  86.4,  86.5,  87.25, 85.42], '#888888'),
+        ('mm\\_sketch + mm\\_sketch\\_simd', [12.50, 38.82, 32.43, 14.99, 14.52], '#__THESIS_PURPLE__'),
+        ('target\\_index\\_build',         [16.0,  14.3,  14.6,  26.38, 23.83], '#__THESIS_BLUE__'),
+        ('collect\\_seed\\_hits',          [6.5,   11.0,  11.3,  12.32, 12.0],  '#__THESIS_TEAL__'),
+        ('mg\\_lchain\\_dp/simd',          [16.0,  8.9,   8.9,   8.88,  8.78],  '#__THESIS_ORANGE__'),
+        ('mm\\_est\\_err',                 [0.7,   7.2,   7.1,   7.88,  0.85],  '#__THESIS_RED__'),
+        ('mm\\_align\\_skeleton',          [87.5,  86.4,  86.5,  87.25, 85.42], '#__THESIS_GRAY__'),
     ]
     bottoms = np.zeros(len(configs))
     for name, vals, color in phases:
@@ -1504,7 +1504,7 @@ We didn't want to implement new hashing scheme at this time, only see the impact
 
 \begin{figure}[H]
   \centering
-  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_BLUE__}{\ThesisBlueHex}, set placeholder eval={__THESIS_TEAL__}{\ThesisTealHex}, set placeholder eval={__THESIS_RED__}{\ThesisRedHex}}
     import matplotlib.pyplot as plt
     import matplotlib
     import numpy as np
@@ -1534,10 +1534,10 @@ We didn't want to implement new hashing scheme at this time, only see the impact
                   (1113.3 - 1171.0) / 1171.0 * 100]
     x = np.arange(len(buckets))
     width = 0.27
-    ax.bar(x - width, delta_v6,  width, label='V6 SIMD (rescan)', color='#1f77b4')
-    ax.bar(x,         delta_v8,  width, label='V8 two-stack',     color='#2ca02c')
-    ax.bar(x + width, delta_v13, width, label='V13* (inline, estimator fix, map replaced)', color='#d62728')
-    # ax.axhline(-10, linestyle='--', linewidth=1, color='#ff0000',
+    ax.bar(x - width, delta_v6,  width, label='V6 SIMD (rescan)', color='#__THESIS_BLUE__')
+    ax.bar(x,         delta_v8,  width, label='V8 two-stack',     color='#__THESIS_TEAL__')
+    ax.bar(x + width, delta_v13, width, label='V13* (inline, estimator fix, map replaced)', color='#__THESIS_RED__')
+    # ax.axhline(-10, linestyle='--', linewidth=1, color='#__THESIS_RED__',
     #            label='-10\\% Goal-2 target')
     ax.axhline(0, linewidth=0.6, color='#000000')
     ax.set_xticks(x)
@@ -1940,7 +1940,7 @@ contains a 56-bit hash and an 8-bit span, while the other word contains the posi
   hashfield/.style={draw=black!75,fill=rewriteBlue!18},
   posfield/.style={draw=black!75,fill=rewriteOrange!20},
   strandfield/.style={draw=black!75,fill=rewriteGreen!25},
-  spanfield/.style={draw=black!75,fill=purple!16}
+  spanfield/.style={draw=black!75,fill=ThesisPurple!16}
 ]
   \node[anchor=west,font=\bfseries] at (0,5.55)
     {Rectangle width is proportional to stored bits};

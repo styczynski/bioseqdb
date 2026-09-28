@@ -66,35 +66,35 @@ When the algorithm fails to improve best score for number of steps, then it deci
   \begin{scope}
     \node at (3,-1) {(a) shift right};
     \foreach \k in {0,...,6} {
-      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+      \draw[ThesisGray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
     }
-    \fill[blue!15] (4,0) rectangle (5,4);
-    \draw[gray!70,dashed,thick] (0,0) rectangle (4,4);
-    \draw[blue!70!black,very thick] (1,0) rectangle (5,4);
+    \fill[ThesisBlue!15] (4,0) rectangle (5,4);
+    \draw[ThesisGray!70,dashed,thick] (0,0) rectangle (4,4);
+    \draw[ThesisBlue!70!black,very thick] (1,0) rectangle (5,4);
     \draw[->,thick] (1,4.8) -- (2,4.8) node[midway,below] {$S$};
     \node at (3,7) {$(i,j)\mapsto(i,j+S)$};
   \end{scope}
   \begin{scope}[xshift=5cm]
-    \node at (3,-1) {(b) grow when best score doesn't improve};
+    \node[align=center,text width=4.55cm] at (3,-1) {(b) grow when best score doesn't improve};
     \foreach \k in {0,...,6} {
-      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+      \draw[ThesisGray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
     }
-    \fill[teal!15] (0,3) rectangle (3,6);
-    \fill[blue!15] (3,0) rectangle (6,6);
-    \draw[blue!70!black,very thick] (0,0) rectangle (6,6);
-    \draw[gray!70,dashed,thick] (0,0) rectangle (3,3);
+    \fill[ThesisTeal!15] (0,3) rectangle (3,6);
+    \fill[ThesisBlue!15] (3,0) rectangle (6,6);
+    \draw[ThesisBlue!70!black,very thick] (0,0) rectangle (6,6);
+    \draw[ThesisGray!70,dashed,thick] (0,0) rectangle (3,3);
     \node at (1.5,4.5) {$\Omega_1$};
     \node at (4.5,3) {$\Omega_2$};
     \node at (3,7) {$B_0\mapsto 2B_0$};
   \end{scope}
   \begin{scope}[xshift=10cm]
-    \node at (3,-1) {(c) then shrink to keep bottom-right quarter};
+    \node[align=center,text width=4.55cm] at (3,-1) {(c) then shrink to keep bottom-right quarter};
     \foreach \k in {0,...,6} {
-      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+      \draw[ThesisGray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
     }
-    \fill[blue!15] (3,3) rectangle (6,6);
-    \draw[gray!70,dashed,thick] (0,0) rectangle (6,6);
-    \draw[blue!70!black,very thick] (3,3) rectangle (6,6);
+    \fill[ThesisBlue!15] (3,3) rectangle (6,6);
+    \draw[ThesisGray!70,dashed,thick] (0,0) rectangle (6,6);
+    \draw[ThesisBlue!70!black,very thick] (3,3) rectangle (6,6);
     \draw[->,thick] (1.2,1.2) -- (2.8,2.8);
     \node at (3,7) {$B\mapsto B/2$};
   \end{scope}

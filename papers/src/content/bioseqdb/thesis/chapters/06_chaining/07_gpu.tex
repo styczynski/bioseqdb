@@ -27,7 +27,7 @@ kernels.}
 \node at (.825,3.70) {anchors};
 
 \draw[chain blue] (2.10,2.92) rectangle (4.65,4.48);
-\node[font=\bfseries] at (3.375,4.15)
+\node[font=\footnotesize\bfseries] at (3.375,4.15)
     {first-pass score};
 \draw[fill=chainBlue!6,draw=chainBlue!70!black]
     (2.30,3.08) rectangle (3.28,3.72);
@@ -40,8 +40,8 @@ kernels.}
 \node[align=center] at (6.375,3.70)
     {backtrack\\and pack};
 
-\draw[chain orange] (8.10,3.05) rectangle (10.72,4.35);
-\node[align=center] at (9.41,3.70)
+\draw[chain orange] (8.10,2.45) rectangle (10.72,4.95);
+\node[align=center,text width=2.28cm,inner sep=0pt] at (9.41,3.70)
     {Is the found chain vs. target size greater than 1000 or 10\% of target size?};
 
 \draw[chain green] (11.35,3.15) rectangle (14.15,4.25);
@@ -61,7 +61,7 @@ kernels.}
 \draw[chain flow] (7.55,3.70)--(8.10,3.70);
 \draw[chain flow] (10.72,3.70)--(11.35,3.70)
     node[midway,above] {no};
-\draw[chain flow] (9.41,3.05)--(9.41,1.95)
+\draw[chain flow] (9.41,2.45)--(9.41,1.95)
     node[midway,right] {yes};
 \draw[chain flow] (10.72,1.35)--(11.35,1.35);
 \end{tikzpicture}

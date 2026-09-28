@@ -101,7 +101,7 @@ lets that call refer to the current target row.\footnote{PostgreSQL 17,
 {\texttt{LATERAL} Subqueries}.}
 
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={A different API could return explicit hit records.}]
+\begin{lstlisting}[style=bioseq-search-sql,caption={Different API example}]
 -- Alternative API sketch, not an existing BioSeqDB function
 SELECT t.id, h.score, h.start, h.cigar
 FROM targets AS t
@@ -118,7 +118,7 @@ To more easily indentify what parts of the alignment are needed (because otherwi
 The function takes sequence as argument and returns some information about alignment. This concept is presented below.
 
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={Hidden state does not establish an evaluation order.}]
+\begin{lstlisting}[style=bioseq-search-sql,caption={Problematic "hidden state" example}]
 -- Hypothetical functions with shared hidden state
 SELECT id, last_score(seq)
 FROM targets
@@ -177,7 +177,7 @@ Stores bytes here
 Typical work
   & fetch remote rows
   & replace a scan or join
-  & layout, insert, vacuum \\
+  & fetching tuples from storage manager, vacuuming \\
 \bottomrule
 \end{tabular}
 \end{table}

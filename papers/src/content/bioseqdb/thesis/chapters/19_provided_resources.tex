@@ -1,0 +1,150 @@
+\label{sec:artifacts-resources}
+
+\subsection*{Source code and packages}
+
+BioseqDB source code is openly available on
+\href{https://github.com/styczynski/bioseqdb}{GitHub}.
+Release \texttt{0.1.0-alpha.1} is also distributed as binary packages and
+Docker images for PostgreSQL 17, 18, 19 and 20, on x86-64 and ARM64.
+I benchmarked PostgreSQL 17. The other versions are untested by me.
+The table lists the available packages and images.
+
+\begingroup
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{longtable}{@{}llccc@{}}
+\toprule
+\textbf{Distribution} & \textbf{PostgreSQL} &
+\shortstack{\textbf{Docker}\\x86-64 and ARM64} &
+\shortstack{\textbf{Binary}\\x86-64} &
+\shortstack{\textbf{Binary}\\ARM64} \\
+\midrule
+\endfirsthead
+\multicolumn{5}{@{}l}{\textit{Packages and Docker images (continued)}}\\
+\toprule
+\textbf{Distribution} & \textbf{PostgreSQL} &
+\shortstack{\textbf{Docker}\\x86-64 and ARM64} &
+\shortstack{\textbf{Binary}\\x86-64} &
+\shortstack{\textbf{Binary}\\ARM64} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{5}{r@{}}{\textit{Continued on the next page}}\\
+\endfoot
+\bottomrule
+\endlastfoot
+Ubuntu 26.04 & 17 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-ubuntu26.04}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/ubuntu_26.04/x64/da8a3eb94b0d0b59/bioseq-postgresql17_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/ubuntu_26.04/arm64/5e98df6c2402d860/bioseq-postgresql17_4.2.3_arm64.deb}{DEB} \\
+Ubuntu 26.04 & 18 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-ubuntu26.04}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/ubuntu_26.04/x64/ab89957bfa9254e9/bioseq-postgresql18_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/ubuntu_26.04/arm64/55f40c2d945bd1ce/bioseq-postgresql18_4.2.3_arm64.deb}{DEB} \\
+Ubuntu 26.04 & 19 (prerelease) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-ubuntu26.04}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/ubuntu_26.04/x64/7c4873d62b514070/bioseq-postgresql19_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/ubuntu_26.04/arm64/7ef10e3f8c22a8ec/bioseq-postgresql19_4.2.3_arm64.deb}{DEB} \\
+Ubuntu 26.04 & 20 (development) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-ubuntu26.04}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/ubuntu_26.04/x64/9b051bb7bf5e918a/bioseq-postgresql20_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/ubuntu_26.04/arm64/62194f54d7406bf8/bioseq-postgresql20_4.2.3_arm64.deb}{DEB} \\
+\addlinespace[0.5em]
+Debian 13 & 17 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-debian13}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/debian_13/x64/47f7ef7853641280/bioseq-postgresql17_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/debian_13/arm64/6e1113688ba8be47/bioseq-postgresql17_4.2.3_arm64.deb}{DEB} \\
+Debian 13 & 18 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-debian13}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/debian_13/x64/ebe9cacf5ffe2c36/bioseq-postgresql18_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/debian_13/arm64/97586d8d4c10c6c9/bioseq-postgresql18_4.2.3_arm64.deb}{DEB} \\
+Debian 13 & 19 (prerelease) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-debian13}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/debian_13/x64/22e7fbb4c94321cd/bioseq-postgresql19_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/debian_13/arm64/731e0fd2ead26fce/bioseq-postgresql19_4.2.3_arm64.deb}{DEB} \\
+Debian 13 & 20 (development) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-debian13}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/debian_13/x64/d029365ba27ed97f/bioseq-postgresql20_4.2.3_amd64.deb}{DEB} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/debian_13/arm64/95931942aa78576e/bioseq-postgresql20_4.2.3_arm64.deb}{DEB} \\
+\addlinespace[0.5em]
+Arch Linux & 17 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-arch}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/arch/x64/7d63bea74a7e08b0/bioseq-postgresql17-4.2.3-1-x86_64.pkg.tar.zst}{Package} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/arch/arm64/0217b8904f5d2e2b/bioseq-postgresql17-4.2.3-1-aarch64.pkg.tar.zst}{Package} \\
+Arch Linux & 18 & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-arch}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/arch/x64/7f36d14e4eee1699/bioseq-postgresql18-4.2.3-1-x86_64.pkg.tar.zst}{Package} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/arch/arm64/f3d628cba9c2b84e/bioseq-postgresql18-4.2.3-1-aarch64.pkg.tar.zst}{Package} \\
+Arch Linux & 19 (prerelease) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-arch}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/arch/x64/f24a28c834556edf/bioseq-postgresql19-4.2.3-1-x86_64.pkg.tar.zst}{Package} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/arch/arm64/cd46c53bb556bb34/bioseq-postgresql19-4.2.3-1-aarch64.pkg.tar.zst}{Package} \\
+Arch Linux & 20 (development) & \href{https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-arch}{Image} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/arch/x64/785979a270e4c914/bioseq-postgresql20-4.2.3-1-x86_64.pkg.tar.zst}{Package} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/arch/arm64/1d3417bbb4e33c89/bioseq-postgresql20-4.2.3-1-aarch64.pkg.tar.zst}{Package} \\
+\addlinespace[0.5em]
+Fedora 44 & 17 & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/fedora_44/x64/033a76a63b030719/bioseq-postgresql17-4.2.3-1.fc44.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/fedora_44/arm64/6e805544bb9bc69d/bioseq-postgresql17-4.2.3-1.fc44.aarch64.rpm}{RPM} \\
+Fedora 44 & 18 & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/fedora_44/x64/f53b5049ea9dc219/bioseq-postgresql18-4.2.3-1.fc44.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/fedora_44/arm64/50e0d29e35a7f952/bioseq-postgresql18-4.2.3-1.fc44.aarch64.rpm}{RPM} \\
+Fedora 44 & 19 (prerelease) & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/fedora_44/x64/bdb1fed13570056f/bioseq-postgresql19-4.2.3-1.fc44.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/fedora_44/arm64/6d52427110d70ad7/bioseq-postgresql19-4.2.3-1.fc44.aarch64.rpm}{RPM} \\
+Fedora 44 & 20 (development) & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/fedora_44/x64/ba12bb76e58161cf/bioseq-postgresql20-4.2.3-1.fc44.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/fedora_44/arm64/38bc2242a3f5a266/bioseq-postgresql20-4.2.3-1.fc44.aarch64.rpm}{RPM} \\
+\addlinespace[0.5em]
+openSUSE 16.0 & 17 & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/opensuse_16.0/x64/f9b0c8bbca7d30d0/bioseq-postgresql17-4.2.3-1.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/opensuse_16.0/arm64/3bdf77cbddfd703f/bioseq-postgresql17-4.2.3-1.aarch64.rpm}{RPM} \\
+openSUSE 16.0 & 18 & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/opensuse_16.0/x64/3050916230122aed/bioseq-postgresql18-4.2.3-1.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/opensuse_16.0/arm64/ecb32b308b267451/bioseq-postgresql18-4.2.3-1.aarch64.rpm}{RPM} \\
+openSUSE 16.0 & 19 (prerelease) & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/opensuse_16.0/x64/873b945bdfc84a43/bioseq-postgresql19-4.2.3-1.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/opensuse_16.0/arm64/debd034cce662a06/bioseq-postgresql19-4.2.3-1.aarch64.rpm}{RPM} \\
+openSUSE 16.0 & 20 (development) & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/opensuse_16.0/x64/6aa760e75abad2a5/bioseq-postgresql20-4.2.3-1.x86_64.rpm}{RPM} & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/opensuse_16.0/arm64/baf19e9857557549/bioseq-postgresql20-4.2.3-1.aarch64.rpm}{RPM} \\
+\addlinespace[0.5em]
+macOS & 17 & Not published & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg17/macos/arm64/76bedc6d98f03f9b/bioseqdb-0.1.0-alpha.1-pg17-macos-arm64.pkg}{PKG} \\
+macOS & 18 & Not published & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg18/macos/arm64/657ba47436f713dc/bioseqdb-0.1.0-alpha.1-pg18-macos-arm64.pkg}{PKG} \\
+macOS & 19 (prerelease) & Not published & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg19/macos/arm64/300f2135f11e3539/bioseqdb-0.1.0-alpha.1-pg19-macos-arm64.pkg}{PKG} \\
+macOS & 20 (development) & Not published & Not published & \href{https://downloads.sourceforge.net/project/bioseqdb/0.1.0-alpha.1/pg20/macos/arm64/54a659966a7afe41/bioseqdb-0.1.0-alpha.1-pg20-macos-arm64.pkg}{PKG} \\
+\end{longtable}
+\endgroup
+
+\Needspace{10\baselineskip}
+\subsection*{Running the Docker image}
+
+\begingroup
+% The numbered step headings describe these snippets. Suppress the empty
+% captions left by the preceding longtable's caption integration.
+\makeatletter
+\let\lst@MakeCaption\@gobble
+\makeatother
+\lstdefinestyle{resource-shell}{%
+  language=bash,
+  basicstyle=\footnotesize\ttfamily\color{black},
+  keywordstyle=\color{ThesisBlueLine},
+  commentstyle=\color{black!60},
+  stringstyle=\color{ThesisTealLine},
+  backgroundcolor=\color{ThesisBlue!3},
+  rulecolor=\color{black!25},
+  frame=single,
+  framerule=0.3pt,
+  framesep=5pt,
+  xleftmargin=5pt,
+  xrightmargin=5pt,
+  aboveskip=0.45\baselineskip,
+  belowskip=0.9\baselineskip,
+  numbers=none,
+  nolol=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showspaces=false,
+  showtabs=false,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  breakautoindent=true,
+  breakindent=1em,
+  tabsize=2,
+  escapeinside={},
+  mathescape=false,
+  texcl=false,
+  upquote=true,
+  caption={},
+  title={}
+}
+\lstdefinestyle{resource-sql}{style=resource-shell,language=SQL}
+
+\Needspace{5\baselineskip}
+\noindent\textbf{1. Pull the image.}
+\begin{lstlisting}[style=resource-shell]
+docker pull styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04
+\end{lstlisting}
+
+\Needspace{5\baselineskip}
+\noindent\textbf{2. Run the container.}
+\begin{lstlisting}[style=resource-shell]
+docker run -d --name bioseqdb-demo -e POSTGRES_PASSWORD=demo-change-me \
+  -p 127.0.0.1:55432:5432 styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04
+\end{lstlisting}
+
+\Needspace{5\baselineskip}
+\noindent\textbf{3. Wait for startup.}
+\begin{lstlisting}[style=resource-shell]
+until docker exec bioseqdb-demo pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
+\end{lstlisting}
+
+\Needspace{5\baselineskip}
+\noindent\textbf{4. Start the client inside the container.}
+\begin{lstlisting}[style=resource-shell]
+docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
+\end{lstlisting}
+
+\Needspace{5\baselineskip}
+\noindent\textbf{5. At the psql prompt.}
+\begin{lstlisting}[style=resource-sql]
+SELECT version();
+CREATE TABLE demo (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+INSERT INTO demo
+SELECT 1, string_agg(translate(md5(i::text), '0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i)::bioseq.seq('dna4', 64)
+FROM generate_series(1, 32) AS i;
+SELECT id, bioseq.cigar(seq), bioseq.score(seq) FROM demo WHERE public.mmsearch(seq, seq);
+\end{lstlisting}
+
+\endgroup

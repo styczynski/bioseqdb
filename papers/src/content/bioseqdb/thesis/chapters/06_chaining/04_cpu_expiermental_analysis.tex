@@ -420,16 +420,16 @@ Constructions~(a), (b) and~(c) are primary using the same idea. After collecting
     font=\small
   },
   anchor cell/.style={
-    draw=blue!55!black,
-    fill=blue!6,
+    draw=ThesisBlue!55!black,
+    fill=ThesisBlue!6,
     minimum width=1.80cm,
     minimum height=0.42cm,
     inner sep=1pt,
     font=\small
   },
-  chain zero/.style={->, >=stealth, line width=0.7pt, blue!70!black},
-  chain one/.style={->, >=stealth, line width=0.7pt, orange!85!black},
-  chain two/.style={->, >=stealth, line width=0.7pt, green!55!black}
+  chain zero/.style={->, >=stealth, line width=0.7pt, ThesisBlue!70!black},
+  chain one/.style={->, >=stealth, line width=0.7pt, ThesisOrange!85!black},
+  chain two/.style={->, >=stealth, line width=0.7pt, ThesisGreen!55!black}
 ]
   \node[font=\small\bfseries] at (0,0.55) {array index};
   \node[font=\small\bfseries] at (1.85,0.55) {anchor};
@@ -795,7 +795,7 @@ Figure~\ref{fig:chaining-max-drop-runl} shows more interesting data. I tested $F
 
 \begin{figure}[H]
 \centering
-\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_BLUE_LINE__}{\ThesisBlueLineHex}, set placeholder eval={__THESIS_GREEN__}{\ThesisGreenHex}, set placeholder eval={__THESIS_ORANGE_LINE__}{\ThesisOrangeLineHex}}
 import matplotlib
 matplotlib.use("pgf")
 import matplotlib.pyplot as plt
@@ -867,7 +867,7 @@ n1_reduction = {
 }
 
 divergence = [row[0] for row in runl_data]
-colors = {4: "#2F6B9A", 8: "#E17C05", 16: "#3C7C36"}
+colors = {4: "#__THESIS_BLUE_LINE__", 8: "#__THESIS_ORANGE_LINE__", 16: "#__THESIS_GREEN__"}
 widths = {4: 1.55, 8: 1.05, 16: 1.05}
 
 fig, axes = plt.subplots(2, 1, sharex=True)
@@ -932,7 +932,7 @@ I also provide figure~\ref{fig:chaining-max-drop-score-divergence} to better ill
 
 \begin{figure}[H]
 \centering
-\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_BLUE_LINE__}{\ThesisBlueLineHex}, set placeholder eval={__THESIS_GREEN__}{\ThesisGreenHex}, set placeholder eval={__THESIS_ORANGE_LINE__}{\ThesisOrangeLineHex}, set placeholder eval={__THESIS_PURPLE__}{\ThesisPurpleHex}, set placeholder eval={__THESIS_RED_LINE__}{\ThesisRedLineHex}, set placeholder eval={__THESIS_TEAL_LINE__}{\ThesisTealLineHex}}
 import matplotlib
 matplotlib.use("pgf")
 import matplotlib.pyplot as plt
@@ -983,8 +983,8 @@ score_count_exceptions = {
 }
 
 query_lengths = (997, 998, 999, 1000, 1001, 1002)
-colors = ("#4C78A8", "#F58518", "#54A24B",
-          "#E45756", "#72B7B2", "#B279A2")
+colors = ("#__THESIS_BLUE_LINE__", "#__THESIS_ORANGE_LINE__", "#__THESIS_GREEN__",
+          "#__THESIS_RED_LINE__", "#__THESIS_TEAL_LINE__", "#__THESIS_PURPLE__")
 
 fig, axes = plt.subplots(1, 3, sharex=True, sharey=True)
 fig.set_size_inches(0.96 * __LINEWIDTH__, 0.40 * __LINEWIDTH__, forward=True)
@@ -1007,7 +1007,7 @@ for ax, divergence in zip(axes, (0, 5, 10)):
         ax.step(scores, cumulative, where="post", color=color,
                 linewidth=0.85, alpha=0.92)
 
-    ax.axvline(40, color="#F28E2B", linestyle="--", linewidth=0.9)
+    ax.axvline(40, color="#__THESIS_ORANGE_LINE__", linestyle="--", linewidth=0.9)
     ax.set_xlim(0, 1000)
     ax.set_ylim(0, 100)
     ax.set_xticks((0, 250, 500, 750, 1000))
@@ -1022,7 +1022,7 @@ for ax, divergence in zip(axes, (0, 5, 10)):
 
 axes[0].set_ylabel(r"cumulative anchors (\%)", fontsize=8)
 axes[0].text(48, 4, r"$\mathtt{min\_sc}=40$", rotation=90,
-             va="bottom", ha="left", color="#A95700", fontsize=6.5)
+             va="bottom", ha="left", color="#__THESIS_ORANGE_LINE__", fontsize=6.5)
 
 legend = [
     Line2D([0], [0], color=color, linewidth=1.1,
@@ -1042,7 +1042,7 @@ plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
 
 \begin{figure}[H]
 \centering
-\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_BLUE__}{\ThesisBlueHex}, set placeholder eval={__THESIS_BLUE_LINE__}{\ThesisBlueLineHex}, set placeholder eval={__THESIS_GREEN__}{\ThesisGreenHex}, set placeholder eval={__THESIS_ORANGE_LINE__}{\ThesisOrangeLineHex}}
 import matplotlib
 matplotlib.use("pgf")
 import matplotlib.pyplot as plt
@@ -1104,13 +1104,13 @@ score_data = [
 fig, axes = plt.subplots(2, 1, sharex=True)
 fig.set_size_inches(0.98 * __LINEWIDTH__, 0.53 * __LINEWIDTH__, forward=True)
 
-axes[0].fill_between(divergence, q10, q90, color="#4C78A8", alpha=0.14,
+axes[0].fill_between(divergence, q10, q90, color="#__THESIS_BLUE__", alpha=0.14,
                      label="10th--90th percentile")
-axes[0].fill_between(divergence, q25, q75, color="#4C78A8", alpha=0.30,
+axes[0].fill_between(divergence, q25, q75, color="#__THESIS_BLUE__", alpha=0.30,
                      label="25th--75th percentile")
-axes[0].plot(divergence, q50, color="#285F8F", linewidth=1.3,
+axes[0].plot(divergence, q50, color="#__THESIS_BLUE_LINE__", linewidth=1.3,
              label="median score")
-axes[0].axhline(40, color="#F28E2B", linestyle="--", linewidth=0.9,
+axes[0].axhline(40, color="#__THESIS_ORANGE_LINE__", linestyle="--", linewidth=0.9,
                 label=r"$\mathtt{min\_sc}=40$")
 axes[0].set_ylim(0, 1000)
 axes[0].set_ylabel(r"DP score $f_i$", fontsize=8)
@@ -1118,9 +1118,9 @@ axes[0].set_title("(a) Within-input score spread", fontsize=8, loc="left")
 axes[0].legend(frameon=False, fontsize=6.5, ncol=2, loc="upper right")
 
 axes[1].fill_between(divergence, fraction_q1, fraction_q3,
-                     color="#59A14F", alpha=0.22,
+                     color="#__THESIS_GREEN__", alpha=0.22,
                      label="six-input interquartile range")
-axes[1].plot(divergence, fraction, color="#3C7C36", linewidth=1.3,
+axes[1].plot(divergence, fraction, color="#__THESIS_GREEN__", linewidth=1.3,
              label="six-input median")
 axes[1].set_ylim(85, 100)
 axes[1].set_yticks((85, 90, 95, 100))
@@ -1273,7 +1273,7 @@ Panel (b)~\ref{fig:chaining-max-drop-long-chain-accounting} demonstrates that wh
 
 \begin{figure}[H]
 \centering
-\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}, set placeholder eval={__THESIS_BLUE_LINE__}{\ThesisBlueLineHex}, set placeholder eval={__THESIS_GRAY__}{\ThesisGrayHex}, set placeholder eval={__THESIS_ORANGE_LINE__}{\ThesisOrangeLineHex}}
 import matplotlib
 matplotlib.use("pgf")
 import matplotlib.pyplot as plt
@@ -1317,8 +1317,8 @@ fig, (left, right) = plt.subplots(1, 2)
 fig.set_size_inches(0.91 * __LINEWIDTH__, 0.34 * __LINEWIDTH__, forward=True)
 
 left.plot(substitution_percent, remaining_percent,
-          color="#4C78A8", linewidth=1.25)
-left.axhline(49.54799892, color="#7F7F7F", linestyle="--", linewidth=0.8,
+          color="#__THESIS_BLUE_LINE__", linewidth=1.25)
+left.axhline(49.54799892, color="#__THESIS_GRAY__", linestyle="--", linewidth=0.8,
              zorder=1)
 left.set_xlim(0, 10)
 left.set_ylim(47.5, 51.0)
@@ -1333,7 +1333,7 @@ left.text(0.35, 50.65,
           fontsize=6.5, color="#555555", va="top")
 
 right.plot(substitution_percent, full_extra_percent,
-           color="#D55E00", linewidth=1.25)
+           color="#__THESIS_ORANGE_LINE__", linewidth=1.25)
 right.axhline(0, color="#555555", linewidth=0.7)
 right.set_xlim(0, 10)
 right.set_ylim(0, 12)
@@ -1344,7 +1344,7 @@ right.set_ylabel(r"extra scan steps vs. baseline (\%)", fontsize=8)
 right.set_xlabel(r"requested substitutions $x_k$ (\%)", fontsize=8)
 right.text(0.35, 10.8,
            "all 246 observations\n" r"combined: +4.046\%",
-           fontsize=6.5, color="#A34700", va="top")
+           fontsize=6.5, color="#__THESIS_ORANGE_LINE__", va="top")
 
 for ax in (left, right):
     ax.tick_params(axis="both", labelsize=7)
