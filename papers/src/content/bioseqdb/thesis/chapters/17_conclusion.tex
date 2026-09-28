@@ -26,6 +26,19 @@ However, the project can be classified as a success:
     \item BioseqDB aligner pipeline can be called as standalone binary directly.
     \item I provided extensive analysis of algoritms that are poorly described in literature, so the provided illustrations and code listings can be used as a base to develop new software more easily and great learning material.
     \item The overall performance was very satisfactory and speedups of x2, x10 to x100 on heavy SWAPped systems were achieved.
+    \item Utilise features of PG19 (current releases for PG19 don't take advantage of streaming APIs or other interesting features)
+\end{itemize}
+
+In the future, BioseqDB should:
+\begin{itemize}
+    \item Rewrite existing GPU algorithms to be more similar to G3SA implementations. Original authors claimed performance speedups, so it is worth considering 
+    exploring Vulkan more. The current implementation is very simple and due to personal inexperience it performed poorly.
+    \item Improiving benchmaring methodology as I only measured total runtime and in some placed the results are outliers for unknown reasons. It requires more investigation.
+    \item Improving optimisations for short sequences
+    \item Adding support for various other different algorithms like BWA or aligner-free approaches
+    \item Adding support for more alphabets
+    \item Resolving problems with very high build times
+    \item Optimising access to indices and "no-index" timings compared to minimap2
 \end{itemize}
 
 \section{Acknowledgments}
@@ -35,4 +48,4 @@ I dedicate this work to Wiesław Styczyński and Agnieszka Styczyńska, who supp
 
 \section{Funding}
 
-The work was self-funded and total spending was around $1000\$$ for AWS infrastructure and hardware rentals.
+The work was self-funded and total spending was approximately $2000\$$ for AWS/Vast.ai infrastructure and hardware rentals.

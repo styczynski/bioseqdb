@@ -28,63 +28,72 @@
 %   - !partial
 %     title: Biological foundations of sequence analysis
 %     path: chapters/01_biology
-%     description: introduces biological sequences and sequencing data. It explains variation and the computational questions that motivate database-resident sequence analysis.
+%     description: Introducion to biological sequences and their context
 %   - !partial
 %     title: Sequence alignment and search strategies
 %     path: chapters/02_alignment_foundations
-%     description: develops exact dynamic programming and seed-and-extend mapping. It also presents graph-based approaches and the limits of existing tools.
+%     description: Alignment as dynamic programing (DP) problem
 %   - !partial
 %     title: Minimizer extraction
 %     path: chapters/05_minimizers
-%     description: explains minimizer sketching and rolling hashing. It compares the SIMD and Vulkan implementations with minimap2 and SIMD-Minimizers.
+%     description: Extraction of minimizers from sequences
 %   - !partial
 %     title: Chaining seed anchors
 %     path: chapters/06_chaining
-%     description: derives the chaining objective and compares its scalar RMQ SIMD and GPU forms. It then states the selection policy.
+%     description: Joining minimizers together into long chains
 %   - !partial
 %     title: Final alignment and postprocessing
 %     path: chapters/07_final_alignment_postprocessing_and_preprocessing
-%     description: compares KSW2 and Block Aligner, explains SneakySnake filtering and distinguishes the reported alignment statistics.
+%     description: Base level aligment and additiona pre- and postprocessing
 %   - !partial
 %     title: Sequence representations and lazy evaluation
 %     path: chapters/09_sequence_abstractions
-%     description: develops compact sequence ranges and bit-level views. It then presents fragmented and lazy sequences with PostgreSQL-backed adapters and alphabet dispatch.
+%     description: Abstractions over sequences in C++
 %   - !partial
 %     title: PostgreSQL API and custom scans
 %     path: chapters/10_postgres_custom_scan
-%     description: follows an mmsearch expression through planning and batched execution. It explains joins and per-row result substitution.
+%     description: fImplementations of sequences abstractions in Postgres
 %   - !partial
 %     title: Physical sequence storage in PostgreSQL
 %     path: chapters/11_postgres_storage
-%     description: explains the columnar-derived storage layout and fragment metadata. It also covers caching and request coordination.
+%     description: Physical storage of sequences
 %   - !partial
 %     title: Persistent sequence indexes
 %     path: chapters/12_index_storage
-%     description: describes index construction and storage with compatibility checks and selective cold loading. It also explains updates and differences from minimap2 indexes.
+%     description: Types and different roles of indexes in BioseqDB
 %   - !partial
 %     title: Benchmarking and performance evaluation
 %     path: chapters/16_benchmarking
-%     description: measuring overall performance of BioseqDB
+%     description: Benchmarking of BioseqDB with full result tables
 %   - !partial
 %     title: Conclusions
 %     path: chapters/17_conclusion
-%     description: answers the research questions and summarizes the final system. It identifies the principal limitations and possible extensions.
+%     description: Summary of achievements and failures
 % authorship: !partial
-%   title: Authorship, development and AI assistance
+%   title: Authorship and notes
 %   path: chapters/18_authorship
 % resources: !partial
-%   title: Provided resources
+%   title: Access to code, binaries and other resources
 %   path: chapters/19_provided_resources
 % appendices:
 %   - !partial
-%     title: A runnable SQL walkthrough
+%     title: A runnable SQL walkthrough (simple user guide)
 %     path: appendices/02_sql_walkthrough
 %   - !partial
-%     title: Configuration reference
+%     title: Configuration reference (settings available in BioseqDB)
 %     path: appendices/03_configuration_reference
 % xrenderonly: chapters/05_minimizers
 
 \input{figure_palette.tex}
+
+% Keep the existing heading spacing, with a small size increase and real bold.
+% Select Latin Modern explicitly: the default Heuristica family lacks TU bold.
+\makeatletter
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\large\fontfamily{lmr}\fontseries{bx}\selectfont}}
+\makeatother
 
 % Keep thesis hyperlinks legible on a white page.  `breaklinks` also permits
 % linked bibliography fields (for example, long conference titles) to wrap.
@@ -139,6 +148,8 @@ In the implemetation I provide multi-platform implementations that can execute o
 
 \chapter*{Introduction}
     \addcontentsline{toc}{chapter}{Introduction}
+    % Avoid stretching the goals list when the timeline needs its own page.
+    \raggedbottom
 
     The thesis is structured in the way that each stage of pipeline prosecessing is discussed in chronological order, while the Postgres storage details are addressed later.
     At the end of the thesis I provide samples of usage to demonstrate all the features and unprocessed benchmark results for different scenarios and machines.
@@ -153,19 +164,31 @@ In the implemetation I provide multi-platform implementations that can execute o
     }
   \end{itemize}
 
-\subsubsection{Main goals}
+\subsubsection{Primary goal}
 
-    The main goals of BioseqDB were:
-    \begin{itemize}
-      \item Explore existing algorithms and literature and provide easy way to understand various approaches and their trade-offs, so this thesis is a form of educational material
-      \item Port existing algorithms to modern C++ by writing them from scratch, so they run on any device
-      \item Integrate state-of-the-art algorithms into one pipeline
-      \item Create own optimisations and measure them on randomized data
-      \item Provide first of its kind integration of aligner software into relational database
-      \item Optimise pipeline until it's more performant than baseline tool (I compare myself to minimap2)
-      \item Provide support for very large sequences, so storage doesn't require any external tools to split or reorder or process in other ways the input sequences
-      \item Directly integrate with SQL api in a way that's intuitive
-    \end{itemize}
+The primary goal of BioseqDB is allow labs to amabdon storing FASTA/FASTQ files on large disks without versioning and allow to perform alignment jobs directly in the database:
+
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Simplest BioseqDB SQL query},
+  label={lst:first-sql-example-main}]
+  SELECT id, bioseq.cigar(seq) FROM samples WHERE age >= 30 AND mmsearch(seq, 'CAGTAACCACCACCCAGTTCAGTTCCCATATGAAAA'::bioseq.seq('dna4', 64));
+\end{lstlisting}
+Long example is available in Appendix~\label{app:sql-walkthrough}
+
+
+\subsubsection{Secondary goals}
+
+  The main goals of BioseqDB were:
+  \begin{itemize}
+    \item Explore existing algorithms and literature and provide easy way to understand various approaches and their trade-offs, so this thesis is a form of educational material
+    \item Port existing algorithms to modern C++ by writing them from scratch, so they run on any device
+    \item Integrate state-of-the-art algorithms into one pipeline
+    \item Create own optimisations and measure them on randomized data
+    \item Provide first of its kind integration of aligner software into relational database
+    \item Optimise pipeline until it's more performant than baseline tool (I compare myself to minimap2)
+    \item Provide support for very large sequences, so storage doesn't require any external tools to split or reorder or process in other ways the input sequences
+    \item Directly integrate with SQL api in a way that's intuitive
+  \end{itemize}
 
 \subsubsection{Work context}
 
@@ -179,6 +202,8 @@ In the implemetation I provide multi-platform implementations that can execute o
     The early prototype was to simplistic as technically I still didn't understand how aligners work internally.
 
     The idea of writing my own alignment software was my long standing dream. I explored the field hobbistically and this thesis stands as the final result of all that work. 
+    I had oppotunity to open issue and communicate directly with authors of MMSeqs2 or Joe Conway who is one of the major contributors of Postgres and few years ago helped me 
+    to understand limitations of parallel execution in Postgres.
 
     \begin{center}
     \begin{tikzpicture}[x=1cm,y=1cm,font=\small,
@@ -283,6 +308,8 @@ In the implemetation I provide multi-platform implementations that can execute o
     {\small\noindent Project history\par}
     \footnotetext{\fontsize{7.5}{9}\selectfont I was a co-founder (shareholder) until 15 July 2022 (KRS update on 3 Jun 2022) in Covid Genomics Sp. z o.o. (registered in Poland in Jun 2020, KRS 0000846289) which then changed its legal name to CGen Sp. z o.o. (on 3 Jun 2022) and then changed its branding name to Deepflare (on Jul 2022). I was also a Chief Engineering Officer from 1 Apr 2020 till 31 Aug 2022.}
 
+\clearpage
+\flushbottom
 \foreachdata{chapters}{\chapteri} {
     \defchapter{\data{chapters.\chapteri.title}}{r:\data{chapters.\chapteri.ref}}
     \datapartial{chapters.\chapteri}
