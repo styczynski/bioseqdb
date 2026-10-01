@@ -1,0 +1,668 @@
+{
+  "entrypoint": "papers/src/content/bioseqdb/thesis/main.tex",
+  "inputs": [
+    {
+      "path": "main.bib",
+      "sha256": "e005f86e1265891311748aeb099b8658390ff1424adcea954add23cbf6471f39"
+    },
+    {
+      "path": "main.tex",
+      "sha256": "2094337a0103074c2d7be017af03cafaa37ca3ab93209d85d3c9b4c15f8787d7"
+    },
+    {
+      "path": "figure_palette.tex",
+      "sha256": "0c9b04b473555d95d2ea22dc960ca540a77acfa146588cfee46d833acf2c0691"
+    },
+    {
+      "path": "chapters/01_biology.tex",
+      "sha256": "f9d872bc3ad7914e2959d05b29bbe604918551fffaeefe291e60b63f26af55c9"
+    },
+    {
+      "path": "chapters/02_alignment_foundations.tex",
+      "sha256": "0ca53acec642566f8a26ff3c88e10730169e270f6bc4ecf5b1e123b151f9e6ed"
+    },
+    {
+      "path": "chapters/05_minimizers.tex",
+      "sha256": "3056192ea2a7bf43e13677257a8639d0a0b2f914310cf34c30e9a72ae2852c65"
+    },
+    {
+      "path": "chapters/06_chaining.tex",
+      "sha256": "fb8b85d0ecd4490dad5d9d98daa3687ac2e8cc6817714d815acb4400a03af4a6"
+    },
+    {
+      "path": "chapters/06_chaining/01_introduction.tex",
+      "sha256": "5e86f59f9dccdf0ace659d2ceccd1d38cb86466b9223ac63440be4233aedc1b6"
+    },
+    {
+      "path": "chapters/06_chaining/02_cpu.tex",
+      "sha256": "f7e547d358b0cf00d481d38153cab57a02948d7bde0b14ae0063aaaef5d4fcee"
+    },
+    {
+      "path": "chapters/06_chaining/03_backtracking.tex",
+      "sha256": "2b1fa15b82ad95fcdf2d2c22b6e65c8f80ad86c77aef3b285886bbdbdb50f54b"
+    },
+    {
+      "path": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
+      "sha256": "9e7bc7c2cb902776506ae32ffb032a0640c4e7e4d5cad015efd91ec228a0419a"
+    },
+    {
+      "path": "chapters/06_chaining/04_cpu_experimental_analysis/dense_divergence_coordinates.tex",
+      "sha256": "f98c889dce4cabf803d00ab083dfa5eda800584ef2cb19138ecbf6a2b3bd9143"
+    },
+    {
+      "path": "chapters/06_chaining/04_cpu_experimental_analysis/u_batch_chart.tex",
+      "sha256": "b55407a1f15e4c2dccf676f8669d596cbf4b5171a30ecbfb7dc9fec69194a438"
+    },
+    {
+      "path": "chapters/06_chaining/04_cpu_experimental_analysis/u_batch_table.tex",
+      "sha256": "7fa0e2448adbc36caf946e355d3be041a50821b1b38a4fe7e90efac675991fca"
+    },
+    {
+      "path": "chapters/06_chaining/05_cpu_temporary_results.tex",
+      "sha256": "86267a8a269f271b706d7e30179231966c15f4e0dac0b813ebec94a717953454"
+    },
+    {
+      "path": "chapters/06_chaining/06_rmq.tex",
+      "sha256": "c4d0c9760a6fc03492b1603dfe3d7339ad3d1e923112072c15a78ca76c747ac4"
+    },
+    {
+      "path": "chapters/06_chaining/07_gpu.tex",
+      "sha256": "74656b8d1a943506e45f815008f33a9fab5bd72b0986bcbce4ca7bf587a07fa4"
+    },
+    {
+      "path": "chapters/06_chaining/08_primary_secondary.tex",
+      "sha256": "38f9b13d5349d1c9697eb6c6285afdb950a6fee4904ed683a2a7c89c676e4e98"
+    },
+    {
+      "path": "chapters/07_final_alignment_postprocessing_and_preprocessing.tex",
+      "sha256": "fd36d35ea6a0dafef4f320742ffd5127aa7348049a5fce3bab7f8a330431eb41"
+    },
+    {
+      "path": "chapters/07_final_alignment_postprocessing_and_preprocessing/01_base_level_alignment.tex",
+      "sha256": "7e211cc80667f8858881a30268b161b55f59e7ec14e6396a371512f8aa99aa83"
+    },
+    {
+      "path": "chapters/07_final_alignment_postprocessing_and_preprocessing/03_postprocessing.tex",
+      "sha256": "b91d217644ae1ebfe1c943a5aced8331efd0ba3d8d0517c1d416cd89acea78c6"
+    },
+    {
+      "path": "chapters/07_final_alignment_postprocessing_and_preprocessing/02_prefiltering.tex",
+      "sha256": "cac9a090dc11c4b572f354a0a4f5b81cf1aeb3b6ac88134b98b0c85f90bf2530"
+    },
+    {
+      "path": "chapters/09_sequence_abstractions.tex",
+      "sha256": "8d4f2aac9107521ba81e124fa0dae25859c3042b7770ff656b04ea43668dcfca"
+    },
+    {
+      "path": "chapters/09_sequence_abstractions/01_values_and_ranges.tex",
+      "sha256": "7fb563da8da1ae886079f8f8dbe6f5ee0614407a5e3bcbf74672de9af998d6ac"
+    },
+    {
+      "path": "chapters/09_sequence_abstractions/02_slice_coordinates.tex",
+      "sha256": "147f663398d846d58b334b5e45b73ec60249983376b1ecfe1f703ca05b8cee0a"
+    },
+    {
+      "path": "chapters/09_sequence_abstractions/03_piece_trees.tex",
+      "sha256": "25184e8552f8eca67ca6cd1aa86c83c8b584759daf64071a486611ce20dac8af"
+    },
+    {
+      "path": "chapters/09_sequence_abstractions/04_reading_intervals.tex",
+      "sha256": "053bafc8ff0709d412953213df5e3d94aec1043cc463117c6c7a1220f83f1654"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan.tex",
+      "sha256": "228fbb4000afc306bb7a329629171ec020ff9f91d8a845547752df911319cc35"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "sha256": "0d5238355060a36a7def660212b68bff4c531777e0c6e4392e8d290aa1b36bc0"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/02_planner.tex",
+      "sha256": "0effc13510ad919608f9edf18394b73299d3199974e2b7b3da4fd0b91731d245"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/03_match_fields.tex",
+      "sha256": "f6ac2d2b5dbd929ad3b39871c107b2bcdcc9aa4d9618680852966a9e6fcd050d"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/04_execution.tex",
+      "sha256": "cbf699ff5b0a64f3ec889585d99a7e2b357e4bfd5caf4facd11bff03b9c58be0"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "sha256": "6debf34b0e433cb0bb13204f22af050d583586cdcdcadf307032001cb1f23d65"
+    },
+    {
+      "path": "chapters/10_postgres_custom_scan/06_result_cache.tex",
+      "sha256": "f64bad0501007a82c51a3749cc2c752f62b869bdb1a3a1a1e7d2a47b4133793b"
+    },
+    {
+      "path": "chapters/11_postgres_storage.tex",
+      "sha256": "fefb4ffa6f7749a656554f649e60a93946b4d2fffc280a060c7701da509e2c4b"
+    },
+    {
+      "path": "chapters/11_postgres_storage/01_storage_problem.tex",
+      "sha256": "eafd452dc0403a1285be920ea9d324121fd7e27a7c7e7f0e45063303824a00a8"
+    },
+    {
+      "path": "chapters/11_postgres_storage/02_columns_and_pages.tex",
+      "sha256": "23a5faef9285703ef674df2af5d5bf21974f0d34f796194e231877e07dccdaf1"
+    },
+    {
+      "path": "chapters/11_postgres_storage/03_fragments_and_shards.tex",
+      "sha256": "10860263041f125230697812922ae34a67665c8ed17f26b1c3b25b94529f4912"
+    },
+    {
+      "path": "chapters/11_postgres_storage/04_versions_and_deletion.tex",
+      "sha256": "992c9ee67127c7c23c554f07b1a31ae155dd2d1cad8634119787d1212f47a8c6"
+    },
+    {
+      "path": "chapters/11_postgres_storage/05_reads_and_caches.tex",
+      "sha256": "3772669f4fc8c4b07d189ff86bb13f09d4bca7b8453f584478a93e23360c06aa"
+    },
+    {
+      "path": "chapters/12_index_storage.tex",
+      "sha256": "10d8310699e4ee59fe7b16b946ebe0b8a62350bdd655a46995eba654f6f88cfb"
+    },
+    {
+      "path": "chapters/12_index_storage/01_persistent_lookup.tex",
+      "sha256": "da80e665390a72f06837537eafaa65f55b3f637c37198c9a8d166771c9d0403c"
+    },
+    {
+      "path": "chapters/12_index_storage/02_mapper_indexes.tex",
+      "sha256": "edd545306975f29e6ce70499c8c41cb3538fbb330872e8c226641f1f107d1fb7"
+    },
+    {
+      "path": "chapters/12_index_storage/03_mpf_and_mps.tex",
+      "sha256": "783fc12272cacc557517967483bc3588609a0cb8b8ac43365c7f95f52efde642"
+    },
+    {
+      "path": "chapters/12_index_storage/04_bounded_construction.tex",
+      "sha256": "3638827f79868ecc8d1b1e67357ee0a0363880cafdbf6d4ae0f47b798395070b"
+    },
+    {
+      "path": "chapters/12_index_storage/05_selective_reads.tex",
+      "sha256": "a48ddabf7e506bf09984c34d90712e24c1cb3de8f6e573301ae763b4e272e926"
+    },
+    {
+      "path": "chapters/12_index_storage/07_policies_and_reuse.tex",
+      "sha256": "958f70d5c4351effe0210ecfdb5b5d4211e7345d51bf5d254722045a516128d7"
+    },
+    {
+      "path": "chapters/16_benchmarking.tex",
+      "sha256": "0ee63b9535c68dcc6d8da0e40661f0b06e8b666ad38dcb29864505fa7a45de98"
+    },
+    {
+      "path": "chapters/16_benchmarking/generated_benchmark_cells.tex",
+      "sha256": "5089d4fa5e406ddfa66ba1f04074c98ee3df9d94fc04d0aa467462a9d5766005"
+    },
+    {
+      "path": "chapters/16_benchmarking/01_introduction.tex",
+      "sha256": "6e31c23e04a2480620f98e0a99bea0413cd25a32ef8b10879121b4e147d281e9"
+    },
+    {
+      "path": "chapters/16_benchmarking/02_results.tex",
+      "sha256": "bb834a01dad84b1058798f6b875390c9a1059805cdcab4b2b8a92beb18ae588d"
+    },
+    {
+      "path": "chapters/16_benchmarking/generated_results.tex",
+      "sha256": "65af5bd7e9aa6e8b9168a4989bad8e922e107ad46895229d0d1b26621d591ba3"
+    },
+    {
+      "path": "chapters/17_conclusion.tex",
+      "sha256": "1faef0ea993b94029d48dbb458d36d86f36aa7fc01420c9447d50b20d37ce2a4"
+    },
+    {
+      "path": "appendices/03_configuration_reference.tex",
+      "sha256": "880660548fe3f0bb7c6ef73968932afb9b9fa43934b77f1904f6d8b44f88c48d"
+    },
+    {
+      "path": "appendices/03_configuration_reference/01_introduction.tex",
+      "sha256": "25073c78e442211f16ec5686092ff266311ea1269ea5de488211114eb2d54bb2"
+    },
+    {
+      "path": "appendices/03_configuration_reference/02_guc_tables.tex",
+      "sha256": "c818079e6c04420391f66dab8a78efe688a8cbff588bf1a428526c892749fa3e"
+    },
+    {
+      "path": "appendices/03_configuration_reference/03_search_options.tex",
+      "sha256": "3c4afd87d3b5dcf955616410b0af985e2e0518ca5a247628aee25e60ffd3d0d3"
+    },
+    {
+      "path": "appendices/03_configuration_reference/04_options_table.tex",
+      "sha256": "a10c57d34bbb33198c2d3b390c3ab7cd9554f3c21bfa23d9ec64b299d803fd97"
+    },
+    {
+      "path": "frontmatter/acknowledgments.tex",
+      "sha256": "e6d340240a9400d1a6d4656e1f718259e7afa95c3ff8b1880a39a0be6627aeda"
+    },
+    {
+      "path": "chapters/18_authorship.tex",
+      "sha256": "3602c554e212245e8928234f110e6b0026f63f837a1c5c38cbb0dd53f8c298ee"
+    },
+    {
+      "path": "chapters/19_provided_resources.tex",
+      "sha256": "15cacbfc23740f25a314720f3e3a65d727a7541bf4fbbd117f320271a8515bf5"
+    },
+    {
+      "path": "appendices/02_sql_walkthrough.tex",
+      "sha256": "4b223d43055976133c980474b273bbab81ae341c3a8d95bac227a5799ffe8563"
+    },
+    {
+      "path": "appendices/02_sql_walkthrough/00_introduction.tex",
+      "sha256": "a9c744811ae0237eff4135a04649ab15189f17501eb208753b8d4096b1479780"
+    },
+    {
+      "path": "appendices/02_sql_walkthrough/01_walkthrough.tex",
+      "sha256": "b71c80f96442211a75d87c2aa2a956a578a71cf1df2273748a650c0cf6084938"
+    }
+  ],
+  "pages": [
+    {
+      "slug": "project_introduction",
+      "title": "Introduction",
+      "sources": [
+        "main.tex",
+        "figure_palette.tex"
+      ]
+    },
+    {
+      "slug": "project_biology",
+      "title": "Biological foundations of sequence analysis",
+      "sources": [
+        "chapters/01_biology.tex"
+      ]
+    },
+    {
+      "slug": "project_alignment_foundations",
+      "title": "Sequence alignment and search strategies",
+      "sources": [
+        "chapters/02_alignment_foundations.tex"
+      ]
+    },
+    {
+      "slug": "project_minimizers",
+      "title": "Minimizer extraction",
+      "sources": [
+        "chapters/05_minimizers.tex"
+      ]
+    },
+    {
+      "slug": "project_chaining",
+      "title": "Chaining seed anchors",
+      "sources": [
+        "chapters/06_chaining.tex",
+        "chapters/06_chaining/01_introduction.tex",
+        "chapters/06_chaining/02_cpu.tex",
+        "chapters/06_chaining/03_backtracking.tex",
+        "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
+        "chapters/06_chaining/04_cpu_experimental_analysis/dense_divergence_coordinates.tex",
+        "chapters/06_chaining/04_cpu_experimental_analysis/u_batch_chart.tex",
+        "chapters/06_chaining/04_cpu_experimental_analysis/u_batch_table.tex",
+        "chapters/06_chaining/05_cpu_temporary_results.tex",
+        "chapters/06_chaining/06_rmq.tex",
+        "chapters/06_chaining/07_gpu.tex",
+        "chapters/06_chaining/08_primary_secondary.tex"
+      ]
+    },
+    {
+      "slug": "project_final_alignment_postprocessing_and_preprocessing",
+      "title": "Final alignment and postprocessing",
+      "sources": [
+        "chapters/07_final_alignment_postprocessing_and_preprocessing.tex",
+        "chapters/07_final_alignment_postprocessing_and_preprocessing/01_base_level_alignment.tex",
+        "chapters/07_final_alignment_postprocessing_and_preprocessing/03_postprocessing.tex",
+        "chapters/07_final_alignment_postprocessing_and_preprocessing/02_prefiltering.tex"
+      ]
+    },
+    {
+      "slug": "project_sequence_abstractions",
+      "title": "Sequence representations and lazy evaluation",
+      "sources": [
+        "chapters/09_sequence_abstractions.tex",
+        "chapters/09_sequence_abstractions/01_values_and_ranges.tex",
+        "chapters/09_sequence_abstractions/02_slice_coordinates.tex",
+        "chapters/09_sequence_abstractions/03_piece_trees.tex",
+        "chapters/09_sequence_abstractions/04_reading_intervals.tex"
+      ]
+    },
+    {
+      "slug": "project_postgres_custom_scan",
+      "title": "PostgreSQL API and custom scans",
+      "sources": [
+        "chapters/10_postgres_custom_scan.tex",
+        "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+        "chapters/10_postgres_custom_scan/02_planner.tex",
+        "chapters/10_postgres_custom_scan/03_match_fields.tex",
+        "chapters/10_postgres_custom_scan/04_execution.tex",
+        "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+        "chapters/10_postgres_custom_scan/06_result_cache.tex"
+      ]
+    },
+    {
+      "slug": "project_postgres_storage",
+      "title": "Physical sequence storage in PostgreSQL",
+      "sources": [
+        "chapters/11_postgres_storage.tex",
+        "chapters/11_postgres_storage/01_storage_problem.tex",
+        "chapters/11_postgres_storage/02_columns_and_pages.tex",
+        "chapters/11_postgres_storage/03_fragments_and_shards.tex",
+        "chapters/11_postgres_storage/04_versions_and_deletion.tex",
+        "chapters/11_postgres_storage/05_reads_and_caches.tex"
+      ]
+    },
+    {
+      "slug": "project_index_storage",
+      "title": "Persistent sequence indexes",
+      "sources": [
+        "chapters/12_index_storage.tex",
+        "chapters/12_index_storage/01_persistent_lookup.tex",
+        "chapters/12_index_storage/02_mapper_indexes.tex",
+        "chapters/12_index_storage/03_mpf_and_mps.tex",
+        "chapters/12_index_storage/04_bounded_construction.tex",
+        "chapters/12_index_storage/05_selective_reads.tex",
+        "chapters/12_index_storage/07_policies_and_reuse.tex"
+      ]
+    },
+    {
+      "slug": "project_benchmarking",
+      "title": "Benchmarking and performance evaluation",
+      "sources": [
+        "chapters/16_benchmarking.tex",
+        "chapters/16_benchmarking/generated_benchmark_cells.tex",
+        "chapters/16_benchmarking/01_introduction.tex",
+        "chapters/16_benchmarking/02_results.tex",
+        "chapters/16_benchmarking/generated_results.tex"
+      ]
+    },
+    {
+      "slug": "project_conclusion",
+      "title": "Conclusions",
+      "sources": [
+        "chapters/17_conclusion.tex"
+      ]
+    },
+    {
+      "slug": "project_configuration_reference",
+      "title": "Configuration reference (settings available in BioseqDB)",
+      "sources": [
+        "appendices/03_configuration_reference.tex",
+        "appendices/03_configuration_reference/01_introduction.tex",
+        "appendices/03_configuration_reference/02_guc_tables.tex",
+        "appendices/03_configuration_reference/03_search_options.tex",
+        "appendices/03_configuration_reference/04_options_table.tex"
+      ]
+    }
+  ],
+  "omitted": [
+    {
+      "area": "acknowledgments",
+      "title": "Special acknowledgments",
+      "path": "frontmatter/acknowledgments.tex",
+      "reason": "Printed front matter or publication boilerplate"
+    },
+    {
+      "area": "authorship",
+      "title": "Authorship and notes",
+      "path": "chapters/18_authorship.tex",
+      "reason": "Printed front matter or publication boilerplate"
+    },
+    {
+      "area": "resources",
+      "title": "Access to code, binaries and other resources",
+      "path": "chapters/19_provided_resources.tex",
+      "reason": "Printed front matter or publication boilerplate"
+    },
+    {
+      "area": "appendices",
+      "title": "A runnable SQL walkthrough (simple user guide)",
+      "path": "appendices/02_sql_walkthrough.tex",
+      "reason": "Walkthrough replaced by the README tutorial"
+    }
+  ],
+  "omitted_main_sections": [
+    "title-page metadata",
+    "abstract",
+    "printed table of contents",
+    "chapter roadmap generated from metadata",
+    "walkthrough-appendix pointer"
+  ],
+  "text_policy": "Author sentences are preserved; thesis becomes project. Formatting, citations, references, executable setup, and reserved-word quoting are publication adaptations.",
+  "sql_examples": [
+    {
+      "source": "main.tex",
+      "index": 0,
+      "label": "lst:first-sql-example-main",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/07_final_alignment_postprocessing_and_preprocessing/02_prefiltering.tex",
+      "index": 0,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Bound application parameters to the deterministic fixture",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/09_sequence_abstractions/02_slice_coordinates.tex",
+      "index": 0,
+      "label": "lst:sequence-sql-examples",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/09_sequence_abstractions/04_reading_intervals.tex",
+      "index": 0,
+      "label": "code:simple-table-read-with-slice",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "index": 0,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Bound application parameters to the deterministic fixture",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "index": 1,
+      "label": "",
+      "runnable": false,
+      "reason": "Hypothetical API used in the author's design discussion",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "index": 2,
+      "label": "",
+      "runnable": false,
+      "reason": "Hypothetical API used in the author's design discussion",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "index": 3,
+      "label": "",
+      "runnable": false,
+      "reason": "Hypothetical API used in the author's design discussion",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
+      "index": 4,
+      "label": "",
+      "runnable": false,
+      "reason": "Hypothetical API used in the author's design discussion",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/02_planner.tex",
+      "index": 0,
+      "label": "lst:paradedb-pg-search-examples",
+      "runnable": false,
+      "reason": "ParadeDB example requires an additional extension and its own documents/index fixture",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/04_execution.tex",
+      "index": 0,
+      "label": "lst:sequence-slice-projection",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Quoted reserved SQL identifier TABLE",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/04_execution.tex",
+      "index": 1,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Bound application parameters to the deterministic fixture",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "index": 0,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "index": 1,
+      "label": "lst:ambiguous-target-binding",
+      "runnable": false,
+      "reason": "Parameterized application example; ambiguous or unsupported ownership is discussed in the surrounding text",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "index": 2,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Bound application parameters to the deterministic fixture",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "index": 3,
+      "label": "",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Bound application parameters to the deterministic fixture",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
+      "index": 4,
+      "label": "lst:constant-extra-mmsearch",
+      "runnable": false,
+      "reason": "illustrative API, internal schema, unsupported example, or multi-session example",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/06_result_cache.tex",
+      "index": 0,
+      "label": "lst:cache-missing-inputs",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
+      "index": 0,
+      "label": "lst:storage-metadata-catalogs",
+      "runnable": false,
+      "reason": "Internal storage-schema illustration, not application DDL",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/11_postgres_storage/03_fragments_and_shards.tex",
+      "index": 1,
+      "label": "lst:sql-storage-widths",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": "22023"
+    },
+    {
+      "source": "chapters/11_postgres_storage/04_versions_and_deletion.tex",
+      "index": 0,
+      "label": "lst:storage-source-version",
+      "runnable": false,
+      "reason": "Internal storage-schema illustration, not application DDL",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/11_postgres_storage/04_versions_and_deletion.tex",
+      "index": 1,
+      "label": "lst:storage-repeatable-read",
+      "runnable": false,
+      "reason": "Concurrent sessions: the one-connection website runner cannot reproduce the interleaving",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/12_index_storage/03_mpf_and_mps.tex",
+      "index": 0,
+      "label": "lst:chunked-per-fragment-row",
+      "runnable": false,
+      "reason": "Internal storage-schema illustration, not application DDL",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "chapters/12_index_storage/03_mpf_and_mps.tex",
+      "index": 2,
+      "label": "lst:index-symbol-counts",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "appendices/03_configuration_reference/01_introduction.tex",
+      "index": 0,
+      "label": "lst:configuration-inspect",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    },
+    {
+      "source": "appendices/03_configuration_reference/03_search_options.tex",
+      "index": 0,
+      "label": "lst:configuration-options",
+      "runnable": true,
+      "reason": "author SQL executed with isolated deterministic setup",
+      "adaptation": "Visible SQL unchanged",
+      "expected_sqlstate": null
+    }
+  ]
+}
