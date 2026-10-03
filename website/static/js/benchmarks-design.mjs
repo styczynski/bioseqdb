@@ -7,6 +7,8 @@
  * through DOM text nodes so report JSON never becomes executable markup.
  */
 
+import { adaptProjectComponent } from "./project-benchmark-component.mjs";
+
 const bindingPattern = /\[\[\s*([^\]]+?)\s*\]\]/g;
 const allowedStyleProperties = new Set([
   "background", "border", "border-color", "border-left", "box-shadow", "color",
@@ -90,7 +92,15 @@ function bindNode(node, scope) {
           .includes(attribute.name.slice("data-bench-".length))) {
       const eventName = attribute.name.slice("data-bench-".length);
       const handler = valueAt(scope, attribute.value);
-      if (typeof handler === "function") node.addEventListener(eventName, handler);
+      if (typeof handler === "function") {
+        node.addEventListener(eventName, handler);
+        if (eventName === "mouseenter") {
+          node.tabIndex = 0;
+          node.addEventListener("focus", handler);
+          node.addEventListener("keydown", (event) => { if (event.key === "Escape") scope.onTipOut?.(); });
+        }
+        if (eventName === "mouseleave") node.addEventListener("blur", handler);
+      }
       node.removeAttribute(attribute.name);
     } else if (attribute.name === "data-bench-style") {
       applyDynamicStyles(node, attribute.value, scope);
@@ -111,7 +121,8 @@ class DCLogic {
   setState(update) {
     const patch = typeof update === "function" ? update(this.state) : update;
     this.state = { ...this.state, ...patch };
-    this.render();
+    if (Object.keys(patch).length === 1 && Object.hasOwn(patch, "tip")) this.renderTip();
+    else this.render();
   }
 
   mount(root, template, props) {
@@ -121,11 +132,28 @@ class DCLogic {
     this.render();
   }
 
+  renderTip() {
+    if (!this.root || !this.template) return;
+    const source = this.template.content.querySelector("[data-benchmark-tip]");
+    const current = this.root.querySelector("[data-benchmark-tip]");
+    if (!source || !current) return;
+    const tip = source.cloneNode(true);
+    bindNode(tip, this.renderVals());
+    current.replaceWith(tip);
+    if (this.state.tip) requestAnimationFrame(() => {
+      const box = tip.getBoundingClientRect();
+      tip.style.top = `${Math.max(10, Math.min(box.top, innerHeight - box.height - 10))}px`;
+    });
+  }
+
   render() {
     if (!this.root || !this.template) return;
+    const controls = [...this.root.querySelectorAll("select,button,a")];
+    const active = controls.indexOf(document.activeElement);
     const fragment = this.template.content.cloneNode(true);
     bindNode(fragment, this.renderVals());
     this.root.replaceChildren(fragment);
+    if (active >= 0) this.root.querySelectorAll("select,button,a")[active]?.focus({ preventScroll: true });
   }
 }
 
@@ -505,21 +533,21 @@ class Component extends DCLogic {
     return out;
   }
 }
+export const ProjectComponent = adaptProjectComponent(Component);
+export { bindNode };
 const root = document.querySelector("#benchmarks-app");
 const template = document.querySelector("#benchmarks-app-template");
-if (!(root instanceof HTMLElement) || !(template instanceof HTMLTemplateElement)) {
-  throw new Error("benchmark application shell is missing");
+if (root instanceof HTMLElement && template instanceof HTMLTemplateElement) {
+  const component = new ProjectComponent();
+  component.mount(root, template, {
+    loaderUrl: root.dataset.loaderUrl,
+    manifestUrl: root.dataset.manifestUrl,
+    defaultStat: "P50",
+  });
+  component.componentDidMount().catch((error) => {
+    const message = document.createElement("p");
+    message.className = "benchmark-runtime-error";
+    message.textContent = `Benchmark data could not be loaded: ${error.message || error}`;
+    root.replaceChildren(message);
+  });
 }
-const component = new Component();
-component.mount(root, template, {
-  loaderUrl: root.dataset.loaderUrl,
-  manifestUrl: root.dataset.manifestUrl,
-  defaultStat: "P50",
-});
-component.componentDidMount().catch((error) => {
-  root.replaceChildren();
-  const message = document.createElement("p");
-  message.className = "benchmark-runtime-error";
-  message.textContent = `Benchmark data could not be loaded: ${error.message || error}`;
-  root.append(message);
-});

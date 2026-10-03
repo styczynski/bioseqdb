@@ -23,8 +23,8 @@
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
 <div id="benchmarks-app"
-     data-loader-url="{{ site.assets_base_url }}js/bench-loader.js"
-     data-manifest-url="{{ site.assets_base_url }}benchmarks-manifest.json"></div>
+     data-loader-url="{{ site.assets_base_url }}js/project-benchmark-loader.mjs"
+     data-manifest-url="{{ site.assets_base_url }}project-benchmarks.json"></div>
 <template id="benchmarks-app-template">
 <div data-screen-label="BioseqDB benchmarks" class="bd-s0001">
 
@@ -54,7 +54,7 @@
 
       <div class="bd-s0018">
         <button data-bench-click="onToggleSources" class="bd-s0019">
-          <span class="bd-s0020" data-bench-style="transform:[[ srcCaret ]]"></span>CI artifacts
+          <span class="bd-s0020" data-bench-style="transform:[[ srcCaret ]]"></span>Published results
           <span class="bd-s0021">[[ sourceSummary ]]</span>
         </button>
 
@@ -66,7 +66,7 @@
                 <span class="bd-s0026">[[ s.kind ]]</span>
               </div>
 
-            <div class="bd-s0027">Discovered from the manifest — new reports appear here with no site change.</div>
+            <div class="bd-s0027">Benchmarking and performance evaluation.</div>
           </div>
 
       </div>
@@ -211,7 +211,7 @@
                 <span class="bd-s0077"><span class="bd-s0078">▲</span>faster / better than baseline</span>
                 <span class="bd-s0077"><span class="bd-s0079">▼</span>slower / worse than baseline</span>
                 <span class="bd-s0077"><span class="bd-s0080"></span>best algorithm for that test case &amp; parameters</span>
-                <span>hover any cell for the full distribution</span>
+                <span>hover or focus a cell for timings and the baseline comparison</span>
               </div>
             </div>
 
@@ -290,7 +290,7 @@
 
         <div data-bench-if="empty" class="bd-s0107">
           <div class="bd-s0108">No benchmark data reachable</div>
-          <p class="bd-s0109">The CI manifest returned nothing usable. It should list <span class="bd-s0110">bench_configuration.json</span> and <span class="bd-s0110">report_&lt;N&gt;.json</span> URLs — a plain JSON array of paths is enough.</p>
+          <p class="bd-s0109">The published result data could not be loaded. It should list <span class="bd-s0110">bench_configuration.json</span> and <span class="bd-s0110">report_&lt;N&gt;.json</span> URLs — a plain JSON array of paths is enough.</p>
         </div>
 
 
@@ -307,7 +307,7 @@
             <span class="bd-s0116">Bioseq<span class="bd-s0117">DB</span></span>
             <span class="bd-s0118">BENCH</span>
           </div>
-          <p class="bd-s0119">Every number on this page is read straight from the bench_framework artifacts published by CI — nothing is transcribed by hand.</p>
+          <p class="bd-s0119">Benchmarking and performance evaluation</p>
         </div>
         <div>
           <div class="bd-s0120">Documentation</div>
@@ -350,7 +350,7 @@
     </div>
   </footer>
 
-  <div class="bd-s0131" data-bench-style="left:[[ tipX ]]px;top:[[ tipY ]]px;opacity:[[ tipOpacity ]]">
+  <div data-benchmark-tip role="tooltip" class="bd-s0131" data-bench-style="left:[[ tipX ]]px;top:[[ tipY ]]px;opacity:[[ tipOpacity ]]">
 
       <div data-bench-if="hasTip">
         <div class="bd-s0132">[[ tipTitle ]]</div>

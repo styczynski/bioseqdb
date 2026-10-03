@@ -1,0 +1,19 @@
+/* Match the authored cyan, orange and mint palette throughout code and plans. */
+code[class*="language-"],pre[class*="language-"]{color:#cbd8e4;background:transparent;text-shadow:none;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;tab-size:4}
+pre[class*="language-"]{overflow:auto;max-width:100%;white-space:pre;word-break:normal;overflow-wrap:normal}
+pre[class*="language-"]>code{font-size:inherit;line-height:inherit;white-space:inherit}
+.token.comment,.token.prolog,.token.doctype,.token.cdata{color:#8094a6;font-style:normal}
+.token.keyword,.token.atrule,.token.selector{color:#65b9dd}
+.token.function,.token.function-name,.token.predicate{color:#f39762;font-weight:500}
+.token.class-name,.token.type,.token.namespace,.token.symbol{color:#8bd0b3}
+.token.builtin{color:#9bb3c7}
+.token.string,.token.char,.token.regex{color:#ddb67d}
+.token.macro,.token.directive,.token.property,.token.variable{color:#c5a8d6}
+.token.number,.token.boolean{color:#e2c478}
+.token.operator,.token.punctuation{color:#94aabf;background:transparent}
+.token.attr-name{color:#8db7c7}
+.language-pgsql-plan .token.plan-node{color:#8bd0b3;font-weight:600}
+.language-pgsql-plan .token.plan-property{color:#8fcbe0}
+.language-pgsql-plan .token.plan-tree{color:#5f7c90}
+.language-pgsql-plan .token.number{color:#dfba80}
+.code-entity-ref{color:inherit;text-decoration-color:rgba(70,184,222,.5);text-underline-offset:3px}

@@ -373,6 +373,12 @@ def prepare_benchmark_markup(source: str) -> tuple[str, StyleCatalog]:
         '{{ site.copyright_holder }} &mdash; an independent open-source project.</span>',
         1,
     )
+    markup = markup.replace('>CI artifacts', '>Published results')
+    markup = markup.replace('Discovered from the manifest — new reports appear here with no site change.', 'Benchmarking and performance evaluation.')
+    markup = markup.replace('Every number on this page is read straight from the bench_framework artifacts published by CI — nothing is transcribed by hand.', 'Benchmarking and performance evaluation')
+    markup = markup.replace('hover any cell for the full distribution', 'hover or focus a cell for timings and the baseline comparison')
+    markup = markup.replace('The CI manifest returned nothing usable.', 'The published result data could not be loaded.')
+    markup = markup.replace('<div style="position:fixed;z-index:200;pointer-events:none;width:352px;', '<div data-benchmark-tip role="tooltip" style="position:fixed;z-index:200;pointer-events:none;width:352px;')
     markup = asset_paths(markup)
 
     event_names = {
@@ -860,6 +866,10 @@ def base_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/docs-design.css">{{% endblock %}}
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/code-theme.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-benchmarks.css">
 </head>
 <body id="page-top" class="{{% block body_class %}}docs-design-page{{% endblock %}}">
 {{% block skip_link %}}<a class="skip-link" href="#doc-main">Skip to main content</a>{{% endblock %}}
@@ -869,6 +879,10 @@ def base_template(markup: str) -> str:
 {{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
 <script src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
 <script src="{{{{ site.prism_js_url }}}}"></script>
+<script src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
+<script src="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.js"></script>
+<script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/project-benchmarks.mjs"></script>
 <script type="module" src="{{{{ site.js_url }}}}"></script>
 {{% block design_script %}}<script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>{{% endblock %}}
 </body>
@@ -903,8 +917,8 @@ def benchmarks_template(markup: str) -> str:
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
 <div id="benchmarks-app"
-     data-loader-url="{{{{ site.assets_base_url }}}}js/bench-loader.js"
-     data-manifest-url="{{{{ site.assets_base_url }}}}benchmarks-manifest.json"></div>
+     data-loader-url="{{{{ site.assets_base_url }}}}js/project-benchmark-loader.mjs"
+     data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"></div>
 <template id="benchmarks-app-template">
 {markup}
 </template>
@@ -963,6 +977,8 @@ BENCHMARK_RUNTIME_PREFIX = r'''/**
  * sc-if/sc-for surface, binds events without inline handlers, and writes text
  * through DOM text nodes so report JSON never becomes executable markup.
  */
+
+import { adaptProjectComponent } from "./project-benchmark-component.mjs";
 
 const bindingPattern = /\[\[\s*([^\]]+?)\s*\]\]/g;
 const allowedStyleProperties = new Set([
@@ -1047,7 +1063,15 @@ function bindNode(node, scope) {
           .includes(attribute.name.slice("data-bench-".length))) {
       const eventName = attribute.name.slice("data-bench-".length);
       const handler = valueAt(scope, attribute.value);
-      if (typeof handler === "function") node.addEventListener(eventName, handler);
+      if (typeof handler === "function") {
+        node.addEventListener(eventName, handler);
+        if (eventName === "mouseenter") {
+          node.tabIndex = 0;
+          node.addEventListener("focus", handler);
+          node.addEventListener("keydown", (event) => { if (event.key === "Escape") scope.onTipOut?.(); });
+        }
+        if (eventName === "mouseleave") node.addEventListener("blur", handler);
+      }
       node.removeAttribute(attribute.name);
     } else if (attribute.name === "data-bench-style") {
       applyDynamicStyles(node, attribute.value, scope);
@@ -1068,7 +1092,8 @@ class DCLogic {
   setState(update) {
     const patch = typeof update === "function" ? update(this.state) : update;
     this.state = { ...this.state, ...patch };
-    this.render();
+    if (Object.keys(patch).length === 1 && Object.hasOwn(patch, "tip")) this.renderTip();
+    else this.render();
   }
 
   mount(root, template, props) {
@@ -1078,11 +1103,28 @@ class DCLogic {
     this.render();
   }
 
+  renderTip() {
+    if (!this.root || !this.template) return;
+    const source = this.template.content.querySelector("[data-benchmark-tip]");
+    const current = this.root.querySelector("[data-benchmark-tip]");
+    if (!source || !current) return;
+    const tip = source.cloneNode(true);
+    bindNode(tip, this.renderVals());
+    current.replaceWith(tip);
+    if (this.state.tip) requestAnimationFrame(() => {
+      const box = tip.getBoundingClientRect();
+      tip.style.top = `${Math.max(10, Math.min(box.top, innerHeight - box.height - 10))}px`;
+    });
+  }
+
   render() {
     if (!this.root || !this.template) return;
+    const controls = [...this.root.querySelectorAll("select,button,a")];
+    const active = controls.indexOf(document.activeElement);
     const fragment = this.template.content.cloneNode(true);
     bindNode(fragment, this.renderVals());
     this.root.replaceChildren(fragment);
+    if (active >= 0) this.root.querySelectorAll("select,button,a")[active]?.focus({ preventScroll: true });
   }
 }
 '''
@@ -1090,24 +1132,24 @@ class DCLogic {
 
 BENCHMARK_RUNTIME_SUFFIX = r'''
 
+export const ProjectComponent = adaptProjectComponent(Component);
+export { bindNode };
 const root = document.querySelector("#benchmarks-app");
 const template = document.querySelector("#benchmarks-app-template");
-if (!(root instanceof HTMLElement) || !(template instanceof HTMLTemplateElement)) {
-  throw new Error("benchmark application shell is missing");
+if (root instanceof HTMLElement && template instanceof HTMLTemplateElement) {
+  const component = new ProjectComponent();
+  component.mount(root, template, {
+    loaderUrl: root.dataset.loaderUrl,
+    manifestUrl: root.dataset.manifestUrl,
+    defaultStat: "P50",
+  });
+  component.componentDidMount().catch((error) => {
+    const message = document.createElement("p");
+    message.className = "benchmark-runtime-error";
+    message.textContent = `Benchmark data could not be loaded: ${error.message || error}`;
+    root.replaceChildren(message);
+  });
 }
-const component = new Component();
-component.mount(root, template, {
-  loaderUrl: root.dataset.loaderUrl,
-  manifestUrl: root.dataset.manifestUrl,
-  defaultStat: "P50",
-});
-component.componentDidMount().catch((error) => {
-  root.replaceChildren();
-  const message = document.createElement("p");
-  message.className = "benchmark-runtime-error";
-  message.textContent = `Benchmark data could not be loaded: ${error.message || error}`;
-  root.append(message);
-});
 '''
 
 
@@ -1138,6 +1180,19 @@ code[class*="language-"],pre[class*="language-"]{color:#cbd8e4;background:transp
 
 BENCHMARK_RUNTIME_CSS = r'''
 .benchmarks-design-page{font-size:16px;line-height:normal}
+.benchmarks-design-page [data-benchmark-tip]{max-height:calc(100vh - 20px);overflow:auto;overflow-wrap:anywhere}
+.benchmarks-design-page [tabindex="0"]:focus-visible{outline:2px solid #46b8de;outline-offset:-2px}
+.project-benchmark{margin:20px 0;min-width:0}
+.project-benchmark table{margin:0;width:max-content;min-width:100%}
+.project-benchmark .bd-s0061,.project-benchmark .bd-s0067{min-width:180px;max-width:230px;white-space:normal}
+.project-benchmark .bd-s0062,.project-benchmark .bd-s0072{min-width:145px}
+.project-benchmark .project-benchmark-b{margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.09)}
+.project-benchmark .bd-s0059{max-width:100%;overscroll-behavior-x:contain}
+.benchmarks-design-page .bd-s0061,.benchmarks-design-page .bd-s0067{width:220px;min-width:180px;max-width:250px;white-space:normal}
+.benchmarks-design-page .bd-s0138{min-width:0;overflow-wrap:anywhere}
+@media(max-width:640px){.benchmarks-design-page .bd-s0061,.benchmarks-design-page .bd-s0067{position:static;min-width:150px;max-width:180px}.benchmarks-design-page .bd-s0038{padding:24px 16px 60px}}
+
+
 .benchmarks-design-page .benchmark-skip-link{position:fixed;left:12px;top:-80px;z-index:260;padding:10px 14px;border-radius:8px;background:#f26522;color:#071320;font-family:'IBM Plex Mono';transition:top .15s}
 .benchmarks-design-page .benchmark-skip-link:focus{top:10px}
 .benchmarks-design-page .benchmark-runtime-error{max-width:620px;margin:40px auto;padding:22px;border:1px solid rgba(242,101,34,.3);border-radius:13px;background:rgba(242,101,34,.07);color:#ffd0b4;font-family:'IBM Plex Mono'}
@@ -1246,6 +1301,19 @@ def write_generated() -> None:
         benchmark_runtime(benchmark_source).rstrip() + "\n",
         encoding="utf-8")
 
+    # Inline chapter excerpts use the very same table and tooltip DOM/styles.
+    table_start = benchmarks.index('<div class="bd-s0059">')
+    table_begin, table_end = element_span(benchmarks, table_start)
+    tip_start = benchmarks.index('<div data-benchmark-tip')
+    tip_begin, tip_end = element_span(benchmarks, tip_start)
+    excerpt = benchmarks[table_begin:table_end]
+    cell_start = excerpt.index('<div class="bd-s0073"')
+    cell_end = excerpt.index('\n                            </td>', cell_start)
+    second = excerpt[cell_start:cell_end].replace('cell.text', 'cell.secondText').replace('cell.valueColor', 'cell.secondColor').replace('cell.arrow', 'cell.secondArrow').replace('cell.ratioText', 'cell.secondRatioText').replace('cell.chipColor', 'cell.secondChipColor')
+    excerpt = excerpt[:cell_end] + '<div class="project-benchmark-b">' + second + '</div>' + excerpt[cell_end:]
+    (WEBSITE / "static" / "project-benchmark-template.html").write_text(excerpt + benchmarks[tip_begin:tip_end] + "\n", encoding="utf-8")
+    (WEBSITE / "static" / "css" / "project-benchmarks.css").write_text(benchmark_catalog.css() + "\n" + BENCHMARK_RUNTIME_CSS + "\n", encoding="utf-8")
+
     # Literal declaration equality: every unique authored HTML style value and
     # every hover value is preserved byte-for-byte in its generated stylesheet.
     for name, source, label, catalog in (
@@ -1283,6 +1351,8 @@ def write_generated() -> None:
 
 
 GENERATED_PATHS = (
+    "static/project-benchmark-template.html",
+    "static/css/project-benchmarks.css",
     "templates/base.html.j2",
     "templates/benchmarks.html.j2",
     "templates/landing.html.j2",

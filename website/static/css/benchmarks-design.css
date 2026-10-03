@@ -164,6 +164,19 @@
 .benchmarks-design-page .bd-h006:hover{color:#00252e}
 
 .benchmarks-design-page{font-size:16px;line-height:normal}
+.benchmarks-design-page [data-benchmark-tip]{max-height:calc(100vh - 20px);overflow:auto;overflow-wrap:anywhere}
+.benchmarks-design-page [tabindex="0"]:focus-visible{outline:2px solid #46b8de;outline-offset:-2px}
+.project-benchmark{margin:20px 0;min-width:0}
+.project-benchmark table{margin:0;width:max-content;min-width:100%}
+.project-benchmark .bd-s0061,.project-benchmark .bd-s0067{min-width:180px;max-width:230px;white-space:normal}
+.project-benchmark .bd-s0062,.project-benchmark .bd-s0072{min-width:145px}
+.project-benchmark .project-benchmark-b{margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.09)}
+.project-benchmark .bd-s0059{max-width:100%;overscroll-behavior-x:contain}
+.benchmarks-design-page .bd-s0061,.benchmarks-design-page .bd-s0067{width:220px;min-width:180px;max-width:250px;white-space:normal}
+.benchmarks-design-page .bd-s0138{min-width:0;overflow-wrap:anywhere}
+@media(max-width:640px){.benchmarks-design-page .bd-s0061,.benchmarks-design-page .bd-s0067{position:static;min-width:150px;max-width:180px}.benchmarks-design-page .bd-s0038{padding:24px 16px 60px}}
+
+
 .benchmarks-design-page .benchmark-skip-link{position:fixed;left:12px;top:-80px;z-index:260;padding:10px 14px;border-radius:8px;background:#f26522;color:#071320;font-family:'IBM Plex Mono';transition:top .15s}
 .benchmarks-design-page .benchmark-skip-link:focus{top:10px}
 .benchmarks-design-page .benchmark-runtime-error{max-width:620px;margin:40px auto;padding:22px;border:1px solid rgba(242,101,34,.3);border-radius:13px;background:rgba(242,101,34,.07);color:#ffd0b4;font-family:'IBM Plex Mono'}
