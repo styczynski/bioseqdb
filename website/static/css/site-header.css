@@ -64,3 +64,4 @@
 .site-header .doc-search-title{display:block;color:#eef4f9;font-family:'IBM Plex Mono';font-size:13.5px}
 .site-header .doc-search-highlight{color:#f4894f;font-weight:600;background:rgba(242,101,34,.14);border-radius:3px}
 .site-header .doc-search-summary{display:block;margin-top:2px;color:#8ea3b5;font-size:12px;line-height:1.45}
+.site-header .doc-search-title,.site-header .doc-search-summary{overflow-wrap:anywhere}

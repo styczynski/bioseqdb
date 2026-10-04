@@ -246,7 +246,7 @@ void verify_website_pipeline() {
         && algorithm_html.contains("data-math=\"inline\">x_i"),
         "algorithm listing keeps indentation, line numbers, keywords, math and comments");
     std::vector<content_node> linked_sql = parse_markdown_content(
-        "```sql\n-- λ bioseq.score(ignore)\nSELECT bioseq.score(t), bioseq.score(t), mmsearch(t,q), 'bioseq.score(t)', $$mmsearch(t,q)$$;\n```\n\n`bioseq.seq`\n").children;
+        "```sql\n-- λ bioseq.score(ignore)\nSELECT bioseq.score(t), bioseq.score(t), mmsearch(t,q), 'bioseq.score(t)', $$mmsearch(t,q)$$, x::seq;\n```\n\n`bioseq.seq`\n").children;
     const std::map<std::string, std::string, std::less<>> names{
         {"sql:function:bioseq.score(anyelement)", "bioseq.score"},
         {"sql:overload_group:public.mmsearch", "public.mmsearch"},
@@ -257,7 +257,7 @@ void verify_website_pipeline() {
         {"sql:type:bioseq.seq", "/seq/"}};
     decorate_code_entity_ranges(linked_sql, routes, names, "/entities.json", "self-test");
     const auto ranges = boost::json::parse(linked_sql.front().attributes.at("entity_ranges")).as_array();
-    expect(ranges.size() == 3 && ranges[0].as_object().at("start").as_int64() == 33
+    expect(ranges.size() == 4 && ranges[0].as_object().at("start").as_int64() == 33
         && render_content_html(linked_sql).contains("sql:type:bioseq.seq"),
         "automatic SQL links repeat names, resolve bare functions, skip comments/literals, and count UTF-16 offsets");
     // MD4C.
@@ -3665,7 +3665,11 @@ void decorate_code_entity_ranges(
                     if (found == names.end()) continue;
                     const bool qualified = spelling.find('.') != std::string::npos;
                     const bool invocation = next < text.size() && text[next] == '(';
-                    if (!qualified && !inline_code && !invocation) continue;
+                    auto previous = begin;
+                    while (previous > 0 && (text[previous - 1] == ' ' || text[previous - 1] == '\n')) --previous;
+                    const bool cast_type = found->second.starts_with("sql:type:")
+                        && previous >= 2 && text.substr(previous - 2, 2) == "::";
+                    if (!qualified && !inline_code && !invocation && !cast_type) continue;
                     const auto route = route_by_id.find(found->second);
                     if (route == route_by_id.end()) continue;
                     if (json.size() > 1) json += ',';

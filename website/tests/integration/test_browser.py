@@ -1067,7 +1067,11 @@ def _exercise_code_entities(page, expected_ids: set[str]) -> None:
         refs = page.locator("code a.entity-ref").filter(has_text=spelling)
         _check(refs.count() > 0, f"automatic SQL references missing {spelling}")
         refs.first.focus()
-        page.wait_for_function("document.getElementById('entity-pop').getAttribute('aria-hidden') === 'false'")
+        page.wait_for_function("""spelling => {
+            const pop = document.getElementById('entity-pop');
+            return pop.getAttribute('aria-hidden') === 'false' &&
+                pop.querySelector('.entity-pop-head pre')?.textContent.includes(spelling);
+        }""", arg=spelling)
         _check(bool(page.locator("#entity-pop .entity-pop-body").inner_text().strip()),
                f"empty SQL tooltip for {spelling}")
         page.keyboard.press("Escape")
