@@ -42,7 +42,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
 
 At the psql prompt:
 
-```sql runnable id=readme_docker_demo timeout=60s
+```sql runnable id=readme_docker_demo timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -56,6 +56,9 @@ FROM generate_series(1, 32) AS i;
 SELECT id, bioseq.cigar(seq), bioseq.score(seq) FROM demo WHERE public.mmsearch(seq, seq);
 -- bioseq:teardown
 DROP TABLE demo;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ## Packages and Docker images
@@ -146,7 +149,7 @@ The base unit width is 64 bits (the value is not maximum sequence size like in c
 
 `USING bioseq` makes sure that table is stored in columnar format using BioseqDB.
 
-```sql runnable id=readme_step_01 timeout=60s
+```sql runnable id=readme_step_01 timeout=60s entity="sql:type:bioseq.seq"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -161,6 +164,9 @@ CREATE TABLE samples (
 ) USING bioseq;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 2. Insert patient data
@@ -200,6 +206,9 @@ SELECT 3, DATE '2026-09-03', 'Cara', 29,
   s::bioseq.seq('dna4', 64) FROM dna;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 3. Read metadata (non-sequence) columns
@@ -239,6 +248,9 @@ SELECT id, upload_date, patient_name, age
 FROM samples;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 4. Reading sequences
@@ -288,6 +300,9 @@ WHERE age BETWEEN 30 AND 60
 ORDER BY age DESC, id;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 5. Read plan for metadata query
@@ -343,7 +358,7 @@ Requesting `cigar` enables additional pipeline stage for base alignment, because
 
 If you encounter `"transient query eexecution stats disagree with its generated backend"` error here or in the next step, you should have at least 2GiB of free memory available
 
-```sql runnable id=readme_step_06 timeout=60s
+```sql runnable id=readme_step_06 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -386,6 +401,9 @@ WHERE age >= 30
     (SELECT seq FROM samples WHERE id = 2)::bioseq.seq('dna4', 64));
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 7. Trigger index rebuild
@@ -428,6 +446,9 @@ SELECT bioseq.update_index(
   'samples', 'minimizers_per_fragment');
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 8. Repeated search
@@ -436,7 +457,7 @@ The same three matches remain.
 
 Currently grouped-MPF which was measured  in benchmarks for case of query/target table join doesn't work for single table queries correctly and causes minimizers to be always recomputed.
 
-```sql runnable id=readme_step_08 timeout=60s
+```sql runnable id=readme_step_08 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -473,6 +494,9 @@ WHERE age >= 30
     (SELECT seq FROM samples WHERE id = 2)::bioseq.seq('dna4', 64));
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 9. Change algorithms for one call
@@ -485,7 +509,7 @@ consecutive 15-mers. Each of the parameters correspond to the BioseqDB current d
 
 Unfortunately the global GUC settings use strings for enums, while the  `aligner_options` type uses numeric codes (due to my laziness).
 
-```sql runnable id=readme_step_09 timeout=60s
+```sql runnable id=readme_step_09 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -530,6 +554,9 @@ WHERE age >= 30 AND mmsearch(seq,
     base_alignment_algorithm => 1));
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 10. Explaining the search (lots of fields!)
@@ -710,7 +737,7 @@ milliseconds. They include work outside the alignment stages.
 
 Each  of the three rows produces a hit as naturally expected sequence should align to itself
 
-```sql runnable id=readme_step_11 timeout=60s
+```sql runnable id=readme_step_11 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -750,6 +777,9 @@ WHERE mmsearch(seq, seq)
 ORDER BY id;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 12. Compare rows using a self-join
@@ -762,7 +792,7 @@ For target 1 and query 2, the same score occurs at both [256,768) and
 
 `index_read_requirement => 2` is used because otherwise bug in BioseqDB prevents index to be used, which slows down the query.
 
-```sql runnable id=readme_step_12 timeout=60s
+```sql runnable id=readme_step_12 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -805,6 +835,9 @@ ORDER BY target_id, query_id, target_start,
   query_start;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 13. Load a FASTA file into another table
@@ -871,6 +904,9 @@ SELECT bioseq.load('imported', 'readme_samples.fasta');
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 14. Slices
@@ -879,7 +915,7 @@ The first query returns three headers, lengths and 16bp slices and
 the next saves a 256-base slice of the loaded Ben record as
 `short_probe`
 
-```sql runnable id=readme_step_14 timeout=60s
+```sql runnable id=readme_step_14 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -930,6 +966,9 @@ ORDER BY header, target_start;
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 15. Every possible alignment field
@@ -950,7 +989,7 @@ This join requires the compatible persisted target index built in step 7 and as 
 before currently due to bugs in implementation of grouped-MPF index this JOIN correctly reads index, while default read policy
 ignores it. Moreover as mentioned alignment without join will also ignore index.
 
-```sql runnable id=readme_step_15 timeout=60s
+```sql runnable id=readme_step_15 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -1013,6 +1052,9 @@ ORDER BY score DESC, target_id, q.header,
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 16. Aggregate metadata
@@ -1064,6 +1106,9 @@ WHERE age >= 30
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 17. Explain now the query
@@ -1157,6 +1202,9 @@ SELECT bioseq.update_index(
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 19. Index statistics
@@ -1223,6 +1271,9 @@ ORDER BY index_name;
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 20. Try scalar minimizers, scalar chaining and KSW2
@@ -1233,7 +1284,7 @@ Adding read requirement 1 forbids persisted target-index reads for this call.
 That matters because the stored index was  built with a different minimizer
 algorithm and otherwise BioseqDB can produce an error
 
-```sql runnable id=readme_step_20 timeout=60s
+```sql runnable id=readme_step_20 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -1292,6 +1343,9 @@ ORDER BY id;
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ### 21. Combine sequence operations and an edit filter
@@ -1302,7 +1356,7 @@ reverses or reverse-complements a prefix
 
 The predicate `bioseq.edit(seq) < 5` enables experimental separate stage in aligner pipeline to estimate edit distance before alignment and filter out candidates
 
-```sql runnable id=readme_step_21 timeout=60s
+```sql runnable id=readme_step_21 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -1368,6 +1422,9 @@ ORDER BY id;
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ## Automatic index updates

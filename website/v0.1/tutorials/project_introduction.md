@@ -9,7 +9,7 @@ draft: false
 
 The project is structured in the way that each stage of pipeline prosecessing is discussed in chronological order, while the Postgres storage details are addressed later. At the end of the project I provide samples of usage to demonstrate all the features and unprocessed benchmark results for different scenarios and machines.
 
-#### Primary goal
+## Primary goal
 
 The primary goal of BioseqDB is allow labs to amabdon storing FASTA/FASTQ files on large disks without versioning and allow to perform alignment jobs directly in the database:
 
@@ -31,7 +31,7 @@ RESET max_parallel_workers_per_gather;
 
 Simplest BioseqDB SQL query
 
-#### Secondary goals
+## Secondary goals
 
 The main goals of BioseqDB were:
 
@@ -51,7 +51,7 @@ The main goals of BioseqDB were:
 
 - Directly integrate with SQL api in a way that’s intuitive
 
-#### Work context
+## Work context
 
 This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research. I proposed the database idea and prepared the initial design, when I was still working for my funded startup. I directed the 2022 prototype, whose implementation was written by colleagues and plugged BWA-MEM call directly into Postgres via C bindings.<sup><a href="#project-note-1">1</a></sup> The early prototype was to simplistic as technically I still didn’t understand how aligners work internally.
 

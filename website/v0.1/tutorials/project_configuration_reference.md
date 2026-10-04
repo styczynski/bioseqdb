@@ -1454,13 +1454,13 @@ This is special field that has no GUC equivalent, that is only available via `al
 <tr>
 <td style="text-align: left;"></td>
 <td style="text-align: left;"></td>
-<td style="text-align: left;">: <code>require_absent</code></td>
+<td style="text-align: left;">1: <code>require_absent</code></td>
 <td style="text-align: left;">Never read index even if it exists, always recompute seeds from scratch. Additionally setting this option will produce errors if deffered index update is ON. Practically used in testing scenarios to see what happens if index does not exist.</td>
 </tr>
 <tr>
 <td style="text-align: left;"></td>
 <td style="text-align: left;"></td>
-<td style="text-align: left;">: <code>require_compatible_persisted</code></td>
+<td style="text-align: left;">2: <code>require_compatible_persisted</code></td>
 <td style="text-align: left;">Hard requirement that index must allways exist. If the index does not exist or is incompatible (different k/w parameters etc.), the query will produce error before execution.</td>
 </tr>
 </tbody>

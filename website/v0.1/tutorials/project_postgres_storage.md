@@ -42,11 +42,11 @@ It’s worth noting that I mention both Citus \[[95](../bibliography/#ref-citus
 
 ClickBench is a benchmark for analytical DBMS and it also reported results for both Hydra and Citus. Figure [storage clickbench motivation](../project_postgres_storage/#fig-storage-clickbench-motivation) uses historical benchmark submissions on AWS machines \[[99](../bibliography/#ref-clickbench_2023_columnar)\]. The benchmark consisted of around 43 queries over a dataset of around 100 million rows (3 runs with minum of second two taken as into the sum).
 
+<a id="fig-storage-clickbench-motivation"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-01.svg)
 
 *Historical ClickBench, calculated from the repository snapshot of 20 September 2023. Each submission uses `c6a.4xlarge` machine with 16 vCPUs, 32 GiB RAM, and 500 GB of GP2 storage. PostgreSQL and Citus results are dated 1 July 2022, and Hydra results 19 September 2023. The times use the sum of shorter of runs two and three for every query. Note that these are "best-fit" results so the configuration was different. It’s good however for quick comparison of performance.*
-
-<a id="fig-storage-clickbench-motivation"></a>
 
 Both columnar submissions store about 19 GB, compared with PostgreSQL’s 77.8 GB. This was due to support of compression on stored columns. Hydra \[[97](../bibliography/#ref-hydra_columnar_source)\] had much better performance due to introduction of vectorized SQL execution for aggregates and column cache that wasn’t present in Citus \[[95](../bibliography/#ref-citus_distributed_2021)\]. These results do not translate directly to BioseqDB as the benchmarks tests some arbitrarily-built queries, however it motivated me to put big effort into modernizing Hydra codebase and incorporating it into BioseqDB as mentioned in previous section [pg storage role](../project_postgres_storage/#sec-pg-storage-role).
 
@@ -64,11 +64,11 @@ Stripe and chunk-group sizes are options per table, where larger ones allows mor
 
 Figure [storage heap to stripe](../project_postgres_storage/#fig-storage-heap-to-stripe) shows this model for the six rows. By default Postgres row-based storage (heap tuple) stores `id`, `sample_id`, and the sequence locator together. The stripe is columnar representation of these rows. Each column occupies its own sequence of chunks. A chunk group is only an abstract concept for chunks that are related to the same rows. The last group of a stripe can be shorter if total row count isn’t a multiple of chunk group size.
 
+<a id="fig-storage-heap-to-stripe"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-02.svg)
 
 *The same six rows as heap tuples and as one stripe. Matching colours mark the same column. The blue callout is one column chunk: presence bits, present values, min/max, and slot count. The orange callout is the chunk group: a deletion mask and `deleted_rows`*
-
-<a id="fig-storage-heap-to-stripe"></a>
 
 When I want to store row, each time the writer append this row to the current chunk group (in memory). After sufficient number of row is reached (max chunk group size) the code serializes each column chunk to a stripe buffer that still is in memory If the number of rows per stripe is reached (max stripe size) then stripe is "flushed", which means writing the stripe. Commonly the maximums of stripe row counts will be hit, but there’s additional check if the current chunk group for specific column buffer exceeds $1GB$ limit, then it forces flush of the entire stripe. This means that if we store large BLOB along very small column, the BLOB will force the stripe to end i.e stripes always need to account for the same number of rows in each column (this also implies that the decision to store sequences via locators increases efficiency of that storage model as more tuples with non-sequence fields can be packed into single stripe). Additionally there’s hard limit on maximum size of $256MiB$ for a single value in row.
 
@@ -79,11 +79,11 @@ When I want to store row, each time the writer append this row to the current ch
 
 The figure [storage write path](../project_postgres_storage/#fig-storage-write-path) shows 3 main stages: we save tuples first to accumulate enough of them, then serialize them to a buffer and when stripe’s buffer eaches $1GB$ or the strip max row count, only then it’s flushed. Algorithm [storage flush stripe](../project_postgres_storage/#alg-storage-flush-stripe) presents pseudocode for that process as well.
 
+<a id="fig-storage-write-path"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-03.svg)
 
 *How we pack chunks groups into stripe buffers, then to flush them if necessary.*
-
-<a id="fig-storage-write-path"></a>
 
 <a id="alg-storage-flush-stripe"></a>
 
@@ -93,150 +93,140 @@ The figure [storage write path](../project_postgres_storage/#fig-storage-write-
 
 3.  $s\gets\mathrm{NULL}$ (open stripe, or none)
 
-4.  
+4.  Procedure `AllocateNewStripe`()
 
-5.  Procedure AllocateNewStripe
+5.  $s.n\gets 0$ (rows already in this stripe)
 
-6.  $s.n\gets 0$ (rows already in this stripe)
+6.  $s.P\gets 0^{|C|\times G}$ (presence bits of the current group)
 
-7.  $s.P\gets 0^{|C|\times G}$ (presence bits of the current group)
+7.  $s.B\gets\varepsilon^{|C|}$ (serialized present values of the current group)
 
-8.  $s.B\gets\varepsilon^{|C|}$ (serialized present values of the current group)
+8.  $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$ (skip min, max, and slot count of every column chunk)
 
-9.  $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$ (skip min, max, and slot count of every column chunk)
+9.  $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$ (packed streams of every serialized group)
 
-10. $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$ (packed streams of every serialized group)
+10. $s.N\gets 0^{G_{\max}}$ (row count of each serialized group)
 
-11. $s.N\gets 0^{G_{\max}}$ (row count of each serialized group)
+11. return $s$
 
-12. return $s$
+12. End Procedure
 
-13. End Procedure
+13. Procedure `WriteRow`($v$)
 
-14. 
+14. If $\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$
 
-15. Procedure WriteRow$v$
+15. `FlushStripe`($s$)
 
-16. If $\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$
+16. End If
 
-17. ($s$)
+17. If $\neg\mathrm{IsOpen}(s)$
 
-18. End If
+18. $s\gets\texttt{AllocateNewStripe}()$
 
-19. If $\neg\mathrm{IsOpen}(s)$
+19. End If
 
-20. $s\gets\operatorname{AllocateNewStripe}()$
+20. $g\gets\lfloor s.n/G\rfloor$,$r\gets s.n\bmod G$
 
-21. End If
+21. ForAll $c\in C$
 
-22. $g\gets\lfloor s.n/G\rfloor$,$r\gets s.n\bmod G$
+22. If $\mathrm{IsNull}(v_c)$
 
-23. ForAll $c\in C$
+23. $s.P_{c,r}\gets 0$
 
-24. If $\mathrm{IsNull}(v_c)$
+24. Else
 
-25. $s.P_{c,r}\gets 0$
+25. If $\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$
 
-26. Else
+26. **error**
 
-27. If $\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$
+27. End If
 
-28. **error**
+28. $s.P_{c,r}\gets 1$
 
-29. End If
+29. $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
 
-30. $s.P_{c,r}\gets 1$
+30. If $\mathrm{Compare}_c\neq\mathrm{NULL}$
 
-31. $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
+31. $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
 
-32. If $\mathrm{Compare}_c\neq\mathrm{NULL}$
+32. $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$ ($\bot$ is the identity)
 
-33. $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
+33. End If
 
-34. $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$ ($\bot$ is the identity)
+34. End If
 
-35. End If
+35. $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
 
-36. End If
+36. End For
 
-37. $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
+37. If $r=G-1$
 
-38. End For
+38. `SerializeGroup`($s$, $g$, $G$)
 
-39. If $r=G-1$
+39. End If
 
-40. ($s$, $g$, $G$)
+40. $s.n\gets s.n+1$
 
-41. End If
+41. If $s.n\ge S$
 
-42. $s.n\gets s.n+1$
+42. `FlushStripe`($s$)
 
-43. If $s.n\ge S$
+43. End If
 
-44. ($s$)
+44. End Procedure
 
-45. End If
+45. Procedure `SerializeGroup`($s$, $g$, $k$)
 
-46. End Procedure
+46. $s.N_g\gets k$
 
-47. 
+47. ForAll $c\in C$
 
-48. Procedure SerializeGroup$s$, $g$, $k$
+48. $s.\mathrm{chunk}_{c,g}.P\gets
+            \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
 
-49. $s.N_g\gets k$
+49. End For
 
 50. ForAll $c\in C$
 
-51. $s.\mathrm{chunk}_{c,g}.P\gets
-            \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
+51. $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$ (identity if incompressible)
 
-52. End For
+52. $s.B_c\gets\varepsilon$
 
-53. ForAll $c\in C$
+53. End For
 
-54. $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$ (identity if incompressible)
+54. End Procedure
 
-55. $s.B_c\gets\varepsilon$
+55. Procedure `FlushStripe`($s$)
 
-56. End For
+56. $k\gets s.n\bmod G$
 
-57. End Procedure
+57. If $k>0$
 
-58. 
+58. `SerializeGroup`($s$, $\lfloor s.n/G\rfloor$, $k$)
 
-59. Procedure FlushStripe$s$
+59. End If
 
-60. $k\gets s.n\bmod G$
+60. $m\gets\lceil s.n/G\rceil$
 
-61. If $k>0$
+61. ForAll $c\in C$
 
-62. ($s$, $\lfloor s.n/G\rfloor$, $k$)
+62. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
 
-63. End If
+63. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
 
-64. $m\gets\lceil s.n/G\rceil$
+64. End For
 
-65. ForAll $c\in C$
+65. `WriteCatalog`($s$)
 
-66. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
+66. $s\gets\mathrm{NULL}$
 
-67. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
+67. End Procedure
 
-68. End For
+68. Procedure `WriteCatalog`($s$)
 
-69. ($s$)
+69. $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$ (Saves row count for group, aggegate stats and deletion mask)
 
-70. $s\gets\mathrm{NULL}$
-
-71. End Procedure
-
-72. 
-
-73. Procedure WriteCatalog$s$
-
-74. $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$ (Saves row count for group, aggegate stats and deletion mask)
-
-75. End Procedure
+70. End Procedure
 
 In’s important that closing the writer also flushes any leftover stripe, so all in-memory buffers are saved to disk when transaction is committed.
 
@@ -260,11 +250,11 @@ In BioseqDB it’s unnecessary to read all chunks all the time. The two optimisa
 
 Figure [column store layout](../project_postgres_storage/#fig-column-store-layout) shows both optimisations. Group that satisfies both of these conditions still needs to apply filters to each row individually, but I save time but not touching groups that are not revelant to the search. The figure assumes query `SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600` is executed.
 
+<a id="fig-column-store-layout"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-04.svg)
 
 *Column selection and group pruning for a simple query `SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600`. Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators are unread, because they were not specified in the `SELECT` clause. In the drawing I only illustrate the idea of reading rows, not their actual layout in storage.*
-
-<a id="fig-column-store-layout"></a>
 
 > [!NOTE]
 > **Prunning for sequence columns**
@@ -275,11 +265,11 @@ Figure [column store layout](../project_postgres_storage/#fig-column-store-layo
 
 Figure [storage column streams](../project_postgres_storage/#fig-storage-column-streams) shows in detail how presence bitmap is computed. If the NULLs are very frequent, I will save the space by not storing them.
 
+<a id="fig-storage-column-streams"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-05.svg)
 
 *Presence bitmap is useful to enable better NULL compression*
-
-<a id="fig-storage-column-streams"></a>
 
 The Hydra code that BioseqDB columnar TAM was based on supported PGLZ, LZ4, or Zstandard, depending on the build and table options. In BioseqDB all compression is disabled by default as I would like to benchmark in the future best (and more modern) compression algorithms decicated for example to sequence storage. Abadi et al. show that the choice of compression method depends on both the data and the query workload \[[101](../bibliography/#ref-abadi2006compression)\], so I leave it as future extension.
 
@@ -353,11 +343,11 @@ When writing stripe data I need to take care about page boundaries. Let $\mathrm
   \qquad
   \operatorname{position}(x)=H+(x\bmod P).$$ BioseqDB will write multiple pages for each stripe, so I need to take additional care about buffers going through multiple page boundaries as seen on figure [storage pages](../project_postgres_storage/#fig-storage-pages).
 
+<a id="fig-storage-pages"></a>
+
 ![02 columns and pages diagram](/static/figures/project/chapters-11-postgres-storage-02-columns-and-pages-tikz-06.svg)
 
 *I use logical offsets $\operatorname{block}(x)$ and $\operatorname{position}(x)$ to hide page boundaries. Diagram shows that we want to write some fragment of in-memory buffer $[8,15)$ to the disk, but it needs to be split across multiple pages. In reality the dimensions are larger than just 20 bytes, but it illustrates the idea.*
-
-<a id="fig-storage-pages"></a>
 
 The original idea comes from Citus page writer that it’s avaialble in their public repository[Citus columnar page mapping · `columnar_storage.c 118`](https://github.com/citusdata/citus/blob/v14.0.0/src/backend/columnar/columnar_storage.c#L118)
 
@@ -444,11 +434,11 @@ Fragment abstraction is a separate layer above columnar storage. Shards for frag
 >
 > <a id="warn-storage-considerations"></a> Fragments always storing 1024 storage units which works well for long sequences, however if the sequence is short then only small number of storage units will be occupied, while the rest is filled with zeros. Compression (default is pglz, but zstd is avialable as well and others for manual building) will take care of this problem and shrink the fragment. However it still has measureable effects on processing in the pipeline as BioseqDB will waste space in memory for very short sequences. This along with locator format optimisation is a task for future work. If we assume occupancy rate of 50% then minimal sequence size for 32-bit storageshould be $1024 * \frac{32}{2} * 0.5 = 8192$ symbols and for smallest possible storage: $1024 * \frac{8}{2} * 0.5 = 2048$ symbols.
 
+<a id="fig-sequence-fragment-flow"></a>
+
 ![03 fragments and shards diagram](/static/figures/project/chapters-11-postgres-storage-03-fragments-and-shards-tikz-01.svg)
 
 *A $40\,000$-symbol DNA4 value with $32$-bit units uses $1024 \times 32/2 = 16\,384$ symbols per fragment, so two full fragments and one partial fragment. Request $[30\,000,34\,000)$ reads fragments 1 and 2. Each stored row is $4112$ bytes ($4096$ payload plus the $16$-byte sequence header). The TAM concatenates those in column buffers via writer code [storage flush stripe](../project_postgres_storage/#alg-storage-flush-stripe) and during flush, writes them on $8192$-byte pages, skipping the $24$-byte `PageHeaderData` ($8168$ usable bytes). One fragment fits in a page, but two concatenated fragments do not ($8224>8168$), so fragment 1 continues after the next header. The compression will shrink the last fragment as it’s mostly zeroed, but the illustration assumes no compression happened.*
-
-<a id="fig-sequence-fragment-flow"></a>
 
 ### Two levels of sharding
 
@@ -489,11 +479,11 @@ The current layout has 35 buckets. The first covers lengths $[0, 2^8)$ and each 
 >
 > It’s very important to note that current during stream access policy [sequence scan lifecycle](../project_sequence_abstractions/#fig-sequence-scan-lifecycle) the sequence size is not known until its end is reached, thus my code in BioseqDB decides to store the sequence in the largest bucket (34) even when the sequence is short. This code path is utilised by IO submodule that loads sequences from FASTA file. This means that each sequence loaded from FASTA currently will be stored in the largest bucket. I plan to resolve this problem in the future - solution could be adding ability to IO submodule to search for first sequence end and assume all sequences are similar sizes. Alternatively I could write one sequence and then adjust the bucket after size is known. Both of these solutions however add additional overhead and complexity to the FASTA loader module. Additionally length-based sharding can allow better utilisation of fragments memory (so fragments are smaller even without compression [storage considerations](../project_postgres_storage/#warn-storage-considerations) and they require fewer bytes when allocated in RAM)
 
+<a id="fig-storage-length-buckets"></a>
+
 ![03 fragments and shards diagram](/static/figures/project/chapters-11-postgres-storage-03-fragments-and-shards-tikz-02.svg)
 
 *Length-based buckets are choosen based on the sequence length log 2, however sequences coming from FASTA/FASTQ have no known length and are streamed, thus internal code always store them in the largest bucket (34). There are multiple tables (called shards) per one bucket depending if we reach $1TB$ limit.*
-
-<a id="fig-storage-length-buckets"></a>
 
 ## MVCC and deletion for sequence fragments
 
@@ -548,11 +538,11 @@ The specific epoch’s `state` follows very simple linear transitions:
 
 Note that the catalog contains far more information that is neccessary. I decided to save CRC hashes to make sure the fragment is not malformed during operations or shard coordinates shared by the locator itself. As each row version requires separate entry this limits the maximum number of sequences stored in the BioseqDB, however entries are cheap so I didn’t incorporate it into estimate calculations [storage human genome table cap](../project_postgres_storage/#eq-storage-human-genome-table-cap).
 
+<a id="fig-storage-update-snapshots"></a>
+
 ![04 versions and deletion diagram](/static/figures/project/chapters-11-postgres-storage-04-versions-and-deletion-tikz-01.svg)
 
 *Postgres snaphot mechanism allows to check visivility of rows in MVCC model, but it’s not sufficient on its own. Let’s assume that reader A and reader B are reading the same sequence before and after other process commited update. Using fragments epochs versioning system means that read A will see older locator via snapshot, while reader B will get newer locator row with changed epoch. Both of them can complete reads as both epochs are still valid.*
-
-<a id="fig-storage-update-snapshots"></a>
 
 Listing [storage repeatable read](../project_postgres_storage/#lst-storage-repeatable-read) gives SQL code for this example:
 

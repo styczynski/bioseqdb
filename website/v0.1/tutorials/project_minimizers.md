@@ -31,29 +31,29 @@ There are also other practical and theoretical consideratiosn affecting minimize
 
 Figure [minimizer walkthrough](../project_minimizers/#fig-minimizer-walkthrough) shows what happens to one $k$-mer through hashing, selection of window that its belongs to and dedupliction of hashes.
 
+<a id="fig-minimizer-walkthrough"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-01.svg)
 
 *Minimizer extraction for $k=5$ and $w=4$ with illustrative hashes.*
 
-<a id="fig-minimizer-walkthrough"></a>
-
 The hashing function can affect heavily minimizer desnity:
+
+<a id="fig-minimizer-density-traces"></a>
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-02.svg)
 
 *Two minimizer traces for $w=4$. Thin brackets mark candidate windows, and orange dots mark their selected minima. The left trace reuses positions 3 and 7. The right trace selects a new position after each slide. Everything depends on numeric properties of used hashing scheme*
 
-<a id="fig-minimizer-density-traces"></a>
-
 I wanted to emphasize that the topic of seed-and-extend is largely based on measuring practical stochastic properties of minimizers distribution and properties and in BioseqDB I only focus on the simplest approaches where in most cases I use the same hashing scheme as minimap2 to guarantee almost exact sensitivity and in one case discussed later incorporate use of rolling hash (nthash).
 
 Figure [seed hash table](../project_minimizers/#fig-seed-hash-table) uses fixed four-base seeds on both sides. The symbols $h_1$, $h_2$, and $h_3$ are some computed hashes. The picture shows that in general we want to build one hash table, compare query to the hashes in the hash table and always filter out the most occuring hashes (as this means that this hash does not ultimately distinguish the part that we maching and will cause lots of false positives not contributing to the final result)
 
+<a id="fig-seed-hash-table"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-03.svg)
 
 *Reference-index construction and query lookup. Positions are seed starts in this example. A usable seed index stores some seed metadata like position and strand*
-
-<a id="fig-seed-hash-table"></a>
 
 Frequent seeds can produce very large occurrence lists. BioSeqDB can exclude seeds whose target frequency exceeds a configured threshold before anchors are constructed. This is common practice in other software as well: minimap2 can remove most common minimizers for specific sequence by using percentage threshold (`--q-occ-frac` $\in[0,1]$)
 
@@ -65,35 +65,33 @@ The most straightforward algorithm to select smallest hash in a given sliding wi
 
 This approach is implemented by minimap2.
 
+<a id="fig-rewrite-minimap-walkthrough"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-04.svg)
 
 *Minimizer extraction with illustrative $k=5$, $w=4$ hashes. Each row is one window of four adjacent $k$-mers. Orange marks the selected position. The hash value 2 remains selected while the window moves, so those windows do not require repeated output.*
 
-<a id="fig-rewrite-minimap-walkthrough"></a>
-
 Equal hashes at different positions are not duplicate records. We wanmt to keep both to guarantee higher minimizer density.
+
+<a id="fig-rewrite-minimap-ties"></a>
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-05.svg)
 
 *Why a hash value alone does not define the output. Both orange cells have hash 3, but they refer to different $k$-mer positions. Minimap2 keeps the rightmost equal position as its saved minimum and has explicit rules for writing other tied identities.*
 
-<a id="fig-rewrite-minimap-ties"></a>
-
 Minimap2 stores the most recent $w$ candidates in a circular buffer It also stores the current minimum and the array slot containing it.
+
+<a id="fig-rewrite-minimap-rescan"></a>
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-06.svg)
 
 *The two costs (cheap/expensive) of one minimap2 step. Gray cells are already in the ring, blue is the entering candidate, and orange is the saved or newly found minimum. A normal cheap step performs one comparison, but when the saved minimum leaves, the algorithm reads the complete window again (rescan)*
-
-<a id="fig-rewrite-minimap-rescan"></a>
 
 Minimap2 stores kmers and apply hash function each time from scratch.
 
 ##### Scalar minimap2-style rescan
 
 <a id="alg-rewrite-minimap-rescan"></a>
-
-<div class="enumerate">
 
 1.  Store $k$-mer binary representation and its reverse complement and update them each step. Calculate hash for both of them and take the minimum.
 
@@ -105,8 +103,6 @@ Minimap2 stores kmers and apply hash function each time from scratch.
 
 5.  At the end of the sequence, write the remaining saved minimum from buffer as final minimizers.
 
-</div>
-
 ## A1: Naive SIMD rescan
 
 <a id="sec-rewrite-naive-simd"></a>
@@ -115,19 +111,17 @@ Let’s assume we have scalar linear iteration over data. The first though is to
 
 Each SIMD lane will load fragments of input data:
 
+<a id="fig-rewrite-naive-simd-rescan"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-07.svg)
 
 *Why direct SIMD rescan is costly. Each lane follows a different sequence piece. A nonzero expiry mask enters one shared loop over all $w$ vector slots. Masking protects lanes 1–3 from changing their answers, but it does not remove their loads and comparisons.*
-
-<a id="fig-rewrite-naive-simd-rescan"></a>
 
 Note that algorithm fundamentally stays the same, we only now divided input sequence into chunks and translated each operation (hashing, comparisons) into SIMD instructions:
 
 ##### Naive SIMDified minimap2 rescan algorithm
 
 <a id="alg-simd-minimap-rescan"></a>
-
-<div class="enumerate">
 
 1.  Split input sequence into chunks each corresponding to the lane of SIMD vector. Each lane handles different chunk (chunks overlap slightly to make sure we don’t omit any window)
 
@@ -141,8 +135,6 @@ Note that algorithm fundamentally stays the same, we only now divided input sequ
 
 6.  At the end of the sequence, emit all remaining minimums as final minimizers.
 
-</div>
-
 As you can see this algorithm works well only if new hash values are greater than current minimum on each position. If not, we still have branching. This is problematic as vectorized algorithms works well if the branching is minimal and CPU pipeline isn’t penalized for wrong branch prediction. Even if we assume the predictor is perfect, we still do expensive rescan for each lane if at least one needs to be updated. Assume one lane needs a rescan with probability $1/w$, then a group of $L$ independent lanes enters the shared slow path with probability $$1-\left(1-\frac1w\right)^L.$$ For $w=10$ and $L=4$, this is about $34.4\%$. This means that we will need to duplicate work much more often than in scalar case.
 
 ## A2: Two-stack algorithm
@@ -155,30 +147,30 @@ In different approach we can preserve prefix and suffix minima to calculate the 
 
 Split the hash stream into blocks of $w$ values. Within each block, let $P_i$ be the smallest value from the block start through position $i$, and let $Q_i$ be the smallest value from position $i$ through the block end. A window starting at $j$ and ending at $e=j+w-1$ crosses one block boundary and has minimum $$\min(Q_j,P_e).$$ The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This means that we still have "rescan" part, but it becames unconditional.
 
+<a id="fig-two-stack-minimum"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-08.svg)
 
 *Sliding minima from blockwise prefixes and suffixes. The two shaded crossing windows each use one suffix value from the starting block and one prefix value from the ending block.*
-
-<a id="fig-two-stack-minimum"></a>
 
 > [!NOTE]
 > **Fixed-width SIMD vectors**
 >
 > The SIMD-Minimizers use fixed-vector size architecture, where the SIMD vector is set to be uint32 times 8. The split per lane is the same as discussed previously. On Neon architecture only 128-bit-wide register is available, so the 256 fixed vector generates separate store intructions.
 
+<a id="fig-vector-minimizer-pipeline"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-09.svg)
 
 *Vectorized minimizer extraction: Each chunk owns a disjoint range and reads enough context to complete its windows.*
 
-<a id="fig-vector-minimizer-pipeline"></a>
-
 Note that in this setup we can store full minimum vectors and later use matrix transposition to deduplicate them (in case that minimum stays the same over window): At first, one SIMD vector contains the selected positions for several far-apart streams at the same step. After several steps, the SIMD-Minimizers paper algorithm rearranges that output matrix so one row contains consecutive windows from one stream. Consecutive windows often select the same position. Once those positions are adjacent in a row, the paper compares neighbors and keeps only positions that changed. At the end duplicates for windows needs to be removed.
+
+<a id="fig-transpose-dedup"></a>
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-10.svg)
 
 *How transposition of the results is done to get consecutive positions in each vector. Then SIMD-Minimizers do deduplication for four vectors*
-
-<a id="fig-transpose-dedup"></a>
 
 ## A3: Chronological SIMD
 
@@ -206,11 +198,11 @@ The idea for one group is as follows:
 
 5.  If the expiry happens then we go through all $w$ windows and check if their minimum has the same value but different position. This only requires checking $m_0, m_1, ..., m_{w-1}$. If yes then we do slow path: extract the ties in order (hence the name of the algorithm: chronological)
 
+<a id="fig-rewrite-chronological-groups"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-11.svg)
 
 *I illustrated here working sets and execution of the chronological adjacent-window algorithm. One group combines previous $w-1$ candidates with $L$ new candidates, then loads $w$ shifted vectors, and reduces them componentwise to the rightmost minima of $L$ adjacent windows. Orange cells represent selected minimums (candidates for potential minimizer emit). A solid orange cell is the rightmost equal minimum selected by the source’s $\leq$ comparison and a dashed cell is an earlier equal minimum.*
-
-<a id="fig-rewrite-chronological-groups"></a>
 
 The figure [rewrite chronological groups](../project_minimizers/#fig-rewrite-chronological-groups) illustrates calculation of window minima for $L=4$ lanes: $x_0, x_1, ... x_{L-1}$. The entire algorithm looks as follows:
 
@@ -497,11 +489,11 @@ Despite me using `[[gnu::always_inline]]`, Clang translated the lambda to a func
 
 Figure [phase evolution](../project_minimizers/#fig-phase-evolution) shows full evolution of my prototypes. I thought it would be interesting to showcase how they behaved. The scalar part involves unavoidable SIMD overhead of collecting results into map, scalar scramble hashing (minimap2 hash) and saving output in the bit structure.
 
+<a id="fig-phase-evolution"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-python-01.svg)
 
 *Evolution of the minimizer-phase cost (`mm_sketch` wrapper plus `mm_sketch_simd` inner) at 903 kbp across the iteration rounds discussed inuujj –. Numbers are means of three runs at `-O3 -DNDEBUG`. V8 is the two-stack port, V8.5 defers the minimap2 hash to emit time, V11 adds dual-stream interleaving, and V12 forces inlining of the per-step body via a free-function template. The dashed horizontal line is the scalar `mm_sketch` baseline. Even with some optimisations still SIMD routine is slower than scalar execution.*
-
-<a id="fig-phase-evolution"></a>
 
 ### Seeding prototype V13: Existmator fix
 
@@ -521,11 +513,11 @@ This caused severe slowdown, which we mistakenly attributed to seeding algorithm
 
 Figure [phase stack v13](../project_minimizers/#fig-phase-stack-v13) stacks the per-phase cost at 903 kbp for V12-pre versus V13. The two large gains are `mm_est_err` (from 7.88 ms to 0.85 ms) and the V12 `mm_sketch` stack (from 14.99 ms to 9.23 ms, already covered in previous section.
 
+<a id="fig-phase-stack-v13"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-python-02.svg)
 
 *Per-phase composition of the per-pair pipeline at 903 kbp we can see that V13 reduced exploded divergence phase*
-
-<a id="fig-phase-stack-v13"></a>
 
 ### Seeding prototype V14: directly use nthash
 
@@ -562,11 +554,11 @@ In all of the experiments we used adjustable minimizer represetations with hash 
 
 The combination of the V12 inlinening fixes, the V13 estimator fix and replacing `boost::unordered_map` (marked as ${V13}^{*}$) yielded finally observable improvements. We didn’t want to implement new hashing scheme at this time, only see the impact of using different hash storage.
 
+<a id="fig-speedup-summary"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-python-03.svg)
 
 *Wall-clock delta versus scalar for the three SIMD configurations, expressed as percent (negative = faster). ${V13}^{*}$ now performs better than scalar, however this is nowhere near results reported in SIMD Minimizers paper.*
-
-<a id="fig-speedup-summary"></a>
 
 The summary table:
 
@@ -595,11 +587,11 @@ G3SA implements the *A3 adjacent-window computation graph*, in CUDA SIMT. Let $L
 The computation is divided according to the following geometry: $$L=32,\qquad G=4,\qquad
   n_{\rm owned}=LG=128,\qquad n_{\rm shared}=L(G+1)=160.$$ We have 128 blocks of 32 threads. Block $b$ handles reads $b,b+128,b+256,\ldots$, one read at a time. For each read it advances by $n_{\rm owned}=128$ window starts. In one advance, thread $t$ attempts candidate slots $t,32+t,\ldots,128+t$ and then reduces the four windows beginning at $t,32+t,64+t,$ and $96+t$. Figure [g3sa minimizer kernel](../project_minimizers/#fig-g3sa-minimizer-kernel) shows this transpose between candidate construction and window reduction.
 
+<a id="fig-g3sa-minimizer-kernel"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-12.svg)
 
 *G3SA algorithm reconstructed from the CUDA code. This is similar to A3, but has specific work split per thread/warp (standrd CUDA SIMT model)*
-
-<a id="fig-g3sa-minimizer-kernel"></a>
 
 ## BioseqDB GPU seeding
 
@@ -609,11 +601,11 @@ The BioseqDB minimizer generation uses minimap2’s scalar rescan approach, but 
 
 In algorithms below I assume $Q$ in entire queries batch (for short queries combines multiple queries into one) and let $\mathcal T=(t_0,\ldots,t_{T-1})$ be the list of tiles to be processed. The processing is done in $G=\min(\lceil T/64\rceil,G_{\max})$ kernel workgroups (where $G_{\max}$ is the workgroup limit defined by device).
 
+<a id="fig-vulkan-tile-dispatch"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-13.svg)
 
 *How tiles are processed in the GPU algorithm. Each of the $G$ workgroups has 64 invocations and one invocation $g$ processes one tile at a time, then advances by $64\mathbin{\cdot}G$*
-
-<a id="fig-vulkan-tile-dispatch"></a>
 
 When we collect results we need to either: have fixed memory offsets per tile and perform another host pass to extract results or we can do lazy approach where we execute pipeline twice. First we use count mode to caculate where to place results and then do a second pass to actually write them. This makes pipeline do twice as much work, but avoids any additional host pass and we can directly use output results. The limtiations of our work is that we didn’t measure the difference between these approaches or between G3SA approach.
 
@@ -631,7 +623,7 @@ The positive value $A$ is the pessimistic output capacity planned by the caller 
 
 3.  Input: policy $P\in\{\textsc{HostAndDevice},\textsc{DeviceOnly}\}$
 
-4.  $\mathcal T\gets\operatorname{PlanTiles}(Q,k,w,G_{\max})$
+4.  $\mathcal T\gets\texttt{PlanTiles}(Q,k,w,G_{\max})$
 
 5.  $T\gets|\mathcal T|$
 
@@ -640,60 +632,60 @@ The positive value $A$ is the pessimistic output capacity planned by the caller 
 7.  $G\gets\min(\lceil T/64\rceil,G_{\max}),\quad S\gets256,
              \quad B\gets\lceil T/S\rceil$
 
-8.  ($Q,\mathcal T$)
+8.  `PrepareDeviceInputs`($Q,\mathcal T$)
 
 9.  allocate device buffers *Count*$[T]$, *Offset*$[T]$, and *Block*$[B]$
 
-10. **if** $P=\textsc{HostAndDevice}$ **then** $\mathit{Output}\gets\operatorname{HostCreateDeviceOutput}(A)$
+10. **if** $P=\textsc{HostAndDevice}$ **then** $\mathit{Output}\gets\texttt{HostCreateDeviceOutput}(A)$
 
-11. ()
+11. `BeginCommandBuffer`()
 
-12. ()
+12. `RecordHostToGPUBarrier`()
 
 13. $\mathit{countTask}\gets
-             \operatorname{RecordOrderedSketchTile}(\textsc{Count},Q,\mathcal T,k,w,G,
+             \texttt{RecordOrderedSketchTile}(\textsc{Count},Q,\mathcal T,k,w,G,
                                             \mathit{Count})$
 
-14. ($\mathit{countTask}$)
+14. `AwaitGPU`($\mathit{countTask}$)
 
 15. $\mathit{localTask}\gets
-             \operatorname{RecordPrefixScanBlock}(\mathit{Count},\mathit{Offset},
+             \texttt{RecordPrefixScanBlock}(\mathit{Count},\mathit{Offset},
                                           \mathit{Block},T,S,B)$
 
-16. ($\mathit{localTask}$)
+16. `AwaitGPU`($\mathit{localTask}$)
 
 17. $\mathit{blockTask}\gets
-             \operatorname{RecordPrefixScanAdd}(0,\mathit{Block},B)$
+             \texttt{RecordPrefixScanAdd}(0,\mathit{Block},B)$
 
-18. ($\mathit{blockTask}$)
+18. `AwaitGPU`($\mathit{blockTask}$)
 
 19. $\mathit{offsetTask}\gets
-             \operatorname{RecordPrefixScanAdd}(1,\mathit{Offset},\mathit{Block},T,S)$
+             \texttt{RecordPrefixScanAdd}(1,\mathit{Offset},\mathit{Block},T,S)$
 
 20. If $P=\textsc{DeviceOnly}$
 
-21. ($\mathit{offsetTask}$)
+21. `SubmitAndHostAwait`($\mathit{offsetTask}$)
 
 22. $N_{\rm out}\gets
                \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
 
 23. return overflow **if** $N_{\rm out}>A$
 
-24. $\mathit{Output}\gets\operatorname{HostCreateDeviceOutput}(N_{\rm out})$
+24. $\mathit{Output}\gets\texttt{HostCreateDeviceOutput}(N_{\rm out})$
 
-25. ()
+25. `BeginCommandBuffer`()
 
-26. ()
+26. `RecordHostToGPUBarrier`()
 
 27. End If
 
-28. ($\mathit{offsetTask}$)
+28. `AwaitGPU`($\mathit{offsetTask}$)
 
 29. $\mathit{emitTask}\gets
-             \operatorname{RecordOrderedSketchTile}(\textsc{Emit},Q,\mathcal T,k,w,G,
+             \texttt{RecordOrderedSketchTile}(\textsc{Emit},Q,\mathcal T,k,w,G,
                                             \mathit{Offset},\mathit{Output})$
 
-30. ($\mathit{emitTask}$)
+30. `SubmitAndHostAwait`($\mathit{emitTask}$)
 
 31. If $P=\textsc{HostAndDevice}$
 
@@ -703,7 +695,7 @@ The positive value $A$ is the pessimistic output capacity planned by the caller 
 33. return overflow **if** $N_{\rm out}>A$
 
 34. $\mathit{HostOutput}\gets
-               \operatorname{CopyMapped}(\mathit{Output}[0\ldots N_{\rm out}))$
+               \texttt{CopyMapped}(\mathit{Output}[0\ldots N_{\rm out}))$
 
 35. Else
 
@@ -717,48 +709,46 @@ The positive value $A$ is the pessimistic output capacity planned by the caller 
 
 <a id="alg-vulkan-ordered-invocation"></a>
 
-1.  Procedure RecordOrderedSketchTile$g,\mathit{mode}$
+1.  Procedure `RecordOrderedSketchTile`($g,\mathit{mode}$)
 
 2.  Input: global invocation ID $0\leq g<64\mathbin{\cdot}G$
 
 3.  Input: dispatch-wide $\mathit{mode}\in\{\textsc{Count},\textsc{Emit}\}$
 
-4.  Input: bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$
+4.  Input: bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$ from Algorithm [vulkan sketch host schedule](../project_minimizers/#alg-vulkan-sketch-host-schedule)
 
-5.  from Algorithm [vulkan sketch host schedule](../project_minimizers/#alg-vulkan-sketch-host-schedule)
+5.  Input: bound *Offset* and *Output* in <span class="smallcaps">Emit</span> mode
 
-6.  Input: bound *Offset* and *Output* in <span class="smallcaps">Emit</span> mode
+6.  $j\gets g$
 
-7.  $j\gets g$
+7.  While $j<T$
 
-8.  While $j<T$
+8.  $\mathit{localCount}\gets0$
 
-9.  $\mathit{localCount}\gets0$
+9.  ForAll record $e$ streamed by `RunScalarRescanTile`($Q,\mathcal T[j],k,w$)
 
-10. ForAll record $e$ streamed by ($Q,\mathcal T[j],k,w$)
+10. If $\mathit{mode}=\textsc{Emit}$
 
-11. If $\mathit{mode}=\textsc{Emit}$
-
-12. $\mathit{Output}[\mathit{Offset}[j]
+11. $\mathit{Output}[\mathit{Offset}[j]
                      +\mathit{localCount}]\gets e$
 
-13. End If
+12. End If
 
-14. $\mathit{localCount}\gets\mathit{localCount}+1$
+13. $\mathit{localCount}\gets\mathit{localCount}+1$
 
-15. End For
+14. End For
 
-16. If $\mathit{mode}=\textsc{Count}$
+15. If $\mathit{mode}=\textsc{Count}$
 
-17. $\mathit{Count}[j]\gets\mathit{localCount}$
+16. $\mathit{Count}[j]\gets\mathit{localCount}$
 
-18. End If
+17. End If
 
-19. $j\gets j+64\mathbin{\cdot}G$
+18. $j\gets j+64\mathbin{\cdot}G$
 
-20. End While
+19. End While
 
-21. End Procedure
+20. End Procedure
 
 ## Packed minimizer representation
 
@@ -813,11 +803,11 @@ The longest form still uses *span* set to $k$, but it’s not used for anything 
 
 The type first reserves $$H=\min(2K,56)$$ hash bits. Let $R=H+L+1$, where the last $1$ is just the strand bit. The type uses the first width $W\in\{16,32,64\}$ for which $R\leq W$. Every bit above the position and strand fields then belongs to the hash, so the stored hash field has $W-L-1$ bits. If $R>64$, the record uses two 64-bit values: one word contains a 56-bit hash and an 8-bit span, while the other word contains the position, the strand bit (and any unused high bits).
 
+<a id="fig-minimizer-representation-layout"></a>
+
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-tikz-14.svg)
 
 *Bit fields in four `minimizer_representation<L,K>` instantiations, shown from high bits on the left to low bits on the right. Blue is the hash, orange is the zero-based final position, green is the one-bit strand, and purple is the span in the two-word form. The highlighted $\langle28,15\rangle$ record is the default 64-bit sketch-data form.*
-
-<a id="fig-minimizer-representation-layout"></a>
 
 The $L$-bit field represents final positions from zero through $2^L-1$, so it can describe a local sequence span of at most $2^L$ bases. For $K=15$, values through $L=33$ still fit in 64 bits, while $L=34$ requires the two-word form. The $\langle28,15\rangle$ form has a 35-bit hash field, but its minimap2 integer hash occupies only 30 bits.
 

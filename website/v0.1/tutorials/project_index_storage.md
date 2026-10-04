@@ -39,17 +39,17 @@ The index file is concatenation of blocks presented in the Figure [index mmi la
 
 The depiction of the index file layout is presented in the Figure [index mmi layout](../project_index_storage/#fig-index-mmi-layout) below.
 
-![02 mapper indexes diagram](/static/figures/project/chapters-12-index-storage-02-mapper-indexes-tikz-01.svg)
-
 <a id="fig-index-mmi-layout"></a>
 
+![02 mapper indexes diagram](/static/figures/project/chapters-12-index-storage-02-mapper-indexes-tikz-01.svg)
+
 The idea of storing hash-map as two lists inside bucket is also presented in the Figure [index mmi construction](../project_index_storage/#fig-index-mmi-construction) below to allow easier understanding of the index concept.
+
+<a id="fig-index-mmi-construction"></a>
 
 ![02 mapper indexes diagram](/static/figures/project/chapters-12-index-storage-02-mapper-indexes-tikz-02.svg)
 
 *A simplified minimap2 hash bucket: hashes 13 and 21 have the same lowest two bits, but different remaining keys, so they land in bucket 1 together. The two occurrences of hash 21 are placed next to each other in the bucket’s position array.*
-
-<a id="fig-index-mmi-construction"></a>
 
 ### Indexing: mmseqs2
 
@@ -63,11 +63,11 @@ MMseqs2 offers great performance in clsutering, which is different problem to al
 
 I illustrate the idea of MMseqs2 index on a small example in the Figure [index mmseqs inverted](../project_index_storage/#fig-index-mmseqs-inverted) below, where I just assume that we use 2-letter k-mers of natural language for simplicity.
 
+<a id="fig-index-mmseqs-inverted"></a>
+
 ![02 mapper indexes diagram](/static/figures/project/chapters-12-index-storage-02-mapper-indexes-tikz-03.svg)
 
 *A small example of MMseqs2’s list construction, where word/count/offsets triplets are stored in a single file - practically only indices are stored there, while the actual (very large) lists of entries are stored separately.*
-
-<a id="fig-index-mmseqs-inverted"></a>
 
 ## BioseqDB indexing abstractions
 
@@ -94,9 +94,9 @@ There are several supported methods of storing index:
 
 Figure [index storage layouts](../project_index_storage/#fig-index-storage-layouts) shows what three of these layouts are representing.
 
-![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-01.svg)
-
 <a id="fig-index-storage-layouts"></a>
+
+![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-01.svg)
 
 In reality the fragment’s number can be viewed as a generic sub-key. This distorts the original meaning of **`CHUNKED_PER_FRAGMENT`**, because in relity it’s just "per-sequence" but with extra key: $\langle$query_key,  
 sub_key,  
@@ -225,9 +225,9 @@ The MPS index stores the same rows as non-grouped MPF, but this time we also hav
 
 The directory contains metadata information like how many distinct hashes are there in total and for every group it stores min(hash), max(hash) to allow us to quickly skip groups if certain hash values do not exist there.
 
-![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-02.svg)
-
 <a id="fig-index-mpf-mps"></a>
+
+![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-02.svg)
 
 MPS index building needs to spend additional work on sorting and merging so later queries can skip unrelated hash ranges, while MPF just keeps smaller hashmaps based on fragments. The current default BioseqDB active minimizer index is MPF.
 
@@ -243,11 +243,11 @@ Internal sequence storage tables use `epoch` to provide sequence versioning [st
 
 I implemented one index type that does not store minimizers at all: `symbol_counts` index keeps a very small symbol histogram for one sequence. Each symbol has 64-bit counter (for DNA4, the counters are $A,C,G,T$ so sequence `AACGTA` gives $(3,1,1,1)$). The counts are stored separately because as we use heap rows the value will be stored inline in Postgres table. This allows very fast access and usually users don’t need to count symbols.
 
+<a id="fig-index-symbol-counts"></a>
+
 ![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-03.svg)
 
 *Hitsogram counter for symbols is stored separately so BioseqDB access it only when specified in the query*
-
-<a id="fig-index-symbol-counts"></a>
 
 <a id="lst-index-symbol-counts"></a>
 
@@ -280,11 +280,11 @@ Building MPF index is rather simple as we traverse each fragment and can separat
 
 - For MPS I use subtly different approach and I collect all minimizers. This means that during parallelized fragment read, the reader need to read not only own fragment, but also parts of fragment to the right and left. This is depicted as "context" on the figure below [index build halos](../project_index_storage/#fig-index-build-halos).
 
+<a id="fig-index-build-halos"></a>
+
 ![04 bounded construction diagram](/static/figures/project/chapters-12-index-storage-04-bounded-construction-tikz-01.svg)
 
 *Each reader to generate minimziers for one fragment in MPS read also neighbouring fragments so first and last minimizers in fragment can be generated. Size of "context" is $w+k-2$ symbols.*
-
-<a id="fig-index-build-halos"></a>
 
 MPS does the following steps to build entire index:
 
@@ -298,11 +298,11 @@ MPS does the following steps to build entire index:
 
 5.  Read the final temporary file and build directory row inside storage.
 
+<a id="fig-index-mps-merge"></a>
+
 ![04 bounded construction diagram](/static/figures/project/chapters-12-index-storage-04-bounded-construction-tikz-02.svg)
 
 *Merging of hash entries (hash value and minimizer position)until one final entry is left and can be stored permamently in index storage. Letters represent different hash values.*
-
-<a id="fig-index-mps-merge"></a>
 
 The spill path uses PostgreSQL’s `BufFile` temporary-file interface. The sorter retains sorted runs in RAM when memory admission succeeds and spills them when it cannot reserve that memory. It can also move a retained run to a temporary file to make room for later work. Thus the merge structure in Figure [index mps merge](../project_index_storage/#fig-index-mps-merge) does not require every run to be written to disk.
 
@@ -324,11 +324,11 @@ The hash-major MPS reader performs the following steps:
 
 4.  Read the chunks selected by this filtering and read positions form them
 
+<a id="fig-index-selective-load"></a> <a id="fig-format6-streams"></a>
+
 ![05 selective reads diagram](/static/figures/project/chapters-12-index-storage-05-selective-reads-tikz-01.svg)
 
 *Two decisions save different reads. All directory entries are read; blue ranges select the controls. Counts reject a frequent hash before its long list is loaded. Positions and thresholds are illustrative.*
-
-<a id="fig-index-selective-load"></a> <a id="fig-format6-streams"></a>
 
 ## Other index considerations
 
@@ -338,11 +338,11 @@ Indexes can automatically update themselves on index, however currently enabled 
 
 This bug was caused by the fact that grouped MPF not only produces relational index, but also saves that compressed relation chunks into separate file that is used to enable faster reads during JOINs. The reader by default rejects ordinary single table queries, so you need to change the GUC to disable grouped-MPF (and use regular MPF instead). Saving file enables the JOIN to concurrently access stored data which is a cheap workaround around the decision to only use single Postgres reader process.
 
+<a id="fig-index-join-read-paths"></a>
+
 ![07 policies and reuse diagram](/static/figures/project/chapters-12-index-storage-07-policies-and-reuse-tikz-01.svg)
 
 *For large joins grouped-MPF uses saved direct binary dump of relational index, which speeds up the alignment by reducing time to sequentially read the backing table*
-
-<a id="fig-index-join-read-paths"></a>
 
 All indexes in BioseqDB can be automatically updated on insert (but as noted earlier, grouped-MPF will produce error on insert due to buggy implementation)
 

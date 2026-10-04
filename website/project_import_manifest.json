@@ -6,6 +6,10 @@
       "sha256": "e005f86e1265891311748aeb099b8658390ff1424adcea954add23cbf6471f39"
     },
     {
+      "path": "../../common.tex",
+      "sha256": "0520d9d1d20cdaa59731b6ae560aec8fd9f9d7b23b5280aedb19f79f0d481703"
+    },
+    {
       "path": "main.tex",
       "sha256": "2094337a0103074c2d7be017af03cafaa37ca3ab93209d85d3c9b4c15f8787d7"
     },

@@ -46,11 +46,11 @@ struct anchor {
 
 Figure [chaining dotplot](../project_chaining/#fig-chaining-dotplot) shows viasual interpretation. Valid anchors that can be used for chaining lie below and to the left of the current anchor. A chain can move between nearby diagonals to represent an insertion or deletion, but large diagonal changes receive a penalty or are not considered at all.
 
+<a id="fig-chaining-dotplot"></a>
+
 ![01 introduction diagram](/static/figures/project/chapters-06-chaining-01-introduction-tikz-01.svg)
 
 *Chaining selects growing, approximately collinear path so we can get closer to the final result. Base-level alignment (later stage of the pipeline) will later resolve gaps between anchors.*
-
-<a id="fig-chaining-dotplot"></a>
 
 > [!NOTE]
 > **Why we look for anchors that are colinear?**
@@ -182,11 +182,11 @@ Our final score is then something of the following structure: $$\begin{gathered}
 0 \leq \alpha, \beta, \gamma \leq 1
 \end{gathered}$$
 
+<a id="fig-chaining-distance-examples"></a>
+
 ![01 introduction diagram](/static/figures/project/chapters-06-chaining-01-introduction-tikz-02.svg)
 
 *Three anchor displacements for $k=5$. The blue brackets are the actual reference and query advances. The green diagonal step advances both coordinates by $g=\min(d_r,d_q)$. The orange horizontal step is the remaining $\delta=|d_r-d_q|$. It would be vertical when $d_q>d_r$. Panel (c) also shows that the reward stops at $k$, even though $g>k$.*
-
-<a id="fig-chaining-distance-examples"></a>
 
 The minimap2 scoring definition $E$ looks exactly as what we have just specified: <a id="eq-chaining-distances"></a> $$\begin{aligned}
  d_q(j,i) &= q_i-q_j, & d_r(j,i) &= r_i-r_j,\\
@@ -227,11 +227,11 @@ We see that scoring is not easy to work with as it depends on both anchors. If w
   \text{GlobalScore}(i) > \text{GlobalScore}(k)
 \end{aligned}$$ This means that we can compute $\text{GlobalScore}(i)$ independently for each anchor and use it to calculate global score. This is what was done in minimap2 as described in minigraph paper \[[7](../bibliography/#ref-minimap2_rmq_scoring_minigraph)\]. The problem is that the new linear gap scoring is very simplistic and does not exhibit some of the properties I discussed earlier.
 
+<a id="fig-chaining-near-far-distance"></a>
+
 ![01 introduction diagram](/static/figures/project/chapters-06-chaining-01-introduction-tikz-03.svg)
 
 *A close and a far predecessor for the same current anchor $a_i=(10,9)$: we can see that both candidates lie on the diagonal $r-q=1$, so both have $\delta=0$. The close link has $g=3$, but the far link has $g=8$.*
-
-<a id="fig-chaining-near-far-distance"></a>
 
 ## B1: minimap2 dynamic programming
 
@@ -299,11 +299,11 @@ $m$ is additional index saved by minimap2 on the side, which we call the *saved 
 
 This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time we check $e<m$ (see if we already scored this anchor) and if not we calculate $E(m,i)$ and do update checks similar to other anchors. $m$ is introduced to make sure to take into consideration anchor that could be potentially a little bit further away. Minimap2 doesn’t use priority queue or list here, because chaining accuracy is already good enough and this approach is much simpler.
 
+<a id="fig-chaining-b1-scan"></a>
+
 ![02 cpu diagram](/static/figures/project/chapters-06-chaining-02-cpu-tikz-01.svg)
 
 *(a) The reference and query limits and diagonal band decide whether a pair can be scored or not. (b) If distance checks pass, then we perform scans in a loop. The picture shows one pass of the scan for the current anchor $i=8$. The numbers inside the circles are anchor indices. The orange arrow from $j$ to $p_j$ shows the predecessor previously saved for anchor $j$. After $j$ is scored without stopping, the arrow’s destination receives the current mark $i=8$. The numbered steps visit anchors $7,6,\ldots,1$. The small $s$ boxes show the single skip counter for current anchor 8. Step 2 doesn’t affect $s$ as this anchor doesn’t have a predecessor in this scan pass (it’s unmarked). Step 5 improves the score and changes $s=2$ to $s=1$. Anchor 0 is already outside the main loop because $\verb|max_iter|=7$, so we don’t scan it, but we check it later with $m=0$. Step 7 stops with $e=1$, so saved $m=0$ satisfies $m<e$ and is checked once. The score of $m=0$ equal to 17 wins, but in some other scan other anchor could have a better score.*
-
-<a id="fig-chaining-b1-scan"></a>
 
 ##### Minimap2’s ordered predecessor scan for one query segment
 
@@ -317,7 +317,7 @@ This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time w
 
 4.  $D_y\gets\max(\verb|max_dist_y|,B)$
 
-5.  Function CanScore$j,i$
+5.  Function `CanScore`($j,i$)
 
 6.  $d_q\gets q_i-q_j,\quad d_r\gets r_i-r_j$
 
@@ -366,7 +366,7 @@ This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time w
 
 28. For $j\gets i-1$ **down to** $st$
 
-29. If ($j,i$)
+29. If `CanScore`($j,i$)
 
 30. $c\gets f_j+E(j,i)$
 
@@ -422,7 +422,7 @@ This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time w
 
 56. If $m\geq0$ and $m<e$
 
-57. If ($m,i$)
+57. If `CanScore`($m,i$)
 
 58. $c\gets f_m+E(m,i)$
 
@@ -486,11 +486,11 @@ Figure [chaining simd lane placement](../project_chaining/#fig-chaining-simd-la
 
 Note that only $\mathbf H^{(b)}$ and $\mathbf P^{(b)}$ are presisted between scans. The superscript $(-1)$ over $H$ means that we got this value from previous scan.
 
+<a id="fig-chaining-simd-lane-placement"></a>
+
 ![02 cpu diagram](/static/figures/project/chapters-06-chaining-02-cpu-tikz-02.svg)
 
 *How predecessor candidates are placed in four SIMD lanes. The lane number $\lambda$ selects the corresponding column in all three vectors. Blue boxes are candidate indices, orange boxes are calculated scores, and green boxes are best scores (the scores are improved vertically). When a lane improves its new maximum has an orange outline. Batch 3 is partial (we exhausted all candidates), so its two dashed lanes are inactive and their totals are $-\infty$.*
-
-<a id="fig-chaining-simd-lane-placement"></a>
 
 We operate on batches so we need to adjust our definition of skip counter. Let $S=\verb|max_chain_skip|$: <a id="eq-chaining-batch-limit"></a> $$U=\max\!\left\{1,\left\lfloor\frac{S}{L}\right\rfloor+1\right\}$$
 
@@ -502,11 +502,11 @@ As a helper we introduce $I_{b,\lambda}$ which is just binary mask checking lane
 
 The figure below depcits two kinds of SIMD B1 algorithms. The first one (a) wasn’t discussed in detail as it only puts the candidates in a single SIMD vector to speed up only few operations like finding the maximum, where the rest of the code stays unchanged. The second parts of figure (b) is more interesting as it shows the approach we discussed with vector batching.
 
+<a id="fig-chaining-b5-batches"></a>
+
 ![02 cpu diagram](/static/figures/project/chapters-06-chaining-02-cpu-tikz-03.svg)
 
 *Here I compare the state updates for the two SIMD B1 algorithms: In (a), exact B1 first calculates four totals together, then the remaining code is scalar and we process each lane in a loop. The bounded algorithm is presented in (b). It’s significantly smarter as now each lane represents a separate chain and we keep its best $(H,P)$ values in separate vectors. The downward arrow shows how each lane keeps this pair while the scan moves through older batches. We start with $\mathbf H^{(-1)}=[8,8,8,8]$ and $\mathbf P^{(-1)}=[-1,-1,-1,-1]$. Each row shows both vectors after its batch. All four lanes change in batch 0. Batch 1 updates only lane 0 to the new best pair $(H_0,P_0)=(13,8)$. Batch 2 leaves both vectors unchanged. Now $u=1=U$, so I omit candidates 0 to 3 (drawn in the bottom gray area). Taking the horizontal maximum across the four lane scores selects $(H^{(2)}_1,P^{(2)}_1)=(16,13)$ from lane 1 (the green bracket and outlines). Note that we still score the saved candidate $m=2$, shown in the orange box, separately in one lane. Its score is $C_m=17$, so it now replaces our selected result with $(17,2)$. On the diagram, green boxes contain scores and blue boxes contain their predecessor indexes. I use orange borders in two places: around $C$ to mark a new improvement (maximum), and around $H$ and $P$ to show which stored pair was updated.*
-
-<a id="fig-chaining-b5-batches"></a>
 
 After the last scored batch, the algorithm takes horizontal maximum of a vector once more: <a id="eq-chaining-b5-horizontal-reduction"></a> $$f_i=\max_\lambda H_\lambda,
  \qquad
@@ -536,19 +536,19 @@ The algorithm is described in detail in Algorithm [chaining b5](../project_chai
 8.  $\mathbf A\gets[\lambda<a_b]_{\lambda=0}^{L-1}$ (mask unused lanes in the oldest partial batch)
 
 9.  $\boldsymbol\epsilon\gets
-               \operatorname{PairScoreBatch}(\mathbf j_b,i,\mathbf A)$ ($E(j,i)$, or $-\infty$ for a rejected pair)
+               \texttt{PairScoreBatch}(\mathbf j_b,i,\mathbf A)$ ($E(j,i)$, or $-\infty$ for a rejected pair)
 
 10. $\mathbf C\gets
-               \operatorname{Select}(\boldsymbol\epsilon\neq-\infty,
+               \texttt{Select}(\boldsymbol\epsilon\neq-\infty,
                  \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty)$ (total candidate scores)
 
 11. $\mathbf I\gets(\mathbf C>\mathbf H)$ (strict lane-wise score improvements)
 
-12. $\mathbf H\gets\operatorname{Select}(\mathbf I,\mathbf C,\mathbf H)$
+12. $\mathbf H\gets\texttt{Select}(\mathbf I,\mathbf C,\mathbf H)$
 
-13. $\mathbf P\gets\operatorname{Select}(\mathbf I,\mathbf j_b,\mathbf P)$ (older candidates with equal scores do not replace)
+13. $\mathbf P\gets\texttt{Select}(\mathbf I,\mathbf j_b,\mathbf P)$ (older candidates with equal scores do not replace)
 
-14. If $\operatorname{Any}(\mathbf I)$
+14. If $\texttt{Any}(\mathbf I)$
 
 15. $u\gets0$
 
@@ -568,11 +568,11 @@ The algorithm is described in detail in Algorithm [chaining b5](../project_chai
 
 23. End For
 
-24. $f_i\gets\operatorname{HorizontalMax}(\mathbf H)$
+24. $f_i\gets\texttt{HorizontalMax}(\mathbf H)$
 
-25. $\mathbf T\gets\operatorname{Select}(\mathbf H=f_i,\mathbf P,-1)$
+25. $\mathbf T\gets\texttt{Select}(\mathbf H=f_i,\mathbf P,-1)$
 
-26. $p_i\gets\operatorname{HorizontalMax}(\mathbf T)$ (If scores are equal, we choose the largest predecessor index)
+26. $p_i\gets\texttt{HorizontalMax}(\mathbf T)$ (If scores are equal, we choose the largest predecessor index)
 
 27. If $f_i=\ell_i$
 
@@ -588,7 +588,7 @@ The algorithm is described in detail in Algorithm [chaining b5](../project_chai
 
 33. If $st_i\leq m<o$
 
-34. $\epsilon_m\gets\operatorname{PairScoreOneSIMDLane}(m,i)$ ($-\infty$ when the pair is rejected)
+34. $\epsilon_m\gets\texttt{PairScoreOneSIMDLane}(m,i)$ ($-\infty$ when the pair is rejected)
 
 35. If $\epsilon_m\neq-\infty$
 
@@ -679,11 +679,11 @@ Figure [chaining minimap2 backtracking](../project_chaining/#fig-chaining-minim
 
 The minimap2 backtracking uses the same technique as BioseqDB Vulkan minimizer seeding: in the first pass we only count the number of copied anchors, while in the second pass we store them in the resulting array. This $\mathrm{phase}\in\langle\mathrm{count},\mathrm{write}\rangle$ iteration is depicted in (c) panel. The last step of minimap2’s backtracking depicted in panel (d) is reversing the chains (so the start is on the left rather than on the right side) and sorting by reference coordinates of the chain’s starts, so the chains are in natural left-to-right order.
 
+<a id="fig-chaining-minimap2-backtracking"></a>
+
 ![03 backtracking diagram](/static/figures/project/chapters-06-chaining-03-backtracking-tikz-01.svg)
 
 *Minimap2 scalar backtracking on three anchors. Panel (b) shows that the anchor that triggers `max_drop` doesn’t have to be the cut that is returned. Panel (c) shows the separate count and write passes. Panel (d) shows the final forward anchor order.*
-
-<a id="fig-chaining-minimap2-backtracking"></a>
 
 Algorithm [chaining minimap2 boundary](../project_chaining/#alg-chaining-minimap2-boundary) shows the code for the cut search loop.
 
@@ -697,45 +697,49 @@ Algorithm [chaining minimap2 boundary](../project_chaining/#alg-chaining-minima
 
 3.  Output: cut $b$, which is excluded from the new chain
 
-4.  Function ChooseCut$e,f,p,t,D$
+4.  Function `ChooseCut`($e,f,p,t,D$)
 
 5.  $i\gets e,\quad b\gets e,\quad \delta_{\mathrm{best}}\gets0$
 
-6.  $t_i\gets2$ (temporary mark)
+6.  Repeat
 
-7.  $i\gets p_i$
+7.  $t_i\gets2$ (temporary mark)
 
-8.  If $i<0$
+8.  $i\gets p_i$
 
-9.  $\delta\gets f_e$
+9.  If $i<0$
 
-10. Else
+10. $\delta\gets f_e$
 
-11. $\delta\gets f_e-f_i$
+11. Else
 
-12. End If
+12. $\delta\gets f_e-f_i$
 
-13. If $\delta>\delta_{\mathrm{best}}$
+13. End If
 
-14. $\delta_{\mathrm{best}}\gets\delta,\quad b\gets i$
+14. If $\delta>\delta_{\mathrm{best}}$
 
-15. ElsIf $\delta_{\mathrm{best}}-\delta>D$
+15. $\delta_{\mathrm{best}}\gets\delta,\quad b\gets i$
 
-16. **break**
+16. ElsIf $\delta_{\mathrm{best}}-\delta>D$
 
-17. End If
+17. **break**
 
-18. $h\gets i,\quad j\gets e$ ($h$ is where this search stopped)
+18. End If
 
-19. While $j\geq0$ and $j\neq h$
+19. Until $i<0\ \lor\ (i\geq0\ \land\ t_i\neq0)$
 
-20. $t_j\gets0,\quad j\gets p_j$ (clear only temporary marks)
+20. $h\gets i,\quad j\gets e$ ($h$ is where this search stopped)
 
-21. End While
+21. While $j\geq0$ and $j\neq h$
 
-22. return $b$
+22. $t_j\gets0,\quad j\gets p_j$ (clear only temporary marks)
 
-23. End Function
+23. End While
+
+24. return $b$
+
+25. End Function
 
 Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minimap2-backtrack) shows also how two passes for count/write are integrated. Minimap2 uses first pass to count all anchors i.e $N_C$ (this value is used to allocate array $U$). Array $U$ holds anchor count for a chain in lower 32 bits and score in higher 32 bits (this packing is defined by $\text{Pack}$ function). $U$ is then chain-reversed into $B_\gamma$ array, which undergoes sorting by reference coordinates $\text{ReferencePos}(B_\gamma[0])$ The final array $A$ contains all anchors, while output array $U$ contains packed `uint_64t` metadata for chain (count and score).
 
@@ -749,7 +753,7 @@ Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minim
 
 3.  Output: packed minimap2 records $U$ and anchor array $A$ with each chain in forward order and chains sorted by reference start
 
-4.  define $\operatorname{Pack}(s,c)=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c$
+4.  define $\texttt{Pack}(s,c)=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c$
 
 5.  $Z\gets[(f_i,i)\mid 0\leq i<n\text{ and }f_i\geq S]$
 
@@ -768,7 +772,7 @@ Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minim
 
 12. If $t_e=0$
 
-13. $b\gets\operatorname{ChooseCut}(e,f,p,t,D)$
+13. $b\gets\texttt{ChooseCut}(e,f,p,t,D)$
 
 14. $N_V^{\mathrm{start}}\gets N_V,\quad i\gets e$ (cursor before tracing this end)
 
@@ -800,7 +804,7 @@ Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minim
 
 28. If $\mathrm{phase}=\mathrm{write}$
 
-29. $U[N_C]\gets\operatorname{Pack}(s,c)$
+29. $U[N_C]\gets\texttt{Pack}(s,c)$
 
 30. End If
 
@@ -906,11 +910,11 @@ Figure [chaining simd backtracking](../project_chaining/#fig-chaining-simd-back
 
 - After multi-path (b) runs we still needs to filter the chains by score and length.
 
+<a id="fig-chaining-simd-backtracking"></a>
+
 ![03 backtracking diagram](/static/figures/project/chapters-06-chaining-03-backtracking-tikz-02.svg)
 
 *BioseqDB SIMD backtracking with four $L$ lanes. Panel (a) shows the special handling of the first path. If we detect $Run_L$ is true, then we use entire SIMD vector just for this one chain (SIMD vector contains anchors for $L=4$ different chains). Panel (b) shows the other case when $Run_L$ if false. The SIMD vector changes with each iteration $d=0,1,2,3$ and it’s used to store (scatter) anchors indices into the buffer (on the right size). Panel (c) reads one row at a time from the buffer starting at highest-scoring anchors first (now the SIMD vector as in case of Panel (a) contains one chain), we check for marked nodes via $\text{FirstMarked}$ function. If there are no marked anchors detected then we iterate this processing multiple times going through the chain. After reaching either end or marked node, we save the chain if it’s score is greater than required threshold and it’s length is sufficient.*
-
-<a id="fig-chaining-simd-backtracking"></a>
 
 The accepted output in this example is $$\begin{aligned}
  C={}&[(100,11,0),(50,3,11),(30,2,14),(40,3,16)],\\
@@ -936,7 +940,7 @@ In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending
 
 1.  Input: anchors $a[0\ldots n)$, scores $f$, predecessors $p$, thresholds $S,K$, width $L$, and empty outputs $C,A$
 
-2.  Function ChooseCutsSIMD$\mathbf e,p,t,V,n$
+2.  Function `ChooseCutsSIMD`($\mathbf e,p,t,V,n$)
 
 3.  $q\gets|\mathbf e|,\quad \mathbf j\gets\mathbf e,\quad
           \boldsymbol\ell\gets\mathbf0,\quad \mathbf b\gets-\mathbf1,\quad
@@ -963,7 +967,7 @@ In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending
 
 11. End Function
 
-12. Function BacktrackSIMD$a,f,p,S,K,L,C,A$
+12. Function `BacktrackSIMD`($a,f,p,S,K,L,C,A$)
 
 13. allocate $V\in\operatorname{int32}^{L\times n}$, and set $t[0\ldots n)\gets0$ ($0$: unclaimed, $1$: claimed)
 
@@ -1002,7 +1006,7 @@ In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending
             \bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1$ **then** $k\gets k-q$ and **continue**
 
 28. $(\boldsymbol\ell,\mathbf b)\gets
-            \operatorname{ChooseCutsSIMD}(\mathbf e,p,t,V,n)$
+            \texttt{ChooseCutsSIMD}(\mathbf e,p,t,V,n)$
 
 29. For $\lambda\gets0$ **to** $q-1$
 
@@ -1067,6 +1071,8 @@ As mentioned in section [chaining interpretation](../project_chaining/#sec-chai
 
 #### Reference and query structures
 
+<a id="fig-chaining-runl-inputs"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-tikz-01.svg)
 
 *Panel (a) presents mosaic, with $A'=A$ so $T = Q = U_0\,A\,U_1\,A'_{\delta}\,U_2 \text{where} A' = \text{Randomize}_{\delta}(A)$. Panel (b) is degraded mosaic, so the $A$ and $A'$ are independently generated, so the divergence between them should be very high, used as control example. Panel (c) is shows spaced copy, which is contructed in the following way $T=S\,N^G,
@@ -1076,8 +1082,6 @@ Q=(S\,N^G)^R,
 \lvert S\rvert=4096,
 \qquad
 G=16384$ Panel (d) is the Minimizer-island comb. I construct it by assuming that every $c_k$ and $r_{k,\ell}$ is an isolated 25-base minimizer island. Then $r_{k,\ell}$ are grouped together with 13-$N$ intervals to create $R_k$ groups. The construction is calculated in such a way that $|d_r - d_q|$ is lower for $c_k$ anchors than for $R_k$ anchors. Panel (e) is wide-gap spaced-copy, where we insert gaps between 16 30-base pieces of query with absurdly large 500-base gaps.*
-
-<a id="fig-chaining-runl-inputs"></a>
 
 In our experiments we use $\delta$ as input parameter for divergence (controlling substituiton rates). The exact substituion count (number of replaced bases in entire sequence) can be expressed as: $$s_{\delta} = \sum_{\text{fragment} \in \text{query}} \left\lfloor\delta\lvert A\rvert+\frac{1}{2}\right\rfloor$$ The $+\frac{1}{2}$ is just used to round the result to the nearest integer. The sum goes over all fragments we can change (this depends on exact construction as some of them need to contain specific exact regions)
 
@@ -1102,11 +1106,11 @@ Figure [chaining runl inputs](../project_chaining/#fig-chaining-runl-inputs) de
 
 Constructions (a), (b) and (c) are primary using the same idea. After collecting and sorting anchors the anchor table looks like this for spaced copy (sorted by target coordinate):
 
+<a id="fig-spaced-copy-anchor-order"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-tikz-02.svg)
 
 *Coordinate-sorted spaced-copy anchors for the concrete case $R=3$. As the query contains exact $R$ copies we will have "layers" ($t=0,1,2...$) of the same anchors with the same reference position. Anchor $a_{t,v}$ is the anchor for $v$-th copy in the query. Colored arrows follow mark the next anchor in the chain. Naturally each anchor points to the next anchor in the same $v$-th copy. This means that each anchor will just point $R$ anchors forward.*
-
-<a id="fig-spaced-copy-anchor-order"></a>
 
 The construction (d) - minimizer-island comb was created by adjusting gap sizes between query and target islands: $$\begin{array}{c|cc}
 \text{transition} & \text{target }N\text{-run} & \text{query }N\text{-run}\\
@@ -1213,11 +1217,11 @@ Let’s consider that we are looking at mosaic with divergence rate $\delta = 0$
 
 Figure [chaining runl mosaic divergence](../project_chaining/#fig-chaining-runl-mosaic-divergence) shows the results for mosaic for different levels of divergence (the degraded mosaic - as control sample - is show separately as a gray rectangle on the right side of chart)
 
+<a id="fig-chaining-runl-mosaic-divergence"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-tikz-03.svg)
 
 *The lighter colours represent minimum/maximum while the darker ones represent median. As we can see the chart confirms that the $Run_L$ firing rates are tied to number of anchors with same-target positions which are competing for the same anchor. Additionally we observe that divergence levels of at least 12% mitigate the negative effect of highly-repetive query.*
-
-<a id="fig-chaining-runl-mosaic-divergence"></a>
 
 As we can see from Figure [chaining runl mosaic divergence](../project_chaining/#fig-chaining-runl-mosaic-divergence), table [chaining runl mosaic divergence](../project_chaining/#tab-chaining-runl-mosaic-divergence) and table [chaining runl firing](../project_chaining/#tab-chaining-runl-firing) the most inconvenient case is the high number of repetitions in the query. These repetitions can be mitigated by increased divergence levels. This was intuitive consulsion that we now sucessfully confirmed with the experiments.
 
@@ -1229,19 +1233,19 @@ I also wanted to measure effects of random sequences (not specially constructed)
 
 - Here I also use the default minimap2 parameters: $k=15$, $w=10$, occurrence filtering, and chaining scores.
 
+<a id="fig-chaining-runl-random-occurrences"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-tikz-04.svg)
 
 *Branch firing rate $100\operatorname{Fire}_L$ for different values of $L$ and $N$ for random-sequence occurrences. As we can observe the $N$ doesn’t affect the firing rate as expected. The light colours represent middle 50% of inputs. As we observe as $L$ gets larger it’s more likely to disrupt the condition randomly so the standard deviation should be higher.*
 
-<a id="fig-chaining-runl-random-occurrences"></a>
-
 Figure [chaining runl random occurrences](../project_chaining/#fig-chaining-runl-random-occurrences) was used to just confirm that random generation is correct and $N$ doesn’t affect the probability (it can affect probability if the target size is too small and query occurences are too crowded and start to overlap). Figure [chaining max drop runl](../project_chaining/#fig-chaining-max-drop-runl) shows more interesting data. I tested $Fire_L$ (panel a) and $Reduction_L$ (panel b)for different valujes of $\delta$ and $L$.
+
+<a id="fig-chaining-max-drop-runl"></a>
 
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-python-01.svg)
 
 *Each data point represents sum of samples (averaged rates) over N=2,3,4...,4000 randomized experiments. The samples for $N=1$ were marked with circles as we expect that they will be significantly higher (as there’s one ocurrence)*
-
-<a id="fig-chaining-max-drop-runl"></a>
 
 > [!NOTE]
 > **Firing rate**
@@ -1252,17 +1256,17 @@ Figure [chaining runl random occurrences](../project_chaining/#fig-chaining-run
 
 If we plot the anchor count versus the cummulative chain score, we should get a curve that is roughly linear (this follows from formulation of the scoring function). The divergence should break long chains and make the curve score axis more narrow. This can be observed on Figure [chaining max drop score counts](../project_chaining/#fig-chaining-max-drop-score-counts). I supply the charts to show how random inputs can behave as supplementary resources to the theoretical chapters. I also provide figure [chaining max drop score divergence](../project_chaining/#fig-chaining-max-drop-score-divergence) to better illustrate "narrowing" of the chart
 
+<a id="fig-chaining-max-drop-score-counts"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-python-02.svg)
 
 *Results from randomized sequences for slightly different query lengths (997-1002 bases). The orange line is the minimum score threshold for chain (minimap default of $\verb|min_sc|=40$)*
 
-<a id="fig-chaining-max-drop-score-counts"></a>
+<a id="fig-chaining-max-drop-score-divergence"></a>
 
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-python-03.svg)
 
 *Cummulative results for all the experiments previously described (query lenghts 997-1002 bases). In the chart I take 6-input median (median over all 6 experiments with slightly different query lengths)*
-
-<a id="fig-chaining-max-drop-score-divergence"></a>
 
 ### Does the bounded SIMD $U$ limit help?
 
@@ -1278,11 +1282,11 @@ For SIMD width $L$, let $E_L$ be the number of executed batches (same as in prev
 
 The measurements on Figure [chaining u batch reduction](../project_chaining/#fig-chaining-u-batch-reduction) are pooled (summed over random-seed experiments), while Table [chaining u batch rates](../project_chaining/#tab-chaining-u-batch-rates) contains the separate runs for $0\%$ and $10\%$ divergence rates.
 
+<a id="fig-chaining-u-batch-reduction"></a>
+
 ![u batch chart diagram](/static/figures/project/chapters-06-chaining-04-cpu-experimental-analysis-u-batch-chart-tikz-01.svg)
 
 *Pooled $U$-only reduction at each divergence for (a) random inputs and (b) sum over mosaic and degraded mosaic*
-
-<a id="fig-chaining-u-batch-reduction"></a>
 
 *$\operatorname{NoUpdate}_L/\operatorname{Reduction}^{U}_L$ (percent). Random uses $N=4000$, a 4.5-Mbase target, 997–1002-base queries, and the same divergence levels as presented previously. Spaced copy uses $R\in\{1,2,4,8,16,32,64\}$. The Minimizer-island comb uses $m\in\{1,2,4,\ldots,1024\}$. Defaults are $k=15$, $w=10$, $S=25$, and `max_chain_iter`=5000.*
 
@@ -1331,11 +1335,11 @@ Thankfully the wide-gap construction can help in this case. The 19,980-base targ
 
 For panel (a) [chaining max drop long chain accounting](../project_chaining/#fig-chaining-max-drop-long-chain-accounting) I calculate how many steps we perform compared to the place where we could terminate execution (lower percentage means that the heuristic won’t save anything). I don’t mark the anchors so we always follow chains right to the end. Panel (b) [chaining max drop long chain accounting](../project_chaining/#fig-chaining-max-drop-long-chain-accounting) demonstrates that when marking chains the panel (a) don’t show full truth. Max drop will save us scanned anchors, but because we won’t mark the chains the actual work is larger (later we need to scan the anchors).
 
+<a id="fig-chaining-max-drop-long-chain-accounting"></a>
+
 ![04 cpu expiermental analysis diagram](/static/figures/project/chapters-06-chaining-04-cpu-expiermental-analysis-python-04.svg)
 
 *Scan-step accounting for Wide-gap spaced-copy at default $D=500$. Its construction and exact dimensions are shown in Figure [chaining runl inputs](../project_chaining/#fig-chaining-runl-inputs)(e). Panel (a) counts the part of each fixed-start baseline scan after we reach max drop for first time. The dashed value is $\sum S/\sum B$ over all 246 observations. Panel (b) applies every cutoff and updates the marks, which increases the complete scan work. These are logical scan steps, not instructions, elapsed time, or a measured slowdown.*
-
-<a id="fig-chaining-max-drop-long-chain-accounting"></a>
 
 After consulting relevant work we see that max drop heuristic isn’t used to reduce number of scanned anchors, but rather to prevent chaining unrelated fragments of sequences. The minimap2 will try to chain large gaps as unrelated fragments, which increases amount of work performed. This however is reported to increase matching accuracy \[[8](../bibliography/#ref-minimap2_why_max_drop)\]
 
@@ -1362,11 +1366,11 @@ I perfomed intermediate testing to verify if predictions coming from synthetic r
 
 The test used $|T|=500Mbps$ and $|Q|=5Mbps$ sequences with just one $N=1$ occurence (this means that this is very optimistic case of random scenario)
 
+<a id="fig-chaining-mode-times"></a>
+
 ![05 cpu temporary results diagram](/static/figures/project/chapters-06-chaining-05-cpu-temporary-results-tikz-01.svg)
 
 *Recorded times for the three CPU modes*
-
-<a id="fig-chaining-mode-times"></a>
 
 The figure above depicts only two runs and presents only quick prototyping test measurements to judge if we are going in right direction. Please note that on bottom chart B1 and B5 are similar, because they use the same backtracking implementation (this is the same algorithm).
 
@@ -1399,11 +1403,11 @@ The last complex operation is local scan. After best candidate $j^{*}$ is select
 
 Figure [chaining minimap2 rmq](../project_chaining/#fig-chaining-minimap2-rmq) illustrates how RMQ chaining works.
 
+<a id="fig-chaining-minimap2-rmq"></a> <a id="fig-chaining-rmq-contrast"></a>
+
 ![06 rmq diagram](/static/figures/project/chapters-06-chaining-06-rmq-tikz-01.svg)
 
 *Minimap2 RMQ for one target. (a) We maintain the range of reference coordinates in the array to know where the window starts (what is the anchor with lowest reference coordinate that still fits in the $r_i-D$ window). (b) Select the best anchor according to linear scoring model$j^\star$; “max $h$” is the largest value in a node’s subtree. (c) If the selected anchor $j^\star$ is not exact (Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact)), then we run the local scan. The blue rectangle is the local interval the green band satisfies $\delta\leq B$, orange crosses mark rejected candidates, including one inside the local interval. A scanned link (blue dot) replaces the current result only if both checks below pass. The local scan can stop early and do not iterate over all anchors in the local interval if for example skip counter $S$ is reached.*
-
-<a id="fig-chaining-minimap2-rmq"></a> <a id="fig-chaining-rmq-contrast"></a>
 
 Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rmq) shows how RMQ forward chaining is implemented inside minimap2. <span class="smallcaps">RangeBest</span> function returns the anchor with the largest $h(j)$ in the interval, or $\bot$ if the interval contains no retained anchor, while <span class="smallcaps">CompleteLink</span> function calculates $E(j,i)$ from Equations [chaining link score](../project_chaining/#eq-chaining-link-score)–[chaining penalty](../project_chaining/#eq-chaining-penalty), together with $\delta$ and the exact (local scan) condition in Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact).
 
@@ -1415,7 +1419,7 @@ Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rm
 
 2.  Output: scores $f$ and predecessor indices $p$
 
-3.  Function Minimap2RMQForward$a,D,D_{\mathrm{in}},B,C,S$
+3.  Function `Minimap2RMQForward`($a,D,D_{\mathrm{in}},B,C,S$)
 
 4.  $D\gets\max(D,B),\quad
           D_{\mathrm{in}}\gets\min(D,\max(0,D_{\mathrm{in}}))$
@@ -1426,31 +1430,31 @@ Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rm
 
 7.  For $i\gets0$ **to** $n-1$
 
-8.  ($T,a,f,i$)
+8.  `InsertCompletedReferenceGroup`($T,a,f,i$)
 
 9.  If $D_{\mathrm{in}}>0$
 
-10. ($T_{\mathrm{in}},a,f,i$)
+10. `InsertCompletedReferenceGroup`($T_{\mathrm{in}},a,f,i$)
 
 11. End If
 
-12. ($T,a,i,D,C$)
+12. `RemoveExpiredEntries`($T,a,i,D,C$)
 
 13. If $D_{\mathrm{in}}>0$
 
-14. ($T_{\mathrm{in}},a,i,D_{\mathrm{in}},C$)
+14. `RemoveExpiredEntries`($T_{\mathrm{in}},a,i,D_{\mathrm{in}},C$)
 
 15. End If
 
 16. $f_i\gets\ell_i,\quad p_i\gets-1$
 
 17. $j^\star\gets
-            \operatorname{RangeBest}(T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0))$
+            \texttt{RangeBest}(T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0))$
 
 18. If $j^\star\neq\bot$
 
 19. $(e,\delta,\mathrm{exact})\gets
-              \operatorname{CompleteLink}(j^\star,i)$ ($e=E(j^\star,i)$)
+              \texttt{CompleteLink}(j^\star,i)$ ($e=E(j^\star,i)$)
 
 20. If $\delta\leq B\land f_{j^\star}+e>f_i$
 
@@ -1462,7 +1466,7 @@ Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rm
                  \land q_i>0$
 
 24. $(f_i,p_i)\gets
-                \operatorname{ScanLocalInterval}(T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t)$ (Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan))
+                \texttt{ScanLocalInterval}(T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t)$ (Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan))
 
 25. End If
 
@@ -1488,7 +1492,7 @@ Similarily to minimap2 forward chaining we use $t_j$ array to mark visited candi
 
 3.  Output: updated $(f_i,p_i)$ and marks $t$
 
-4.  Function ScanLocalInterval$T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t$
+4.  Function `ScanLocalInterval`($T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t$)
 
 5.  $s\gets0$
 
@@ -1612,19 +1616,19 @@ The G3SA paper divides GPU kernel into 4 stages:
 >
 > The repository contains CUDA AVL support code and a commented experimental entry point. The active chaining pipeline does not call that entry point. Its second pass uses array-based short and tiled kernels.
 
+<a id="fig-chaining-pipelines"></a>
+
 ![07 gpu diagram](/static/figures/project/chapters-06-chaining-07-gpu-tikz-01.svg)
 
 *Simplified depictions of G3SA pipeline*
 
-<a id="fig-chaining-pipelines"></a>
-
 The main difference between G3SA is that it uses specialised paths depending on data size and it calculates rows instead of columns in the score matrix for anchors: the first kernel instead of looking at previous anchors and updating itself, looks at next anchors and updates them [chaining work split](../project_chaining/#fig-chaining-work-split).
+
+<a id="fig-chaining-work-split"></a>
 
 ![07 gpu diagram](/static/figures/project/chapters-06-chaining-07-gpu-tikz-02.svg)
 
 *Different approaches (transposed) of minimap2 and G3SA*
-
-<a id="fig-chaining-work-split"></a>
 
 After long analysis I decided to implement the simpler approach. Instead of writing multiple kernels, just naively port existing chaining logic to Vulkan API.
 

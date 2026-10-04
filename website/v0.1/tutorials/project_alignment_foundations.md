@@ -47,11 +47,11 @@ This scoring model isn’t sufficient to define entire problem:
 
 Figure [alignment boundary modes](../project_alignment_foundations/#fig-alignment-boundary-modes) shows schematic examples of these modes.
 
+<a id="fig-alignment-boundary-modes"></a>
+
 ![02 alignment foundations diagram](/static/figures/project/chapters-02-alignment-foundations-tikz-01.svg)
 
 *Eight alignment boundary modes. Yellow lines depcict possible tracebacks. Black dots mark fixed endpoints (for example for global alignment we always align entire sequence so endpoints are 0 and len(Y)-1), yellow dots mark selected free endpoints, and bold border segments mark penalized or anchored boundaries (usually the border is the length of sequence, but under certain conditions we might have limits on the alignment length and coordinates). In each lower schematic, the solid arrow is the reference and the yellow dashed track is the query. These panels showcase how different libraries/algorithms handle different goals across number of scientific resarch*
-
-<a id="fig-alignment-boundary-modes"></a>
 
 Various practical implementations also use special stopping criteria, which usualy can be upper bound on the $S(A)$ score.
 
@@ -147,11 +147,11 @@ Seed $(s_a, i_a, j_a)$ is some represenative of the sequence substring $x_a = x_
 
 **Canonical minimizers:** DNA is double-stranded and majority of sequencing technologies do not distinguish these two strands. Genomic sequences thus need to satisy additional constraint: sequence and its reverse complement ($A \leftrightarrow T, C \leftrightarrow G$) should be handled in the same way by the software (they should be indistinguisable) In our case this means that for minimizer of a window $W$ at position $p$ we need to have minimizer $\overline{W^{c}}$ at position $w-1-p = |W| - k - p$. \[[36](../bibliography/#ref-groot_koerkamp_simd_minimizers_2025)\] In most of the software due to simplicity truly cannonical minimizers aren’t used. Instead we take minimum of hashes of $k$-mer and its reverse complement: $m^{\text{cannonical}} = \min(m, \overline{m^{c}})$
 
+<a id="fig-seed-chain-extend"></a>
+
 ![02 alignment foundations diagram](/static/figures/project/chapters-02-alignment-foundations-tikz-02.svg)
 
 *The seed–chain–extend approach in minimap2*
-
-<a id="fig-seed-chain-extend"></a>
 
 In cases of both chaining and base alignment we operate on very similar score definitions like in Equation [linear gap dp](../project_alignment_foundations/#eq-linear-gap-dp) or Equation [affine dp](../project_alignment_foundations/#eq-affine-dp). The algorithms are conceptually similar, but they have different methods of terminating the search, scoring function which punish gaps harder (base aliugnment doesn’t need to care about large gaps that can occur in chaining stage). I provide overview of literature and my own implementations in next chapters.
 

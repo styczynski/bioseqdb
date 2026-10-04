@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publish the author's LaTeX prose as website chapters without rewriting it.
 
-Requires Pandoc. Figures are produced by render_project_figures.py separately.
+Requires Pandoc. Figures are produced by export_thesis_figures.py separately.
 The import manifest records reachable inputs, deliberate omissions, and SQL
 examples that remain illustrative. Re-run from any working directory.
 """
@@ -308,14 +308,30 @@ def prepare_file(path: str, text: str | None = None) -> str:
     if path.endswith("generated_benchmark_cells.tex"):
         return ""
     if path.endswith("generated_results.tex"):
-        registry = ROOT / "papers/src/content/bioseqdb/benchmarks/registry.json"
-        # These are the source panel identifiers, kept stable for deep links.
-        ids = re.findall(r"\\label\{tab:bench:([^}]+)\}", text)
-        machine = text[:text.index(r"\refstepcounter{table}")]
-        machine = re.sub(r"\\begin\{landscape\}|\\newgeometry\{[^}]*\}", "", machine)
-        # Preserve the author's machine-specification table before the ten
-        # panels supplied by the shared benchmark data renderer.
-        return machine + protect("\n\n".join(benchmark(t, label="tab:bench:" + t) for t in dict.fromkeys(ids)), True)
+        def benchmark_landscape(match):
+            landscape = match[1]
+            starts = list(re.finditer(r"\\refstepcounter\{table\}", landscape))
+            if not starts:
+                return landscape
+            # Only the paginated timing matrices are replaced by widgets.
+            # Keep every authored introduction, machine table, and table legend.
+            output = landscape[:starts[0].start()]
+            for i, start in enumerate(starts):
+                segment = landscape[start.start():starts[i+1].start() if i+1 < len(starts) else len(landscape)]
+                table = re.search(r"\\label\{tab:bench:([^}]+)\}", segment)[1]
+                labels = re.findall(r"\\label\{([^}]+)\}", segment)
+                output += "\n".join("\\label{" + label + "}" for label in labels) + "\n"
+                output += protect(benchmark(table), True)
+                legends = []
+                for legend in re.finditer(r"\\smallskip\s*(?=\{\\footnotesize\\noindent)", segment):
+                    body, _ = group(segment, legend.end())
+                    if body not in legends:
+                        legends.append(body)
+                output += "\n\n".join(legends) + "\n\n"
+            return output
+        text = re.sub(r"\\begin\{landscape\}(.*?)\\end\{landscape\}", benchmark_landscape, text, flags=re.S)
+        text = re.sub(r"\\newgeometry\{[^}]*\}|\\restoregeometry", "", text)
+        return text
     def include(value):
         candidate = value if Path(value).suffix else value + ".tex"
         if not (SOURCE / candidate).exists():
@@ -330,10 +346,21 @@ def convert(text: str) -> str:
     text = publication_words(text)
     # Remove print-only float wrappers before conversion. Otherwise Pandoc
     # places the protected Markdown images inside raw HTML paragraphs.
-    text = re.sub(r"\\begin\{figure\*?\}(?:\[[^]]*\])?|\\end\{figure\*?\}", "\n", text)
+    def figure_body(match):
+        body = match[1]
+        labels = re.findall(r"\\label\{[^}]+\}", body)
+        body = re.sub(r"\\label\{[^}]+\}", "", body)
+        return "\n\n" + "\n".join(labels) + "\n\n" + body + "\n\n"
+    text = re.sub(r"\\begin\{figure\*?\}(?:\[[^]]*\])?(.*?)\\end\{figure\*?\}", figure_body, text, flags=re.S)
     text = re.sub(r"\\begin\{minipage\}(?:\[[^]]*\])?\{[^}]*\}|\\end\{minipage\}", "\n", text)
     text = re.sub(r"\\begin\{center\}|\\end\{center\}", "\n", text)
     text = macros(text, "multirow", 3, lambda rows, width, body, opt: body, optional=True)
+    # These are print-only column declarations. Pandoc applies \arraybackslash
+    # to the cell body and consumes leading numbers as a dimension, silently
+    # turning e.g. "7.68 cores" into "cores". Keep the cell text untouched.
+    text = text.replace(r">{\raggedright\arraybackslash}", "")
+    # The star forbids a printed page break after this row; it is not a cell.
+    text = text.replace(r"\\*", r"\\")
     # A paginated longtable repeats its header and footer for paper pages.
     # Keep one header on the website, and move its caption above the table.
     def longtable(m):
@@ -408,17 +435,24 @@ def convert(text: str) -> str:
     # mathematical notation are retained, including conditional/end markers.
     def algorithm(m):
         body = m[1]
+        already_numbered = r"\begin{enumerate}" in body
         body = re.sub(r"\\begin\{algorithmic\}(?:\[.*?\])?|\\end\{algorithmic\}", "", body)
         body = macros(body, "caption", 1, lambda title: "\\paragraph{" + title + "}")
-        body = re.sub(r"\\(Require|Ensure|State|Statex)\b", lambda x: "\n\\item " + ({"Require": "Input: ", "Ensure": "Output: "}.get(x[1], "")), body)
-        for name in ["For", "ForAll", "While", "If", "ElsIf", "Procedure", "Function"]:
+        body = re.sub(r"\\Statex\b", r"\\newline ", body)
+        body = re.sub(r"\\(Require|Ensure|State)\b", lambda x: "\n\\item " + ({"Require": "Input: ", "Ensure": "Output: "}.get(x[1], "")), body)
+        for name in ["For", "ForAll", "While", "If", "ElsIf", "Until"]:
             body = macros(body, name, 1, lambda condition, name=name: "\n\\item " + name + " " + condition)
+        for name in ["Procedure", "Function"]:
+            body = macros(body, name, 2, lambda title, args, name=name: "\n\\item " + name + " \\texttt{" + title + "}(" + args + ")")
+        body = re.sub(r"\\Repeat\b", r"\n\\item Repeat", body)
         body = re.sub(r"\\(EndFor|EndWhile|EndIf|EndProcedure|EndFunction|Else)\b", lambda x: "\n\\item " + re.sub(r"([a-z])([A-Z])", r"\1 \2", x[1]), body)
-        body = macros(body, "Call", 2, lambda name, args: "\\operatorname{" + name + "}(" + args + ")")
+        # \Call occurs both inside and outside math. \operatorname outside
+        # math loses its argument in Pandoc; \texttt preserves both forms.
+        body = macros(body, "Call", 2, lambda name, args: "\\texttt{" + name + "}(" + args + ")")
         body = macros(body, "Comment", 1, lambda value: " (" + value + ")")
         body = re.sub(r"\\Return\b", "return ", body)
         first = body.find("\\item")
-        if first >= 0:
+        if first >= 0 and not already_numbered:
             body = body[:first] + "\\begin{enumerate}\n" + body[first:] + "\n\\end{enumerate}"
         return body
     text = re.sub(r"\\begin\{algorithm\}(?:\[[^]]*\])?(.*?)\\end\{algorithm\}", algorithm, text, flags=re.S)
@@ -499,6 +533,13 @@ def reference(label: str) -> str:
 def bibliography() -> str:
     raw = read_source("main.bib")
     items = json.loads(pandoc(raw, "biblatex", "csljson"))
+    source_titles = {}
+    for match in re.finditer(r"@\w+\s*\{\s*([^,]+),", raw):
+        entry, _ = group(raw, raw.index("{", match.start()))
+        title_match = re.search(r"(?im)^\s*title\s*=\s*", entry)
+        if title_match:
+            title, _ = group(entry, title_match.end())
+            source_titles[match[1].strip()] = inline(title)
     parts = []
     for index, item in enumerate(items, 1):
         key = item["id"]
@@ -506,7 +547,9 @@ def bibliography() -> str:
         CITATION_ITEMS[key] = item
         authors = "; ".join(a.get("literal") or " ".join(filter(None, [a.get("given"), a.get("family")])) for a in item.get("author", []))
         year = str(item.get("issued", {}).get("date-parts", [[""]])[0][0])
-        title = item.get("title", key)
+        # CSL normalizes unprotected BibTeX title capitalization. The website
+        # keeps the exact title capitalization supplied by the author instead.
+        title = source_titles.get(key, item.get("title", key))
         # CSL title inline HTML is safe bibliographic markup.
         venue = item.get("container-title", item.get("publisher", ""))
         url = item.get("URL") or ("https://doi.org/" + item["DOI"] if item.get("DOI") else "")
@@ -525,7 +568,7 @@ def main() -> None:
     DEST.mkdir(parents=True, exist_ok=True)
     data = metadata()
     bib = bibliography()
-    common = (SOURCE.parents[1] / "common.tex").read_text()
+    common = read_source("../../common.tex")
     for name, url, revision in re.findall(r"\\DeclareCodeRepository\{([^}]+)\}\{([^}]+)\}(?:\[([^]]*)\])?", common):
         REPOS[name] = (url, revision or "main")
     entries = [dict(e) for e in data["entries"] if e["area"] == "chapters" or (e["area"] == "appendices" and "configuration" in e["path"])]
@@ -533,6 +576,9 @@ def main() -> None:
     intro = re.sub(r"\\addcontentsline\{toc\}\{chapter\}\{Introduction\}", "", intro)
     intro = re.sub(r"\\begin\{itemize\}.*?\\foreachdata.*?\\end\{itemize\}", "", intro, count=1, flags=re.S)
     intro = re.sub(r"Long example is available in Appendix[^\n]+", "", intro)
+    # The print introduction used subsubsections beneath an unnumbered chapter.
+    # On its own page these are the first section level under the page title.
+    intro = intro.replace(r"\subsubsection{", r"\section{")
     entries.insert(0, {"area": "introduction", "path": "main.tex", "title": "Introduction", "text": intro})
     for e in entries:
         e["slug"] = "project_" + ("introduction" if e["path"] == "main.tex" else re.sub(r"^\d+_", "", Path(e["path"]).stem))

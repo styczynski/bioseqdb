@@ -163,11 +163,11 @@ SeqAn alphabet assigns each symbol an integer called its *rank*. For DNA4, the f
 
 The figure below [lsb packed layout](../project_sequence_abstractions/#fig-lsb-packed-layout) shows an example of how I bitpack DNA4 sequence in storage units.
 
+<a id="fig-lsb-packed-layout"></a>
+
 ![01 values and ranges diagram](/static/figures/project/chapters-09-sequence-abstractions-01-values-and-ranges-tikz-01.svg)
 
 *Packing `ACGTGA` with four DNA4 symbols per byte. The dashed slots are padding, which occurs at the end of the sequence as rarely sequence size is multiple of `compact_sequence_range<R>::traits::letters_per_unit` so they are not part of the sequence.*
-
-<a id="fig-lsb-packed-layout"></a>
 
 > [!WARNING]
 > **Template instance explosion**
@@ -241,11 +241,11 @@ The bounds follow a small set of intuitive rules simiar to design of slices in P
 Slicing can be implemented by just holding slice coordinates, without actually loading any sequences, using very simple coordinate arithmetic shown in the figure below [sequence slice coordinates](../project_sequence_abstractions/#fig-sequence-slice-coordinates). For a slice view $V=S[a,b)$, view position $j$ refers to $S[a+j]$. A second slice can combine its offsets directly to get: $$V[c,d)=S[a+c,a+d).$$ The example’s $S[2,10)[1,5)$ is $S[3,7)$, which reads `TAAC`. The reversal operation is represented by reversing the start and end coordinates. For $W=\operatorname{reverse}(S[a,b))$ we have: $$W[j]=S[b-1-j],\qquad
   W[c,d)=\operatorname{reverse}(S[b-d,b-c)).$$ The complementing operation leaves the coordinates unchanged, but it changes the binary flag representing whether the slice is complemented or not.
 
+<a id="fig-sequence-slice-coordinates"></a>
+
 ![02 slice coordinates diagram](/static/figures/project/chapters-09-sequence-abstractions-02-slice-coordinates-tikz-01.svg)
 
 *Blue cells form the first slice and orange cells show a second slice*
-
-<a id="fig-sequence-slice-coordinates"></a>
 
 ## Composing sequences without joining their payloads
 
@@ -265,11 +265,11 @@ The slice tree is constructed from the following elements:
 
 Figure [piece tree](../project_sequence_abstractions/#fig-piece-tree) illustrates concatenation of three pieces including two source leaves and one literal leaf: $$Z=S[2,6)\ \Vert\ \operatorname{reverse}(S[8,12))\ \Vert\ \verb|AC|,$$ The result is `GTAAATTGAC`, with length $4+4+2=10$.
 
+<a id="fig-piece-tree"></a>
+
 ![03 piece trees diagram](/static/figures/project/chapters-09-sequence-abstractions-03-piece-trees-tikz-01.svg)
 
 *A piece tree describes how BioseqDB process slices of a sequence.*
-
-<a id="fig-piece-tree"></a>
 
 Each of the operations can easily be implemented by traversing the tree: concatenation joins roots and restores tree balance, slicing splits at the two bounds and leaves the middle part, reversing just as complementation flipps flags on the edges.
 
@@ -307,11 +307,11 @@ Internally I distinguish several access policies which are specified by the pipe
 
 3.  **Pack.** In case if borrowing is not possible, algorithm needs to request new memory permit (this is routed through custom pool allocator). Caller is then responsible for this memory chunk.
 
+<a id="fig-sequence-abstraction-layers"></a>
+
 ![04 reading intervals diagram](/static/figures/project/chapters-09-sequence-abstractions-04-reading-intervals-tikz-01.svg)
 
 *Simplified view of different access policies*
-
-<a id="fig-sequence-abstraction-layers"></a>
 
 > [!NOTE]
 > **Borrowing**
@@ -324,11 +324,11 @@ Internally I distinguish several access policies which are specified by the pipe
 
 The PostgreSQL source-provider view keeps its scanner and packed fragment slots in the read session. A rank request visits the requested symbols, looks up each symbol’s fragment in that scanner and unpacks its rank. Repeated small requests can reuse packed fragments, but still repeat the callback and symbol-extraction work; they need not read the fragment again from disk or decode the whole fragment into ranks. Retaining a packed target for the alignment stage avoids these source-provider calls, although an algorithm requesting byte ranks must still unpack the selected interval.
 
+<a id="fig-sequence-scan-lifecycle"></a>
+
 ![04 reading intervals diagram](/static/figures/project/chapters-09-sequence-abstractions-04-reading-intervals-tikz-02.svg)
 
 *Illustration of structures used and operations performed on sequences during scan lifecycle*
-
-<a id="fig-sequence-scan-lifecycle"></a>
 
 At this point I need to describe lifecycles of various entities to illustrate how reading is performed. Figure [sequence scan lifecycle](../project_sequence_abstractions/#fig-sequence-scan-lifecycle) shows how what is happening under the hood during the scan:
 

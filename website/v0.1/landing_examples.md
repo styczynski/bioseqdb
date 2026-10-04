@@ -8,7 +8,7 @@ slots:
   similarity_search: landing_similarity_search
 ---
 
-```sql runnable id=landing_hero_query timeout=60s
+```sql runnable id=landing_hero_query timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -51,6 +51,9 @@ WHERE age >= 30
     (SELECT seq FROM samples WHERE id = 2)::bioseq.seq('dna4', 64));
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ```sql runnable id=landing_sequence_storage timeout=60s
@@ -88,9 +91,12 @@ SELECT bioseq.load('imported', 'readme_samples.fasta');
 -- bioseq:teardown
 DROP TABLE imported;
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
-```sql runnable id=landing_similarity_search timeout=60s
+```sql runnable id=landing_similarity_search timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = off;
 SET max_parallel_workers_per_gather = 0;
@@ -133,5 +139,8 @@ ORDER BY target_id, query_id, target_start,
   query_start;
 -- bioseq:teardown
 DROP TABLE samples;
+RESET bioseq.aligner.vulkan.enabled;
+RESET max_parallel_workers_per_gather;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 

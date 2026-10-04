@@ -70,11 +70,11 @@ We will consider finite nonemptystrings over the DNA4 alphabet. A gap is a symbo
 
 As an example, let us present an alignment of $GATCAGATA$ and $CATTCAATCA$. One of the possible alignments is:
 
+<a id="fig-biology-alignment-example"></a>
+
 ![01 biology diagram](/static/figures/project/chapters-01-biology-tikz-01.svg)
 
 *Alignment of the target sequence `GATCAGATA` and query sequence `CATTCAATCA`. Orthogonal connectors map each ungapped sequence position to its aligned column; gaps are intentionally unboxed.*
-
-<a id="fig-biology-alignment-example"></a>
 
 There are 4 cases that can occur during alignments:
 

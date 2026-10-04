@@ -81,35 +81,22 @@ EXIT_SKIP = 4
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _REPOSITORY_URL = "https://github.com/styczynski/bioseqdb"
 _EXPECTED_TUTORIALS = (
-    "quick_read_search_write",
-    "sequence_column_type",
-    "columnar_storage_and_vectorized_aggregates",
-    "sequence_generation",
-    "fasta_fastq_gzip_and_io",
-    "index_lifecycle_and_metadata",
-    "similarity_search",
-    "slice_concat_reverse",
-    "multiple_sequence_columns_and_joins",
-    "highway_runtime_dispatch",
-    "reading_bioseq_explain",
-    "query_cache",
-    "remote_provider_to_search",
+    "getting_started",
+    "project_introduction",
+    "project_biology",
+    "project_alignment_foundations",
+    "project_minimizers",
+    "project_chaining",
+    "project_final_alignment_postprocessing_and_preprocessing",
+    "project_sequence_abstractions",
+    "project_postgres_custom_scan",
+    "project_postgres_storage",
+    "project_index_storage",
+    "project_benchmarking",
+    "project_conclusion",
+    "project_configuration_reference",
+    "bibliography",
 )
-_EXPECTED_RUNNABLE_COUNTS = {
-    "quick_read_search_write": 1,
-    "sequence_column_type": 2,
-    "columnar_storage_and_vectorized_aggregates": 1,
-    "sequence_generation": 1,
-    "fasta_fastq_gzip_and_io": 1,
-    "index_lifecycle_and_metadata": 1,
-    "slice_concat_reverse": 1,
-    "similarity_search": 1,
-    "multiple_sequence_columns_and_joins": 1,
-    "remote_provider_to_search": 1,
-    "query_cache": 3,
-    "highway_runtime_dispatch": 2,
-    "reading_bioseq_explain": 1,
-}
 _DESIGN_PALETTE = {
     "comment": "#6f8698",
     "keyword": "#4fb0d6",
@@ -120,6 +107,18 @@ _DESIGN_PALETTE = {
     "number": "#e0b04a",
     "macro": "#c99bd6",
     "operator": "#cbd8e4",
+}
+_CODE_PALETTE = {
+    "comment": "#8094a6",
+    "keyword": "#65b9dd",
+    "function": "#f39762",
+    "string": "#ddb67d",
+    "type": "#8bd0b3",
+    "builtin": "#9bb3c7",
+    "number": "#e2c478",
+    "macro": "#c5a8d6",
+    "operator": "#94aabf",
+    "plain": "#cbd8e4",
 }
 _BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
@@ -416,13 +415,13 @@ def _parse_authored_runnable_fences(path: Path) -> list[str]:
         teardown = "\n".join(body[positions[2][0] + 1:]).strip()
         _check(bool(setup) and bool(visible) and bool(teardown),
                f"{path}:{body_start}: setup, visible, and teardown must be nonempty")
-        _check(re.search(r"\b(SELECT|SHOW|EXPLAIN|INSERT|UPDATE|DELETE)\b", visible,
+        _check(re.search(r"\b(SELECT|SHOW|EXPLAIN|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|SET|RESET|CALL|DO)\b", visible,
                          re.IGNORECASE) is not None,
                f"{path}:{body_start}: visible phase has no user-facing SQL operation")
 
         created_tables = re.findall(
             r"\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+([a-z_][a-z0-9_]*)",
-            setup, re.IGNORECASE)
+            setup + "\n" + visible, re.IGNORECASE)
         for table in created_tables:
             _check(re.search(rf"\bDROP\s+TABLE(?:\s+IF\s+EXISTS)?\s+{re.escape(table)}\b",
                              teardown, re.IGNORECASE) is not None,
@@ -477,567 +476,92 @@ def _runnable_output_groups(nodes: list[dict]) -> dict[str, list[dict]]:
 
 
 def _assert_authored_content_contract(version: str) -> None:
-    tutorial_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "similarity_search.md"
-    )
-    sequence_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "sequence_column_type.md"
-    )
-    cache_path = _WEBSITE_ROOT / version / "tutorials" / "query_cache.md"
-    highway_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "highway_runtime_dispatch.md"
-    )
-    columnar_path = (
-        _WEBSITE_ROOT / version / "tutorials"
-        / "columnar_storage_and_vectorized_aggregates.md"
-    )
-    generation_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "sequence_generation.md"
-    )
-    io_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "fasta_fastq_gzip_and_io.md"
-    )
-    index_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "index_lifecycle_and_metadata.md"
-    )
-    landing_path = _WEBSITE_ROOT / version / "landing_examples.md"
-    common_path = (
-        _REPOSITORY_ROOT
-        / "bioseq"
-        / "tests"
-        / "integration"
-        / "support"
-        / "index.cppm"
-    )
-    for path in (
-        tutorial_path, sequence_path, cache_path, highway_path,
-        columnar_path, generation_path, io_path, index_path,
-        landing_path, common_path,
-    ):
-        _check(path.is_file(), f"acceptance source is missing: {path}")
-
-    all_runnable_ids: list[str] = []
+    """The published tutorial and chapters are the current authored sources."""
+    tutorial_root = _WEBSITE_ROOT / version / "tutorials"
+    _check({path.stem for path in tutorial_root.glob("*.md")} == set(_EXPECTED_TUTORIALS),
+           "authored tutorial inventory differs from the README/project chapter set")
+    all_ids: list[str] = []
+    sources: dict[str, str] = {}
     for slug in _EXPECTED_TUTORIALS:
-        path = _WEBSITE_ROOT / version / "tutorials" / f"{slug}.md"
+        path = tutorial_root / f"{slug}.md"
         _check(path.is_file(), f"tutorial source is missing: {path}")
-        runnable_ids = _parse_authored_runnable_fences(path)
-        _check(len(runnable_ids) == _EXPECTED_RUNNABLE_COUNTS[slug],
-               f"{slug} has {len(runnable_ids)} runnable examples, expected "
-               f"{_EXPECTED_RUNNABLE_COUNTS[slug]}")
+        all_ids.extend(_parse_authored_runnable_fences(path))
         source = path.read_text(encoding="utf-8")
-        links = re.findall(r"\[\[(sql:[^\]|]+)\]\]", source)
-        _check(bool(links), f"{slug} has no SQL reference links")
-        _check("[[sql:" not in re.sub(r"\[\[sql:[^\]|]+\]\]", "", source),
-               f"{slug} has a malformed or labelled SQL reference link")
-        runnable_bodies = re.findall(
-            r"```sql runnable[^\n]*\n(.*?)\n```", source, re.DOTALL)
-        for body in runnable_bodies:
+        sources[slug] = source
+        for body in re.findall(r"```sql runnable[^\n]*\n(.*?)\n```", source, re.S):
             _check("bioseq_internal." not in body
                    and "inspect_ready_minimizer_generation" not in body,
                    f"{slug} runnable SQL exposes a private or revoked interface")
-        all_runnable_ids.extend(runnable_ids)
-    _check(len(all_runnable_ids) == len(set(all_runnable_ids)),
-           "runnable ids must be unique across every tutorial")
-    authored_tutorials = "\n".join(
-        (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text(
-            encoding="utf-8")
-        for slug in _EXPECTED_TUTORIALS
-    )
-    for forbidden in (
-        "Test-build-only", "DSM Test Fixture", "Fully Attested Alignment Jobs",
-        "Bioseq Batch ABI Version", "Bioseq Owned RestrictInfo Path Copies",
-        "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
-        "Bioseq Requirement Executable", "bioseq_internal.",
-        "inspect_ready_minimizer_generation",
-        "inspect_ready_hash_major_minimizer_generation",
-    ):
-        _check(forbidden not in authored_tutorials,
-               f"public tutorial corpus exposes non-user field {forbidden}")
-    _check(re.search(r"\breport_[0-9]+\.json\b", authored_tutorials) is None,
-           "tutorials must not hard-code numbered benchmark report filenames")
-
-    common = common_path.read_text(encoding="utf-8")
-    fixture_match = re.search(
-        r"export inline std::vector<seq_row> hoe_seed_rows\(\)\s*\{(.*?)\n\}",
-        common, re.S)
-    _check(fixture_match is not None, "cannot resolve canonical hoe_seed_rows source")
-    fixture_pairs = re.findall(
-        r'\.sequences\s*=\s*\{\s*"([ACGT]+)",\s*"([ACGT]+)"\s*\}',
-        fixture_match.group(1), re.S)
-    _check(len(fixture_pairs) == 5,
-           f"canonical hoe_seed_rows source has {len(fixture_pairs)} rows, expected 5")
-    probe_match = re.search(
-        r'k_hoe_probe_sequence\s*=\s*\n?\s*"([ACGT]+)"', common)
-    _check(probe_match is not None,
-           "cannot resolve canonical k_hoe_probe_sequence source")
-
-    tutorial = tutorial_path.read_text(encoding="utf-8")
-    runnable_match = re.search(
-        r"```sql runnable id=canonical_mmsearch[^\n]*\n(.*?)\n```",
-        tutorial, re.S)
-    _check(runnable_match is not None,
-           "similarity tutorial has no canonical runnable search")
-    runnable_source = runnable_match.group(1)
-    fixture_insert = re.search(
-        r"INSERT INTO tutorial_mmsearch\b.*?;", runnable_source, re.S)
-    _check(fixture_insert is not None,
-           "similarity tutorial has no canonical target INSERT")
-    for target, _secondary_probe in fixture_pairs:
-        _check(fixture_insert.group(0).count(f"'{target}'") == 1,
-               "similarity tutorial does not copy each canonical hoe target exactly once")
-    probe = probe_match.group(1)
-    _check(tutorial.count(f"'{probe}'") >= 2,
-           "similarity tutorial must retain the canonical short-motif examples")
-    visible_query = runnable_source.split("-- bioseq:visible", 1)[-1].split(
-        "-- bioseq:teardown", 1)[0]
-    _check(visible_query.count(f"'{fixture_pairs[0][0]}'") == 2,
-           "similarity tutorial must explain and execute the same full-read query")
-    for assertion in (
-        "EXPLAIN (VERBOSE, COSTS OFF)", "public.mmsearch(",
-        "The first result shows whether the planner selected `BioseqScan`",
-    ):
-        _check(assertion in tutorial,
-               f"similarity tutorial is missing visible plan contract {assertion}")
-    _check("-- bioseq:expected" not in tutorial,
-           "similarity tutorial must not author expected output rows")
-
-    sequence = sequence_path.read_text(encoding="utf-8")
-    _check("bioseq.seq('dna4', 64)" in sequence
-           and "match=\"'dna4'\" title=\"Alphabet\"" in sequence
-           and 'match="64" title="Storage-unit width"' in sequence,
-           "sequence anatomy must be driven by the exact two Markdown annotations")
-    _check(not re.search(r"temporary|placeholder|lorem", sequence, re.I),
-           "sequence tutorial contains disabled or prototype content")
-    cache = cache_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 110", "bioseq_cache.query_cache.mode = 'exact_query'",
-        "bioseq_cache.query_cache.mode = 'reusable_fragments'",
-        "minimizers_per_sequence", "minimizers_per_fragment",
-        "bioseq_cache.stats()", "bioseq_cache.entries()",
-        "bioseq_cache.invalidate_relation", "bioseq_cache.invalidate_all()",
-        "expect=error sqlstate=42501",
-    ):
-        _check(spelling in cache, f"cache tutorial is missing {spelling}")
-    highway = highway_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 90", "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)",
-        "Highway Compiled Targets", "CPU-Supported Targets",
-        "Runnable Targets", "Planned Architecture",
-        "Executed Architecture",
-    ):
-        _check(spelling in highway, f"Highway tutorial is missing {spelling}")
-    explain_path = (
-        _WEBSITE_ROOT / version / "tutorials" / "reading_bioseq_explain.md"
-    )
-    explain_source = explain_path.read_text(encoding="utf-8")
-    for forbidden in (
-        "Test-build-only DSM diagnostics", "DSM Test Fixture",
-        "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
-        "Bioseq Owned RestrictInfo Path Copies",
-    ):
-        _check(forbidden not in explain_source,
-               f"public EXPLAIN tutorial exposes non-user field {forbidden}")
-    columnar = columnar_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 20", "id=columnar_vector_aggregate", "VectorAggNode",
-        "count(*)", "sum", "avg", "min", "max",
-        "bioseq.list_seq_storage_shards", "alter_bioseq_table_set",
-        "alter_bioseq_table_reset", "bioseq.column_cache.capacity_mb",
-        "bioseq.vacuum_seq_storage", "NULL and empty inputs",
-        "Administrator-only shard inspection",
-    ):
-        _check(spelling in columnar,
-               f"columnar/vector tutorial is missing {spelling}")
-    generation = generation_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 30", "id=deterministic_sequence_generation",
-        "bioseq.create_sample_table", "bioseq.create_query_target_sample_table",
-        "same_seed_same_sequence", "rejects any other alphabet",
-    ):
-        _check(spelling in generation,
-               f"sequence-generation tutorial is missing {spelling}")
-    io_tutorial = io_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 40", "id=local_fasta_load_index_search", "bioseq.load",
-        ".fastq", ".bgzf", "regular zlib-backed", "parallel_gzip",
-        "does not provide random range access", "no current SQL function",
-    ):
-        _check(spelling in io_tutorial,
-               f"FASTA/FASTQ tutorial is missing {spelling}")
-    index_tutorial = index_path.read_text(encoding="utf-8")
-    for spelling in (
-        "order: 50", "id=index_lifecycle_metadata",
-        "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
-        "UPDATE_ON_INSERT", "UPDATE_MANUALLY", "bioseq.list_metadata()",
-        "Bioseq Fetched From Meta", "index_read_requirement => 2",
-        "actual_index_source=persisted",
-        "bioseq.last_alignment_execution_stats()",
-        "bioseq.set_active_read_index", "administrator/policy-manager",
-    ):
-        _check(spelling in index_tutorial,
-               f"index-lifecycle tutorial is missing {spelling}")
-    landing = landing_path.read_text(encoding="utf-8")
-    _check(not re.search(r"temporary|placeholder|lorem|symbol_count", landing, re.I),
-           "landing examples contain disabled or prototype content")
+        _check("-- bioseq:expected" not in source,
+               f"{slug} contains authored result rows instead of captured PostgreSQL output")
+    _check(len(all_ids) >= 30 and len(all_ids) == len(set(all_ids)),
+           "README/project runnable examples are missing or repeat an id")
+    _check("readme_docker_demo" in all_ids,
+           "README Docker quick-start example is missing")
+    for token in ("Docker quick start", "Packages and Docker images", "bioseq.load", "mmsearch"):
+        _check(token in sources["getting_started"], f"README tutorial lost {token!r}")
+    bibliography_ids = set(re.findall(r'<a id="(ref-[^"]+)"', sources["bibliography"]))
+    _check(len(bibliography_ids) >= 100, "project bibliography lost its references")
+    citations = re.findall(r'\.\./bibliography/#(ref-[a-zA-Z0-9_-]+)', "\n".join(sources.values()))
+    _check(len(citations) >= 100 and set(citations) <= bibliography_ids,
+           "project citation links do not all resolve to the bibliography")
+    figure_manifest = json.loads(
+        (_WEBSITE_ROOT / "static/figures/project/manifest.json").read_text())
+    figures = figure_manifest["figures"]
+    _check(len(figures) == 74, "original figure inventory is incomplete")
+    actual_figures = set(re.findall(r'/static/(figures/project/[^)\s]+\.svg)',
+                                    "\n".join(sources.values())))
+    _check(actual_figures == {item["svg"] for item in figures},
+           "authored chapters do not embed every exported original figure")
+    provenance = json.loads((_WEBSITE_ROOT / "project_import_manifest.json").read_text())
+    _check(provenance.get("entrypoint") == "papers/src/content/bioseqdb/thesis/main.tex",
+           "chapter provenance lost the original main.tex entry point")
+    source_root = _REPOSITORY_ROOT / "papers/src/content/bioseqdb/thesis"
+    for item in provenance.get("inputs", []):
+        path = source_root / item["path"]
+        _check(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"],
+               f"chapter source manifest is stale for {path}")
+    _check(len(provenance.get("inputs", [])) >= 60,
+           "chapter source manifest lost recursive includes/partials")
+    _parse_authored_runnable_fences(_WEBSITE_ROOT / version / "landing_examples.md")
 
 
 def _load_benchmark_fixture_contract(site: Path, base_path: str) -> dict:
-    """Bind browser checks to the generated content-classified benchmark bundle."""
-    manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
-    _check(len(manifest_paths) == 1,
-           f"expected one published benchmarks-manifest.json, got {manifest_paths}")
-    manifest_path = manifest_paths[0]
-    _check(not manifest_path.is_symlink() and manifest_path.is_file(),
-           f"published benchmark manifest is not a regular file: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if isinstance(manifest, list):
-        sources = manifest
-    elif isinstance(manifest, dict):
-        sources = manifest.get("sources", [])
-    else:
-        sources = []
-    _check(isinstance(sources, list) and bool(sources),
-           "published benchmark manifest has no JSON sources")
-
-    manifest_route = _public_route(
-        base_path, manifest_path.relative_to(site).as_posix())
-    manifest_url = f"https://website.invalid{manifest_route}"
-    site_root = site.resolve()
-    repository_root = _REPOSITORY_ROOT.resolve()
-    repository_identity = tuple(
-        part for part in urlsplit(_REPOSITORY_URL).path.split("/") if part)
-    _check(len(repository_identity) == 2,
-           f"repository URL has no owner/repository identity: {_REPOSITORY_URL}")
-
-    def repository_source(relative: Path, context: str) -> Path:
-        _check(not relative.is_absolute() and bool(relative.parts)
-               and all(part not in {"", ".", ".."} for part in relative.parts),
-               f"{context} has an invalid repository path: {relative}")
-        lexical = repository_root
-        for part in relative.parts:
-            lexical = lexical / part
-            _check(not lexical.is_symlink(),
-                   f"{context} traverses a repository symlink: {relative}")
-        try:
-            resolved = lexical.resolve(strict=True)
-            resolved.relative_to(repository_root)
-        except (OSError, ValueError) as error:
-            raise AssertionFail(
-                f"{context} escapes or is absent from the repository: {relative}: "
-                f"{error}") from None
-        _check(resolved.is_file(),
-               f"{context} is not a regular repository file: {relative}")
-        return resolved
-
-    records: list[dict] = []
-    local_source_routes: set[str] = set()
-    local_generated_paths: set[Path] = set()
-    local_source_sha256: dict[str, str] = {}
-    remote_sources: set[str] = set()
-    remote_artifacts: dict[str, bytes] = {}
-    source_values: set[str] = set()
-    reserved = {"params", "test_cases", "regression_rules", "meta", "benchmarks"}
-
-    for source_index, source in enumerate(sources):
-        if isinstance(source, str):
-            value = source
-        elif (isinstance(source, dict) and len(source) == 1
-              and set(source).issubset({"url", "path"})):
-            value = source.get("url", source.get("path", ""))
-        else:
-            value = ""
-        _check(isinstance(value, str) and bool(value),
-               f"benchmark manifest contains an invalid source: {source!r}")
-        _check(value not in source_values,
-               f"benchmark manifest repeats source {value!r}")
-        source_values.add(value)
-        parsed = urlsplit(value)
-        repository_relative: Path
-        generated_path: Path | None = None
-
-        if parsed.scheme or parsed.netloc:
-            decoded_path = unquote(parsed.path)
-            decoded_parts = tuple(
-                part for part in decoded_path.split("/") if part)
-            try:
-                port = parsed.port
-            except ValueError:
-                port = -1
-            _check(
-                parsed.scheme == "https"
-                and parsed.hostname in _BENCHMARK_REMOTE_HOSTS
-                and port is None
-                and parsed.username is None
-                and parsed.password is None
-                and not parsed.query
-                and not parsed.fragment
-                and len(decoded_parts) >= 4
-                and tuple(decoded_parts[:2]) == repository_identity
-                and re.fullmatch(r"[0-9a-f]{40}", decoded_parts[2]) is not None
-                and decoded_path == "/" + "/".join(decoded_parts)
-                and quote(decoded_path, safe="/-._~") == parsed.path
-                and "%" not in decoded_path
-                and "\\" not in decoded_path
-                and ".." not in decoded_parts
-                and "/blob/" not in parsed.path,
-                f"benchmark override is not a safe immutable public raw URL: {value}",
-            )
-            revision = decoded_parts[2]
-            repository_relative = Path(*decoded_parts[3:])
-            try:
-                remote_blob = subprocess.run(
-                    ["git", "show", f"{revision}:{repository_relative.as_posix()}"],
-                    cwd=repository_root,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=15,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as error:
-                raise AssertionFail(
-                    f"benchmark override Git lookup timed out: {value}") from error
-            _check(remote_blob.returncode == 0,
-                   f"benchmark override revision/path is unavailable locally: {value}")
-            body = remote_blob.stdout
-            remote_sources.add(value)
-            remote_artifacts[value] = body
-        else:
-            decoded_path = unquote(parsed.path)
-            decoded_parts = Path(decoded_path).parts
-            _check(
-                not parsed.path.startswith("/")
-                and not parsed.query
-                and not parsed.fragment
-                and len(decoded_parts) >= 2
-                and decoded_parts[0] == "benchmark-data"
-                and decoded_path == "/".join(decoded_parts)
-                and quote(decoded_path, safe="/-._~") == parsed.path
-                and "%" not in decoded_path
-                and "\\" not in decoded_path
-                and ".." not in decoded_parts,
-                f"same-origin benchmark source is not a canonical contained path: {value}",
-            )
-            lexical_generated_path = manifest_path.parent.joinpath(*decoded_parts)
-            current = manifest_path.parent
-            for part in decoded_parts:
-                current = current / part
-                _check(not current.is_symlink(),
-                       f"same-origin benchmark source traverses a symlink: {value}")
-            try:
-                generated_path = lexical_generated_path.resolve(strict=True)
-                generated_path.relative_to(site_root)
-            except (OSError, ValueError):
-                raise AssertionFail(
-                    f"benchmark manifest source escapes or is absent: {value}") from None
-            _check(generated_path.is_file(),
-                   f"same-origin benchmark artifact is missing: {generated_path}")
-            body = generated_path.read_bytes()
-            repository_relative = Path(*decoded_parts[1:])
-            authoritative = repository_source(
-                repository_relative, f"same-origin benchmark source {value}")
-            _check(body == authoritative.read_bytes(),
-                   f"published benchmark artifact rewrote source bytes: "
-                   f"{repository_relative.as_posix()}")
-            source_route = urlsplit(urljoin(manifest_url, value)).path
-            local_source_routes.add(source_route)
-            local_generated_paths.add(generated_path)
-            generated_relative = generated_path.relative_to(site_root).as_posix()
-            local_source_sha256[generated_relative] = hashlib.sha256(body).hexdigest()
-
-        source_name = Path(unquote(parsed.path)).name
-        try:
-            document = json.loads(body)
-        except json.JSONDecodeError as error:
-            raise AssertionFail(
-                f"benchmark artifact {value} is invalid JSON: {error}") from error
-        _check(isinstance(document, dict),
-               f"benchmark artifact {value} must be a JSON object")
-
-        configuration_keys = tuple(
-            key for key, block in document.items()
-            if key not in reserved
-            and isinstance(block, dict)
-            and isinstance(block.get("matrix"), dict)
-        )
-        configuration_claim = (
-            isinstance(document.get("params"), dict)
-            and bool(document["params"])
-            and isinstance(document.get("test_cases"), dict)
-            and bool(document["test_cases"])
-            and isinstance(document.get("regression_rules"), list)
-            and bool(configuration_keys)
-        )
-        report_claim = (
-            isinstance(document.get("benchmarks"), dict)
-            and bool(document["benchmarks"])
-            and isinstance(document.get("meta"), dict)
-        )
-        _check(configuration_claim != report_claim,
-               f"benchmark artifact {value} does not claim exactly one supported shape")
-
-        timestamp = 0
-        created = ""
-        if report_claim:
-            meta = document["meta"]
-            timestamp = meta.get("timestamp")
-            created = meta.get("created")
-            _check(type(timestamp) is int and timestamp >= 0
-                   and isinstance(created, str) and created.endswith("Z")
-                   and isinstance(meta.get("dirty"), bool)
-                   and meta.get("fast") is False
-                   and isinstance(meta.get("history_eligible"), bool),
-                   f"benchmark report {value} lacks current public writer metadata")
-            try:
-                parsed_created = datetime.fromisoformat(
-                    created.replace("Z", "+00:00"))
-                created_timestamp = int(parsed_created.timestamp())
-            except (OSError, OverflowError, ValueError) as error:
-                raise AssertionFail(
-                    f"benchmark report {value} has invalid created metadata: "
-                    f"{error}") from error
-            _check(parsed_created.tzinfo is not None
-                   and abs(created_timestamp - timestamp) <= 1,
-                   f"benchmark report {value} has inconsistent created/timestamp metadata")
-            for key, benchmark in document["benchmarks"].items():
-                _check(isinstance(key, str) and bool(key)
-                       and isinstance(benchmark, dict)
-                       and isinstance(benchmark.get("execution_tuples"), list)
-                       and bool(benchmark["execution_tuples"]),
-                       f"benchmark report {value} has an invalid benchmark block")
-
-        records.append({
-            "manifest_index": source_index,
-            "value": value,
-            "name": source_name,
-            "kind": "report" if report_claim else "configuration",
-            "document": document,
-            "repository_relative": repository_relative.as_posix(),
-            "configuration_keys": configuration_keys,
-            "timestamp": timestamp,
-            "created": created,
-        })
-
-    has_local_sources = bool(local_generated_paths)
-    _check(not (has_local_sources and remote_sources),
-           "benchmark manifest mixes same-origin data with remote overrides")
-    data_root = manifest_path.parent / "benchmark-data"
-    _check(not data_root.is_symlink(),
-           "published benchmark-data root must not be a symlink")
-    staged_files: set[Path] = set()
-    if data_root.exists():
-        _check(data_root.is_dir(),
-               "published benchmark-data root must be a directory")
-        for entry in sorted(data_root.rglob("*")):
-            _check(not entry.is_symlink(),
-                   f"published benchmark-data contains a symlink: {entry}")
-            if entry.is_dir():
-                continue
-            _check(entry.is_file(),
-                   f"published benchmark-data contains a special file: {entry}")
-            staged_files.add(entry.resolve())
-    if has_local_sources:
-        _check(staged_files == local_generated_paths,
-               "published benchmark-data inventory differs from manifest sources: "
-               f"staged={sorted(str(path) for path in staged_files)}, "
-               f"manifest={sorted(str(path) for path in local_generated_paths)}")
-    else:
-        _check(not staged_files,
-               "remote benchmark override retained same-origin benchmark data")
-
-    if has_local_sources:
-        expected_records = sorted(
-            (record for record in records if record["kind"] == "configuration"),
-            key=lambda record: record["repository_relative"],
-        ) + sorted(
-            (record for record in records if record["kind"] == "report"),
-            key=lambda record: (
-                -record["timestamp"], record["repository_relative"]),
-        )
-        _check(records == expected_records,
-               "same-origin benchmark manifest is not in deterministic "
-               "configuration/metadata-newest order")
-
-    benchmarks: dict[str, dict] = {}
-
-    def ensure_benchmark(key: str) -> dict:
-        if key not in benchmarks:
-            benchmarks[key] = {
-                "key": key,
-                "title": key,
-                "has_results": False,
-                "runs": [],
-            }
-        return benchmarks[key]
-
-    for record in records:
-        if record["kind"] != "configuration":
-            continue
-        for key in record["configuration_keys"]:
-            ensure_benchmark(key)
-    for record in records:
-        if record["kind"] != "report":
-            continue
-        for key, benchmark in record["document"]["benchmarks"].items():
-            model_benchmark = ensure_benchmark(key)
-            model_benchmark["has_results"] = True
-            model_benchmark["title"] = benchmark.get("title") or model_benchmark["title"]
-            tuples = benchmark["execution_tuples"]
-            case_set = {
-                case
-                for execution_tuple in tuples
-                if isinstance(execution_tuple, dict)
-                for case in (execution_tuple.get("test_cases") or {})
-            }
-            model_benchmark["runs"].append({
-                "manifest_index": record["manifest_index"],
-                "name": record["name"],
-                "created": record["created"],
-                "timestamp": record["timestamp"],
-                "score": len(tuples) * max(1, len(case_set)),
-            })
-
-    _check(bool(benchmarks), "benchmark sources expose no configured benchmark keys")
-    model_order = sorted(
-        benchmarks,
-        key=lambda key: (
-            0 if benchmarks[key]["has_results"] else 1,
-            key,
-        ),
-    )
-    for benchmark in benchmarks.values():
-        benchmark["runs"].sort(key=lambda run: run["manifest_index"])
-        benchmark["runs"].sort(key=lambda run: run["created"], reverse=True)
-        benchmark["runs"].sort(key=lambda run: run["score"], reverse=True)
-    benchmark_key = sorted(
-        model_order,
-        key=lambda key: -(
-            benchmarks[key]["runs"][0]["score"]
-            if benchmarks[key]["runs"] else 0
-        ),
-    )[0]
-    benchmark = benchmarks[benchmark_key]
-    default_report = benchmark["runs"][0] if benchmark["runs"] else None
-    if default_report is not None:
-        equally_rich = [
-            run for run in benchmark["runs"]
-            if run["score"] == default_report["score"]
-        ]
-        _check(default_report["timestamp"] == max(
-                   run["timestamp"] for run in equally_rich),
-               "default report is not the metadata-newest equally rich run")
-
+    """Bind browser comparisons to the same approved cells as the chapter."""
+    paths = sorted(site.rglob("project-benchmarks.json"))
+    _check(len(paths) == 1, f"expected one published benchmark dataset, got {paths}")
+    path = paths[0]
+    payload = path.read_bytes()
+    source = _WEBSITE_ROOT / "static/project-benchmarks.json"
+    _check(payload == source.read_bytes(), "published benchmark data differs from source")
+    document = json.loads(payload)
+    _check(document.get("schema") == "bioseq.project-benchmarks.v1",
+           "unsupported project benchmark schema")
+    tables = document.get("tables", {})
+    _check(len(tables) == 10, "chapter benchmark source panels were omitted")
+    cells = [cell for table in tables.values() for row in table["rows"]
+             for cell in row["cells"].values()]
+    _check(len(cells) == document["counts"]["cells"], "benchmark cell count drift")
+    _check(sum(cell["a_ns"] is not None for cell in cells)
+           == document["counts"]["measured"], "benchmark measurement count drift")
+    for cell in cells:
+        _check((cell["a_ns"] is None) == (cell["b_ns"] is None),
+               "benchmark cell contains only one of its A/B measurements")
+        if cell["a_ns"] is not None:
+            _check(cell["a_ns"] > 0 and cell["b_ns"] > 0
+                   and cell["samples"] >= 1, "invalid published benchmark timing")
+    results_root = _REPOSITORY_ROOT / "research_benchmarks/paper/e2e"
+    for name, expected in document["sources"].items():
+        _check(Path(name).name == name, "benchmark source must be a filename")
+        _check(hashlib.sha256((results_root / name).read_bytes()).hexdigest() == expected,
+               f"published benchmark snapshot is stale: {name}")
+    key = max(tables, key=lambda k: len(tables[k]["rows"]) * len(tables[k]["columns"]))
+    route = _public_route(base_path, path.relative_to(site).as_posix())
     return {
-        "key": benchmark_key,
-        "title": benchmark["title"],
-        "benchmark_count": len(benchmarks),
-        "default_report": default_report,
-        "sources": sources,
-        "manifest_route": manifest_route,
-        "local_source_routes": local_source_routes,
-        "local_source_sha256": dict(sorted(local_source_sha256.items())),
-        "remote_sources": remote_sources,
-        "remote_artifacts": remote_artifacts,
-        "same_origin": has_local_sources,
+        "key": key, "title": tables[key]["title"], "tables": tables,
+        "benchmark_count": len(tables), "manifest_route": route,
+        "local_source_routes": {route}, "remote_sources": set(),
+        "remote_artifacts": {}, "same_origin": True,
     }
 
 
@@ -1076,9 +600,10 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for tutorial in tutorials:
         slug = tutorial["slug"]
         examples = tutorial.get("sql_examples", [])
-        _check(len(examples) == _EXPECTED_RUNNABLE_COUNTS[slug],
-               f"{slug} must carry {_EXPECTED_RUNNABLE_COUNTS[slug]} "
-               f"runnable example(s), got {len(examples)}")
+        authored_ids = _parse_authored_runnable_fences(
+            _WEBSITE_ROOT / version / "tutorials" / f"{slug}.md")
+        _check([example.get("local_id") for example in examples] == authored_ids,
+               f"{slug}: resolved runnable examples differ from the authored fences")
         groups = _runnable_output_groups(tutorial.get("content", []))
         local_ids = [example.get("local_id", "") for example in examples]
         _check(all(bool(identifier) for identifier in local_ids),
@@ -1112,10 +637,13 @@ def _load_static_contract(site: Path, base_path: str, version: str,
                        and f"SQLSTATE {sqlstate}:" in _node_text({"children": result_nodes}),
                        f"{canonical_id}: expected error output lost SQLSTATE {sqlstate}")
             else:
-                _check(bool(tables),
-                       f"{canonical_id}: successful runnable SQL has no result table")
+                output_text = _node_text({"children": result_nodes})
+                _check(bool(tables) or re.search(
+                    r"\b(?:CREATE (?:TABLE|EXTENSION)|ALTER TABLE|DROP TABLE|"
+                    r"INSERT \d+ \d+|UPDATE \d+|DELETE \d+|SET|RESET|CALL|DO)\b", output_text),
+                    f"{canonical_id}: successful SQL has neither rows nor a command status")
                 for table in tables:
-                    _check(len(table) >= 2 and bool(table[0])
+                    _check(len(table) >= 1 and bool(table[0])
                            and all(bool(cell.strip()) for cell in table[0]),
                            f"{canonical_id}: result table lacks readable columns or rows")
 
@@ -1137,193 +665,16 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     _check(len(model_runnable_ids) == len(set(model_runnable_ids)),
            "resolved runnable ids must be globally unique")
 
-    sequence_annotations = _nodes_of_kind(
-        by_slug["sequence_column_type"].get("content", []), "code_annotation")
-    _check(len(sequence_annotations) == 2,
-           "sequence type anatomy must contain exactly two Markdown annotations")
-    annotation_titles = [item.get("attributes", {}).get("title")
-                         for item in sequence_annotations]
-    _check(annotation_titles == ["Alphabet", "Storage-unit width"],
-           f"unexpected anatomy annotation titles: {annotation_titles}")
-
-    columnar_example = by_slug[
-        "columnar_storage_and_vectorized_aggregates"
-    ]["sql_examples"][0]
-    _check("EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)"
-           in columnar_example["visible_sql"]
-           and "bioseq.list_seq_storage_shards" not in columnar_example["visible_sql"],
-           "columnar tutorial must execute its analyzed aggregate without "
-           "administrator-only shard inspection")
-    columnar_results = "\n".join(
-        cell
-        for table in _result_tables(by_slug[
-            "columnar_storage_and_vectorized_aggregates"].get("content", []))
-        for row in table
-        for cell in row
-    )
-    _check("Custom Scan (VectorAggNode)" in columnar_results
-           and "Custom Scan (BioseqScan)" in columnar_results,
-           "columnar aggregate example did not capture VectorAggNode over BioseqScan")
-
-    generation_example = by_slug["sequence_generation"]["sql_examples"][0]
-    for spelling in (
-        "bioseq.create_sample_table", "bioseq.create_query_target_sample_table",
-        "same_seed_same_sequence", "truth_target_start", "effective_error_rate",
-    ):
-        _check(spelling in generation_example["visible_sql"],
-               f"generation example visible SQL is missing {spelling}")
-
-    io_example = by_slug["fasta_fastq_gzip_and_io"]["sql_examples"][0]
-    for spelling in (
-        "bioseq.load", "landing_reads.fasta",
-        "bioseq.update_index", "minimizers_per_fragment",
-        "symbol_counts", "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)",
-    ):
-        _check(spelling in io_example["visible_sql"],
-               f"local-I/O example visible SQL is missing {spelling}")
-
-    index_example = by_slug[
-        "index_lifecycle_and_metadata"
-    ]["sql_examples"][0]
-    for spelling in (
-        "bioseq.list_metadata()", "bioseq.update_index",
-        "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
-        "index_read_requirement => 2",
-        "bioseq.last_alignment_execution_stats()", "stage = 'query_sketch'",
-    ):
-        _check(spelling in index_example["visible_sql"],
-               f"index-lifecycle example visible SQL is missing {spelling}")
-    index_results = "\n".join(
-        cell
-        for table in _result_tables(by_slug[
-            "index_lifecycle_and_metadata"].get("content", []))
-        for row in table
-        for cell in row
-    )
-    _check("Custom Scan (BioseqBatchJoin)" in index_results
-           and "require_compatible_persisted" in index_results
-           and "Bioseq Fetched From Meta" in index_results
-           and "actual_index_source=persisted" in index_results,
-           "index lifecycle did not capture public persisted-route evidence")
-    index_tables = _result_tables(
-        by_slug["index_lifecycle_and_metadata"].get("content", []))
-    stats_table = next((table for table in index_tables
-                        if table and table[0][0].startswith(
-                            "requested_target_index_source")), None)
-    _check(stats_table is not None and len(stats_table) == 2,
-           "index lifecycle needs one captured query-sketch statistics row")
-    stats = dict(zip(stats_table[0], stats_table[1]))
-    _check(stats.get("requested_target_index_sourcetext") == "persisted"
-           and stats.get("actual_target_index_sourcetext") == "persisted"
-           and int(stats.get("persisted_index_rowsbigint", "0")) > 0
-           and stats.get("missing_persisted_index_rowsbigint") == "0"
-           and stats.get("recomputed_target_index_rowsbigint") == "0"
-           and int(stats.get("persisted_generation_read_sessionsbigint", "0")) > 0,
-           "index lifecycle statistics do not prove persisted reads without recomputation")
-    batch_rows = re.search(
-        r"Custom Scan \(BioseqBatchJoin\).*\brows=([0-9]+)", index_results)
-    _check(batch_rows is not None and int(batch_rows.group(1)) > 0,
-           "index lifecycle must find matches through its persisted batch join")
-
-    similarity_sql = by_slug["similarity_search"]["sql_examples"][0]["visible_sql"]
-    required_sql = (
-        "public.mmsearch", "bioseq.query_start", "bioseq.query_end",
-        "bioseq.target_start", "bioseq.target_end", "bioseq.cigar",
-        "CTAGTCACTGTAGCCTGATCGTAGCTAGT",
-    )
-    for spelling in required_sql:
-        _check(spelling in similarity_sql,
-               f"similarity tutorial visible SQL is missing {spelling}")
-    similarity_tables = _result_tables(
-        by_slug["similarity_search"].get("content", []))
-    _check(len(similarity_tables) == 2
-           and similarity_tables[0][0][0].startswith("QUERY PLAN")
-           and len(similarity_tables[0]) > 1
-           and len(similarity_tables[1]) > 1
-           and "Custom Scan (BioseqScan)" in "\n".join(
-               row[0] for row in similarity_tables[0][1:]),
-           "similarity tutorial must capture its BioseqScan plan and result table")
-
-    cache_examples = by_slug["query_cache"]["sql_examples"]
-    _check("bioseq_cache.stats()" in cache_examples[0]["visible_sql"],
-           "exact-query cache example does not publish production stats")
-    _check("bioseq_cache.entries()" in cache_examples[1]["visible_sql"],
-           "reusable-fragment cache example does not inspect entries")
-    _check(cache_examples[2].get("expected_sqlstate") == "42501"
-           and "invalidate_relation" in cache_examples[2]["visible_sql"],
-           "cache invalidation error example lost its exact SQLSTATE contract")
-    highway_sql = by_slug["highway_runtime_dispatch"]["sql_examples"][0]
-    _check("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)" in highway_sql["visible_sql"],
-           "Highway tutorial does not execute an analyzed JSON plan")
-    highway_results = "\n".join(
-        cell
-        for table in _result_tables(
-            by_slug["highway_runtime_dispatch"].get("content", []))
-        for row in table
-        for cell in row
-    )
-    for label in (
-        "Highway Compiled Targets", "CPU-Supported Targets",
-        "Runnable Targets", "Planned Architecture", "Executed Architecture",
-    ):
-        _check(label in highway_results,
-               f"executed Highway plan is missing label {label}")
-
-    explain_example = by_slug["reading_bioseq_explain"]["sql_examples"][0]
-    _check("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS OFF)"
-           in explain_example["visible_sql"],
-           "EXPLAIN tutorial does not publish its analyzed text plan")
-    explain_tables = _result_tables(
-        by_slug["reading_bioseq_explain"].get("content", []))
-    _check(len(explain_tables) == 1
-           and explain_tables[0][0][0].startswith("QUERY PLAN")
-           and len(explain_tables[0]) > 2,
-           "EXPLAIN tutorial did not capture a formatted PostgreSQL plan table")
-    explain_output = "\n".join(row[0] for row in explain_tables[0][1:])
-    for label in (
-        "Custom Scan (BioseqScan)", "One-to-many alignment:",
-        "Highway Compiled Targets", "Executed Architecture",
-        "| QuerySketchStage:", "| chain_stage:", "| align_stage:",
-        "* Execution statistics [", "* Index outcomes [",
-    ):
-        _check(label in explain_output,
-               f"executed text plan is missing Bioseq section {label}")
-    scan_rows = re.search(
-        r"Custom Scan \(BioseqScan\).*\brows=([0-9]+)", explain_output)
-    _check(scan_rows is not None and int(scan_rows.group(1)) > 0,
-           "EXPLAIN tutorial must demonstrate a search that finds matches")
-
-    remote_content = by_slug["remote_provider_to_search"].get("content", [])
-    remote_table_nodes = [
-        node for node in _nodes_of_kind(remote_content, "table")
-        if node.get("attributes", {}).get("class") == "result-table"
-    ]
-    _check(bool(remote_table_nodes)
-           and bool(remote_table_nodes[0].get("children")),
-           "remote-provider tutorial has no captured capability table model")
-    remote_header_contract: list[tuple[str, str]] = []
-    for cell in remote_table_nodes[0]["children"][0].get("children", []):
-        children = cell.get("children", [])
-        type_nodes = [child for child in children
-                      if child.get("kind") == "code_span"]
-        name = "".join(_node_text(child) for child in children
-                       if child.get("kind") not in {"code_span", "line_break"})
-        _check(len(type_nodes) == 1 and bool(name),
-               "remote-provider capability header lost its name/type model")
-        remote_header_contract.append((name, _node_text(type_nodes[0])))
-    _check(remote_header_contract == [
-               ("schema_ready", "boolean"),
-               ("table_am_ready", "boolean"),
-               ("relation_count", "bigint"),
-           ],
-           "remote-provider capability columns lost PostgreSQL format_type labels")
-    remote_tables = _result_tables(remote_content)
-    _check(len(remote_tables) == 2
-           and remote_tables[0][0] == [
-               name + type_name for name, type_name in remote_header_contract]
-           and len(remote_tables[0]) == 2
-           and len(remote_tables[1]) >= 2,
-           "remote-provider tutorial must show honest capability and search results")
+    # Captured rows and provenance are checked for every runnable block above;
+    # theoretical SQL/EXPLAIN samples remain ordinary authored code blocks.
+    readme_sql = "\n".join(example["visible_sql"]
+                            for example in by_slug["getting_started"]["sql_examples"])
+    for token in ("CREATE TABLE", "bioseq.load", "bioseq.update_index", "mmsearch"):
+        _check(token in readme_sql, f"README runnable tutorial lost {token!r}")
+    for slug in ("project_introduction", "project_sequence_abstractions",
+                 "project_postgres_custom_scan", "project_index_storage"):
+        _check(bool(by_slug[slug].get("sql_examples")),
+               f"{slug}: practical project SQL lost its runnable embedding")
 
     landing = {item.get("slot"): item for item in model.get("landing_examples", [])}
     expected_slots = {"hero_query", "sequence_storage", "similarity_search"}
@@ -1342,35 +693,24 @@ def _load_static_contract(site: Path, base_path: str, version: str,
         _check("TEMPORARY" not in item.get("visible_sql", ""),
                f"landing slot {slot} contains disabled SQL")
 
+    # Landing slots use the original README SQL and the same isolated fixtures.
     filter_sql = landing["similarity_search"]["visible_sql"]
-    for spelling in (
-        "CREATE TABLE reference_reads", "organism = 'Homo sapiens'",
-        "collected_on >= DATE '2025-01-01'", "bioseq.len(seq) >= 1000",
-        "public.mmsearch", "ORDER BY quality_score DESC, accession", "LIMIT 25",
-    ):
+    for spelling in ("FROM samples AS t JOIN samples AS q", "mmsearch",
+                     "bioseq.target_start", "bioseq.query_start", "bioseq.cigar"):
         _check(spelling in filter_sql,
-               f"landing Filter and sort SQL is missing {spelling}")
+               f"landing sequence-join example lost {spelling!r}")
     _check([column.get("name") for column in
             landing["similarity_search"]["result"].get("columns", [])]
-           == ["id", "accession", "organism", "bases"],
-           "landing Filter and sort did not publish its final SELECT result")
-
+           == ["target_id", "query_id", "target_start", "target_end",
+               "query_start", "query_end", "score", "cigar"],
+           "landing sequence join did not publish its final SELECT result")
     load_sql = landing["sequence_storage"]["visible_sql"]
-    for spelling in (
-        "CREATE TABLE run_reads", "row_no", "bigserial PRIMARY KEY",
-        "run_name      name NOT NULL DEFAULT 'run_042'",
-        "SET bioseq.index.insert_maintenance.enabled = off",
-        "bioseq.update_index", "minimizers_per_fragment",
-        "bioseq.load", "landing_reads.fasta", "bioseq.column_mapping",
-        "INSERT INTO run_reads", "public.mmsearch", "bioseq.target_start",
-        "bioseq.target_end", "ORDER BY collected_on DESC, read_id",
-    ):
+    for spelling in ("CREATE TABLE imported", "bioseq.load", "readme_samples.fasta"):
         _check(spelling in load_sql,
-               f"landing Load and index SQL is missing {spelling}")
+               f"landing README load example lost {spelling!r}")
     _check([column.get("name") for column in
-            landing["sequence_storage"]["result"].get("columns", [])]
-           == ["read_id", "sample_id", "match_start", "match_end"],
-           "landing Load and index did not publish its final SELECT result")
+            landing["sequence_storage"]["result"].get("columns", [])] == ["load"],
+           "landing load example did not publish the loader's actual result")
 
     tutorials_dir = site / version / "tutorials"
     _check(not (tutorials_dir / "index.html").exists(),
@@ -1481,32 +821,8 @@ def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
     base = mount if mount else ""
     return {
         "landing": f"{base}/",
-        "tutorial_quick":
-            f"{base}/{version}/tutorials/quick_read_search_write/",
-        "tutorial_sequence":
-            f"{base}/{version}/tutorials/sequence_column_type/",
-        "tutorial_columnar":
-            f"{base}/{version}/tutorials/columnar_storage_and_vectorized_aggregates/",
-        "tutorial_generation":
-            f"{base}/{version}/tutorials/sequence_generation/",
-        "tutorial_io":
-            f"{base}/{version}/tutorials/fasta_fastq_gzip_and_io/",
-        "tutorial_index":
-            f"{base}/{version}/tutorials/index_lifecycle_and_metadata/",
-        "tutorial_slice":
-            f"{base}/{version}/tutorials/slice_concat_reverse/",
-        "tutorial_similarity":
-            f"{base}/{version}/tutorials/similarity_search/",
-        "tutorial_columns":
-            f"{base}/{version}/tutorials/multiple_sequence_columns_and_joins/",
-        "tutorial_remote":
-            f"{base}/{version}/tutorials/remote_provider_to_search/",
-        "tutorial_cache":
-            f"{base}/{version}/tutorials/query_cache/",
-        "tutorial_highway":
-            f"{base}/{version}/tutorials/highway_runtime_dispatch/",
-        "tutorial_explain":
-            f"{base}/{version}/tutorials/reading_bioseq_explain/",
+        **{f"tutorial:{slug}": f"{base}/{version}/tutorials/{slug}/"
+           for slug in _EXPECTED_TUTORIALS},
         "reference": f"{base}/{version}/reference/",
         "entity": _discover_entity_route(site, base, version),
         "benchmarks": f"{base}/benchmarks/",
@@ -1676,36 +992,6 @@ def _exercise_copy(page) -> None:
         raise AssertionFail(f"docs copy failure was announced as success: {error}")
 
 
-def _exercise_annotations(page) -> None:
-    """The sequence-type anatomy is Markdown-owned and must reproduce the two-card
-    supplied component exactly."""
-    anatomy = page.locator("figure.annotated-type[data-annotated-type]")
-    _check(anatomy.count() == 1, "Markdown anatomy did not render its stable component")
-    expression = anatomy.locator(".annotated-type-expression code[data-code]")
-    _check(expression.count() == 1
-           and (expression.text_content() or "").strip() == "bioseq.seq('dna4', 64)",
-           "annotated anatomy expression differs from the supplied component")
-    marks = anatomy.locator("mark.anno.annotated-type-value[data-anno]")
-    count = marks.count()
-    _check(count == 2, f"sequence anatomy requires 2 annotation marks, got {count}")
-    cards = anatomy.locator(
-        "ol.annotated-type-cards[data-split] > li.annotated-type-card[data-anno-card]")
-    _check(cards.count() == count,
-           f"{count} annotation mark(s) but {cards.count()} callout card(s)")
-    nums = cards.locator(".anno-card-num")
-    _check(nums.count() == count, "each callout card must carry a number badge")
-    _check([marks.nth(i).inner_text() for i in range(count)] == ["'dna4'", "64"],
-           "anatomy marks must target exactly 'dna4' and 64")
-    titles = cards.locator(".anno-card-title")
-    _check([(titles.nth(i).text_content() or "").strip() for i in range(titles.count())]
-           == ["Alphabet", "Storage-unit width"],
-           "anatomy callout titles do not match the supplied two-card component")
-    body = cards.all_inner_texts()
-    _check("four-symbol DNA alphabet" in body[0]
-           and "does not limit the sequence to 64 bases" in body[1],
-           "anatomy callout explanations are not the authored Markdown text")
-
-
 def _exercise_code_entities(page, expected_ids: set[str]) -> None:
     """Verify repeatable fence entity declarations became exact in-code hover
     ranges after Prism without changing source text."""
@@ -1776,12 +1062,12 @@ def _exercise_docs_search(page, request_urls: list[str], contract: dict,
     page.locator("body").press("/")
     _check(inp.evaluate("el => el === document.activeElement"),
            "the docs '/' shortcut did not focus search")
-    inp.fill("mmsearch")
+    inp.fill("PostgreSQL API")
     results = dropdown.locator("a[href]")
     try:
         results.first.wait_for(state="visible", timeout=4000)
     except Exception as error:  # noqa: BLE001
-        raise AssertionFail(f"docs search produced no visible mmsearch results: {error}")
+        raise AssertionFail(f"docs search produced no visible PostgreSQL API results: {error}")
     hrefs = [results.nth(index).get_attribute("href") or ""
              for index in range(results.count())]
     href_paths = [urlsplit(href).path for href in hrefs]
@@ -1997,8 +1283,8 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
     _check(actual == comparison_expected,
            f"{tutorial['slug']}: rendered SQL cells differ from real PostgreSQL model")
     for index, expected_table in enumerate(expected):
-        _check(len(expected_table) >= 2 and bool(expected_table[0]),
-               f"{tutorial['slug']}: captured result table has no data row")
+        _check(len(expected_table) >= 1 and bool(expected_table[0]),
+               f"{tutorial['slug']}: captured result table has no column header")
         expected_columns = len(expected_table[0]) if expected_table else 0
         type_labels = tables.nth(index).locator("thead th code")
         _check(type_labels.count() == expected_columns
@@ -2027,18 +1313,64 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
                f"{tutorial['slug']}: EXPLAIN rows lost pre-wrap rendering")
 
 
-def _exercise_markdown_callouts(page, slug: str) -> None:
-    if slug == "sequence_column_type":
-        _check(page.locator(".admonition-note").count() == 1,
-               "sequence tutorial Markdown NOTE callout is missing")
-        _check(page.locator(".admonition-tip").count() == 1,
-               "sequence tutorial Markdown TIP callout is missing")
-    else:
-        important = page.locator(".admonition-important")
-        _check(important.count() == 1,
-               "similarity tutorial Markdown IMPORTANT callout is missing")
-        _check("BioseqScan" in important.inner_text(),
-               "similarity tutorial callout lost its planner assertion explanation")
+def _exercise_project_content(page, tutorial: dict, base_path: str, version: str) -> None:
+    """Original diagrams, mathematics, bibliography, and source links survive rendering."""
+    slug = tutorial["slug"]
+    source = (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text()
+    expected_figures = re.findall(r'/static/figures/project/[^)\s]+\.svg', source)
+    figures = page.locator('main#doc-main img[src*="/figures/project/"]')
+    _check(figures.count() == len(expected_figures),
+           f"{slug}: original figure count changed during rendering")
+    loaded = figures.evaluate_all("""async images => {
+        images.forEach(image => { image.loading = 'eager'; });
+        return await Promise.all(images.map(async image => {
+            try { await image.decode(); return true; }
+            catch { return false; }
+        }));
+    }""")
+    _check(all(loaded), f"{slug}: an original SVG failed to decode")
+    _check(figures.evaluate_all("images => images.every(image => image.complete && image.naturalWidth > 0)"),
+           f"{slug}: an original SVG failed to load")
+    if expected_figures:
+        _check(figures.evaluate_all(
+            "images => images.every(image => getComputedStyle(image).backgroundColor === 'rgb(255, 255, 255)')"),
+            f"{slug}: original figure text needs its light background")
+    bibliography = _public_route(base_path, f"{version}/tutorials/bibliography/")
+    citations = page.locator('main#doc-main a[href*="#ref-"]')
+    for index in range(citations.count()):
+        href = citations.nth(index).get_attribute("href") or ""
+        _check(urlsplit(urljoin(page.url, href)).path == bibliography,
+               f"{slug}: citation no longer points to the bibliography: {href}")
+    _check(page.locator("main#doc-main .katex-error").count() == 0,
+           f"{slug}: mathematical content contains a KaTeX parse error")
+    math = page.locator("main#doc-main [data-math]")
+    _check(math.evaluate_all("nodes => nodes.every(node => node.querySelector('math'))"),
+           f"{slug}: project mathematics was left as raw LaTeX")
+    if slug == "project_biology":
+        _check(math.count() > 0, "biology formulas were not rendered")
+    if slug == "project_postgres_custom_scan":
+        links = page.locator('main#doc-main a[href^="https://github.com/"][href*="/blob/"]')
+        _check(links.count() >= 5, "original PostgreSQL source references were lost")
+        _check(links.evaluate_all(
+            "links => links.every(link => link.matches('.source-link') && link.querySelector('svg.github-mark'))"),
+            "original PostgreSQL source references lost their GitHub icons")
+        plans = page.locator("main#doc-main code.language-pgsql-plan")
+        _check(plans.count() > 0 and plans.locator(".token.plan-node").count() > 0,
+               "authored EXPLAIN examples lost plan-specific highlighting")
+    if slug == "bibliography":
+        _check(page.locator('main#doc-main [id^="ref-"]').count() >= 100,
+               "bibliography reference targets were lost")
+    if slug == "project_benchmarking":
+        chapter_text = page.locator("main#doc-main").inner_text()
+        for value in ("7.68 cores", "120.8 GiB", "32,607 MiB", "595.84",
+                      "1.4.329", "500.28 GB", "6,000 IOPS / 500 MiB/s"):
+            _check(value in chapter_text,
+                   f"benchmark machine specification lost its original value: {value}")
+    if slug == "project_configuration_reference":
+        values = page.locator("main#doc-main td").all_inner_texts()
+        _check("1: require_absent" in values
+               and "2: require_compatible_persisted" in values,
+               "index-read policy table lost its original numeric option codes")
 
 
 def _assert_landing_routes(page, base_path: str, version: str) -> None:
@@ -2258,8 +1590,10 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
             ("marginTop", "marginRight", "marginBottom", "marginLeft", "paddingTop",
              "paddingRight", "paddingBottom", "paddingLeft", "overflowX"),
             "Markdown code geometry")
+        code_reference = dict(records["data-code:first"])
+        code_reference["style"] += ";font-size:13px;line-height:1.65;color:#cbd8e4"
         _compare_design_style(
-            page, ".doc-code:not(:has(.anno-cards)) code", records["data-code:first"],
+            page, ".doc-code:not(:has(.anno-cards)) code", code_reference,
             ("fontFamily", "fontSize", "lineHeight", "color"),
             "Markdown code typography")
 
@@ -2296,10 +1630,12 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
           const code = pre.querySelector('code.language-sql');
           figure.style.cssText = termStyle;
           pre.style.cssText = preStyle;
+          pre.style.fontSize = '13px';
+          pre.style.lineHeight = '1.65';
           code.style.fontFamily = "'IBM Plex Mono'";
-          code.style.fontSize = '14px';
-          code.style.lineHeight = '1.85';
-          code.style.color = palette.operator;
+          code.style.fontSize = '13px';
+          code.style.lineHeight = '1.65';
+          code.style.color = palette.plain;
           code.style.background = 'transparent';
           code.style.textShadow = 'none';
           const paint = (selector, colour, weight = '') => {
@@ -2310,7 +1646,7 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
           };
           paint('.token.comment,.token.prolog,.token.doctype,.token.cdata', palette.comment);
           paint('.token.keyword,.token.atrule,.token.selector', palette.keyword);
-          paint('.token.function,.token.function-name,.token.predicate', palette.function, '600');
+          paint('.token.function,.token.function-name,.token.predicate', palette.function, '500');
           paint('.token.class-name,.token.type,.token.namespace', palette.type);
           paint('.token.builtin', palette.builtin);
           paint('.token.string,.token.char,.token.regex', palette.string);
@@ -2320,7 +1656,7 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
         }""",
         {"termStyle": docs["data-term:first"]["style"],
          "preStyle": docs["data-code:first"]["style"],
-         "palette": _DESIGN_PALETTE},
+         "palette": _CODE_PALETTE},
     )
     reference = pre.screenshot(path=str(reference_path), animations="disabled")
     _check(actual == reference,
@@ -2534,207 +1870,83 @@ def _release_benchmark_fetches(page) -> None:
 
 def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
                          base_path: str, version: str) -> None:
-    """Exercise the copied shell against every dynamically discovered artifact."""
+    """Check same-column A/B ratios, controls and accessible design tooltips."""
     benchmark = contract["benchmarks"]
-    _check((page.locator("h1").inner_text()).strip() == benchmark["title"],
-           "benchmark heading is not derived from discovered benchmark content")
-    _check(benchmark["key"] in page.locator("main").inner_text(),
-           f"rendered benchmark model is missing real key {benchmark['key']}")
+    panel = benchmark["tables"][benchmark["key"]]
+    _check(page.locator("h1").inner_text().strip() == benchmark["title"],
+           "benchmark heading differs from the published panel")
     _check(f"{benchmark['benchmark_count']} benchmarks" in
-           page.locator("#bhead").inner_text(),
-           "benchmark status does not reflect the complete supplied artifact model")
-    _check(page.locator("[data-bnav]").count() == 1,
-           "benchmark model has no copied navigation rail")
-    _check(page.locator("[data-bnav]", has_text=benchmark["key"]).count() == 1,
-           "benchmark navigation was not populated from the real artifacts")
-    expected_header_routes = {
+           page.locator("#bhead").inner_text(), "benchmark status count is stale")
+    for label, expected in {
         "Docs": _public_route(base_path, f"{version}/"),
         "Product": _public_route(base_path, ""),
         "Benchmarks": _public_route(base_path, "benchmarks/"),
-    }
-    for text_value, expected_route in expected_header_routes.items():
-        link = page.locator("#bhead nav a", has_text=text_value)
-        _check(link.count() == 1
-               and urlsplit(link.get_attribute("href") or "").path == expected_route,
-               f"benchmark {text_value} navigation does not preserve mount "
-               f"{expected_route}")
-
+    }.items():
+        link = page.locator("#bhead nav a", has_text=label)
+        _check(link.count() == 1 and urlsplit(link.get_attribute("href")).path == expected,
+               f"benchmark {label} navigation lost the configured mount")
     controls = page.locator("[data-ctrls] select")
-    _check(controls.count() == 4,
-           f"benchmark comparison requires four filters, got {controls.count()}")
-    for index in range(controls.count()):
-        _check(controls.nth(index).locator("option").count() >= 1,
-               f"benchmark filter {index} has no model-derived options")
-    statistic = controls.nth(1)
-    _check(statistic.locator("option[value='P01']").count() == 1,
-           "benchmark statistic filter lost the P01 option")
-    default_report = benchmark["default_report"]
-    if default_report is not None:
-        report_chip = page.locator("#benchmark-main").get_by_text(
-            default_report["name"], exact=True)
-        _check(report_chip.count() == 1,
-               "benchmark page did not select the metadata-newest default report")
-        report_chip.hover()
-        report_tooltips: list[str] = []
-        for _ in range(120):
-            report_tooltips = page.evaluate(
-                """() => [...document.body.querySelectorAll('*')]
-                  .filter((node) => {
-                    const style = getComputedStyle(node);
-                    return style.position === 'fixed' &&
-                      style.pointerEvents === 'none' && Number(style.opacity) > 0;
-                  })
-                  .map((node) => (node.textContent || '').trim())
-                  .filter(Boolean)""")
-            if report_tooltips:
-                break
-            page.wait_for_timeout(25)
-        _check(any(default_report["created"] in text
-                   for text in report_tooltips),
-               "selected report tooltip does not expose its newest metadata")
-
-        metric = controls.nth(0)
-        metric_index = min(1, metric.locator("option").count() - 1)
-        metric_value = (
-            metric.locator("option").nth(metric_index).get_attribute("value") or "")
-        metric.select_option(metric_value)
-        page.wait_for_function(
-            "metric => document.body.textContent.includes(metric)", metric_value)
-        _check(metric.input_value() == metric_value,
-               "benchmark metric filter did not retain its selected value")
-        statistic.select_option("P01")
-        page.wait_for_function(
-            "() => document.body.textContent.includes('P01 of')")
-        _check("P01 of" in page.locator("main").inner_text(),
-               "benchmark statistic filter did not update the rendered table note")
-        baseline = controls.nth(3)
-        if baseline.locator("option").count() > 1:
-            baseline_value = (
-                baseline.locator("option").nth(1).get_attribute("value") or "")
-            baseline.select_option(baseline_value)
-            page.wait_for_function(
-                "value => document.body.textContent.includes('baseline ' + value)",
-                baseline_value)
-            _check(baseline.input_value() == baseline_value,
-                   "benchmark baseline filter did not retain its selected value")
-        direction = page.get_by_role("button", name="↑ higher is better")
-        _check(direction.count() == 1, "benchmark direction filter is missing")
-        direction.click()
-    else:
-        statistic.select_option("P01")
-        _check(statistic.input_value() == "P01",
-               "configuration-only statistic filter did not retain its value")
-        _check("configuration only — no report published" in
-               page.locator("#benchmark-main").inner_text(),
-               "configuration-only benchmark state is not identifiable")
-        _check(page.get_by_role("button", name="↑ higher is better").count() == 0,
-               "configuration-only benchmark exposed report direction controls")
-
-    test_cases = page.locator("[data-bnav] a", has_text="Test cases").first
-    _check(test_cases.count() == 1, "benchmark Test cases navigation is missing")
-    test_cases.click()
-    _check("Test cases" in page.locator("main").inner_text(),
-           "benchmark sidebar navigation did not render the Test cases view")
-    comparison = page.locator("[data-bnav] a", has_text="Comparison").first
-    comparison.click()
+    _check(controls.count() == 4, "benchmark comparison filters are missing")
+    _check(controls.nth(1).locator("option").count() == 1
+           and controls.nth(1).input_value() == "P50",
+           "published medians must not invent percentile distributions")
+    preferred = next(row for row in panel["rows"] if row["preferred"])
+    baseline = next(row for row in panel["rows"] if row["id"] == "minimap2")
+    column_index = next(i for i, column in enumerate(panel["columns"])
+                        if preferred["cells"][column["id"]]["a_ns"] is not None
+                        and baseline["cells"][column["id"]]["a_ns"] is not None)
+    column = panel["columns"][column_index]["id"]
+    row = page.locator("tbody tr").filter(
+        has=page.get_by_text(preferred["label"], exact=True))
+    cell = row.locator(".bd-s0072").nth(column_index)
+    cell.hover()
+    tooltip = page.locator("[data-benchmark-tip]")
+    page.wait_for_function("() => Number(getComputedStyle(document.querySelector('[data-benchmark-tip]')).opacity) > 0")
+    expected_ratio = baseline["cells"][column]["a_ns"] / preferred["cells"][column]["a_ns"]
+    _check(f"{expected_ratio:.3f}×" in tooltip.inner_text(),
+           "hover tooltip compares A against the wrong baseline/workload")
+    _check(preferred["cells"][column]["source"] in tooltip.inner_text(),
+           "benchmark tooltip lost source provenance")
+    cell.focus()
+    _check("baseline value" in tooltip.inner_text(),
+           "keyboard focus did not reveal the comparison tooltip")
+    page.keyboard.press("Escape")
+    page.wait_for_function("() => getComputedStyle(document.querySelector('[data-benchmark-tip]')).opacity === '0'")
+    controls.nth(3).select_option(preferred["id"])
+    _check(row.locator(".bd-s0070").inner_text() == "BASE",
+           "baseline selection did not move the baseline marker")
+    minimap_row = page.locator("tbody tr").filter(
+        has=page.get_by_text("minimap2", exact=True))
+    minimap_row.locator(".bd-s0072").nth(column_index).hover()
+    _check(f"{1 / expected_ratio:.3f}×" in tooltip.inner_text(),
+           "baseline selection did not recompute the inverse A ratio")
+    controls.nth(0).select_option("without_cigar_mapq_ns")
+    minimap_row.locator(".bd-s0072").nth(column_index).focus()
+    expected_b = preferred["cells"][column]["b_ns"] / baseline["cells"][column]["b_ns"]
+    _check(f"{expected_b:.3f}×" in tooltip.inner_text(),
+           "B metric compares the wrong observations")
+    _check("B · without CIGAR/MAPQ" in tooltip.inner_text(),
+           "comparison tooltip lost its B measurement")
+    page.keyboard.press("Escape")
+    controls.nth(0).select_option("wall_clock_ns")
+    controls.nth(3).select_option("minimap2")
+    page.locator("[data-bnav] a", has_text="Test cases").first.click()
+    _check("1,024 queries" in page.locator("main").inner_text(),
+           "test-case navigation did not expose the published query count")
+    page.locator("[data-bnav] a", has_text="Comparison").first.click()
     _check(page.locator("[data-ctrls]").count() == 1,
-           "benchmark sidebar navigation did not restore the Comparison view")
-
-    if default_report is not None:
-        # The first tbody cell can be the optional group-heading colspan cell.
-        # A measured result cell carries the supplied distribution tooltip.
-        hover_target = page.locator("main table tbody tr td:nth-child(2)").first
-        _check(hover_target.count() == 1,
-               "benchmark comparison table has no model-derived cell to inspect")
-        hover_target.hover()
-        tooltip_texts: list[str] = []
-        for _ in range(120):
-            tooltip_texts = page.evaluate(
-                """() => [...document.body.querySelectorAll('*')]
-                  .filter((node) => {
-                    const style = getComputedStyle(node);
-                    return style.position === 'fixed' &&
-                      style.pointerEvents === 'none' && Number(style.opacity) > 0;
-                  })
-                  .map((node) => (node.textContent || '').trim())
-                  .filter(Boolean)""")
-            if tooltip_texts:
-                break
-            page.wait_for_timeout(25)
-        _check(bool(tooltip_texts),
-               "hovering a real benchmark cell did not expose its distribution tooltip")
-    else:
-        _check("No report published for this benchmark yet." in
-               page.locator("#benchmark-main").inner_text(),
-               "configuration-only comparison did not retain its empty-report note")
-
+           "comparison navigation failed to restore the table")
     page.evaluate("() => window.__closeBioseqBenchmarkFetchGate()")
     page.get_by_role("button", name="Reload").click()
-    loading = page.get_by_text("Fetching benchmark artifacts…", exact=True)
-    try:
-        loading.wait_for(state="visible", timeout=3000)
-    except Exception as error:  # noqa: BLE001
-        raise AssertionFail(f"benchmark Reload did not restore loading state: {error}")
+    page.get_by_text("Fetching benchmark artifacts…", exact=True).wait_for(state="visible")
     _wait_for_benchmark_fetch_gate(page)
     _release_benchmark_fetches(page)
-
-    manifest_requests = {
-        url for url in request_urls
-        if urlsplit(url).path == benchmark["manifest_route"]
-    }
-    _check(bool(manifest_requests),
-           "benchmark browser run did not fetch its manifest over HTTP")
-    page_origin = urlsplit(page.url)
-    _check(all(
-               urlsplit(url).scheme in {"http", "https"}
-               and (urlsplit(url).scheme, urlsplit(url).netloc)
-               == (page_origin.scheme, page_origin.netloc)
-               for url in manifest_requests),
-           "benchmark manifest was not fetched from the page origin over HTTP")
-
-    requested_local_routes = {
-        urlsplit(url).path for url in request_urls
-        if urlsplit(url).path in benchmark["local_source_routes"]
-    }
-    _check(requested_local_routes == benchmark["local_source_routes"],
-           f"benchmark loader requested local artifacts "
-           f"{sorted(requested_local_routes)}, expected "
-           f"{sorted(benchmark['local_source_routes'])}")
-    _check(all(
-               (urlsplit(url).scheme, urlsplit(url).netloc)
-               == (page_origin.scheme, page_origin.netloc)
-               for url in request_urls
-               if urlsplit(url).path in benchmark["local_source_routes"]),
-           "benchmark artifact request escaped the generated site's origin")
-    requested_remote_sources = {
-        url for url in request_urls if url in benchmark["remote_sources"]
-    }
-    _check(requested_remote_sources == benchmark["remote_sources"],
-           f"benchmark loader requested remote overrides "
-           f"{sorted(requested_remote_sources)}, expected "
-           f"{sorted(benchmark['remote_sources'])}")
-    _check(all(urlsplit(url).scheme in {"http", "https"}
-               for url in requested_remote_sources),
-           "benchmark remote overrides were not fetched over HTTP")
-    if benchmark["same_origin"]:
-        unexpected_remote = [
-            url for url in request_urls
-            if urlsplit(url).hostname in _BENCHMARK_REMOTE_HOSTS
-        ]
-        _check(not unexpected_remote,
-               f"default benchmark bundle made remote requests: {unexpected_remote}")
-
-    blob_requests = [url for url in request_urls
-                     if urlsplit(url).hostname == "github.com"
-                     and "/blob/" in urlsplit(url).path]
-    _check(not blob_requests,
-           f"benchmark loader requested GitHub HTML blob pages: {blob_requests}")
-    for url in requested_remote_sources:
-        parsed = urlsplit(url)
-        _check(parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
-               f"benchmark override used an unexpected host: {url}")
-        _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
-               f"benchmark override used a GitHub HTML blob page: {url}")
+    requested = {urlsplit(url).path for url in request_urls}
+    _check(benchmark["manifest_route"] in requested,
+           "benchmark data was never fetched from the static site")
+    _check(not [url for url in request_urls
+                if urlsplit(url).hostname in _BENCHMARK_REMOTE_HOSTS],
+           "published chapter benchmarks made an external data request")
 
 
 def _exercise_benchmark_failure(page, remote_state: dict[str, bool]) -> None:
@@ -2873,6 +2085,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                   return nativeFetch(input, init);
                 }
                 const benchmarkJson =
+                  (url.pathname.endsWith('/project-benchmarks.json') && location.pathname.endsWith('/benchmarks/')) ||
                   url.pathname.endsWith('/benchmarks-manifest.json') ||
                   url.pathname.includes('/benchmark-data/') ||
                   url.hostname === 'raw.githubusercontent.com';
@@ -2938,109 +2151,32 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_media_band(page)
                 _exercise_cta_grid(page)
                 _exercise_reduced_motion(page)
-            if label == "tutorial_sequence":
+            if label.startswith("tutorial:"):
+                slug = label.split(":", 1)[1]
+                tutorial = contract["tutorials"][slug]
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])
                 _assert_tutorial_sidebar(page, base_path, version)
-                _exercise_tooltip(page, request_urls, contract)
-                _exercise_copy(page)
-                _exercise_annotations(page)
-                _exercise_code_entities(
-                    page, {"sql:function:bioseq.len(bioseq.seq)"})
-                _exercise_markdown_callouts(page, "sequence_column_type")
-                _exercise_tutorial_results(page, contract["tutorials"]["sequence_column_type"])
-                _exercise_docs_search(
-                    page, request_urls, contract,
-                    _public_route(base_path, f"{version}/tutorials/similarity_search/"))
-                _exercise_version_selector(page, request_urls)
+                if _nodes_of_kind(tutorial.get("content", []), "code_block"):
+                    _exercise_copy(page)
+                _exercise_tutorial_results(page, tutorial)
+                _exercise_project_content(page, tutorial, base_path, version)
                 _exercise_jsonld(page)
-                _exercise_doc_frame(page, expect_toc=True)
-            if label == "tutorial_similarity":
-                _assert_literal_design_structure(page, label, contract["design"])
-                _exercise_design_style_parity(page, label, contract["design"])
-                _assert_tutorial_sidebar(page, base_path, version)
-                _exercise_copy(page)
-                _exercise_code_entities(page, {
-                    "sql:function:bioseq.query_start(anyelement)",
-                    "sql:function:bioseq.query_end(anyelement)",
-                    "sql:function:bioseq.target_start(anyelement)",
-                    "sql:function:bioseq.target_end(anyelement)",
-                    "sql:function:bioseq.cigar(anyelement)",
-                })
-                _exercise_markdown_callouts(page, "similarity_search")
-                _exercise_tutorial_results(page, contract["tutorials"]["similarity_search"])
-                _exercise_jsonld(page)
-                _exercise_doc_frame(page, expect_toc=True)
-            if label == "tutorial_cache":
-                _assert_literal_design_structure(page, label, contract["design"])
-                _exercise_design_style_parity(page, label, contract["design"])
-                _assert_tutorial_sidebar(page, base_path, version)
-                _exercise_copy(page)
-                _exercise_code_entities(page, {
-                    "sql:function:bioseq_cache.stats()",
-                })
-                _exercise_tutorial_results(page, contract["tutorials"]["query_cache"])
-                _exercise_jsonld(page)
-                _exercise_doc_frame(page, expect_toc=True)
-            if label == "tutorial_highway":
-                _assert_literal_design_structure(page, label, contract["design"])
-                _exercise_design_style_parity(page, label, contract["design"])
-                _assert_tutorial_sidebar(page, base_path, version)
-                _exercise_copy(page)
-                _exercise_tutorial_results(
-                    page, contract["tutorials"]["highway_runtime_dispatch"])
-                body = page.locator("main#doc-main").inner_text()
-                for highway_label in (
-                    "Highway Compiled Targets", "CPU-Supported Targets",
-                    "Runnable Targets", "Planned Architecture",
-                    "Executed Architecture",
-                ):
-                    _check(highway_label in body,
-                           f"Highway page is missing {highway_label}")
-                _exercise_jsonld(page)
-                _exercise_doc_frame(page, expect_toc=True)
-            if label in {
-                "tutorial_quick", "tutorial_columnar", "tutorial_generation",
-                "tutorial_io", "tutorial_index", "tutorial_slice",
-                "tutorial_columns", "tutorial_remote", "tutorial_explain",
-            }:
-                _assert_literal_design_structure(page, label, contract["design"])
-                _exercise_design_style_parity(page, label, contract["design"])
-                _assert_tutorial_sidebar(page, base_path, version)
-                tutorial_slug = {
-                    "tutorial_quick": "quick_read_search_write",
-                    "tutorial_columnar": "columnar_storage_and_vectorized_aggregates",
-                    "tutorial_generation": "sequence_generation",
-                    "tutorial_io": "fasta_fastq_gzip_and_io",
-                    "tutorial_index": "index_lifecycle_and_metadata",
-                    "tutorial_slice": "slice_concat_reverse",
-                    "tutorial_columns": "multiple_sequence_columns_and_joins",
-                    "tutorial_remote": "remote_provider_to_search",
-                    "tutorial_explain": "reading_bioseq_explain",
-                }[label]
-                expected_code_entities = {
-                    "tutorial_generation": {
-                        "sql:function:bioseq.symbol_count(bioseq.seq,text)",
-                    },
-                    "tutorial_io": {
-                        "sql:type:bioseq.seq",
-                        "sql:function:bioseq.len(bioseq.seq)",
-                        "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
-                        "sql:function:bioseq.target_start(anyelement)",
-                        "sql:function:bioseq.target_end(anyelement)",
-                    },
-                    "tutorial_index": {
-                        "sql:function:$extension.mmsearch("
-                        "bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
-                        "sql:function:bioseq.target_start(anyelement)",
-                        "sql:function:bioseq.target_end(anyelement)",
-                    },
-                }.get(label)
-                if expected_code_entities is not None:
-                    _exercise_code_entities(page, expected_code_entities)
-                _exercise_tutorial_results(page, contract["tutorials"][tutorial_slug])
-                _exercise_jsonld(page)
-                _exercise_doc_frame(page, expect_toc=True)
+                _exercise_doc_frame(page, expect_toc=bool(
+                    _nodes_of_kind(tutorial.get("content", []), "heading")))
+                if slug == "getting_started":
+                    _exercise_tooltip(page, request_urls, contract)
+                    _exercise_code_entities(page, {
+                        "sql:function:bioseq.cigar(anyelement)",
+                    })
+                    _check(page.locator(
+                        'pre code a.entity-ref[data-entity-id="sql:type:bioseq.seq"]').count() >= 1,
+                        "README sequence type sample lost its entity annotation")
+                    _exercise_docs_search(
+                        page, request_urls, contract,
+                        _public_route(base_path,
+                                      f"{version}/tutorials/project_postgres_custom_scan/"))
+                    _exercise_version_selector(page, request_urls)
             if label == "reference":
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])
@@ -3056,7 +2192,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_benchmarks(
                     page, request_urls, contract, base_path, version)
             _exercise_responsive(page, label)
-            if label == "tutorial_similarity":
+            if label == "tutorial:getting_started":
                 _exercise_prism_pixel_contract(page, contract["design"], artifact_dir)
             if label == "benchmarks":
                 _exercise_benchmark_failure(page, remote_state)

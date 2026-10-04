@@ -53,7 +53,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 try:
     import html5lib
@@ -75,19 +75,21 @@ _INLINE_HANDLERS = (
     " onsubmit=", " onchange=")
 _H1 = re.compile(r"<h1[\s>]", re.IGNORECASE)
 _EXPECTED_TUTORIAL_IDS = {
-    "tutorial:quick_read_search_write",
-    "tutorial:sequence_column_type",
-    "tutorial:columnar_storage_and_vectorized_aggregates",
-    "tutorial:sequence_generation",
-    "tutorial:fasta_fastq_gzip_and_io",
-    "tutorial:index_lifecycle_and_metadata",
-    "tutorial:slice_concat_reverse",
-    "tutorial:similarity_search",
-    "tutorial:multiple_sequence_columns_and_joins",
-    "tutorial:remote_provider_to_search",
-    "tutorial:query_cache",
-    "tutorial:highway_runtime_dispatch",
-    "tutorial:reading_bioseq_explain",
+    "tutorial:getting_started",
+    "tutorial:project_introduction",
+    "tutorial:project_biology",
+    "tutorial:project_alignment_foundations",
+    "tutorial:project_minimizers",
+    "tutorial:project_chaining",
+    "tutorial:project_final_alignment_postprocessing_and_preprocessing",
+    "tutorial:project_sequence_abstractions",
+    "tutorial:project_postgres_custom_scan",
+    "tutorial:project_postgres_storage",
+    "tutorial:project_index_storage",
+    "tutorial:project_benchmarking",
+    "tutorial:project_conclusion",
+    "tutorial:project_configuration_reference",
+    "tutorial:bibliography",
 }
 _BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
@@ -652,21 +654,13 @@ def site_level_checks(site: Path, pages: dict[Path, str],
     }
     for path, text in pages.items():
         page_route = "/" + path.relative_to(site).as_posix()
-        page_dir = "/" + path.parent.relative_to(site).as_posix()
+        page_url = "https://validation.invalid" + base_path.rstrip("/") + page_route
         for url in _ATTR_URL.findall(text):
             if url.startswith(_EXTERNAL_URL):
                 continue
-            target, _, frag = url.partition("#")
-            target = target.split("?", 1)[0]
-            if target == "":
-                if frag and frag not in page_ids.get(page_route, set()):
-                    problems.append(_fail(path, f"in-page anchor #{frag} has no target"))
-                continue
-            if target.startswith("/"):
-                rel = _route_to_relpath(target, base_path)
-            else:
-                base = page_dir.rstrip("/")
-                rel = _route_to_relpath(f"{base}/{target}", base_path)
+            resolved = urlsplit(urljoin(page_url, url))
+            frag = unquote(resolved.fragment)
+            rel = _route_to_relpath(resolved.path, base_path)
             if rel is None:
                 continue
             target_file = site / rel
@@ -703,101 +697,105 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 problems.append(_fail(search_path,
                                       f"record {record.get('id')!r} route {route} does not resolve"))
         tutorial_root = search_path.parent / "tutorials"
+        actual_slugs = {page.parent.name for page in tutorial_root.glob("*/index.html")}
+        expected_slugs = {identifier.removeprefix("tutorial:")
+                          for identifier in _EXPECTED_TUTORIAL_IDS}
+        if actual_slugs != expected_slugs:
+            problems.append(_fail(
+                tutorial_root, "published chapters differ from the current source inventory"))
+        bibliography = tutorial_root / "bibliography" / "index.html"
+        bibliography_ids = set(_ID_ATTR.findall(
+            bibliography.read_text(encoding="utf-8"))) if bibliography.is_file() else set()
+        if len([identifier for identifier in bibliography_ids
+                if identifier.startswith("ref-")]) < 100:
+            problems.append(_fail(bibliography, "project bibliography lost its reference entries"))
+        figure_manifest_routes = sorted(
+            route for route in declared
+            if re.fullmatch(r"/assets/[0-9a-f]{64}/figures/project/manifest\.json", route))
+        expected_figures: set[str] = set()
+        figure_manifest = (site / figure_manifest_routes[0].lstrip("/")
+                           if len(figure_manifest_routes) == 1 else site / "assets")
+        if len(figure_manifest_routes) != 1 or not figure_manifest.is_file():
+            problems.append(_fail(figure_manifest,
+                                  "expected one staged original-figure export manifest"))
+        else:
+            asset_root = figure_manifest.parents[2]
+            figures = json.loads(figure_manifest.read_text(encoding="utf-8")).get("figures", [])
+            if len(figures) != 74:
+                problems.append(_fail(figure_manifest, "expected all 74 original diagrams and plots"))
+            for figure in figures:
+                svg = figure.get("svg", "")
+                asset = asset_root / svg
+                expected_figures.add(asset.relative_to(site).as_posix())
+                if not asset.is_file():
+                    problems.append(_fail(asset, "exported project figure is missing"))
+                    continue
+                try:
+                    graphic = ET.parse(asset).getroot()
+                    viewport = [float(value) for value in graphic.attrib["viewBox"].split()]
+                    if (not graphic.tag.endswith("svg") or len(viewport) != 4
+                            or viewport[2] <= 0 or viewport[3] <= 0):
+                        raise ValueError("invalid SVG viewport")
+                    for node in graphic.iter():
+                        for name, target in node.attrib.items():
+                            if name.endswith("href") and (
+                                    target.startswith("file:") or ".dvi#" in target
+                                    or "/Users/" in target or "/tmp/" in target):
+                                raise ValueError(f"SVG leaks a build-local link: {target}")
+                except (ET.ParseError, KeyError, ValueError) as error:
+                    problems.append(_fail(asset, f"invalid exported SVG: {error}"))
+        referenced_figures: set[str] = set()
+        code_references = 0
+        citation_count = 0
         for tutorial_page in tutorial_root.glob("*/index.html"):
             tutorial_text = tutorial_page.read_text(encoding="utf-8")
-            for forbidden in (
-                "Test-build-only", "DSM Test Fixture",
-                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
-                "Bioseq Owned RestrictInfo Path Copies",
-                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
-                "Bioseq Requirement Executable", "bioseq_internal.",
-                "inspect_ready_minimizer_generation",
-                "inspect_ready_hash_major_minimizer_generation",
-            ):
+            page_url = ("https://validation.invalid" + base_path.rstrip("/") + "/"
+                        + tutorial_page.relative_to(site).as_posix())
+            for url in _ATTR_URL.findall(tutorial_text):
+                resolved = urlsplit(urljoin(page_url, url))
+                if "/figures/project/" in resolved.path:
+                    rel = _route_to_relpath(resolved.path, base_path)
+                    if rel:
+                        referenced_figures.add(rel)
+                if "#ref-" in url:
+                    citation_count += 1
+                    target = _route_to_relpath(resolved.path, base_path)
+                    if (resolved.netloc != "validation.invalid"
+                            or target != bibliography.relative_to(site).as_posix()):
+                        problems.append(_fail(tutorial_page,
+                                              f"citation must link to bibliography: {url}"))
+                    if unquote(resolved.fragment) not in bibliography_ids:
+                        problems.append(_fail(tutorial_page,
+                                              f"citation has no bibliography entry: {url}"))
+                if url.startswith("https://github.com/") and "/blob/" in url:
+                    code_references += 1
+            # Internal storage descriptions belong in the author's architecture
+            # chapters; hidden executor test diagnostics still do not.
+            for forbidden in ("DSM Test Fixture", "Fully Attested Alignment Jobs",
+                              "Bioseq Batch ABI Version", "Bioseq Owned RestrictInfo Path Copies"):
                 if forbidden in tutorial_text:
-                    problems.append(_fail(
-                        tutorial_page,
-                        f"public tutorial exposes non-user field {forbidden!r}",
-                    ))
-        columnar_page = (
-            tutorial_root / "columnar_storage_and_vectorized_aggregates" / "index.html"
-        )
-        index_page = tutorial_root / "index_lifecycle_and_metadata" / "index.html"
-        cache_page = tutorial_root / "query_cache" / "index.html"
-        highway_page = tutorial_root / "highway_runtime_dispatch" / "index.html"
-        explain_page = tutorial_root / "reading_bioseq_explain" / "index.html"
-        if not columnar_page.is_file():
-            problems.append(_fail(
-                columnar_page, "current columnar/vector aggregate tutorial is missing"))
-        else:
-            columnar_text = columnar_page.read_text(encoding="utf-8")
-            for token in (
-                "VectorAggNode", "BioseqScan", "bioseq.list_seq_storage_shards",
-                "alter_bioseq_table_set", "alter_bioseq_table_reset",
-                "bioseq.column_cache.capacity_mb", "bioseq.vacuum_seq_storage",
-                "columnar_vector_aggregate",
-            ):
-                if token not in columnar_text:
-                    problems.append(_fail(
-                        columnar_page,
-                        f"columnar tutorial contract token {token!r} is missing",
-                    ))
-        if not index_page.is_file():
-            problems.append(_fail(index_page, "current index lifecycle tutorial is missing"))
-        else:
-            index_text = index_page.read_text(encoding="utf-8")
-            for token in (
-                "minimizers_per_fragment", "minimizers_per_sequence",
-                "symbol_counts", "require_compatible_persisted",
-                "Bioseq Fetched From Meta", "actual_index_source=persisted",
-                "index_lifecycle_metadata",
-            ):
-                if token not in index_text:
-                    problems.append(_fail(
-                        index_page,
-                        f"index lifecycle tutorial contract token {token!r} is missing",
-                    ))
-        if not cache_page.is_file():
-            problems.append(_fail(cache_page, "current cache tutorial is missing"))
-        else:
-            cache_text = cache_page.read_text(encoding="utf-8")
-            for token in (
-                "exact_query", "reusable_fragments", "minimizers_per_sequence",
-                "minimizers_per_fragment", "bioseq_cache.stats",
-                "bioseq_cache.entries", "invalidate_relation", "invalidate_all",
-                "SQLSTATE 42501",
-            ):
-                if token not in cache_text:
-                    problems.append(_fail(
-                        cache_page, f"cache qualification token {token!r} is missing"))
-        if not highway_page.is_file():
-            problems.append(_fail(highway_page, "current Highway tutorial is missing"))
-        else:
-            highway_text = highway_page.read_text(encoding="utf-8")
-            for label in (
-                "Highway Compiled Targets", "CPU-Supported Targets",
-                "Runnable Targets", "Planned Architecture",
-                "Executed Architecture",
-            ):
-                if label not in highway_text:
-                    problems.append(_fail(
-                        highway_page, f"Highway EXPLAIN label {label!r} is missing"))
-        if not explain_page.is_file():
-            problems.append(_fail(explain_page, "current EXPLAIN tutorial is missing"))
-        else:
-            explain_text = explain_page.read_text(encoding="utf-8")
-            for forbidden in (
-                "Test-build-only DSM diagnostics", "DSM Test Fixture",
-                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
-                "Bioseq Owned RestrictInfo Path Copies",
-                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
-                "Bioseq Requirement Executable",
-            ):
-                if forbidden in explain_text:
-                    problems.append(_fail(
-                        explain_page,
-                        f"public EXPLAIN tutorial exposes non-user field {forbidden!r}",
-                    ))
+                    problems.append(_fail(tutorial_page,
+                                          f"public chapter exposes test diagnostic {forbidden!r}"))
+        if referenced_figures != expected_figures:
+            problems.append(_fail(figure_manifest,
+                                  "published chapter figures do not match the complete SVG inventory"))
+        if citation_count < 100 or code_references < 10:
+            problems.append(_fail(tutorial_root,
+                                  "project citations or original source-code references were lost"))
+        for slug, tokens in {
+            "getting_started": ("readme_docker_demo", "mmsearch", "bioseq.cigar"),
+            "project_biology": ("Biological context", "data-math"),
+            "project_postgres_custom_scan": ("BioseqScan", "PlaceHolderVar"),
+            "project_index_storage": ("minimizers_per_fragment", "symbol_counts"),
+            "project_benchmarking": ("project-benchmarks", "7.68 cores", "120.8 GiB",
+                                     "32,607 MiB", "595.84", "1.4.329", "500.28 GB",
+                                     "6,000 IOPS / 500 MiB/s"),
+        }.items():
+            page = tutorial_root / slug / "index.html"
+            text = page.read_text(encoding="utf-8") if page.is_file() else ""
+            for token in tokens:
+                if token not in text:
+                    problems.append(_fail(page, f"project content token {token!r} is missing"))
     for entities_path in site.rglob("entities.*.json"):
         for entity_id, entity in json.loads(
                 entities_path.read_text(encoding="utf-8")).get("entities", {}).items():

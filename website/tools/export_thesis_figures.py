@@ -159,7 +159,11 @@ def render_tikz(item, definitions, work):
     env['TEXINPUTS'] = str(SOURCE) + os.pathsep + env.get('TEXINPUTS', '')
     command(['latex', '-interaction=nonstopmode', '-halt-on-error', 'figure.tex'], work, env)
     command(['dvisvgm', '--no-fonts', '--exact', '--bbox=papersize', '--linkmark=none', '--output=figure.svg', 'figure.dvi'], work)
-    return work / 'figure.svg'
+    svg = work / 'figure.svg'
+    # hypertex treats site-absolute paths as DVI files. Restore website routes
+    # after vector export while leaving ordinary external HTTPS links intact.
+    svg.write_text(re.sub(r'file:(/[^\"\']*?)\.dvi#', r'\1#', svg.read_text()))
+    return svg
 
 
 def render_python(item, work):

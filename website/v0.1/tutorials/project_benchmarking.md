@@ -353,12 +353,12 @@ Each cell places the A duration above its comparison, followed by the B duration
 | Architecture | arm64 | x86_64 | x86_64 | x86_64 | aarch64 |
 | OS version / kernel | macOS 15.6 / Darwin 24.6.0 | Linux / 7.0.0-1012-aws | Linux / 7.0.0-1012-aws | Linux / 7.0.0-1012-aws | Linux / 7.0.0-1012-aws |
 | OS build / distribution | 24G5054d | Distribution not recorded | Distribution not recorded | Distribution not recorded | Distribution not recorded |
-| Logical / physical cores | / 8 (6P + 2E) | / 4 | / 2 | / 2 | / 4 |
-| Physical RAM | GiB unified | GiB | GiB | GiB | GiB |
+| Logical / physical cores | 8 / 8 (6P + 2E) | 4 / 4 | 4 / 2 | 4 / 2 | 4 / 4 |
+| Physical RAM | 16 GiB unified | 16 GiB | 16 GiB | 16 GiB | 8 GiB |
 | GPU | Apple M1 Pro, 14 cores | None available | None available | None available | None available |
 | Storage | APPLE SSD AP0512R | EBS gp3 | EBS gp3 | EBS gp3 | EBS gp3 |
-| Disk capacity | GB | GiB | GiB | GiB | GiB |
-| Provisioned disk I/O | Not recorded | ,000 IOPS / 500 MiB/s | ,000 IOPS / 500 MiB/s | ,000 IOPS / 500 MiB/s | ,000 IOPS / 500 MiB/s |
+| Disk capacity | 500.28 GB | 500 GiB | 500 GiB | 500 GiB | 500 GiB |
+| Provisioned disk I/O | Not recorded | 6,000 IOPS / 500 MiB/s | 6,000 IOPS / 500 MiB/s | 6,000 IOPS / 500 MiB/s | 6,000 IOPS / 500 MiB/s |
 
 <a id="tab-bench-local"></a>
 
@@ -366,11 +366,27 @@ Each cell places the A duration above its comparison, followed by the B duration
 
 [Benchmark results](/benchmarks/?table=local)
 
+Each cell: A and B times, $\cdot$: no measurement. —<sup>g</sup>: GPU unavailable. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+MPF/MPS: minimizers per fragment/sequence. SIMD-ref: naive SIMD scan. Bounded: bounded SIMD algorithm.
+
 <a id="tab-bench-aws-4-k15-w10"></a>
 
 <div class="project-benchmark" data-table="aws-4-k15-w10"></div>
 
 [Benchmark results](/benchmarks/?table=aws-4-k15-w10)
+
+Each cell: A and B times, $\cdot$: no measurement. —<sup>g</sup>: GPU unavailable. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+MPF/MPS: minimizers per fragment/sequence. SIMD-ref: naive SIMD scan. Bounded: bounded SIMD algorithm.
 
 <a id="tab-bench-aws-4-k20-w15"></a>
 
@@ -378,11 +394,27 @@ Each cell places the A duration above its comparison, followed by the B duration
 
 [Benchmark results](/benchmarks/?table=aws-4-k20-w15)
 
+Each cell: A and B times, $\cdot$: no measurement. —<sup>g</sup>: GPU unavailable. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+MPF/MPS: minimizers per fragment/sequence. SIMD-ref: naive SIMD scan. Bounded: bounded SIMD algorithm.
+
 <a id="tab-bench-aws-2-k15-w10"></a>
 
 <div class="project-benchmark" data-table="aws-2-k15-w10"></div>
 
 [Benchmark results](/benchmarks/?table=aws-2-k15-w10)
+
+Each cell: A and B times, $\cdot$: no measurement. —<sup>g</sup>: GPU unavailable. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+MPF/MPS: minimizers per fragment/sequence. SIMD-ref: naive SIMD scan. Bounded: bounded SIMD algorithm.
 
 <a id="tab-bench-aws-2-k20-w15"></a>
 
@@ -390,11 +422,51 @@ Each cell places the A duration above its comparison, followed by the B duration
 
 [Benchmark results](/benchmarks/?table=aws-2-k20-w15)
 
-<a id="tab-bench-external-4-k15-w10"></a>
+Each cell: A and B times, $\cdot$: no measurement. —<sup>g</sup>: GPU unavailable. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+MPF/MPS: minimizers per fragment/sequence. SIMD-ref: naive SIMD scan. Bounded: bounded SIMD algorithm.
+
+### Comparison with other aligners
+
+<a id="sec-external-aligner-results"></a> The following adjustments were needed to run the compared aligners:
+
+- **Minimap2.** A single FASTA record must fit in 32-bit integer, so I split the 4 Gbp reference into two records of about 2 Gbp each. Returned positions are converted back to coordinates in the original reference. The 2 Gbp reference didn’t require any spliting, so I left it as-is.
+
+- **Winnowmap.** I re-enabled saving its native index and changed loading to rebuild the weighting Bloom filter from the saved list of frequent k-mers produced by Meryl (Meryl is the tool Winnomap uses for extracting k-mers). The 4 Gbp references used index batches of 2 Mbp, because otherwise Winnowmap failed even with sufficient SWAP. This means that Winnowmap had far better conditions to minimap2. Sadly comparison wasn’t possible otherwise, beccause I encountered repeatable memory errors.
+
+- **blastn.** BLAST used sequences unchanged. It has no second branch and scores N symbol differently - as $-3$ rather than $-1$, but it had no impact on results.
+
+- **LexicMap.** It uses 28-bit coordinates meaning that the sequences was required to be split into 268Mbp parts. On machines with less than 10 GiB RAM, the 4 Gbp reference was indexed one record per batch, because otherwise it produced an error. LexicMap by default replaces N with A in target, which also didn’t affect the quality of results.
+
+<a id="tab-bench-external-4-k15-w10"></a> <a id="tab-external-aligners"></a>
 
 <div class="project-benchmark" data-table="external-4-k15-w10"></div>
 
 [Benchmark results](/benchmarks/?table=external-4-k15-w10)
+
+Each cell: A, comparison, B, comparison. $\cdot$: no measurement. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+Comparisons use minimap2. The minimap2 row compares with BioseqDB.
+
+<sup>\*</sup> Each algorithm except BLAST required intensive splitting, sometimes not equal. The splitting was the biggest possible to allow algorithm not to crash.
+
+<sup>a</sup>BLAST scores N as -3, compared with -1 in minimap2.
+
+<sup>b</sup>LexicMap stores reference N as A.
+
+<sup>c</sup>The 4 Gbp reference is split into two input records.
+
+<sup>d</sup>Winnowmap uses overlapping 250 Mb records and 499M index batches. Merging results can affect MAPQ.
+
+<sup>e</sup>Winnowmap merges results from 1999M index batches.
 
 <a id="tab-bench-external-4-k20-w15"></a>
 
@@ -402,11 +474,49 @@ Each cell places the A duration above its comparison, followed by the B duration
 
 [Benchmark results](/benchmarks/?table=external-4-k20-w15)
 
+Each cell: A, comparison, B, comparison. $\cdot$: no measurement. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+Comparisons use minimap2. The minimap2 row compares with BioseqDB.
+
+<sup>\*</sup> Each algorithm except BLAST required intensive splitting, sometimes not equal. The splitting was the biggest possible to allow algorithm not to crash.
+
+<sup>a</sup>BLAST scores N as -3, compared with -1 in minimap2.
+
+<sup>b</sup>LexicMap stores reference N as A.
+
+<sup>c</sup>The 4 Gbp reference is split into two input records.
+
+<sup>d</sup>Winnowmap uses overlapping 250 Mb records and 499M index batches. Merging results can affect MAPQ.
+
+<sup>e</sup>Winnowmap merges results from 1999M index batches.
+
 <a id="tab-bench-external-2-k15-w10"></a>
 
 <div class="project-benchmark" data-table="external-2-k15-w10"></div>
 
 [Benchmark results](/benchmarks/?table=external-2-k15-w10)
+
+Each cell: A, comparison, B, comparison. $\cdot$: no measurement. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+Comparisons use minimap2. The minimap2 row compares with BioseqDB.
+
+<sup>\*</sup> Each algorithm except BLAST required intensive splitting, sometimes not equal. The splitting was the biggest possible to allow algorithm not to crash.
+
+<sup>a</sup>BLAST scores N as -3, compared with -1 in minimap2.
+
+<sup>b</sup>LexicMap stores reference N as A.
+
+<sup>d</sup>Winnowmap uses overlapping 250 Mb records and 499M index batches. Merging results can affect MAPQ.
+
+<sup>f</sup>Swap settings were not recorded.
 
 <a id="tab-bench-external-2-k20-w15"></a>
 
@@ -414,8 +524,51 @@ Each cell places the A duration above its comparison, followed by the B duration
 
 [Benchmark results](/benchmarks/?table=external-2-k20-w15)
 
-<a id="tab-bench-vastai"></a>
+Each cell: A, comparison, B, comparison. $\cdot$: no measurement. n/a: no comparison.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.
+
+Comparisons use minimap2. The minimap2 row compares with BioseqDB.
+
+<sup>\*</sup> Each algorithm except BLAST required intensive splitting, sometimes not equal. The splitting was the biggest possible to allow algorithm not to crash.
+
+<sup>a</sup>BLAST scores N as -3, compared with -1 in minimap2.
+
+<sup>b</sup>LexicMap stores reference N as A.
+
+### Vulkan on a Vast.ai GPU instance
+
+<a id="sec-vastai-gpu-results"></a>
+
+*Vast.ai machine specs* <a id="tab-vastai-machine"></a>
+
+| Property      | Value                           |
+|:--------------|:--------------------------------|
+| CPU           | AMD EPYC 7282 16-Core Processor |
+| CPU quota     | 7.68 cores                      |
+| Memory limit  | 120.8 GiB                       |
+| GPU           | NVIDIA GeForce RTX 5090         |
+| GPU memory    | 32,607 MiB                      |
+| OS            | Ubuntu 24.04                    |
+| NVIDIA driver | 595.84                          |
+| Vulkan API    | 1.4.329                         |
+
+<a id="tab-vastai-gpu"></a> <a id="tab-bench-vastai"></a>
 
 <div class="project-benchmark" data-table="vastai"></div>
 
 [Benchmark results](/benchmarks/?table=vastai)
+
+Each cell: A, comparison, B, comparison. Light gray = minimap2.
+
+Blue: one lowest A and one lowest B measurement for each column for each configuration.
+
+MPF/MPS = minimizers per fragment/sequence. Vulkan rows compare with minimap2 on the same machine.
+
+$\cdot$ = no result. n/a: no comparison. <span style="color: BrickRed">$\bigcirc$</span> = setup rejected. <span style="color: BrickRed">$\times$</span> = execution failed.
+
+<sup>1</sup>The GPU index exceeds the available memory budget.
+
+<sup>2</sup>The MPS control buffer exceeds the Vulkan buffer limit.

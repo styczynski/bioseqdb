@@ -42,11 +42,11 @@ I previously introduced X-drop and Z-drop concepts [xdrop zdrop strategies](../
 
 Block Aligner moves a $B\times B$ square through the scoring matrix, and internally compute strips of width $S=8$ visible on the figure [block adaptive reconstruction](../project_final_alignment_postprocessing_and_preprocessing/#fig-block-adaptive-reconstruction) below. When the algorithm fails to improve best score for number of steps, then it decides to grow the block as seen on image below [block adaptive reconstruction](../project_final_alignment_postprocessing_and_preprocessing/#fig-block-adaptive-reconstruction)
 
+<a id="fig-block-adaptive-reconstruction"></a>
+
 ![01 base level alignment diagram](/static/figures/project/chapters-07-final-alignment-postprocessing-and-preprocessing-01-base-level-alignment-tikz-01.svg)
 
 *Illustration of 3 steps that Block Aligner repeatedly performs. Growth computes the lower rectangle $\Omega_1$ before the right rectangle $\Omega_2$.*
-
-<a id="fig-block-adaptive-reconstruction"></a>
 
 The pseudocode below is directly taken from Block Aligner paper \[[38](../bibliography/#ref-block_aligner_paper)\]. For more details please consult the projects README \[[39](../bibliography/#ref-block_aligner_readme)\]. I use here original paper notation, where $q$ is the query and $p$ the target sequence aligner to. $G^c_{open},G^c_{close},G^r_{open},G_{ext}$ are the gap penalties. Function $\mathrm{COMPUTE\_RECT}((r,c),(w,h))$ is used to compute all the scores in the given rectangle given as parameters, using SIMD version of regular DP scoring formulation.
 
@@ -56,7 +56,7 @@ The important thing in the paper is: $[r,r+h)\times[c,c+w)$; $Y=\lfloor B/S\rflo
 
 <a id="alg-adaptive-block-alignment"></a>
 
-1.  Procedure ALIGN$q,p,X,B_{min},B_{max},G^c_{open},G^c_{close},G^r_{open},G_{ext}$
+1.  Procedure `ALIGN`($q,p,X,B_{min},B_{max},G^c_{open},G^c_{close},G^r_{open},G_{ext}$)
 
 2.  $S\gets8$, $\mathit{max\_score}\gets0$, $\mathit{dir}\gets\textsc{GROW}$, $B\gets B_{min}$, $B_{prev}\gets0$, $i\gets0$, $j\gets0$
 
@@ -70,17 +70,17 @@ The important thing in the paper is: $[r,r+h)\times[c,c+w)$; $Y=\lfloor B/S\rflo
 
 5.  If $\mathit{dir}=\textsc{RIGHT}$ (Block position $(i,j-S)\mapsto(i,j)$)
 
-6.  $\mathit{curr\_score}\gets\operatorname{COMPUTE\_RECT}((i,j+B-S),(S,B))$
+6.  $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i,j+B-S),(S,B))$
 
 7.  ElsIf $\mathit{dir}=\textsc{DOWN}$ (Block position $(i-S,j)\mapsto(i,j)$)
 
-8.  $\mathit{curr\_score}\gets\operatorname{COMPUTE\_RECT}((i+B-S,j),(B,S))$
+8.  $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i+B-S,j),(B,S))$
 
 9.  ElsIf $\mathit{dir}=\textsc{GROW}$
 
-10. $\mathit{curr\_score}\gets\operatorname{COMPUTE\_RECT}((i+B_{prev},j),(B_{prev},B-B_{prev}))$ (Grow down)
+10. $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i+B_{prev},j),(B_{prev},B-B_{prev}))$ (Grow down)
 
-11. $\mathit{curr\_score}\gets\operatorname{COMPUTE\_RECT}((i,j+B_{prev}),(B-B_{prev},B))$ (Grow right)
+11. $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i,j+B_{prev}),(B-B_{prev},B))$ (Grow right)
 
 12. End If
 
@@ -236,8 +236,8 @@ Let’s define $Z$ matrix formally. First index $i$ is up to $2E+1$ and second i
   1,&\text{otherwise}.
  \end{cases}$$ Here, $\delta_i$ just formally defines relative lookups i.e if we look to the left of position in $R$ up to $E$ positions or to the right up to $E$ positions. In paper authors want to look at the left side first, for example $(-1, -2, -3, 0, +1, +2, +3)$, so $\delta_i$ looks more complicated than just $i-E$.
 
+<a id="fig-prefilter-chip-maze"></a>
+
 ![02 prefiltering diagram](/static/figures/project/chapters-07-final-alignment-postprocessing-and-preprocessing-02-prefiltering-tikz-01.svg)
 
 *Example similar to original figure from paper: Fig. 2(a,b) in [Alser, Shahroodi, Gómez-Luna, Alkan, Mutlu](../bibliography/#ref-sneakysnake_paper) ([2020](../bibliography/#ref-sneakysnake_paper)) for $R=\mathtt{GGTGCAGAGCTC}$, $Q=\mathtt{GGTGAGAGTTGT}$, and $E=3$. (a) Comparing $R_6$ with $Q_3,\ldots,Q_9$ constructs column 6 (blue in (b)). The first three results follow this $\delta_i$ reversed order.. (b) The net (best path) crosses three circled obstacles, so the pair passes the filter. The SneakySnake algorithm uses special notion of "checkpoints" so we don’t perform path updates until obstacle is met after last checkpoint.*
-
-<a id="fig-prefilter-chip-maze"></a>

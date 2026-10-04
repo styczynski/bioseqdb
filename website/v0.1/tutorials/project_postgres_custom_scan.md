@@ -46,11 +46,11 @@ The first `mmsearch` argument is the target sequence and the second is the query
 
 One insteresting observation is that naturally each alignment can produce multiple hits, so this operation can return multiple rows for a single input row. We intuitively expect that there will be two kinds of selected expressions: Some of them will not depend on alignment (in this case it’s primary key), so they will be the same for all these hits, while some of them like score and cigar will be different. Figure [scan occurrences](../project_postgres_custom_scan/#fig-scan-occurrences) illustrates that alignment should be set-returning function.
 
+<a id="fig-scan-occurrences"></a>
+
 ![01 engineering problem diagram](/static/figures/project/chapters-10-postgres-custom-scan-01-engineering-problem-tikz-01.svg)
 
 *Searching `XYX` for `X` gives two occurrences, so the function needs to "clone" metadata of tuple (id key in this case) and for each generated tuple fill-in the alignment hit position.*
-
-<a id="fig-scan-occurrences"></a>
 
 The first idea for implementation of such search was the simplest one - implementing alignment as callable Postgres function, which is very easy to do in C++. The function accepts query as raw SQL string:
 
@@ -178,11 +178,11 @@ To implement custom scan, we must understand different objects in Postgres:
 
 All types of Postgres API described in table earlier [pg scan extension points](../project_postgres_custom_scan/#tab-pg-scan-extension-points) mainly rely on callbacks (in Postgres called *hooks*). Extension fills the structure with function pointers and let postgres know which call is handled by which function. In this case PostgreSQL calls `PlanCustomPath` when it converts a selected custom path into a plan and later calls `CreateCustomScanState` to create the executor state<sup><a href="../bibliography/#ref-reference-note-3">153</a></sup> Figure [bioseqscan hook lifecycle](../project_postgres_custom_scan/#fig-bioseqscan-hook-lifecycle) shows when PostgreSQL calls those hooks, when `BioseqScan` runs, and when the columnar table access method returns a tuple.
 
+<a id="fig-bioseqscan-hook-lifecycle"></a>
+
 ![02 planner diagram](/static/figures/project/chapters-10-postgres-custom-scan-02-planner-tikz-01.svg)
 
 *Lifecycle of `BioseqScan` and the columnar table access method. Bands mark exeuction states: initialization, parsing, planning, and execution. Boxes have various colours: Grey boxes are PostgreSQL, orange boxes are BioSeqDB hooks or the custom scan and green boxes are TAM callbacks. Arrows follow the order in which Postgres calls specific hooks. `column_planner_hook` calls `standard_planner`, then rewrites the finished plan, so we don’t explicitly control GQO, but can affect it using costs functions, registering paths and even after plan is choosen, we have complete constrol over it (we are free to rewrite its parts). The scan is calling TAM to fetch rows from storage and returns them to Postgres until it returns NULL (no more tuples to fetch)*
-
-<a id="fig-bioseqscan-hook-lifecycle"></a>
 
 `ProcessUtility_hook` is used for utility statements such as `CREATE`, `DROP`, `COPY`, and `CREATE INDEX`. This is useful to forbid user from doing certain operations (Currently I only use it to log statements).
 
@@ -216,11 +216,11 @@ I still need to explain how exactly `CustomBioseqScan` works with worker-archite
 
 Figure [execcustomscan dispatch](../project_postgres_custom_scan/#fig-execcustomscan-dispatch) shows how Panel (a) of Figure [sequence scan lifecycle](../project_sequence_abstractions/#fig-sequence-scan-lifecycle) looks in the context of Postgres scan. `BioseqScan` asks for the next row from TAM. This row is placed into dispatch buffer (locator only) and dispatch buffer holds all the structures presented before [sequence scan lifecycle](../project_sequence_abstractions/#fig-sequence-scan-lifecycle) - scanners. The dispatch buffer code then handles all view copies to the workers.
 
+<a id="fig-execcustomscan-dispatch"></a>
+
 ![03 match fields diagram](/static/figures/project/chapters-10-postgres-custom-scan-03-match-fields-tikz-01.svg)
 
 *Inside `ExecCustomScan`, the following things happen: `BioseqScan` holds dispatch buffer and fetches a locator handles it to the buffer logic and retrieves results from it. The dispatch buffer stores locators, then builds a session that holds scanners. A scanner miss reads the fragment sub-table through the TAM column cache and copies the fragment into a slot. Workers receive a view copy from the scanners. Black arrows show the normal alignmen execution path, however it might happen that we don’t perform alignment and just want to return the sequences itself. In that case the flow uses blue arrows (there’s no `mmsearch` in the query) and `BioseqScan` hydrates the sequence row through cache and just returns it without interacting with dispatch buffer. Dashed arrows repesent loops here.*
-
-<a id="fig-execcustomscan-dispatch"></a>
 
 The collect loop is the gap between batch 1 and batch 2 in panel (d) of Figure [sequence scan lifecycle](../project_sequence_abstractions/#fig-sequence-scan-lifecycle). `BioseqScan` may call the user-table TAM many times before it returns to fill in the dispatch buffer. The backend thread that owns the scanners performs fragment reads, while workers only see the view copy described in panel (b).
 
@@ -232,8 +232,6 @@ Now I not only need to build the tuple but somehow explain to Postgres that cert
 
 <a id="alg-scan-project-hit"></a>
 
-<div class="enumerate">
-
 1.  Restore the original columns.
 
 2.  For every requested BioseqDB function like `score(seq)`, `target_start(seq)`, `cigar(seq)` and so on, write its field from this hit into the corresponding typed value node.
@@ -241,8 +239,6 @@ Now I not only need to build the tuple but somehow explain to Postgres that cert
 3.  Rebuild the evaluator, then evaluate the output expressions.
 
 4.  Return the resulting SQL row
-
-</div>
 
 ### Supporting joins
 
@@ -516,11 +512,11 @@ RESET max_parallel_workers_per_gather;
 
 Keep one highest score from each of the two searches, per stored row.
 
+<a id="fig-scan-alias-pairs"></a>
+
 ![05 joins and plans diagram](/static/figures/project/chapters-10-postgres-custom-scan-05-joins-and-plans-tikz-01.svg)
 
 *Two hits from the first search and three from the second produce six combinations. Additional hit conditions may select subset of this cross-product matrix, but this is responsibility of the user as I don’t provide any specialised optimisation for example to extract only one best-hit for each search.*
-
-<a id="fig-scan-alias-pairs"></a>
 
 The intereesting part is that self-joins in relational databases are commonly used for hierarchical structures (trees), detect duplicates, extract consecutive elements (and other comparison operations). In this case it’s used to create new alias for the column without any additional operations.
 
@@ -568,11 +564,11 @@ The cache subextension coordinates requests and stores completed results. The ex
 
 *producer* is the query runner that currently executes alignment job. In that timeframe another Postgres-spawned process with other user query waits for results. Submission of partial results would be possible, although very complicated to implement correctly. *sealing* here means that we store last tuple, collect some metadata like tuple counts and create new UUID for the result. Figure [cache lifecycle](../project_postgres_custom_scan/#fig-cache-lifecycle) shows what happens during the execution of two queries. The cache has expiration TTL time after which the results cannot be reused anymore.
 
+<a id="fig-cache-lifecycle"></a>
+
 ![06 result cache diagram](/static/figures/project/chapters-10-postgres-custom-scan-06-result-cache-tikz-01.svg)
 
 *Consumer just waits for all results from producer and then reads them.*
-
-<a id="fig-cache-lifecycle"></a>
 
 There’s one lock that is taken by any consumer during execution just to access shared state. The consumer sleeps and preiodically acquires and releases the lock to check if it can continue execution (polling). If the producer fails or is cancelled I wake all consumers that registered for this job and then each of them will try manually run the query (so the consumer won’t fail due to producer error or cancellation).
 
@@ -606,11 +602,11 @@ Order the selected cached sources from $1$ to $m$, source $i$ supplies part $B_i
    = B_1\uplus\cdots\uplus B_m
      \uplus\{(t,h)\mid t\in D\land A(t,h)\}.$$ Here $\uplus$ joins disjoint sets of occurrences. This simple formal description can be implemented as large `UNION ALL` operation of the entries in cache. Figure [cache ranges](../project_postgres_custom_scan/#fig-cache-ranges) shows the same example, including the overlap between the two sources.
 
+<a id="fig-cache-ranges"></a>
+
 ![06 result cache diagram](/static/figures/project/chapters-10-postgres-custom-scan-06-result-cache-tikz-02.svg)
 
 *Example of resuable query with one predicate on the primary ID column.The new request uses source 1 for $[40,60)$, source 2 for $[60,80)$, and computes $[80,100)$. The gray overlap in source 2 is omitted because source 1 already contains those occurrences. Cached rows outside the new request are also omitted.*
-
-<a id="fig-cache-ranges"></a>
 
 With both sources valid, the missing inputs have this equivalent SQL description:
 

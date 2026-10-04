@@ -34,7 +34,11 @@ def generate():
         return re.sub(r"\\gset\b", ";", text)
     mutated = sql(snippets[18])
     def runnable(body, setup, name, teardown):
-        return f"```sql runnable id=readme_{name} timeout=60s\n-- bioseq:setup\n{setup}\n-- bioseq:visible\n{body}\n-- bioseq:teardown\n{teardown}\n```"
+        teardown += "\nRESET bioseq.aligner.vulkan.enabled;\nRESET max_parallel_workers_per_gather;\nRESET bioseq.index.insert_maintenance.enabled;"
+        entity = ' entity="sql:type:bioseq.seq"' if name == 'step_01' else ''
+        if body.count('bioseq.cigar(') == 1:
+            entity += ' entity="sql:function:bioseq.cigar(anyelement)"'
+        return f"```sql runnable id=readme_{name} timeout=60s{entity}\n-- bioseq:setup\n{setup}\n-- bioseq:visible\n{body}\n-- bioseq:teardown\n{teardown}\n```"
     body = original.split("# BioseqDB\n", 1)[1].strip()
     body = re.sub(r"## Table of contents\n.*?(?=## Docker quick start)", "", body, flags=re.S)
     # The page template supplies the title and table of contents.
