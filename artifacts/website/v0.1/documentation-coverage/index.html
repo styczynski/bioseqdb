@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation coverage</title>
+<meta name="description" content="Public API documentation coverage">
+<link rel="canonical" href="https://bioseqdb.com/v0.1/documentation-coverage/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="Documentation coverage">
+<meta property="og:description" content="Public API documentation coverage">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bioseqdb.com/v0.1/documentation-coverage/">
+<meta property="og:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Documentation coverage">
+<meta name="twitter:description" content="Public API documentation coverage">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<link rel="icon" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/favicon.svg">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/site.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/docs-design.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/code-theme.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-content.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-benchmarks.css">
+</head>
+<body id="page-top" class="docs-design-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB documentation" class="dd-s0001">
+
+  <!-- ============ TOP NAV ============ -->
+  <header id="dnav" class="dd-s0002">
+    <div class="dd-s0003">
+      <button data-menu aria-label="Menu" class="dd-s0004">
+        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
+      </button>
+      <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0006">
+        <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
+        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
+        <span data-docsbadge class="dd-s0010">DOCS</span>
+      </a>
+
+      <nav data-topnav class="dd-s0011">
+        <a href="/v0.1/tutorials/getting_started/" data-nav class="dd-s0012">Docs</a>
+        <a href="/" class="dd-s0013">Product</a>
+        <a href="/benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
+        <a href="/versions/" class="dd-s0013">Versions</a>
+      </nav>
+
+      <!-- SEARCH -->
+      <div data-search-wrap class="dd-s0015">
+        <div data-search-box class="dd-s0016">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
+          <kbd class="dd-s0019">/</kbd>
+        </div>
+        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+      </div>
+
+      <!-- VERSION -->
+      <div data-ver-wrap class="dd-s0021">
+        <button id="ver-btn" class="dd-s0022">
+          <span class="dd-s0023"></span>v0.1 <span class="docs-version-status">Alpha</span>
+          <span data-caret class="dd-s0025"></span>
+        </button>
+        <div id="ver-menu" data-versions-url="/versions.json" class="dd-s0026">
+          <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="dd-s0027">v0.1 <span class="docs-version-current">current</span></a>
+          <a data-ver-all href="/versions/" class="dd-s0029">All versions</a>
+        </div>
+      </div>
+
+      <a data-ghbtn href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0031">GitHub</a>
+    </div>
+  </header>
+
+  <!-- ============ BODY GRID ============ -->
+  <div data-bodygrid class="dd-s0032">
+
+    <!-- ===== LEFT SIDEBAR ===== -->
+    <aside id="sidebar" class="dd-s0033">
+      
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Tutorials
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/tutorials/getting_started/" class="dd-s0037">Getting started with BioseqDB</a><a data-doc-link href="/v0.1/tutorials/project_introduction/" class="dd-s0037">Introduction</a><a data-doc-link href="/v0.1/tutorials/project_biology/" class="dd-s0037">Biological foundations of sequence analysis</a><a data-doc-link href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0037">Sequence alignment and search strategies</a><a data-doc-link href="/v0.1/tutorials/project_minimizers/" class="dd-s0037">Minimizer extraction</a><a data-doc-link href="/v0.1/tutorials/project_chaining/" class="dd-s0037">Chaining seed anchors</a><a data-doc-link href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0037">Final alignment and postprocessing</a><a data-doc-link href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0037">Sequence representations and lazy evaluation</a><a data-doc-link href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0037">PostgreSQL API and custom scans</a><a data-doc-link href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0037">Physical sequence storage in PostgreSQL</a><a data-doc-link href="/v0.1/tutorials/project_index_storage/" class="dd-s0037">Persistent sequence indexes</a><a data-doc-link href="/v0.1/tutorials/project_benchmarking/" class="dd-s0037">Benchmarking and performance evaluation</a><a data-doc-link href="/v0.1/tutorials/project_conclusion/" class="dd-s0037">Conclusions</a><a data-doc-link href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0037">Configuration reference (settings available in BioseqDB)</a><a data-doc-link href="/v0.1/tutorials/bibliography/" class="dd-s0037">Bibliography</a>
+        </div>
+      </div>
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Reference
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/reference/cpp/" class="dd-s0037">C++</a><a data-doc-link href="/v0.1/reference/sql/" class="dd-s0037">SQL</a>
+        </div>
+      </div>
+      
+      
+      <div class="dd-s0038">
+        <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0039">Edit on GitHub</a>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="doc-main" class="dd-s0040">
+      
+<section data-page-panel data-screen-label="Docs · Coverage" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header"><h1 class="dd-s0045">Documentation coverage</h1><p class="dd-s0046">62 of 141 public entities documented.</p></header>
+  <section class="design-entity-section"><h2>By module and SQL domain</h2><div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Group</th><th scope="col">Documented</th><th scope="col">Public</th></tr></thead><tbody><tr><td><code>bioseq.cache.provider_api</code></td><td>2</td><td>30</td></tr><tr><td><code>bioseq.cache.provider_api.&lt;implicit global&gt;</code></td><td>0</td><td>44</td></tr><tr><td><code>bioseq.io.reader</code></td><td>5</td><td>7</td></tr><tr><td><code>bioseq.io.reader:types</code></td><td>38</td><td>43</td></tr><tr><td><code>sql:bioseq</code></td><td>8</td><td>8</td></tr><tr><td><code>sql:bioseq_cache</code></td><td>6</td><td>6</td></tr><tr><td><code>sql:public</code></td><td>3</td><td>3</td></tr></tbody></table></div></section>
+  
+  <section class="design-entity-section"><h2>Missing summaries</h2><ul class="design-code-list"><li><code>cpp:enum:bioseq_cache_provider_flags</code></li><li><code>cpp:enum:bioseq_cache_provider_security_digest_format</code></li><li><code>cpp:enum:bioseq_cache_status</code></li><li><code>cpp:enumerator:bioseq::io::reader_backend::gzip</code></li><li><code>cpp:enumerator:bioseq::io::reader_backend::memory_mapped</code></li><li><code>cpp:enumerator:bioseq::io::reader_backend::parallel_gzip</code></li><li><code>cpp:enumerator:bioseq::io::reader_backend::posix_read</code></li><li><code>cpp:enumerator:bioseq::io::reader_backend::unknown</code></li><li><code>cpp:enumerator:bioseq_cache_provider_complete_write_observation</code></li><li><code>cpp:enumerator:bioseq_cache_provider_exact_source_elision_safe</code></li><li><code>cpp:enumerator:bioseq_cache_provider_reusable_coverage</code></li><li><code>cpp:enumerator:bioseq_cache_provider_security_digest_format_canonical</code></li><li><code>cpp:enumerator:bioseq_cache_status_error</code></li><li><code>cpp:enumerator:bioseq_cache_status_ok</code></li><li><code>cpp:enumerator:bioseq_cache_status_unsupported</code></li><li><code>cpp:namespace:bioseq</code></li><li><code>cpp:namespace:bioseq::cache</code></li><li><code>cpp:namespace:bioseq::io</code></li><li><code>cpp:struct:CustomPath</code></li><li><code>cpp:struct:CustomScanMethods</code></li><li><code>cpp:struct:EState</code></li><li><code>cpp:struct:ExplainState</code></li><li><code>cpp:struct:Expr</code></li><li><code>cpp:struct:List</code></li><li><code>cpp:struct:Path</code></li><li><code>cpp:struct:Plan</code></li><li><code>cpp:struct:PlannedStmt</code></li><li><code>cpp:struct:PlannerInfo</code></li><li><code>cpp:struct:Query</code></li><li><code>cpp:struct:RangeTblEntry</code></li><li><code>cpp:struct:RelOptInfo</code></li><li><code>cpp:struct:RelationData</code></li><li><code>cpp:struct:TupleTableSlot</code></li><li><code>cpp:struct:bioseq_cache_api</code></li><li><code>cpp:struct:bioseq_cache_column_map_entry</code></li><li><code>cpp:struct:bioseq_cache_column_schema</code></li><li><code>cpp:struct:bioseq_cache_decorated_path</code></li><li><code>cpp:struct:bioseq_cache_digest_sink</code></li><li><code>cpp:struct:bioseq_cache_explain_sink</code></li><li><code>cpp:struct:bioseq_cache_late_fetch_sink</code></li><li><code>cpp:struct:bioseq_cache_occurrence</code></li><li><code>cpp:struct:bioseq_cache_path_description</code></li><li><code>cpp:struct:bioseq_cache_path_domain</code></li><li><code>cpp:struct:bioseq_cache_physical_identity</code></li><li><code>cpp:struct:bioseq_cache_plan_digest_recipe</code></li><li><code>cpp:struct:bioseq_cache_planner_bridge</code></li><li><code>cpp:struct:bioseq_cache_provider</code></li><li><code>cpp:struct:bioseq_cache_provider_directory</code></li><li><code>cpp:struct:bioseq_cache_provider_registration</code></li><li><code>cpp:struct:bioseq_cache_query_intent</code></li><li><code>cpp:struct:bioseq_cache_reusable_source</code></li><li><code>cpp:struct:bioseq_cache_source_mapping</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_api</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_column_map_entry</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_column_schema</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_decorated_path</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_digest_sink</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_explain_sink</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_late_fetch_sink</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_occurrence</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_path_description</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_path_domain</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_physical_identity</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_plan_digest_recipe</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_planner_bridge</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_provider</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_provider_directory</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_provider_flags</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_provider_registration</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_provider_security_digest_format</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_query_intent</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_reusable_source</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_source_mapping</code></li><li><code>cpp:type_alias:bioseq::cache::bioseq_cache_status</code></li><li><code>cpp:type_alias:source_type</code></li><li><code>cpp:variable:bioseq::cache::k_cache_api_rendezvous_name</code></li><li><code>cpp:variable:bioseq::cache::k_provider_abi_revision</code></li><li><code>cpp:variable:bioseq::cache::k_provider_digest_bytes</code></li><li><code>cpp:variable:bioseq::cache::k_provider_directory_rendezvous_name</code></li></ul></section>
+  <section class="design-entity-section"><h2>Missing parameter documentation</h2><ul class="design-code-list"><li><code>cpp:function:bioseq::cache::provider_abi_field_present(const p_public_struct *, std::size_t, const p_field &amp;)</code></li><li><code>cpp:function:bioseq::cache::provider_abi_prefix_valid(const p_public_struct *, std::uint32_t, std::uint32_t)</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::compact_sequence_view&lt;p_range&gt;(const bioseq::io::compact_sequence_view::storage_unit *, std::__1::size_t, std::__1::size_t)</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::operator[](std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::read_decompressed_prefix(const char *, std::__1::size_t, const bioseq::io::reader_options &amp;)</code></li><li><code>cpp:function:bioseq::io::read_sequences_file(p_path &amp;&amp;, p_handler &amp;&amp;, p_failure &amp;&amp;, const bioseq::io::reader_options &amp;, bioseq::io::reader_backend *)</code></li><li><code>cpp:function:bioseq::io::read_sequences_files(std::__1::span&lt;const p_path&gt;, p_handler &amp;&amp;, p_failure &amp;&amp;, const bioseq::io::reader_options &amp;)</code></li><li><code>cpp:function:bioseq::io::reader_backend_name(bioseq::io::reader_backend)</code></li><li><code>cpp:function:bioseq::io::sample_sequence_headers(const char *, bioseq::io::sequence_file_format, const bioseq::io::reader_options &amp;, std::__1::size_t, std::__1::size_t)</code></li><li><code>cpp:function:bioseq::io::sequence_batch::header(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::prepare(std::__1::size_t, bool)</code></li><li><code>cpp:function:bioseq::io::sequence_batch::quality(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::reserve_storage(std::__1::size_t, std::__1::size_t, std::__1::size_t)</code></li><li><code>cpp:function:bioseq::io::sequence_batch::sequence(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::stream_sequences_file(const char *, p_sink &amp;&amp;, p_failure &amp;&amp;, bioseq::io::reader_options)</code></li></ul></section>
+  <section class="design-entity-section"><h2>Missing return documentation</h2><ul class="design-code-list"><li><code>cpp:function:bioseq::cache::provider_abi_field_present(const p_public_struct *, std::size_t, const p_field &amp;)</code></li><li><code>cpp:function:bioseq::cache::provider_abi_prefix_valid(const p_public_struct *, std::uint32_t, std::uint32_t)</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::begin() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::cbegin() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::cend() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::data() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::end() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::operator[](std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::padding() const</code></li><li><code>cpp:function:bioseq::io::compact_sequence_view::size() const</code></li><li><code>cpp:function:bioseq::io::read_decompressed_prefix(const char *, std::__1::size_t, const bioseq::io::reader_options &amp;)</code></li><li><code>cpp:function:bioseq::io::read_sequences_file(p_path &amp;&amp;, p_handler &amp;&amp;, p_failure &amp;&amp;, const bioseq::io::reader_options &amp;, bioseq::io::reader_backend *)</code></li><li><code>cpp:function:bioseq::io::read_sequences_files(std::__1::span&lt;const p_path&gt;, p_handler &amp;&amp;, p_failure &amp;&amp;, const bioseq::io::reader_options &amp;)</code></li><li><code>cpp:function:bioseq::io::reader_backend_name(bioseq::io::reader_backend)</code></li><li><code>cpp:function:bioseq::io::sample_sequence_headers(const char *, bioseq::io::sequence_file_format, const bioseq::io::reader_options &amp;, std::__1::size_t, std::__1::size_t)</code></li><li><code>cpp:function:bioseq::io::sequence_batch::empty() const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::header(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::header_offsets()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::header_storage()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::quality(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::quality_offsets()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::quality_storage()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::sequence(std::__1::size_t) const</code></li><li><code>cpp:function:bioseq::io::sequence_batch::sequence_offsets()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::sequence_paddings()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::sequence_storage()</code></li><li><code>cpp:function:bioseq::io::sequence_batch::size() const</code></li><li><code>cpp:function:bioseq::io::stream_sequences_file(const char *, p_sink &amp;&amp;, p_failure &amp;&amp;, bioseq::io::reader_options)</code></li></ul></section>
+</section>
+
+    </main>
+
+    <!-- ===== RIGHT TOC ===== -->
+    <aside data-rightrail class="dd-s0234">
+      <div class="dd-s0235">On this page</div>
+      <div id="toc-list" class="dd-s0236">
+        
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ============ SITE FOOTER ============ -->
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Getting started with BioseqDB</a><a href="/v0.1/tutorials/project_introduction/" class="dd-s0250 dd-h009">Introduction</a><a href="/v0.1/tutorials/project_biology/" class="dd-s0250 dd-h009">Biological foundations of sequence analysis</a><a href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0250 dd-h009">Sequence alignment and search strategies</a><a href="/v0.1/tutorials/project_minimizers/" class="dd-s0250 dd-h009">Minimizer extraction</a><a href="/v0.1/tutorials/project_chaining/" class="dd-s0250 dd-h009">Chaining seed anchors</a><a href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0250 dd-h009">Final alignment and postprocessing</a><a href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0250 dd-h009">Sequence representations and lazy evaluation</a><a href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0250 dd-h009">PostgreSQL API and custom scans</a><a href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0250 dd-h009">Physical sequence storage in PostgreSQL</a><a href="/v0.1/tutorials/project_index_storage/" class="dd-s0250 dd-h009">Persistent sequence indexes</a><a href="/v0.1/tutorials/project_benchmarking/" class="dd-s0250 dd-h009">Benchmarking and performance evaluation</a><a href="/v0.1/tutorials/project_conclusion/" class="dd-s0250 dd-h009">Conclusions</a><a href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0250 dd-h009">Configuration reference (settings available in BioseqDB)</a><a href="/v0.1/tutorials/bibliography/" class="dd-s0250 dd-h009">Bibliography</a><a href="/v0.1/reference/cpp/" class="dd-s0250 dd-h009">C++</a><a href="/v0.1/reference/sql/" class="dd-s0250 dd-h009">SQL</a>
+            
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 Bioseq contributors &mdash; an independent open-source project.</span>
+        <nav class="dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div data-backdrop class="dd-s0259"></div>
+
+  <!-- ===== ENTITY POPOVER ===== -->
+  <div id="entity-pop" class="dd-s0260"></div>
+
+</div>
+
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Documentation coverage","description":"Public API documentation coverage","url":"https://bioseqdb.com/v0.1/documentation-coverage/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png"}</script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-init.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-languages.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-math.js"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/main.js"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/docs-design.mjs"></script>
+</body>
+</html>

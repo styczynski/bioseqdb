@@ -1,0 +1,8 @@
+{
+  "_comment": "Generated from validated repository benchmark artifacts. Do not edit this build output.",
+  "sources": [
+    "benchmark-data/bench/alignment_benchmark_configuration.json",
+    "benchmark-data/bench/bench_e2e_configuration.json",
+    "benchmark-data/bioseq/io/benchmark/configuration.json"
+  ]
+}

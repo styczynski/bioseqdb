@@ -1,0 +1,2640 @@
+{
+  "params": {
+    "sneakysnake_original": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold passed to the bundled exact SneakySnake.c source"}
+    },
+    "sneakysnake_scalar": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the native rank-buffer scalar port"}
+    },
+    "sneakysnake_simd": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the Highway batch port"}
+    },
+    "sneakysnake_vulkan": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the fail-closed hardware Vulkan batch port"}
+    },
+    "sneakysnake_vulkan_e2": {"_": {"type": "integer", "default": 0, "description": "Fixed-E2 SneakySnake Vulkan small-seed comparator"}},
+    "gatekeeper_vulkan_e2": {"_": {"type": "integer", "default": 0, "description": "Fixed-E2 GateKeeper Vulkan small-seed candidate"}},
+    "sneakysnake_vulkan_e4": {"_": {"type": "integer", "default": 0, "description": "Fixed-E4 SneakySnake Vulkan small-seed comparator"}},
+    "gatekeeper_vulkan_e4": {"_": {"type": "integer", "default": 0, "description": "Fixed-E4 GateKeeper Vulkan small-seed candidate"}},
+    "bioseq_prefilter_off": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold applied after the common pipeline; lower-bound prefilter disabled"}
+    },
+    "bioseq_prefilter_scalar": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and scalar SneakySnake pipeline stage"}
+    },
+    "bioseq_prefilter_simd": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and Highway SIMD SneakySnake pipeline stage"}
+    },
+    "bioseq_prefilter_vulkan": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and fail-closed hardware Vulkan SneakySnake pipeline stage"}
+    },
+    "minimap2_dp":                              {"_": {"type": "integer", "default": 0, "description": "no params; passthrough"}},
+    "minimap2_rmq":                             {"_": {"type": "integer", "default": 0}},
+    "bioseq_ksw2_scalar_dp_scalar_mm":          {"_": {"type": "integer", "default": 0}},
+    "bioseq_ksw2_simd_dp_scalar_mm":            {"_": {"type": "integer", "default": 0}},
+    "bioseq_ksw2_simd_dp_two_stack_nthash":     {"_": {"type": "integer", "default": 0}},
+    "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited": {"_": {"type": "integer", "default": 0, "description": "Explicit exact_visited SIMD chaining oracle with two-stack ntHash SIMD sketch and KSW2"}},
+    "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate": {"_": {"type": "integer", "default": 0, "description": "Explicit bounded_batch_approximate SIMD chaining promotion candidate with two-stack ntHash SIMD sketch and KSW2"}},
+    "simd_chaining_endpoint_qualification":     {"_": {"type": "integer", "default": 0, "description": "Single callback runs bounded SIMD, exact SIMD, and bundled minimap2 sequentially on every fixed endpoint fixture"}},
+    "simd_chaining_endpoint_zero_reference":    {"_": {"type": "integer", "default": 0, "description": "Framework-literal substitute: returns zero metrics and performs no biological work; used only as the comparator for endpoint qualification rules"}},
+    "bioseq_ksw2_simd_dp_bounded_nthash":         {"_": {"type": "integer", "default": 0, "description": "Bounded u32/R7/sum ntHash SIMD sketch, SIMD chaining, KSW2 extension; native fail-closed route"}},
+    "bioseq_block_simd_dp_bounded_nthash":        {"_": {"type": "integer", "default": 0, "description": "Bounded u32/R7/sum ntHash SIMD sketch, SIMD chaining, Block Aligner SIMD extension; native fail-closed route"}},
+    "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU route: CPU ExactSimd minimizers, Vulkan tiled-DP score generation, CPU backtracking, CPU KSW2; fails without hardware Vulkan and is not all-GPU acceptance stats"}},
+    "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "Inter-region batched KSW2"}},
+    "bioseq_ksw2_simd_dp_simd_minimap2_slow":   {"_": {"type": "integer", "default": 0}},
+    "bioseq_block_simd_dp_scalar_mm":           {"_": {"type": "integer", "default": 0}},
+    "bioseq_block_simd_dp_two_stack_nthash":    {"_": {"type": "integer", "default": 0}},
+    "bioseq_block_vulkan_dp_vulkan_minimap_int": {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU route: Vulkan minimizers, source-direct mapped sorted-dense resident target index, seed lookup and tiled-DP score generation, but CPU mapped-prefix authority reads, backtracking and Block Aligner; not all-GPU acceptance stats"}},
+    "bioseq_block_vulkan_resident_gpu_index_frontend":     {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU resident GPU-index frontend: Vulkan sketch/index/seed/sort and tiled-DP score generation, but CPU backtracking and Block Aligner; not all-GPU acceptance stats"}},
+    "bioseq_ksw2_rmq_scalar_mm":                {"_": {"type": "integer", "default": 0}}
+  },
+
+  "test_cases": {
+    "SNEAKYSNAKE_ERR_E2_100BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
+      "description": "Deterministic 1024-pair prefix of the upstream 100 bp ERR E2 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SNEAKYSNAKE_ERR_E40_100BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
+      "description": "Deterministic 1024-pair prefix of the upstream 100 bp ERR E40 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "PREFILTER_SMALL_ERR_E2_32BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 32, "sequence_prefix_length": 32},
+      "description": "Deterministic 4096-pair 32-symbol prefix of the upstream ERR E2 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E40_32BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 32, "sequence_prefix_length": 32},
+      "description": "Deterministic 4096-pair 32-symbol prefix of the upstream ERR E40 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E2_64BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 64, "sequence_prefix_length": 64},
+      "description": "Deterministic 4096-pair 64-symbol prefix of the upstream ERR E2 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E40_64BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 64, "sequence_prefix_length": 64},
+      "description": "Deterministic 4096-pair 64-symbol prefix of the upstream ERR E40 corpus"
+    },
+    "SNEAKYSNAKE_SRR_E8_250BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/SRR826471_1_E8_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 250},
+      "description": "Deterministic 1024-pair prefix of the upstream 250 bp SRR E8 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SNEAKYSNAKE_SRR_E100_250BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/SRR826471_1_E100_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 250},
+      "description": "Deterministic 1024-pair prefix of the upstream 250 bp SRR E100 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SHORT_HIFI":      { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234567 }, "description": "300 bp fragments, ~0.2% HiFi-style error, 3 kbp reference"   },
+    "SHORT_CCS":       { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.005, "insertion_rate": 0.005,  "deletion_rate": 0.005,  "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 2345678 }, "description": "300 bp fragments, ~1.5% CCS-style error"   },
+    "SHORT_ONT_MODERN":{ "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.005, "insertion_rate": 0.025,  "deletion_rate": 0.020,  "insertion_length_mean": 2.0, "deletion_length_mean": 2.0, "reverse_complement_rate": 0.5, "seed": 3456789 }, "description": "300 bp fragments, ~5% ONT-modern error"   },
+    "SHORT_ONT_HIGH_ERROR":{ "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.01,  "insertion_rate": 0.05,   "deletion_rate": 0.04,   "insertion_length_mean": 2.5, "deletion_length_mean": 2.5, "reverse_complement_rate": 0.5, "seed": 4567890 }, "description": "300 bp fragments, ~10% high-error ONT model"   },
+    "SHORT_HIGH_INDEL_LOW_SUB": { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50, "reference_length": 3000, "substitution_rate": 0.001, "insertion_rate": 0.04, "deletion_rate": 0.04, "insertion_length_mean": 2.5, "deletion_length_mean": 2.5, "reverse_complement_rate": 0.5, "seed": 5678901 }, "description": "300 bp fragments, ~8% indel-only" },
+    "SHORT_HIGH_SUB_LOW_INDEL": { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50, "reference_length": 3000, "substitution_rate": 0.05,  "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 6789012 }, "description": "300 bp fragments, ~5% sub-only" },
+
+    "MEDIUM_HIFI":      { "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500,   "reference_length": 30000,    "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 7890123 }, "description": "5 kbp fragments, ~0.2% HiFi-style error, 30 kbp reference"   },
+    "MEDIUM_CCS":       { "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500,   "reference_length": 30000,    "substitution_rate": 0.005, "insertion_rate": 0.005,  "deletion_rate": 0.005,  "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 8901234 }, "description": "5 kbp fragments, ~1.5% CCS-style error"   },
+    "MEDIUM_ONT_MODERN":{ "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500,   "reference_length": 30000,    "substitution_rate": 0.005, "insertion_rate": 0.025,  "deletion_rate": 0.020,  "insertion_length_mean": 2.0, "deletion_length_mean": 2.0, "reverse_complement_rate": 0.5, "seed": 9012345 }, "description": "5 kbp fragments, ~5% ONT-modern error"   },
+    "MEDIUM_ONT_HIGH_ERROR":{ "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500,   "reference_length": 30000,    "substitution_rate": 0.01,  "insertion_rate": 0.05,   "deletion_rate": 0.04,   "insertion_length_mean": 2.5, "deletion_length_mean": 2.5, "reverse_complement_rate": 0.5, "seed": 1023456 }, "description": "5 kbp fragments, ~10% high-error ONT model"   },
+    "MEDIUM_HIGH_INDEL_LOW_SUB": { "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500, "reference_length": 30000, "substitution_rate": 0.001, "insertion_rate": 0.04, "deletion_rate": 0.04, "insertion_length_mean": 2.5, "deletion_length_mean": 2.5, "reverse_complement_rate": 0.5, "seed": 2103456 }, "description": "5 kbp fragments, ~8% indel-only" },
+    "MEDIUM_HIGH_SUB_LOW_INDEL": { "data": { "fragment_count": 6, "fragment_length_mean": 5000, "fragment_length_stddev": 500, "reference_length": 30000, "substitution_rate": 0.05,  "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3210456 }, "description": "5 kbp fragments, ~5% sub-only" },
+
+    "LONG_HIFI":       { "data": { "fragment_count": 3, "fragment_length_mean": 50000, "fragment_length_stddev": 3000,  "reference_length": 250000,   "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 4321056 }, "description": "50 kbp fragments, ~0.2% HiFi error, 250 kbp reference"   },
+    "LONG_CCS":        { "data": { "fragment_count": 3, "fragment_length_mean": 50000, "fragment_length_stddev": 3000,  "reference_length": 250000,   "substitution_rate": 0.005, "insertion_rate": 0.005,  "deletion_rate": 0.005,  "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 5432106 }, "description": "50 kbp fragments, ~1.5% CCS error"   },
+    "LONG_ONT_MODERN": { "data": { "fragment_count": 3, "fragment_length_mean": 50000, "fragment_length_stddev": 3000,  "reference_length": 250000,   "substitution_rate": 0.005, "insertion_rate": 0.025,  "deletion_rate": 0.020,  "insertion_length_mean": 2.0, "deletion_length_mean": 2.0, "reverse_complement_rate": 0.5, "seed": 6543210 }, "description": "50 kbp fragments, ~5% ONT-modern error"   },
+    "LONG_HIGH_SUB_LOW_INDEL": { "data": { "fragment_count": 3, "fragment_length_mean": 50000, "fragment_length_stddev": 3000, "reference_length": 250000, "substitution_rate": 0.05,  "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 7654321 }, "description": "50 kbp fragments, ~5% sub-only" },
+
+    "VERY_LONG_HIFI":  { "concurrency": 2, "data": { "fragment_count": 1, "fragment_length_mean": 1000000, "fragment_length_stddev": 50000, "reference_length": 1500000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 8765432 }, "description": "1 Mbp fragments, ~0.2% HiFi error" },
+    "VERY_LONG_CCS":   { "concurrency": 2, "data": { "fragment_count": 1, "fragment_length_mean": 1000000, "fragment_length_stddev": 50000, "reference_length": 1500000, "substitution_rate": 0.005, "insertion_rate": 0.005,  "deletion_rate": 0.005,  "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 9876543 }, "description": "1 Mbp fragments, ~1.5% CCS error" },
+    "VERY_LONG_ONT_MODERN": { "concurrency": 2, "data": { "fragment_count": 1, "fragment_length_mean": 1000000, "fragment_length_stddev": 50000, "reference_length": 1500000, "substitution_rate": 0.005, "insertion_rate": 0.025, "deletion_rate": 0.020, "insertion_length_mean": 2.0, "deletion_length_mean": 2.0, "reverse_complement_rate": 0.5, "seed": 1987653 }, "description": "1 Mbp fragments, ~5% ONT-modern error" },
+    "VERY_LONG_HIGH_SUB_LOW_INDEL": { "concurrency": 2, "data": { "fragment_count": 1, "fragment_length_mean": 1000000, "fragment_length_stddev": 50000, "reference_length": 1500000, "substitution_rate": 0.05, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 2198765 }, "description": "1 Mbp fragments, ~5% sub-only" },
+
+    "XL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
+
+    "FAST_LONG": { "concurrency": 5, "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error" },
+    "FAST_VERY_LONG": { "concurrency": 5, "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100, "reference_length": 100000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
+
+
+    "XL_CCS":          { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.005, "insertion_rate": 0.005, "deletion_rate": 0.005, "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 4321987 }, "description": "5 Mbp fragments, ~1.5% CCS error" },
+
+    "XXL_HIFI":         { "concurrency": 1, "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "Single-group 0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error; serial grouping leaves admission headroom for the Vulkan query sketch nested under the segmented target-wave permit" },
+    "XXL_HIFI_PAIRED":  { "concurrency": 1, "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "Single-group copy of XXL_HIFI for 11-repeat paired serial acceptance; identical generated workload and seed" },
+
+
+    "REPR_STORAGE_K7_MEDIUM":  { "data": { "kmer_size": 7,  "fragment_count": 3, "fragment_length_mean": 5000, "fragment_length_stddev": 500, "reference_length": 30000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 24681012 }, "description": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>" },
+    "REPR_STORAGE_K27_XL":     { "concurrency": 1, "data": { "kmer_size": 27, "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 13579246 }, "description": "K=27 / XL HiFi — exercises 128-bit MinimizerRepr<28,27>" },
+
+    "RMQ_REPRO_LONG_CCS":      { "data": { "fragment_count": 3, "fragment_length_mean": 50000, "fragment_length_stddev": 3000, "reference_length": 250000, "substitution_rate": 0.005, "insertion_rate": 0.005, "deletion_rate": 0.005, "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 18029918 }, "description": "Pinned (LONG, CCS) seed covering bioseq-RMQ AVL rebalancing" },
+
+    "CURATED_UNIQUE_FRAGMENT": { "data": { "fragment_count": 1, "fragment_length_mean": 300, "fragment_length_stddev": 0, "reference_length": 2000, "substitution_rate": 0.0, "insertion_rate": 0.0, "deletion_rate": 0.0, "insertion_length_mean": 0.0, "deletion_length_mean": 0.0, "reverse_complement_rate": 0.0, "seed": 424242 }, "description": "Single error-free fragment from a 2 kbp random reference — trivial alignment" },
+    "CURATED_SEAL_BATCH":      { "data": { "fragment_count": 8, "fragment_length_mean": 200, "fragment_length_stddev": 10, "reference_length": 4000, "substitution_rate": 0.01, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234 }, "description": "SEAL-style 8-fragment batch with mild error and reverse-complement" },
+    "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS": { "concurrency": 1, "data": {}, "description": "One source-fixed corpus callback spanning nearby short exact-read sizes, reverse-strand and nonzero-penalty fixed seeds, a structurally constructed cutoff/rescue case, generated error profiles, constructed repetitive decoys, and SHORT through report-76 XXL_HIFI endpoint sizes; generic fixed-seed cases make no unverified anchor-shape claim, and all targets fit bundled minimap2's signed-32-bit ABI" }
+  },
+  "bench_prefilter_kernels": {
+    "tags": ["prefilter", "sneakysnake", "simd", "vulkan"],
+    "description": "Separate prefilter microbenchmark inside bioseq_benchmark. One-time shared input preparation (dataset read, byte-rank flattening, jobs) and the untimed bundled-source/scalar/edit-distance oracles are reported separately. The measured backend_batch region is the complete selected batch API call; for Vulkan it includes upload, dispatch, synchronization, and result readback. callback_total additionally includes output materialization and separately reported runtime validation, while callback_non_backend is its difference from backend_batch. No per-row pseudo end-to-end number incorrectly adds the shared input setup. These <=250 bp fixtures use one complete maze (t=y=len), avoiding the source implementation's multi-maze tail quirks. CPU/source rows sweep E=2/8/40/100; Vulkan rows sweep only the kernel's evaluated E=2/8/16/31 domain. Every available row is validated after backend timing against source decisions and exact ED truth; available Vulkan rows additionally require status-0 execution and exact scalar lower-bound/status/decision parity. Vulkan-unavailable rows are nonblocking and never CPU-fallback. Reports 151/153/154 exposed the max_edits=2 SRR-E100 Vulkan P50 moving 0.410/0.512/0.694 ms with only three samples. All rows now retain 11 measured samples under the existing exclusive serial GPU schedule and fixed seeded interleaving; correctness and within-run performance gates are unchanged.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5121008},
+    "matrix": {
+      "for": {
+        "SNEAKYSNAKE_ERR_E2_100BP": 11,
+        "SNEAKYSNAKE_ERR_E40_100BP": 11,
+        "SNEAKYSNAKE_SRR_E8_250BP": 11,
+        "SNEAKYSNAKE_SRR_E100_250BP": 11
+      },
+      "over": {
+        "sneakysnake_original": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_scalar": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_simd": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_vulkan": {"max_edits": [2, 8, 16, 31]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "region": "prefilter_backend_batch", "rules": []},
+        "input_preparation_ns": {"type": "evaluation", "rules": []},
+        "oracle_preparation_ns": {"type": "evaluation", "rules": []},
+        "backend_batch_ns": {"type": "evaluation", "rules": []},
+        "callback_non_backend_ns": {"type": "evaluation", "rules": []},
+        "callback_total_ns": {"type": "evaluation", "rules": []},
+        "validation_ns": {"type": "evaluation", "rules": []},
+        "input_valid": {"type": "evaluation", "rules": []},
+        "backend_available": {"type": "evaluation", "rules": []},
+        "runtime_validation_performed": {"type": "evaluation", "rules": []},
+        "runtime_validation_passed": {"type": "evaluation", "rules": []},
+        "vulkan_validation_required": {"type": "evaluation", "rules": []},
+        "result_count_valid": {"type": "evaluation", "rules": []},
+        "pair_count": {"type": "evaluation", "rules": []},
+        "base_count": {"type": "evaluation", "rules": []},
+        "accepted_count": {"type": "evaluation", "rules": []},
+        "rejected_count": {"type": "evaluation", "rules": []},
+        "rejection_rate": {"type": "evaluation", "rules": []},
+        "evaluated_count": {"type": "evaluation", "rules": []},
+        "reference_decision_mismatches": {"type": "evaluation", "rules": []},
+        "reference_decision_mismatch_rate": {"type": "evaluation", "rules": []},
+        "true_similar_count": {"type": "evaluation", "rules": []},
+        "true_dissimilar_count": {"type": "evaluation", "rules": []},
+        "false_accept_count": {"type": "evaluation", "rules": []},
+        "false_reject_count": {"type": "evaluation", "rules": []},
+        "false_accept_rate": {"type": "evaluation", "rules": []},
+        "false_reject_rate": {"type": "evaluation", "rules": []},
+        "backend_pairs_per_second": {"type": "evaluation", "rules": []},
+        "backend_bases_per_second": {"type": "evaluation", "rules": []},
+        "callback_pairs_per_second": {"type": "evaluation", "rules": []},
+        "callback_bases_per_second": {"type": "evaluation", "rules": []},
+        "lower_bound_sum": {"type": "evaluation", "rules": []},
+        "lower_bound_max": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "bench_prefilter_small_seeds": {
+    "tags": ["prefilter", "gatekeeper", "sneakysnake", "vulkan", "small-seed"],
+    "description": "Blocking hardware-Vulkan comparison of GateKeeper and SneakySnake on deterministic 32/64-symbol prefixes. Each callback times a complete upload/dispatch/wait/readback batch, then requires full CPU-oracle parity, supported geometry, result-count parity, and zero false rejects. Every matched independent P50 GateKeeper cell must be more than 10% faster than SneakySnake.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5123830},
+    "matrix": {
+      "for": {
+        "PREFILTER_SMALL_ERR_E2_32BP": 5,
+        "PREFILTER_SMALL_ERR_E40_32BP": 5,
+        "PREFILTER_SMALL_ERR_E2_64BP": 5,
+        "PREFILTER_SMALL_ERR_E40_64BP": 5
+      },
+      "over": {
+        "sneakysnake_vulkan_e2": {},
+        "gatekeeper_vulkan_e2": {},
+        "sneakysnake_vulkan_e4": {},
+        "gatekeeper_vulkan_e4": {}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "region": "prefilter_backend_batch", "rules": []},
+        "backend_batch_ns": {"type": "evaluation", "rules": [
+          ["gatekeeper_e2_err_e2_32_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}],
+          ["gatekeeper_e4_err_e2_32_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}],
+          ["gatekeeper_e2_err_e40_32_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}],
+          ["gatekeeper_e4_err_e40_32_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}],
+          ["gatekeeper_e2_err_e2_64_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}],
+          ["gatekeeper_e4_err_e2_64_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}],
+          ["gatekeeper_e2_err_e40_64_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}],
+          ["gatekeeper_e4_err_e40_64_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}]
+        ]},
+        "input_preparation_ns": {"type": "evaluation", "rules": []},
+        "oracle_preparation_ns": {"type": "evaluation", "rules": []},
+        "callback_non_backend_ns": {"type": "evaluation", "rules": []},
+        "callback_total_ns": {"type": "evaluation", "rules": []},
+        "validation_ns": {"type": "evaluation", "rules": []},
+        "input_valid": {"type": "evaluation", "rules": []},
+        "backend_available": {"type": "evaluation", "rules": []},
+        "runtime_validation_performed": {"type": "evaluation", "rules": []},
+        "runtime_validation_passed": {"type": "evaluation", "rules": []},
+        "vulkan_validation_required": {"type": "evaluation", "rules": []},
+        "gatekeeper_validation_required": {"type": "evaluation", "rules": []},
+        "result_count_valid": {"type": "evaluation", "rules": []},
+        "pair_count": {"type": "evaluation", "rules": []},
+        "base_count": {"type": "evaluation", "rules": []},
+        "supported_job_count": {"type": "evaluation", "rules": []},
+        "false_reject_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_estimate_sum": {"type": "evaluation", "rules": []},
+        "gatekeeper_mask_rejection_candidate_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_exact_guard_activation_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_guard_confirmed_rejection_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_final_rejection_count": {"type": "evaluation", "rules": []},
+        "lower_bound_sum": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "bench_prefilter_pipeline": {
+    "tags": ["aligner", "prefilter", "sneakysnake", "pipeline"],
+    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes prefilter and mm_align_skeleton. Operation-originated stats report actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless stats are available and report non-empty work from the selected backend, while the off row requires stats to be absent. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5124040},
+    "matrix": {
+      "for": {"MEDIUM_HIFI": 5, "MEDIUM_ONT_MODERN": 5},
+      "over": {
+        "bioseq_prefilter_off": {"max_edits": [16]},
+        "bioseq_prefilter_scalar": {"max_edits": [16]},
+        "bioseq_prefilter_simd": {"max_edits": [16]},
+        "bioseq_prefilter_vulkan": {"max_edits": [16]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "region_visits": {"type": "region", "rules": []},
+        "pipeline_backend_available": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_required": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_performed": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_passed": {"type": "evaluation", "rules": []},
+        "edit_threshold_enforced": {"type": "evaluation", "rules": []},
+        "edit_threshold": {"type": "evaluation", "rules": []},
+        "prefilter_enabled": {"type": "evaluation", "rules": []},
+        "prefilter_backend_off": {"type": "evaluation", "rules": []},
+        "prefilter_backend_scalar": {"type": "evaluation", "rules": []},
+        "prefilter_backend_simd": {"type": "evaluation", "rules": []},
+        "prefilter_backend_vulkan": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_available": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_consistent": {"type": "evaluation", "rules": []},
+        "prefilter_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_sneaky_snake_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_gatekeeper_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_scalar_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_simd_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_vulkan_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_evaluated_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_length_difference_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_unsupported_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_rejected_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_rejected_regions": {"type": "evaluation", "rules": []},
+        "prefilter_surviving_regions": {"type": "evaluation", "rules": []},
+        "prefilter_mask_rejection_candidates": {"type": "evaluation", "rules": []},
+        "prefilter_exact_guard_activations": {"type": "evaluation", "rules": []},
+        "prefilter_guard_confirmed_rejections": {"type": "evaluation", "rules": []},
+        "prefilter_hamming_exact_rejections": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_saturated": {"type": "evaluation", "rules": []},
+        "selected_route_execution_stats_consistent": {"type": "evaluation", "rules": []},
+        "ksw2_left_calls": {"type": "evaluation", "rules": []},
+        "ksw2_gap_calls": {"type": "evaluation", "rules": []},
+        "ksw2_right_calls": {"type": "evaluation", "rules": []},
+        "ksw2_total_calls": {"type": "evaluation", "rules": []},
+        "ksw2_input_cell_area": {"type": "evaluation", "rules": []},
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_preserves_exact_threshold_results", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_preserves_exact_threshold_results", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "threshold_truth_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "threshold_correct_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "primary_correct_fraction": {"type": "evaluation", "rules": []},
+        "mean_position_offset_bp": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "bench_aligners_grid": {
+    "tags": ["aligner", "grid"],
+    "description": "Length × error × algorithm matrix. Iteration counts are bucket-tuned (60 SHORT, 35 MEDIUM, 12 LONG, 3 VERY_LONG, 2 XL) so SHORT cells drive the tight noise floor while XL cells stay inside the per-call budget. Skip noisy×long cells (LONG / VERY_LONG / XL × ONT_HIGH_ERROR, HIGH_INDEL_LOW_SUB) — minimap2 itself fails to produce a primary at 8-10% indel rate on >50 kbp pairs.",
+    "fast": false,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": {
+        "SHORT_HIFI": 60, "SHORT_CCS": 60, "SHORT_ONT_MODERN": 60, "SHORT_ONT_HIGH_ERROR": 60, "SHORT_HIGH_INDEL_LOW_SUB": 60, "SHORT_HIGH_SUB_LOW_INDEL": 60,
+        "MEDIUM_HIFI": 35, "MEDIUM_CCS": 35, "MEDIUM_ONT_MODERN": 35, "MEDIUM_ONT_HIGH_ERROR": 35, "MEDIUM_HIGH_INDEL_LOW_SUB": 35, "MEDIUM_HIGH_SUB_LOW_INDEL": 35,
+        "LONG_HIFI": 12, "LONG_CCS": 12, "LONG_ONT_MODERN": 12, "LONG_HIGH_SUB_LOW_INDEL": 12,
+        "VERY_LONG_HIFI": 3, "VERY_LONG_CCS": 3, "VERY_LONG_ONT_MODERN": 3, "VERY_LONG_HIGH_SUB_LOW_INDEL": 3,
+        "XL_HIFI": 2, "XL_CCS": 2, "XXL_HIFI": 1
+      },
+      "over": {
+        "minimap2_dp": {},
+        "minimap2_rmq": {},
+        "bioseq_ksw2_scalar_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_simd_dp_simd_minimap2_slow": {},
+        "bioseq_block_simd_dp_scalar_mm": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_rmq_scalar_mm": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {},
+        "match_count": { "type": "evaluation" },
+        "primary_correct_fraction": { "type": "evaluation" },
+        "mean_position_offset_bp": { "type": "evaluation" }
+      }
+    }
+  },
+  "bench_aligners_curated": {
+    "tags": ["aligner", "curated"],
+    "description": "Curated correctness probes. Exact eight-row/four-case acceptance and blocking all-sample biological bounds cover every unique-fragment, SEAL-style batch, FAST_LONG, and FAST_VERY_LONG observation. The resident GPU-index frontend FAST_LONG row must produce one match, primary correctness 1, and zero offset. Wall timing is diagnostic only: five concurrent groups share a process-wide Vulkan queue mutex, so wall samples include unequal queue waiting and independent row P50/P99 estimates are not acceptance-grade. Scheduling variance does not alter biological or index-construction acceptance. The 10M/100M targets are below the 256 Mi-bp source-direct threshold, so the named small-target sibling comparisons are not direct-resident stats. Blocking GPU speed acceptance lives in the serial, route-validated XXL relative and paired gates; a row-pruning filter remains a hard configuration error here, so no biological comparison side can disappear vacuously.",
+    "fast": true,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": { "CURATED_UNIQUE_FRAGMENT": 5000, "CURATED_SEAL_BATCH": 2000, "FAST_LONG": 300, "FAST_VERY_LONG": 20 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_scalar_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {},
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {},
+        "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "minimap2_dp",
+          "bioseq_ksw2_scalar_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_two_stack_nthash",
+          "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+          "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+          "bioseq_block_simd_dp_two_stack_nthash",
+          "bioseq_block_vulkan_dp_vulkan_minimap_int",
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
+        ],
+        "exact_test_case_iterations": {
+          "CURATED_UNIQUE_FRAGMENT": 5000,
+          "CURATED_SEAL_BATCH": 2000,
+          "FAST_LONG": 300,
+          "FAST_VERY_LONG": 20
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "resident_gpu_frontend_fast_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50", "blocking": false },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "FAST_LONG" } ],
+            [ "resident_gpu_frontend_fast_very_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50", "blocking": false },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "FAST_VERY_LONG" } ]
+          ]
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "resident_gpu_frontend_fast_long_match_count_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
+            [ "resident_gpu_frontend_fast_long_match_count_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
+            [ "resident_gpu_frontend_fast_very_long_match_count_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ],
+            [ "resident_gpu_frontend_fast_very_long_match_count_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
+          ]
+        },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "bioseq_curated_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ],
+            [ "bioseq_ksw2_batched_curated_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ],
+            [ "bioseq_block_curated_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ],
+            [ "resident_gpu_frontend_fast_long_correct_fraction_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
+            [ "resident_gpu_frontend_fast_very_long_correct_fraction_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
+          ]
+        },
+        "mean_position_offset_bp": {
+          "type": "evaluation",
+          "rules": [
+            [ "resident_gpu_frontend_fast_long_position_offset_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
+            [ "resident_gpu_frontend_fast_very_long_position_offset_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
+          ]
+        }
+      }
+    }
+  },
+
+  "bench_aligners_xxl_hifi_relative": {
+    "tags": ["aligner", "xxl-hifi", "relative-regression"],
+    "description": "XXL_HIFI-only non-E2E algorithm comparison. Four samples and nine controlled rows apply independent within-run P50 wall/stage ceilings. The 500M target is above the 256 Mi-bp production threshold: strict execution receipts validate both the direct resident and resident GPU-index frontend routes, and a blocking same-report P50 rule requires route-validated resident GPU-index frontend to beat route-validated source-direct Vulkan. Batched-KSW2 wall is bounded at 1.005x; SIMD/scalar sketch and chaining are bounded at 0.214x and 0.600x. The mixed GPU/CPU Vulkan wall ceiling remains visible at 1.011221x only as a nonblocking diagnostic; it is not faster or all-GPU acceptance evidence. Every SIMD_MM2 row explicitly selects bounded_batch_approximate as a promotion candidate and must validate requested/observed policy identity, positive accelerated cutoff work, and zero scalar fallback. Every Vulkan-labelled row is a mixed GPU/CPU route (CPU work remains) and is explicitly ineligible for all-GPU acceptance.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "XXL_HIFI": 4 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_scalar_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {},
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {},
+        "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "minimap2_dp",
+          "bioseq_ksw2_scalar_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_two_stack_nthash",
+          "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+          "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+          "bioseq_block_simd_dp_two_stack_nthash",
+          "bioseq_block_vulkan_dp_vulkan_minimap_int",
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
+        ],
+        "exact_test_case_iterations": { "XXL_HIFI": 4 },
+        "require_named_region_iteration_coverage": true,
+        "exact_named_region_sample_multiplicities": [
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mm_sketch", "metric": "region_total_ns", "exact_samples": 8 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mg_lchain_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mg_lchain_dp", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_align_skeleton", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_align_skeleton", "metric": "region_total_ns", "exact_samples": 4 }
+        ]
+      },
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "report76_xxl_hifi_block_simd_over_ksw2_simd_wall_ratio_max_1_057921",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 5.7921, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "complete_reports120_148_151_153_xxl_hifi_ksw2_batched_over_ksw2_simd_wall_ratio_max_1_005000",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0.5, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 1.1221, "aggregate": "p50", "blocking": false },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "report76_xxl_hifi_ksw2_simd_over_minimap2_wall_ratio_max_0_797045",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 20.2955, "tolerance%": 0.0001, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "report76_xxl_hifi_ksw2_simd_over_scalar_wall_ratio_max_0_540314",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 45.9686, "tolerance%": 0.0001, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "report76_xxl_hifi_legacy_block_vulkan_over_block_simd_wall_ratio_max_1_714040",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 71.4040, "aggregate": "p50" },
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "report76_xxl_hifi_resident_gpu_frontend_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 72.2027, "aggregate": "p50" },
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "xxl_resident_gpu_frontend_wall_less_than_route_validated_source_direct",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": [
+            [ "complete_paired_medians_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_214000",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" },
+              { "compare": "<", "threshold%": 78.6, "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mm_sketch" } ],
+            [ "complete_paired_medians_xxl_hifi_chaining_simd_over_scalar_ratio_max_0_600000",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mg_lchain_simd" },
+              { "compare": "<", "threshold%": 40, "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mg_lchain_dp" } ],
+            [ "report76_xxl_hifi_backtrack_simd_over_scalar_ratio_max_0_955048972",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "backtrack_chains" },
+              { "compare": "<", "threshold%": 4.4951028, "tolerance%": 0.0000001, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "backtrack_chains" } ],
+            [ "report76_xxl_hifi_block_over_ksw2_alignment_ratio_max_0_591278239",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_align_skeleton" },
+              { "compare": "<", "threshold%": 40.8721761, "tolerance%": 0.0000001, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_align_skeleton" } ]
+          ]
+        },
+        "region_visits": { "type": "region", "rules": [] },
+        "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "biological_fingerprint_computed": { "type": "evaluation", "rules": [] },
+        "biological_fingerprint_saturated": { "type": "evaluation", "rules": [] },
+        "biological_collection_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_collection_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_match_result_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_result_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_result_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_result_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_operation_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_operation_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_match_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_match_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_match_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_match_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "biological_cigar_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_lanes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_scalar_orchestration_steps": { "type": "evaluation", "rules": [] },
+        "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_block_simd_chain_operation_validation_accepted",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_simd_chain_operation_validation_accepted",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_sketch_simd_chain_operation_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_chain_operation_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_policy_stats_coherent": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_block_simd_chain_bounded_policy_stats_coherent",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_simd_chain_bounded_policy_stats_coherent",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_sketch_simd_chain_bounded_policy_stats_coherent",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_chain_bounded_policy_stats_coherent",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_hybrid_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_exact_visited": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_exact_policy_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_all_simd_exact_policy_forbidden", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_all_simd_exact_policy_forbidden", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_selected_policy_bounded_batch_approximate": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_bounded_policy_selected", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_all_simd_bounded_policy_selected", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_all_simd_bounded_policy_selected", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_selected_policy_matches_stats": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_requested_observed_policy_match", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_all_simd_requested_observed_policy_match", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_all_simd_requested_observed_policy_match", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_exact_visited_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_exact_calls_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_batch_approximate_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_bounded_calls_positive", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_improving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_nonimproving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_bounded_cutoff_positive", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_candidates_skipped": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_bounded_candidates_skipped_positive", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_global_best_rescue_probes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_global_best_rescue_wins": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_policy_rejection_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_policy_stats_saturated": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_all_simd_policy_stats_saturation_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_scalar_score_branches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_block_simd_chain_scalar_score_forbidden", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_simd_chain_scalar_score_forbidden", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_sketch_simd_chain_scalar_score_forbidden", { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_chain_scalar_score_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_scalar_backtrack_branches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_block_simd_chain_scalar_backtrack_forbidden", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_simd_chain_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_sketch_simd_chain_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_chain_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_shared_scalar_backtrack_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_block_simd_chain_shared_scalar_backtrack_forbidden", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_simd_chain_shared_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_sketch_simd_chain_shared_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_chain_shared_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "ksw2_batched_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_scalar_one_match_per_sample",
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_simd_chain_scalar_sketch_one_match_per_sample",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_one_match_per_sample",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_partial_gpu_chain_one_match_per_sample",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_one_match_per_sample",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_simd_one_match_per_sample",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_legacy_partial_gpu_one_match_per_sample",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_partial_gpu_one_match_per_sample",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_scalar_primary_correct_per_sample",
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_simd_chain_scalar_sketch_primary_correct_per_sample",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_primary_correct_per_sample",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_partial_gpu_chain_primary_correct_per_sample",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_primary_correct_per_sample",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_simd_primary_correct_per_sample",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_legacy_partial_gpu_primary_correct_per_sample",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_partial_gpu_primary_correct_per_sample",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "mean_position_offset_bp": { "type": "evaluation" },
+        "mixed_gpu_pipeline_selected": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_vulkan_tiled_is_partial_gpu",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_legacy_block_vulkan_is_partial_gpu",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_is_partial_gpu",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_minimap2_not_partial_gpu",
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_scalar_not_partial_gpu",
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_simd_chain_scalar_sketch_not_partial_gpu",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_all_simd_not_partial_gpu",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_batched_not_partial_gpu",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_simd_not_partial_gpu",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "all_gpu_acceptance_eligible": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_vulkan_tiled_disqualified_from_all_gpu",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_legacy_block_vulkan_disqualified_from_all_gpu",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_disqualified_from_all_gpu",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_query_sketch_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_legacy_block_vulkan_query_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_query_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_target_sketch_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_legacy_block_vulkan_target_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_target_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_target_index_build_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_target_index_build_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_lookup_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_legacy_block_vulkan_seed_lookup_dispatched",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_seed_lookup_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_open_addressed_lookup_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_sorted_dense_lookup_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_chain_score_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_vulkan_tiled_chain_score_dispatched",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_legacy_block_vulkan_chain_score_dispatched",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_chain_score_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_bitonic_sort_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_sort_operations": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_anchor_count": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_passes": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_histogram_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_scan_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_scatter_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_host_sort_fallbacks": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_anchor_validation_operations": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_anchor_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_canonical_anchor_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_canonical_anchor_order_checks": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vulkan_seed_canonical_anchor_order_checks_positive",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_vulkan_seed_canonical_anchor_order_checks_positive",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_canonical_anchor_order_accepts": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_direct_vulkan_seed_canonical_anchor_order_accepts_positive",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_vulkan_seed_canonical_anchor_order_accepts_positive",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "vulkan_seed_canonical_tie_normalization_runs": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_tie_normalization_anchors": { "type": "evaluation", "rules": [] },
+        "gpu_index_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_open_addressed_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_sorted_dense_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_unique_keys": { "type": "evaluation", "rules": [] },
+        "gpu_index_slot_capacity": { "type": "evaluation", "rules": [] },
+        "gpu_index_logical_resident_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_actual_allocation_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_fully_touched_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_staging_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_permit_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_process_footprint_reflections": { "type": "evaluation", "rules": [] },
+        "gpu_index_reflected_footprint_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_max_load_ppm": { "type": "evaluation", "rules": [] },
+        "gpu_index_max_probe": { "type": "evaluation", "rules": [] },
+        "gpu_index_ownership_validation_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_gpu_index_ownership_validation_consistent",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_count_stage_admissions": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_count_stage_admitted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_main_peak_admissions": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_main_peak_admitted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_resident_transfers": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_resident_transferred",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_adoption_rereserve_attempts": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_adoption_never_rereserved",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_adoption_successes": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_adopted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_owned_resident_bytes": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_has_owned_resident_bytes",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gate_enabled": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_query_gate_disabled",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gate_word_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_query_gate_has_no_words",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gate_mask": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_query_gate_mask_absent",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gate_set_bits": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_query_gate_has_no_set_bits",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gate_count_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_gated_count_forbidden",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_gated_emit_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_gated_emit_forbidden",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_ungated_emit_dispatches": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_ungated_emit_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_retained_minimizer_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_retained_minimizers_nonempty",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_distinct_minimizer_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_resident_gpu_index_distinct_minimizers_nonempty",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "source_direct_gpu_index_materialization_validation_accepted": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_source_direct_gpu_index_materialization_validation_accepted",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_source_direct_operations": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_source_direct_operation_completed",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_minimap2_source_direct_neutral",
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_ksw2_scalar_source_direct_neutral",
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_ksw2_simd_scalar_source_direct_neutral",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_ksw2_simd_nthash_source_direct_neutral",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_ksw2_vulkan_tiled_source_direct_neutral",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_ksw2_batched_source_direct_neutral",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_block_simd_source_direct_neutral",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
+            [ "strict_xxl_resident_gpu_frontend_source_direct_neutral",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "gpu_index_source_direct_terminal_successes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_empty_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_zero_query_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_planning_receipts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_terminal_receipts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_resident_publications": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_logical_control_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_logical_position_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_control_requirement_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_position_requirement_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_allocation_request_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_actual_control_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_actual_position_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_released_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_checksum_matches": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_traversals": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_traversals": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_reflected_authorities": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_retained_authorities": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_retained_resident_permit_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_cache_preinsertions": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_expected_seed_consumers": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_completed_seed_consumers": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_lookups": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_hits": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_misses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_fallback_attempts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_passes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_lookups": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_comparisons": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_requested_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_initial_capacity": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_actual_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_retained_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_permit_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_reserved_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_planned_vulkan_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_actual_vulkan_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_roundtrips": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_zero_anchor_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_fence_completions": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_cache_cleanup_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_resident_cleanup_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_pipeline_completions": { "type": "evaluation", "rules": [] },
+        "exact_simd_query_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_query_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_target_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_target_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_query_fast_route_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "exact_simd_query_resident_dual_route_accepted": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_query_resident_dual_route_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_target_fast_route_accepted": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_target_fast_route_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_query_generic_kernel_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_query_generic_route_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_target_generic_kernel_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_exact_target_generic_route_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_query_b8_route_accepted": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_b8_route_accepted": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_resident_dual_route_accepted": { "type": "evaluation", "rules": [] },
+        "exact_simd_query_resident_vector_stream_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_resident_vector_stream_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_query_resident_vector_stream_dual_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_resident_vector_stream_dual_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_query_b8_kernel_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_b8_kernel_calls": { "type": "evaluation", "rules": [] },
+        "post_seed_owned_gpu_cache_evictions": { "type": "evaluation" },
+        "post_seed_owned_gpu_resident_bytes_released": { "type": "evaluation" },
+        "post_seed_owned_cpu_index_releases": { "type": "evaluation" },
+        "post_seed_owned_cpu_position_bytes_released": { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_aligners_simd_chaining_endpoint_quality": {
+    "tags": ["aligner", "simd-chaining", "endpoint-quality", "qualification"],
+    "description": "Two-row absolute qualification gate. The real row owns all biological work: it runs bounded SIMD, exact SIMD, and bundled minimap2 sequentially on each fixed one-target fixture, requires one normalized primary from each backend, and includes a source-constructed prefix/repeat-bank/repeat-wall/suffix default-max-skip=25 fixture whose own stats must show cutoff, skipped candidates, and a winning global-best rescue across the repeated bank. Its endpoint participates in the same strict <15-bp maxima. The clearly labelled zero-reference row performs no biological work and exists only because framework rules compare rows rather than literals. Ordinary rules reject failures while preserving complete report and raw stats; wall time and endpoint maxima remain diagnostics. primary_correct_fraction is emitted as 1.0 by both rows only to satisfy the config-global cross-run regression metric contract and is not an endpoint acceptance signal.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS": 1 },
+      "over": {
+        "simd_chaining_endpoint_qualification": {},
+        "simd_chaining_endpoint_zero_reference": {}
+      },
+      "by_regions": false,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "simd_chaining_endpoint_qualification",
+          "simd_chaining_endpoint_zero_reference"
+        ],
+        "exact_test_case_iterations": {
+          "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS": 1
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "metrics": {
+        "wall_clock_ns": { "rules": [] },
+        "primary_correct_fraction": { "type": "evaluation", "rules": [] },
+        "endpoint_qualification_accepted": { "type": "evaluation", "rules": [
+          [ "endpoint_qualification_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_policy_validation_accepted": { "type": "evaluation", "rules": [
+          [ "endpoint_policy_validation_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_rescue_stats_accepted": { "type": "evaluation", "rules": [
+          [ "dedicated_rescue_fixture_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_exact_route_validation_accepted": { "type": "evaluation", "rules": [
+          [ "endpoint_exact_route_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_route_validation_accepted": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_route_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_minimap2_route_validation_accepted": { "type": "evaluation", "rules": [
+          [ "endpoint_minimap2_route_must_pass", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_qualification_saturated": { "type": "evaluation", "rules": [
+          [ "endpoint_qualification_saturation_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_deterministic_rescue_fixture_runs": { "type": "evaluation", "rules": [
+          [ "dedicated_rescue_fixture_run_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_deterministic_rescue_fixture_mappings_compared": { "type": "evaluation", "rules": [
+          [ "dedicated_rescue_endpoint_comparison_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_fixtures": { "type": "evaluation", "rules": [
+          [ "endpoint_fixed_corpus_must_run", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_mappings_compared": { "type": "evaluation", "rules": [
+          [ "endpoint_mappings_must_be_compared", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_missing_primary": { "type": "evaluation", "rules": [
+          [ "endpoint_missing_primary_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_ambiguous_primary": { "type": "evaluation", "rules": [
+          [ "endpoint_ambiguous_primary_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_reference_or_strand_mismatches": { "type": "evaluation", "rules": [
+          [ "endpoint_identity_or_strand_mismatch_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_invalid_normalized_coordinates": { "type": "evaluation", "rules": [
+          [ "endpoint_invalid_coordinates_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_max_delta_vs_exact_bp": { "type": "evaluation", "rules": [] },
+        "endpoint_max_delta_vs_minimap2_bp": { "type": "evaluation", "rules": [] },
+        "endpoint_exact_policy_calls": { "type": "evaluation", "rules": [
+          [ "endpoint_exact_policy_call_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_policy_calls": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_policy_call_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_score_batches": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_score_batches_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_cutoff_stops": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_cutoff_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_candidates_skipped": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_skipped_candidates_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_global_best_rescue_probes": { "type": "evaluation", "rules": [
+          [ "endpoint_global_best_rescue_probe_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_global_best_rescue_wins": { "type": "evaluation", "rules": [
+          [ "endpoint_global_best_rescue_win_required", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_exact_policy_rejections": { "type": "evaluation", "rules": [
+          [ "endpoint_exact_policy_rejection_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_policy_rejections": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_policy_rejection_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_exact_policy_stats_saturated": { "type": "evaluation", "rules": [
+          [ "endpoint_exact_policy_saturation_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_bounded_policy_stats_saturated": { "type": "evaluation", "rules": [
+          [ "endpoint_bounded_policy_saturation_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_scalar_score_branches": { "type": "evaluation", "rules": [
+          [ "endpoint_scalar_score_fallback_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_scalar_backtrack_branches": { "type": "evaluation", "rules": [
+          [ "endpoint_scalar_backtrack_fallback_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] },
+        "endpoint_shared_scalar_backtrack_calls": { "type": "evaluation", "rules": [
+          [ "endpoint_shared_scalar_backtrack_forbidden", { "key": "simd_chaining_endpoint_qualification", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "simd_chaining_endpoint_zero_reference", "test_case": "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS" } ]
+        ] }
+      }
+    }
+  },
+
+  "bench_aligners_xxl_hifi_chain_focus": {
+    "tags": ["aligner", "xxl-hifi", "chain-focus", "iteration"],
+    "description": "Three-row scalar/exact-SIMD/explicitly-bounded-SIMD iteration gate. Bounded forward and shared SIMD backtracking must beat scalar, execute real cutoff/skipped work, retain strict correctness, and validate zero scalar score/backtrack fallback. Exact remains a non-promotion oracle; rescue and exact-policy timing are retained as nonblocking diagnostics.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 370370 },
+    "matrix": {
+      "for": { "XXL_HIFI": 2 },
+      "over": {
+        "bioseq_ksw2_scalar_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "bioseq_ksw2_scalar_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited",
+          "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate"
+        ],
+        "exact_test_case_iterations": { "XXL_HIFI": 2 },
+        "require_named_region_iteration_coverage": true,
+        "exact_named_region_sample_multiplicities": [
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI", "region": "mg_lchain_simd", "metric": "region_total_ns", "exact_samples": 2 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI", "region": "mg_lchain_simd", "metric": "region_total_ns", "exact_samples": 2 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mg_lchain_dp", "metric": "region_total_ns", "exact_samples": 2 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 2 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 2 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 2 }
+        ]
+      },
+      "metrics": {
+        "wall_clock_ns": { "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": [
+            [ "chain_focus_bounded_simd_chain_faster_than_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI", "region": "mg_lchain_simd" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mg_lchain_dp" } ],
+            [ "chain_focus_bounded_simd_backtrack_faster_than_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI", "region": "backtrack_chains" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "backtrack_chains" } ],
+            [ "chain_focus_exact_simd_chain_timing_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI", "region": "mg_lchain_simd" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "blocking": false },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "mg_lchain_dp" } ],
+            [ "chain_focus_exact_simd_backtrack_timing_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI", "region": "backtrack_chains" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "blocking": false },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI", "region": "backtrack_chains" } ]
+          ]
+        },
+        "region_visits": { "type": "region", "rules": [] },
+        "selected_route_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_selected_route_validated",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_selected_route_validated",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_lanes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_scalar_orchestration_steps": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_exact_visited": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_policy_explicitly_selected",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_selected_policy_bounded_batch_approximate": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_policy_explicitly_selected",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_policy_stats_coherent": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_policy_stats_coherent",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_policy_stats_coherent",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_selected_policy_matches_stats": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_requested_observed_policy_match",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_requested_observed_policy_match",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_exact_visited_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_call_recorded",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_row_has_zero_exact_calls",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_batch_approximate_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_call_recorded",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_exact_row_has_zero_bounded_calls",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_score_batches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_score_batches_positive",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_improving_batches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_improving_batches_positive",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_nonimproving_batches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_nonimproving_batches_positive",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_cutoff_stops": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_cutoff_executed",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_bounded_candidates_skipped": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_candidates_actually_skipped",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_global_best_rescue_probes": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_global_best_rescue_probe_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min", "blocking": false },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_global_best_rescue_wins": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_global_best_rescue_win_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min", "blocking": false },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_policy_rejections": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_policy_rejection_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_policy_stats_saturated": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_policy_saturation_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_primary_contiguous_batches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_primary_backtrack_vector_path_executed",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_operation_simd_chain_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_operation_simd_chain_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_hybrid_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_scalar_score_branches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_scalar_score_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_scalar_score_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_scalar_backtrack_branches": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_scalar_backtrack_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_scalar_backtrack_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "simd_chaining_shared_scalar_backtrack_calls": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_shared_scalar_backtrack_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_shared_scalar_backtrack_fallback_forbidden",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_query_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_query_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_query_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_target_execution_stats_consistent": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_target_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_target_validation_accepted",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "exact_simd_query_resident_dual_route_accepted": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_fast_route_accepted": { "type": "evaluation", "rules": [] },
+        "exact_simd_query_generic_kernel_calls": { "type": "evaluation", "rules": [] },
+        "exact_simd_target_generic_kernel_calls": { "type": "evaluation", "rules": [] },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_match_count_equals_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_match_count_equals_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_exact_primary_correctness_equals_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ],
+            [ "chain_focus_bounded_primary_correctness_equals_scalar",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min" },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "mean_position_offset_bp": {
+          "type": "evaluation",
+          "rules": [
+            [ "chain_focus_bounded_position_offset_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "max", "blocking": false },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
+          ]
+        }
+      }
+    }
+  },
+
+  "bench_aligners_xxl_hifi_paired": {
+    "tags": ["aligner", "xxl-hifi", "relative-regression", "paired"],
+    "description": "Statistically paired companion to bench_aligners_xxl_hifi_relative. It keeps the same nine rows and strict route/correctness validation, but runs one exclusive single-group batch for 11 seeded repetition-major repeats. It reports P50 repeat-wise ratios after retaining repeat zero as first-repeat stats and excluding it from the 10 steady-state pairs. The resident GPU-index frontend/source-direct ratio below 1 is blocking because both routes execute in this exact serial schedule with strict positive receipts; the report_76-derived 10% wall and 15% stage bands remain nonblocking diagnostics because report_76 contains ratios of independent P50s. Raw stats retains every repeat and reports first-repeat separately; first-repeat is not a globally cold measurement because routes share the process/runtime.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 370076 },
+    "matrix": {
+      "for": { "XXL_HIFI_PAIRED": 11 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_scalar_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_scalar_mm": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {},
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {},
+        "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "minimap2_dp",
+          "bioseq_ksw2_scalar_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_scalar_mm",
+          "bioseq_ksw2_simd_dp_two_stack_nthash",
+          "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+          "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+          "bioseq_block_simd_dp_two_stack_nthash",
+          "bioseq_block_vulkan_dp_vulkan_minimap_int",
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
+        ],
+        "exact_test_case_iterations": { "XXL_HIFI_PAIRED": 11 },
+        "require_named_region_iteration_coverage": true,
+        "exact_named_region_sample_multiplicities": [
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_sketch_simd", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "mm_sketch", "metric": "region_total_ns", "exact_samples": 22 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mg_lchain_simd", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "mg_lchain_dp", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "backtrack_chains", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_align_skeleton", "metric": "region_total_ns", "exact_samples": 11 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_align_skeleton", "metric": "region_total_ns", "exact_samples": 11 }
+        ]
+      },
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "paired_resident_gpu_frontend_over_source_direct_wall_ratio_lt_1",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_block_simd_over_ksw2_simd_wall_with_10pct_noise",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 10, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0579206255, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_ksw2_batched_over_ksw2_simd_wall_with_10pct_noise",
+              { "key": "bioseq_ksw2_batched_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 10, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0006539950, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_vulkan_tiled_over_ksw2_simd_wall_with_15pct_noise",
+              { "key": "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0112208665, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_ksw2_simd_over_minimap2_wall_with_10pct_noise",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 10, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.7970454999, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_ksw2_simd_over_scalar_wall_with_10pct_noise",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 10, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.5403141232, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_diagnostic_simd_chain_scalar_mm_no_material_wall_reversal",
+              { "key": "bioseq_ksw2_simd_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 10, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_legacy_block_vulkan_over_block_simd_wall_with_15pct_noise",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.7140396842, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ],
+            [ "paired_report76_resident_gpu_frontend_block_vulkan_over_block_simd_wall_with_15pct_noise",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.7220260601, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": [
+            [ "paired_report76_nthash_simd_over_scalar_sketch_with_15pct_noise",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_sketch_simd" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.2104969566, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "mm_sketch" } ],
+            [ "paired_report76_chaining_simd_over_scalar_with_15pct_noise",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mg_lchain_simd" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.5792684210, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "mg_lchain_dp" } ],
+            [ "paired_report76_backtrack_simd_over_scalar_with_15pct_noise",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "backtrack_chains" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.9550489722, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI_PAIRED", "region": "backtrack_chains" } ],
+            [ "paired_report76_block_over_ksw2_alignment_with_15pct_noise",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_align_skeleton" },
+              { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 0.5912782394, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED", "region": "mm_align_skeleton" } ]
+          ]
+        },
+        "region_visits": { "type": "region", "rules": [] },
+        "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "biological_fingerprint_computed": { "type": "evaluation", "rules": [] },
+        "biological_fingerprint_saturated": { "type": "evaluation", "rules": [] },
+        "biological_collection_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_collection_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_match_result_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_result_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_result_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_result_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_operation_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_operation_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_match_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_match_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_match_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_match_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "biological_cigar_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_lanes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_scalar_orchestration_steps": { "type": "evaluation", "rules": [] },
+        "simd_chaining_hybrid_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_matches_stats": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_visited_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_batch_approximate_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_improving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_nonimproving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_global_best_rescue_probes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_global_best_rescue_wins": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_saturated": { "type": "evaluation", "rules": [] },
+        "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
+        "ksw2_batched_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "match_count": { "type": "evaluation", "rules": [] },
+        "primary_correct_fraction": { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "mixed_gpu_pipeline_selected": { "type": "evaluation", "rules": [] },
+        "all_gpu_acceptance_eligible": { "type": "evaluation", "rules": [] },
+        "vulkan_query_sketch_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_target_sketch_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_target_index_build_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_lookup_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_open_addressed_lookup_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_sorted_dense_lookup_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_chain_score_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_bitonic_sort_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_sort_operations": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_anchor_count": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_passes": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_histogram_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_scan_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_radix_scatter_dispatches": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_host_sort_fallbacks": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_anchor_validation_operations": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_anchor_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_canonical_anchor_count_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "vulkan_seed_canonical_anchor_order_checks": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_anchor_order_accepts": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_tie_normalization_runs": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_canonical_tie_normalization_anchors": { "type": "evaluation", "rules": [] },
+        "vulkan_seed_anchor_digest_lane0_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane0_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane1_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_hi32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "vulkan_seed_anchor_digest_lane1_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_lo32_exact",
+              { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+          ]
+        },
+        "gpu_index_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_open_addressed_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_sorted_dense_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_unique_keys": { "type": "evaluation", "rules": [] },
+        "gpu_index_slot_capacity": { "type": "evaluation", "rules": [] },
+        "gpu_index_logical_resident_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_actual_allocation_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_fully_touched_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_staging_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_permit_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_process_footprint_reflections": { "type": "evaluation", "rules": [] },
+        "gpu_index_reflected_footprint_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_max_load_ppm": { "type": "evaluation", "rules": [] },
+        "gpu_index_max_probe": { "type": "evaluation", "rules": [] },
+        "gpu_index_ownership_validation_consistent": { "type": "evaluation", "rules": [] },
+        "gpu_index_count_stage_admissions": { "type": "evaluation", "rules": [] },
+        "gpu_index_main_peak_admissions": { "type": "evaluation", "rules": [] },
+        "gpu_index_resident_transfers": { "type": "evaluation", "rules": [] },
+        "gpu_index_adoption_rereserve_attempts": { "type": "evaluation", "rules": [] },
+        "gpu_index_adoption_successes": { "type": "evaluation", "rules": [] },
+        "gpu_index_owned_resident_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_gate_enabled": { "type": "evaluation", "rules": [] },
+        "gpu_index_gate_word_count": { "type": "evaluation", "rules": [] },
+        "gpu_index_gate_mask": { "type": "evaluation", "rules": [] },
+        "gpu_index_gate_set_bits": { "type": "evaluation", "rules": [] },
+        "gpu_index_gate_count_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_index_gated_emit_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_index_ungated_emit_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_index_retained_minimizer_count": { "type": "evaluation", "rules": [] },
+        "gpu_index_distinct_minimizer_count": { "type": "evaluation", "rules": [] },
+        "source_direct_gpu_index_materialization_validation_accepted": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_operations": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_terminal_successes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_empty_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_zero_query_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_planning_receipts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_terminal_receipts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_materializations": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_resident_publications": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_logical_control_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_logical_position_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_control_requirement_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_position_requirement_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_allocation_request_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_actual_control_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_actual_position_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_released_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_checksum_matches": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_source_traversals": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_traversals": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_reflected_authorities": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_retained_authorities": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_retained_resident_permit_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_cache_preinsertions": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_expected_seed_consumers": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_completed_seed_consumers": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_lookups": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_hits": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_required_misses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_fallback_attempts": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_passes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_lookups": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_mapped_prefix_comparisons": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_requested_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_initial_capacity": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_actual_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_retained_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_slab_permit_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_reserved_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_planned_vulkan_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_actual_vulkan_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_roundtrips": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_zero_anchor_bypasses": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_seed_fence_completions": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_cache_cleanup_releases": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_resident_cleanup_bytes": { "type": "evaluation", "rules": [] },
+        "gpu_index_source_direct_pipeline_completions": { "type": "evaluation", "rules": [] },
+        "post_seed_owned_gpu_cache_evictions": { "type": "evaluation" },
+        "post_seed_owned_gpu_resident_bytes_released": { "type": "evaluation" },
+        "post_seed_owned_cpu_index_releases": { "type": "evaluation" },
+        "post_seed_owned_cpu_position_bytes_released": { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_aligners_repr_storage": {
+    "tags": ["aligner", "storage", "repr"],
+    "description": "Force the 32-bit (K=7 / MEDIUM) and 128-bit (K=27 / XL) MinimizerRepr storage variants. Smaller grid (3 algorithm rows) so the bucket finishes in minutes.",
+    "fast": true,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": { "REPR_STORAGE_K7_MEDIUM": 300, "REPR_STORAGE_K27_XL": 150 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":            { "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        },
+        "match_count":              { "type": "evaluation" },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "bioseq_ksw2_simd_dp_two_stack_nthash_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ],
+
+            [ "bioseq_block_simd_dp_two_stack_nthash_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ]
+          ]
+        },
+        "mean_position_offset_bp":  { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_bounded_nthash_xxl_hifi_validation": {
+    "tags": ["aligner", "xxl-hifi", "bounded-nthash", "simd", "validation"],
+    "description": "Isolated restart-free XXL_HIFI validation for the bounded u32/R7/sum SIMD sketch. The ExactSimd row is an oracle/debug comparator. Both bounded-ntHash rows must execute bounded ntHash sketch execution stats plus SIMD chaining, and the Block row must additionally execute Block Aligner SIMD; the strict runner requires exactly one primary mapping with target offset strictly below 15 bp. The bounded-ntHash/ExactSimd sketch ratios compare unequal work and are stably 1.46-1.48, so their strict <1.0 faster-than boundary is retained only as a visible nonblocking comparison diagnostic, not acceptance.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 370371 },
+    "matrix": {
+      "for": { "XXL_HIFI": 4 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_ksw2_simd_dp_bounded_nthash": {},
+        "bioseq_block_simd_dp_bounded_nthash": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "minimap2_dp",
+          "bioseq_ksw2_simd_dp_two_stack_nthash",
+          "bioseq_ksw2_simd_dp_bounded_nthash",
+          "bioseq_block_simd_dp_bounded_nthash"
+        ],
+        "exact_test_case_iterations": { "XXL_HIFI": 4 },
+        "require_named_region_iteration_coverage": true,
+        "exact_named_region_sample_multiplicities": [
+          { "algorithm": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd", "metric": "region_total_ns", "exact_samples": 4 }
+        ]
+      },
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "bounded_nthash_ksw2_wall_faster_than_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "bounded_nthash_block_wall_faster_than_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": [
+            [ "bounded_nthash_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" } ],
+            [ "bounded_nthash_block_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd" },
+              { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "blocking": false, "warmup_repetitions": 1 },
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" } ]
+          ]
+        },
+        "region_visits": { "type": "region", "rules": [] },
+        "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_improvement_replay_lanes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_scalar_orchestration_steps": { "type": "evaluation", "rules": [] },
+        "simd_chaining_hybrid_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_coherent": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_matches_stats": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_visited_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_batch_approximate_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_improving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_nonimproving_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_global_best_rescue_probes": { "type": "evaluation", "rules": [] },
+        "simd_chaining_global_best_rescue_wins": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_saturated": { "type": "evaluation", "rules": [] },
+        "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_query_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_target_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_query_segments_combined": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_target_segments_combined": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_fallback_calls": { "type": "evaluation", "rules": [] },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "bounded_nthash_ksw2_match_count_equals_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "bounded_nthash_block_match_count_equals_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "bounded_nthash_ksw2_primary_correct_equals_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
+            [ "bounded_nthash_block_primary_correct_equals_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
+          ]
+        },
+        "mean_position_offset_bp": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "bench_aligners_rmq_repro": {
+    "tags": ["aligner", "rmq"],
+    "description": "Pinned (LONG, CCS) regression seed covering bioseq-RMQ AVL rebalancing. One row asserts a non-zero match count.",
+    "fast": true,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": { "RMQ_REPRO_LONG_CCS": 100 },
+      "over": { "bioseq_ksw2_rmq_scalar_mm": {}, "minimap2_rmq": {} },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "rmq_bioseq_ksw2_rmq_scalar_mm_wall_clock_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_rmq_scalar_mm" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 8, "aggregate": "p50" },
+              { "key": "minimap2_rmq" } ]
+          ]
+        },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "rmq_bioseq_ksw2_rmq_scalar_mm_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_rmq_scalar_mm" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_rmq" } ]
+          ]
+        },
+        "primary_correct_fraction": { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp":  { "type": "evaluation", "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        }
+      }
+    }
+  },
+
+  "regression_rules": [
+    {
+      "name": "wall_clock_p50_no_blowup",
+      "metric": "wall_clock_ns",
+      "aggregate": "p50",
+      "operator": { "compare": "<", "tolerance%": 25 },
+      "exclude_benchmarks": ["bench_aligners_curated"],
+      "exclude_cases": [
+        "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",
+        "SHORT_ONT_HIGH_ERROR", "SHORT_HIGH_INDEL_LOW_SUB",
+        "SHORT_HIGH_SUB_LOW_INDEL",
+        "CURATED_UNIQUE_FRAGMENT", "CURATED_SEAL_BATCH"
+      ]
+    },
+    {
+      "name": "curated_wall_clock_p50_concurrency_diagnostic",
+      "benchmarks": ["bench_aligners_curated"],
+      "metric": "wall_clock_ns",
+      "aggregate": "p50",
+      "operator": { "compare": "<", "tolerance%": 25 },
+      "blocking": false,
+      "exclude_cases": [
+        "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",
+        "SHORT_ONT_HIGH_ERROR", "SHORT_HIGH_INDEL_LOW_SUB",
+        "SHORT_HIGH_SUB_LOW_INDEL",
+        "CURATED_UNIQUE_FRAGMENT", "CURATED_SEAL_BATCH"
+      ]
+    },
+    {
+      "name": "wall_clock_p99_no_runaway_outlier",
+      "metric": "wall_clock_ns",
+      "aggregate": "p99",
+      "operator": { "compare": "<", "tolerance%": 50 },
+      "exclude_benchmarks": ["bench_aligners_curated"],
+      "exclude_cases": [
+        "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",
+        "SHORT_ONT_HIGH_ERROR", "SHORT_HIGH_INDEL_LOW_SUB",
+        "SHORT_HIGH_SUB_LOW_INDEL",
+        "CURATED_UNIQUE_FRAGMENT", "CURATED_SEAL_BATCH"
+      ]
+    },
+    {
+      "name": "curated_wall_clock_p99_no_runaway_outlier",
+      "benchmarks": ["bench_aligners_curated"],
+      "metric": "wall_clock_ns",
+      "aggregate": "p99",
+      "operator": { "compare": "<", "tolerance%": 50 },
+      "blocking": false,
+      "exclude_algorithms": [
+        "bioseq_block_vulkan_dp_vulkan_minimap_int",
+        "bioseq_block_vulkan_resident_gpu_index_frontend"
+      ],
+      "exclude_cases": [
+        "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",
+        "SHORT_ONT_HIGH_ERROR", "SHORT_HIGH_INDEL_LOW_SUB",
+        "SHORT_HIGH_SUB_LOW_INDEL",
+        "CURATED_UNIQUE_FRAGMENT", "CURATED_SEAL_BATCH"
+      ]
+    },
+    {
+      "name": "curated_high_variance_partial_gpu_p99_confirmation",
+      "benchmarks": ["bench_aligners_curated"],
+      "metric": "wall_clock_ns",
+      "aggregate": "p99",
+      "operator": { "compare": "<", "tolerance%": 50 },
+      "blocking": false,
+      "exclude_algorithms": [
+        "minimap2_dp",
+        "bioseq_ksw2_scalar_dp_scalar_mm",
+        "bioseq_ksw2_simd_dp_two_stack_nthash",
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+        "bioseq_block_simd_dp_two_stack_nthash"
+      ],
+      "exclude_cases": [
+        "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",
+        "SHORT_ONT_HIGH_ERROR", "SHORT_HIGH_INDEL_LOW_SUB",
+        "SHORT_HIGH_SUB_LOW_INDEL",
+        "CURATED_UNIQUE_FRAGMENT", "CURATED_SEAL_BATCH"
+      ]
+    },
+    {
+      "name": "primary_correct_fraction_no_drop",
+      "metric": "primary_correct_fraction",
+      "aggregate": "p50",
+      "operator": { "compare": ">", "tolerance%": 5 }
+    }
+  ]
+}

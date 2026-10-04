@@ -1,0 +1,4 @@
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self' https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: geolocation=(), microphone=(), camera=()

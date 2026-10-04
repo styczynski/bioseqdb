@@ -1,0 +1,154 @@
+# Provenance lock for the vendored PRODUCTION static assets that ship inside the
+# generated site's content-addressed bundle (§4.4, §12.6, §133, §292). Every
+# entry records upstream URL/tag, license path, and the exact SHA-256 of the file
+# as committed under website/static/. Builds are OFFLINE: the generator copies
+# these bytes verbatim into the bundle and never downloads them; this file is the
+# human-auditable record of what those bytes are and where they came from.
+#
+# The separate website/third_party.lock.yaml locks the Python/Playwright
+# VALIDATION toolchain (schema bioseq.website.python_toolchain.lock, revision 1);
+# this file
+# locks the assets served to end users.
+schema: bioseq.website.static_assets.lock
+schema_revision: 1
+
+# Prism syntax highlighter (§12.6): the committed prism.min.js is the minimal core
+# concatenated with exactly the language grammars the site highlights, in
+# dependency order (clike -> c -> cpp; bash, sql, cmake, json, yaml). The bundle's
+# own SHA-256 is what the build verifies; the component list records the upstream
+# provenance of each concatenated part so the bundle can be reproduced byte-for-byte.
+prism:
+  version: "1.30.0"
+  license: MIT
+  license_file: vendor/prism/LICENSE
+  license_sha256: 2b947f0901a7ffcf08a89957da9783c0e9c6e72cb6ce8e959f501ab5409e4d2b
+  upstream: https://unpkg.com/prismjs@1.30.0/
+  homepage: https://prismjs.com/
+  bundle:
+    path: vendor/prism/prism.min.js
+    sha256: a45c26906ba7f7661c9d7721fd7adb67936a159bc6106be1d451d33e795c9696
+    components:  # upstream file + SHA-256, concatenated in this exact order
+      - { file: components/prism-core.min.js,  sha256: 6caad316dd991f24f8004e0b9c19c055cb5829ff65e973fbee406f96d81b8e7e }
+      - { file: components/prism-clike.min.js, sha256: c76ba4e240932bdc75546be30e550f5ba5e13815ff71511c76e9e27ac3072444 }
+      - { file: components/prism-c.min.js,     sha256: 9e05cf21207bff46afbf80cb8f43bb58bc4a4a87b68f28bc0470342f69345209 }
+      - { file: components/prism-cpp.min.js,   sha256: 12077d9ea67882c149066e94843a6ede9036994b3724bfc45b31d97619328e14 }
+      - { file: components/prism-bash.min.js,  sha256: 6260814110e5182f2956e3bd257429548d9dbf2a9b66a63719b26cf9fac966a7 }
+      - { file: components/prism-sql.min.js,   sha256: 3fc5f8ce69950ec73adc972f061df42aaea78faa4864709134ea2adc083f3a33 }
+      - { file: components/prism-cmake.min.js, sha256: 396b5dbd10b253da47571a76be989ee39aa4bfc41ecd2436ab08294d2205476d }
+      - { file: components/prism-json.min.js,  sha256: 956d86baa5ae7ec4106758f354ac2d140bdcd7fc103dece02f73ed12b8d663e4 }
+      - { file: components/prism-yaml.min.js,  sha256: 719c8e8b8c344dc9de510c729f65ba840b1502a0a8e7e25e2ad19ee715f65c02 }
+  theme:
+    path: vendor/prism/prism.min.css
+    upstream_file: themes/prism-tomorrow.min.css
+    sha256: 1b15fe2971998a048aebb60f26f6eed76122071db9ef3b995abd003224f52a98
+
+# Self-hosted WOFF2 web fonts (§292). Latin subset from Google Fonts; each family
+# is SIL Open Font License 1.1. Space Grotesk and IBM Plex Sans ship as variable
+# faces; IBM Plex Mono ships as three static weights.
+fonts:
+  license: SIL OFL 1.1
+  families:
+    - name: Space Grotesk
+      upstream: https://fonts.gstatic.com/s/spacegrotesk/v22/
+      license_file: licenses/OFL-SpaceGrotesk.txt
+      license_sha256: 564ce565c371c5e5bbf286006565a7c9aa55a9f56e7ca58d56e05d649dd61a72
+      files:
+        - { path: fonts/space-grotesk-var.woff2, weight: "500 700", sha256: 0640890476fc1198ab4de571fb658de443c4d85b66466ec09534a8737ab1ce9d }
+    - name: IBM Plex Sans
+      upstream: https://fonts.gstatic.com/s/ibmplexsans/v23/
+      license_file: licenses/OFL-IBMPlexSans.txt
+      license_sha256: 7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
+      files:
+        - { path: fonts/ibm-plex-sans-var.woff2, weight: "400 600", sha256: e2291e842cf5af167122a22881a740c7f2dda7716f1e8cd76680264f4a859470 }
+    - name: IBM Plex Mono
+      upstream: https://fonts.gstatic.com/s/ibmplexmono/v20/
+      license_file: licenses/OFL-IBMPlexMono.txt
+      license_sha256: 7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
+      files:
+        - { path: fonts/ibm-plex-mono-400.woff2, weight: "400", sha256: 08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7 }
+        - { path: fonts/ibm-plex-mono-400-latin-ext.woff2, weight: "400 latin-ext", sha256: 6bc0f226a5b7884a8170e3f62c63d7675609d4631bdc5931b5cdab81821f00eb }
+        - { path: fonts/ibm-plex-mono-500.woff2, weight: "500", sha256: 01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22 }
+        - { path: fonts/ibm-plex-mono-500-latin-ext.woff2, weight: "500 latin-ext", sha256: 6bb06407c97584b0867a959e05e8874693bfeb8c317de190811c51598f2d99ea }
+        - { path: fonts/ibm-plex-mono-600.woff2, weight: "600", sha256: 0d1f0b8d0722224e32e9f28261bdc86c79115be73444ae5eceb73976a1bcdf83 }
+        - { path: fonts/ibm-plex-mono-600-latin-ext.woff2, weight: "600 latin-ext", sha256: 32057cf50dd14bdb21a2c93766c4a2c43e4abe688ea3922df3203cac7751a98b }
+
+# Social share cards referenced by site.yaml default_social_image and tutorial
+# frontmatter (§15.5). First-party project assets (no upstream); listed here so the
+# lock is a complete inventory of every media file in the shipped bundle.
+media:
+  license: project-owned (Bioseq contributors)
+  files:
+    - { path: media/social_card.png, sha256: 5a09b23db5be89253ee80fdd9d2924e613d6b8b96c490774082b50989e6f0559 }
+    - { path: media/small_vid.mp4, sha256: 89890c8476f08f06ae289fdb3392ce938591b8b4d3a9ae8ecc3bb62d6189d5b0 }
+    - { path: media/vials.mp4, sha256: cab280d2d62ec7f62af4b8bf0e18c18e8dfea4bbf7e7fdf4f04a0b66437c5ba7 }
+
+# Self-hosted LaTeX typesetting; MathML output keeps equations accessible.
+katex:
+  version: "0.16.22"
+  license: MIT
+  license_file: vendor/katex/LICENSE
+  upstream: https://registry.npmjs.org/katex/-/katex-0.16.22.tgz
+  files:
+    - { path: vendor/katex/LICENSE, sha256: 766ccc1f306c885aa45542a9846bbd0a505b27a0374f146778171c2254ce18e3 }
+    - { path: vendor/katex/fonts/KaTeX_AMS-Regular.ttf, sha256: 68534840bcfdd2bffb6f0e8deb48684dd01e7f04ea2813267577afb906de1d13 }
+    - { path: vendor/katex/fonts/KaTeX_AMS-Regular.woff, sha256: 30da91e84c893f875e252689faebdc590b2871145e8adc7f9a9d4dbd8ce0b251 }
+    - { path: vendor/katex/fonts/KaTeX_AMS-Regular.woff2, sha256: 0cdd387c9590a1a9f9794560022dbb59654a7d86f187aa0c81495ad42d3a7308 }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Bold.ttf, sha256: 07d8e303ce4fc12b4bb54f1004170dd190a1f3db45d400fe68060df3e0897268 }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff, sha256: 1ae6bd7475590e97e7f145a89e09ccde322f7a6bc0b91607b1c8b8ee28290fed }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2, sha256: de7701e42cf1f4cf0b766c03fb27977207eee2f4fd5d76fa82188406da43ea4c }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Regular.ttf, sha256: ed0b74372feefcbb9c0666b2e210da37b7e49fa7fbbf3eeb11db5f693dacfbb7 }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff, sha256: 3398dd02302557a793f2863f88e02d96ce10df2abffa07c8e9fa90775116e65c }
+    - { path: vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2, sha256: 5d53e70ad607c2352162dec9e0923fb54ecdafaccbf604cd8dcf7d00facb989b }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Bold.ttf, sha256: 9163df9c7122432e6495b4229fa9071cf9ae86a758ae5efc4924ec2e1a6dbce1 }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Bold.woff, sha256: 9be7ceb88004ab8ad124082246fbfcca4091e36385d4ec6ed1df67375dad50fb }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2, sha256: 74444efd593c005e3f4573b44524704c0af0a937fe911cca9e94068d0d140d3f }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Regular.ttf, sha256: 1e6f9579e90e2cac37f8f60a597c436e075c114385652b7cbeb0dec0421291b3 }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Regular.woff, sha256: 5e28753be717dac97f559f49bc10be9cf3c124ddcabda6659d11cb68febc6463 }
+    - { path: vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2, sha256: 51814d270d06ff0255dba0799994fa4d8c84d11f09951d47595f4abb1f3602dc }
+    - { path: vendor/katex/fonts/KaTeX_Main-Bold.ttf, sha256: 138ac28d1663b3037e9c5f52371fa5c63d8324f4a38d22cd573e6ea3a3fd0cf8 }
+    - { path: vendor/katex/fonts/KaTeX_Main-Bold.woff, sha256: c76c5d696297d51b9cb1639c7da4334f0e7dec81b42b11213b5e25ef671bb822 }
+    - { path: vendor/katex/fonts/KaTeX_Main-Bold.woff2, sha256: 0f60d1b897938ec918c8ce073092411baf9438f6739465693ff18b0f9d20b021 }
+    - { path: vendor/katex/fonts/KaTeX_Main-BoldItalic.ttf, sha256: 70ee1f64a20f2048c21940ef46d0144fd215baa953ca69afd1e31e98544f708f }
+    - { path: vendor/katex/fonts/KaTeX_Main-BoldItalic.woff, sha256: a6f7ec0d846ac7ad975adb8959c37ed49b94acbc4ae436db9ce9e20287e4a64c }
+    - { path: vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2, sha256: 99cd42a3c072d918f2f44984a807cf7aa16e13545fd0875fc07c6c65f99e715b }
+    - { path: vendor/katex/fonts/KaTeX_Main-Italic.ttf, sha256: 0d85ae7cc30f23790a7f1a58c4a112fdca8aae769b6ba11429af1d98b1b6cb3a }
+    - { path: vendor/katex/fonts/KaTeX_Main-Italic.woff, sha256: f1d6ef86f3b11a528bd5185199bd2443ecb2b0dead96d88674b5a2c12be24bdf }
+    - { path: vendor/katex/fonts/KaTeX_Main-Italic.woff2, sha256: 97479ca6cce906abc961ecac96faa5f9ca2e61b8e7670d475826bcdee9a7c267 }
+    - { path: vendor/katex/fonts/KaTeX_Main-Regular.ttf, sha256: d0332f52868370fd83ae7fa46470f90c8f2eab2fcf12bc4f88080b340c95a830 }
+    - { path: vendor/katex/fonts/KaTeX_Main-Regular.woff, sha256: c6368d87e8a1a3a5d337623d83d8dc4b868f242a9ad476237d6f8d1e0f168cdc }
+    - { path: vendor/katex/fonts/KaTeX_Main-Regular.woff2, sha256: c2342cd8b869e01752a9321dc17213fc40d4d04c79688c1d43f2cf316abd7866 }
+    - { path: vendor/katex/fonts/KaTeX_Math-BoldItalic.ttf, sha256: f9377ab0271cda59af24bcffbd46a4d0c8a3572ffafdbb38de2ad5ea7b0d5ee5 }
+    - { path: vendor/katex/fonts/KaTeX_Math-BoldItalic.woff, sha256: 850c0af5c2238497febaf5e461d880bf458c341f42f4f330f1b1ab5698b1998e }
+    - { path: vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2, sha256: dc47344dbb6cb5b655c8460d561f4df5f501b90c804ad3c6cec65fe322351ab1 }
+    - { path: vendor/katex/fonts/KaTeX_Math-Italic.ttf, sha256: 08ce98e51b04d58945a301e639e02b6998af29fdfd61a7b8afdd07bbfc479d4a }
+    - { path: vendor/katex/fonts/KaTeX_Math-Italic.woff, sha256: 8a8d244581371912b8f3f5a23e2437cb2a59cd9bcaebb0346e722c05737a2571 }
+    - { path: vendor/katex/fonts/KaTeX_Math-Italic.woff2, sha256: 7af58c5ec8f132a2ddde9027c6d7814decce4d3b822a11192a42a20e2e973264 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Bold.ttf, sha256: 1ece03f79f95277d57dc7f6b435a74e1379b0d46104a8530286b60ff49369ea0 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Bold.woff, sha256: ece03cfd83e22c212cdef66feb8442d25a083beb988db3f1883f3f9738d750ba }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2, sha256: e99ae51144bf1232efcc1bfe5add36262c6866b0faab24fa75740e1b98577a62 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Italic.ttf, sha256: 3931dd81faed86ba021bb2bbdc36f5bed9a38d6b4f4077aca59b265aa1b02083 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Italic.woff, sha256: 91ee67500cc0129aa0ace3ac5c61ff1692102f0f31d02b69347fba35dcb75bf2 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2, sha256: 00b26ac825e2095056396e0553b8ac26d3f8ad158c3826e28b4c45b385c4714a }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Regular.ttf, sha256: f36ea897e19f4a2e571d1e900e4e3710e438deb05a842486045ba0a3e616a4ad }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Regular.woff, sha256: 11e4dc8a6471ff6d6ee561d53d10fde8f7489e798257ff449c5d37c197435605 }
+    - { path: vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2, sha256: 68e8c73ef42afd3ccec58bf0fba302cce448938e7fc020a5e31f8a952eee1342 }
+    - { path: vendor/katex/fonts/KaTeX_Script-Regular.ttf, sha256: 1c67f068fea8bb09bf099c088b1cf64bd27516a6e07f4684344873564bb66a67 }
+    - { path: vendor/katex/fonts/KaTeX_Script-Regular.woff, sha256: d96cdf2b3bdd4d64a8fd5f74a4c467f123a8a73931cd435889f08ffaf9bf947a }
+    - { path: vendor/katex/fonts/KaTeX_Script-Regular.woff2, sha256: 036d4e95149b69ff9bcc0cd55771efeb25ffa3947293e69acd78d5ac328c684b }
+    - { path: vendor/katex/fonts/KaTeX_Size1-Regular.ttf, sha256: 95b6d2f1a50173bfedb8c63e1d1c99b10427d0a4df4201cb44513b226951a22b }
+    - { path: vendor/katex/fonts/KaTeX_Size1-Regular.woff, sha256: c943cc986384f59e86bea5fd7dc50a9c4dfe567a7c05eb40d6790720dead97c9 }
+    - { path: vendor/katex/fonts/KaTeX_Size1-Regular.woff2, sha256: 6b47c40166b6dbe21a5dfca7718413f2147fd2399be1ba605d8ad39cedf25dfe }
+    - { path: vendor/katex/fonts/KaTeX_Size2-Regular.ttf, sha256: a6b2099fb555c60e3a0db3a08842ebf1d732c6eb4e4bf44913613bed4fc4e39b }
+    - { path: vendor/katex/fonts/KaTeX_Size2-Regular.woff, sha256: 2014c523c3210bcc166648c4d4cc57f05b747df07a24277bf71c51e67dc79e3d }
+    - { path: vendor/katex/fonts/KaTeX_Size2-Regular.woff2, sha256: d04c54219f9eaec6d4d4fd42dfb28785975a4794d6b2fc71e566b9cd6db842dd }
+    - { path: vendor/katex/fonts/KaTeX_Size3-Regular.ttf, sha256: 500e04d54f0d51666332c9d2089aa803be22aa878eca539e59fa53c6e522b082 }
+    - { path: vendor/katex/fonts/KaTeX_Size3-Regular.woff, sha256: 6ab6b62e9b62dae2c00dd90f791bd10950be0ecc3490d7d6045f51c2e8fe0949 }
+    - { path: vendor/katex/fonts/KaTeX_Size3-Regular.woff2, sha256: 73d591271b1604960cb10bb90fee021670af7297017e0e98480b332d11f51995 }
+    - { path: vendor/katex/fonts/KaTeX_Size4-Regular.ttf, sha256: c647367d1dd4e162468717d020e1fc0f1dc5c26ebfdffbe55261713bf88c5877 }
+    - { path: vendor/katex/fonts/KaTeX_Size4-Regular.woff, sha256: 99f9c6750b489c9462bf04900bd3f939df9b829339daaaaa99ef5495cdddea58 }
+    - { path: vendor/katex/fonts/KaTeX_Size4-Regular.woff2, sha256: a4af7d414440a1c1790825cfb700cf9cf43b0f2c4b04f0ebc523011ad9853ec0 }
+    - { path: vendor/katex/fonts/KaTeX_Typewriter-Regular.ttf, sha256: f01f3e87d9c6a61c0c081ceb577abd864eb00a612f7ac1620dd6915fad2ef5aa }
+    - { path: vendor/katex/fonts/KaTeX_Typewriter-Regular.woff, sha256: e14fed02b1aba7ce9f5afd5844b5d0321b22351febc720e0de8b8723527609f7 }
+    - { path: vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2, sha256: 71d517d67827787cfabdf186914cc3358eda539e37931941f2b2fd4a21f68c0b }
+    - { path: vendor/katex/katex.min.css, sha256: 19095127357ed6d29fe0a63a6b000c913a89f7f1963b765dd3715e97c9852e75 }
+    - { path: vendor/katex/katex.min.js, sha256: e8d885505949f3a5f4abdd5dd0d53696bd1371ad26ffbf4f310dcd77c8cdae89 }

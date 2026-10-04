@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C++ API</title>
+<meta name="description" content="C++ API reference">
+<link rel="canonical" href="https://bioseqdb.com/v0.1/reference/cpp/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="C++ API">
+<meta property="og:description" content="C++ API reference">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bioseqdb.com/v0.1/reference/cpp/">
+<meta property="og:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="C++ API">
+<meta name="twitter:description" content="C++ API reference">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<link rel="icon" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/favicon.svg">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/site.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/docs-design.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/code-theme.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-content.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-benchmarks.css">
+</head>
+<body id="page-top" class="docs-design-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB documentation" class="dd-s0001">
+
+  <!-- ============ TOP NAV ============ -->
+  <header id="dnav" class="dd-s0002">
+    <div class="dd-s0003">
+      <button data-menu aria-label="Menu" class="dd-s0004">
+        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
+      </button>
+      <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0006">
+        <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
+        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
+        <span data-docsbadge class="dd-s0010">DOCS</span>
+      </a>
+
+      <nav data-topnav class="dd-s0011">
+        <a href="/v0.1/tutorials/getting_started/" data-nav class="dd-s0012">Docs</a>
+        <a href="/" class="dd-s0013">Product</a>
+        <a href="/benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
+        <a href="/versions/" class="dd-s0013">Versions</a>
+      </nav>
+
+      <!-- SEARCH -->
+      <div data-search-wrap class="dd-s0015">
+        <div data-search-box class="dd-s0016">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
+          <kbd class="dd-s0019">/</kbd>
+        </div>
+        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+      </div>
+
+      <!-- VERSION -->
+      <div data-ver-wrap class="dd-s0021">
+        <button id="ver-btn" class="dd-s0022">
+          <span class="dd-s0023"></span>v0.1 <span class="docs-version-status">Alpha</span>
+          <span data-caret class="dd-s0025"></span>
+        </button>
+        <div id="ver-menu" data-versions-url="/versions.json" class="dd-s0026">
+          <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="dd-s0027">v0.1 <span class="docs-version-current">current</span></a>
+          <a data-ver-all href="/versions/" class="dd-s0029">All versions</a>
+        </div>
+      </div>
+
+      <a data-ghbtn href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0031">GitHub</a>
+    </div>
+  </header>
+
+  <!-- ============ BODY GRID ============ -->
+  <div data-bodygrid class="dd-s0032">
+
+    <!-- ===== LEFT SIDEBAR ===== -->
+    <aside id="sidebar" class="dd-s0033">
+      
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Tutorials
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/tutorials/getting_started/" class="dd-s0037">Getting started with BioseqDB</a><a data-doc-link href="/v0.1/tutorials/project_introduction/" class="dd-s0037">Introduction</a><a data-doc-link href="/v0.1/tutorials/project_biology/" class="dd-s0037">Biological foundations of sequence analysis</a><a data-doc-link href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0037">Sequence alignment and search strategies</a><a data-doc-link href="/v0.1/tutorials/project_minimizers/" class="dd-s0037">Minimizer extraction</a><a data-doc-link href="/v0.1/tutorials/project_chaining/" class="dd-s0037">Chaining seed anchors</a><a data-doc-link href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0037">Final alignment and postprocessing</a><a data-doc-link href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0037">Sequence representations and lazy evaluation</a><a data-doc-link href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0037">PostgreSQL API and custom scans</a><a data-doc-link href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0037">Physical sequence storage in PostgreSQL</a><a data-doc-link href="/v0.1/tutorials/project_index_storage/" class="dd-s0037">Persistent sequence indexes</a><a data-doc-link href="/v0.1/tutorials/project_benchmarking/" class="dd-s0037">Benchmarking and performance evaluation</a><a data-doc-link href="/v0.1/tutorials/project_conclusion/" class="dd-s0037">Conclusions</a><a data-doc-link href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0037">Configuration reference (settings available in BioseqDB)</a><a data-doc-link href="/v0.1/tutorials/bibliography/" class="dd-s0037">Bibliography</a>
+        </div>
+      </div>
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Reference
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/reference/cpp/" class="dd-s0037">C++</a><a data-doc-link href="/v0.1/reference/sql/" class="dd-s0037">SQL</a>
+        </div>
+      </div>
+      
+      
+      <div class="dd-s0038">
+        <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0039">Edit on GitHub</a>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="doc-main" class="dd-s0040">
+      
+<section data-page-panel data-screen-label="Docs · Entity index" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb"><a href="/">Home</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/">v0.1</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/">Reference</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/cpp/">C++ API</a><span class="dd-s0043" aria-hidden="true">/</span></nav>
+    <h1 class="dd-s0045">C++ API</h1>
+    <p class="dd-s0046">C++ API reference</p>
+  </header>
+  
+  <ul class="design-entity-list">
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/class/io-compact-sequence-view-dab38192a3cf24d8/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view</code><span class="design-kind-badge">class</span></span><span class="design-entity-summary">Borrows one record&#39;s packed words from a batch.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/class/io-sequence-batch-9dd2b131a8e4a9ed/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch</code><span class="design-kind-badge">class</span></span><span class="design-entity-summary">Owns record headers, packed sequences, and qualities in shared buffers.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/concept/io-sequence-batch-handler-f9bd946f12e76f2a/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch_handler</code><span class="design-kind-badge">concept</span></span><span class="design-entity-summary">Handler contract for accepting a batch rvalue.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enum/io-reader-backend-79b264a958998bc0/"><span class="design-entity-heading"><code>bioseq::io::reader_backend</code><span class="design-kind-badge">enum</span></span><span class="design-entity-summary">Input backend selected for a read.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enum/bioseq-cache-provider-flags-c2bb083e2b2c3437/"><span class="design-entity-heading"><code>bioseq_cache_provider_flags</code><span class="design-kind-badge">enum</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enum/bioseq-cache-provider-security-digest-format-7f797ee448f17fdb/"><span class="design-entity-heading"><code>bioseq_cache_provider_security_digest_format</code><span class="design-kind-badge">enum</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enum/bioseq-cache-status-403afe6425a0d7f8/"><span class="design-entity-heading"><code>bioseq_cache_status</code><span class="design-kind-badge">enum</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/reader-backend-gzip-8641960c813ce73d/"><span class="design-entity-heading"><code>bioseq::io::reader_backend::gzip</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/reader-backend-memory-mapped-8a1c51dba99e9548/"><span class="design-entity-heading"><code>bioseq::io::reader_backend::memory_mapped</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/"><span class="design-entity-heading"><code>bioseq::io::reader_backend::parallel_gzip</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/reader-backend-posix-read-d42bcdc0d4768e5d/"><span class="design-entity-heading"><code>bioseq::io::reader_backend::posix_read</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/reader-backend-unknown-f8477c756b04b061/"><span class="design-entity-heading"><code>bioseq::io::reader_backend::unknown</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-provider-complete-write-observation-30efe88ebe504e5f/"><span class="design-entity-heading"><code>bioseq_cache_provider_complete_write_observation</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-provider-exact-source-elision-safe-e98836a44ce547ee/"><span class="design-entity-heading"><code>bioseq_cache_provider_exact_source_elision_safe</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-provider-reusable-coverage-6372505c5dc6b71f/"><span class="design-entity-heading"><code>bioseq_cache_provider_reusable_coverage</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-provider-security-digest-format-canonical-4221a8d7ffec7183/"><span class="design-entity-heading"><code>bioseq_cache_provider_security_digest_format_canonical</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-status-error-1c0c6b28dc6b8eea/"><span class="design-entity-heading"><code>bioseq_cache_status_error</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-status-ok-5e4b48c419412f06/"><span class="design-entity-heading"><code>bioseq_cache_status_ok</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/enumerator/bioseq-cache-status-unsupported-15bac4a396b093eb/"><span class="design-entity-heading"><code>bioseq_cache_status_unsupported</code><span class="design-kind-badge">enum_value</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/cache-provider-abi-field-present-a76fd8e260654b8d/"><span class="design-entity-heading"><code>bioseq::cache::provider_abi_field_present</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Check that struct_size includes the whole field before reading it.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/cache-provider-abi-prefix-valid-50d952ca48a9e4c9/"><span class="design-entity-heading"><code>bioseq::cache::provider_abi_prefix_valid</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Check the pointer, struct size, interface version and PostgreSQL major version.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-begin-6b6f840ec9ae2b11/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::begin</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return an iterator to the first packed storage unit.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-cbegin-9d9fac842bbdb82e/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::cbegin</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return a const iterator to the first packed storage unit.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-cend-c3750c6b1dc19bb2/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::cend</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return a const iterator one past the final packed storage unit.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-compact-sequence-view-p-range-8970f1f5c87e9b00/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::compact_sequence_view&lt;p_range&gt;</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Construct an empty view.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-compact-sequence-view-p-range-3214130f24bb7c8b/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::compact_sequence_view&lt;p_range&gt;</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Construct a view over</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-data-463259bacc5e05ac/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::data</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Returns a pointer to the first packed word.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-end-3955c3b6b075c771/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::end</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return an iterator one past the final packed storage unit.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-operator-de2bf87057d7fa9c/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::operator[]</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return one packed storage unit without bounds checking.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-padding-c5adfeb5813c64a9/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::padding</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return the number of unused letters in the final storage unit.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/compact-sequence-view-size-580fbd56c7a7d3dd/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::size</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return the number of packed storage units.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-read-decompressed-prefix-da03cfe010ccd555/"><span class="design-entity-heading"><code>bioseq::io::read_decompressed_prefix</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Reads up to</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-read-sequences-file-5b0f9740c0f6d0a1/"><span class="design-entity-heading"><code>bioseq::io::read_sequences_file</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Reads a FASTA or FASTQ file and sends batches to</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/"><span class="design-entity-heading"><code>bioseq::io::read_sequences_files</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Read files in declaration order and return their combined record count.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-reader-backend-name-a3301116084a007f/"><span class="design-entity-heading"><code>bioseq::io::reader_backend_name</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return the stable benchmark label for a selected reader backend.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-sample-sequence-headers-22786175c74e7a2d/"><span class="design-entity-heading"><code>bioseq::io::sample_sequence_headers</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Sample up to</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-clear-3b7f29ff40af137d/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::clear</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Release every logical record while keeping each vector&#39;s allocation.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-empty-33d43cd4d142b6f6/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::empty</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return whether the batch contains no logical records.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-header-8135ecc5ff892c24/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::header</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Borrows the header of a record. The index must be below</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-header-offsets-14de089f7c20f520/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::header_offsets</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable header offsets for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-header-storage-878a8e1229f2c199/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::header_storage</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Returns the header buffer that parsers append to while building the batch.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-prepare-d000463dcf180bf7/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::prepare</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Starts a batch with empty header and sequence storage and zero first offsets.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-quality-092f0d0ce8c07a2a/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::quality</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Borrows a record&#39;s quality bytes, or returns empty when qualities are absent.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-quality-offsets-ca2ae8338564c7de/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::quality_offsets</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable quality offsets for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-quality-storage-3e2d7efd86e54433/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::quality_storage</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable quality storage for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-reserve-storage-a6ed10741f4ebe1a/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::reserve_storage</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Reserves estimated capacity before records are appended.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-sequence-b0119d7b6fc23c7c/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Borrows a record&#39;s packed words and padding. The index must be below</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-sequence-offsets-ca3fb26d08cc6828/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence_offsets</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable packed-sequence offsets for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-sequence-paddings-ccc2430a9929d4fc/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence_paddings</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable per-record padding counts for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-sequence-storage-b0aa8ccb487ba061/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence_storage</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return mutable packed-sequence storage for the parser callback.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/sequence-batch-size-526cb8fdfe00fcc4/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::size</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Return the number of logical records in the batch.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/function/io-stream-sequences-file-752294f69bc733b5/"><span class="design-entity-heading"><code>bioseq::io::stream_sequences_file</code><span class="design-kind-badge">function</span></span><span class="design-entity-summary">Reads FASTA or FASTQ on the calling thread and sends packed chunks to</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/namespace/bioseq-8fce0e2924c84b4e/"><span class="design-entity-heading"><code>bioseq</code><span class="design-kind-badge">namespace</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/namespace/bioseq-cache-25add4b846caac70/"><span class="design-entity-heading"><code>bioseq::cache</code><span class="design-kind-badge">namespace</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/namespace/bioseq-io-533c7fc1b61fc46a/"><span class="design-entity-heading"><code>bioseq::io</code><span class="design-kind-badge">namespace</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/custompath-9e4f7272aa51b149/"><span class="design-entity-heading"><code>CustomPath</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/customscanmethods-9a8267b13d9ecc0f/"><span class="design-entity-heading"><code>CustomScanMethods</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/estate-4ae784ea014310f1/"><span class="design-entity-heading"><code>EState</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/explainstate-761bf5590804ce2d/"><span class="design-entity-heading"><code>ExplainState</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/expr-d072d997b37a86c2/"><span class="design-entity-heading"><code>Expr</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/list-be0646e52be3c6ad/"><span class="design-entity-heading"><code>List</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/path-775fa102ada6521a/"><span class="design-entity-heading"><code>Path</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/plan-e7ceb002ed48b44e/"><span class="design-entity-heading"><code>Plan</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/plannedstmt-58e02c13a159b0bf/"><span class="design-entity-heading"><code>PlannedStmt</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/plannerinfo-3477fa9b3dd29033/"><span class="design-entity-heading"><code>PlannerInfo</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/query-edb1ac3c6f91fa37/"><span class="design-entity-heading"><code>Query</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/rangetblentry-27838af2156a569c/"><span class="design-entity-heading"><code>RangeTblEntry</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/reloptinfo-98e3f8e2b0053d89/"><span class="design-entity-heading"><code>RelOptInfo</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/relationdata-1e279bd5220a83c5/"><span class="design-entity-heading"><code>RelationData</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/tupletableslot-048a160541b8d873/"><span class="design-entity-heading"><code>TupleTableSlot</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/io-packed-sequence-chunk-b454a91de17f8f9a/"><span class="design-entity-heading"><code>bioseq::io::packed_sequence_chunk</code><span class="design-kind-badge">struct</span></span><span class="design-entity-summary">Packed sequence words passed to a streaming sink.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-api-69e8587cf440dfde/"><span class="design-entity-heading"><code>bioseq_cache_api</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-column-map-entry-6cc37e4f01219df2/"><span class="design-entity-heading"><code>bioseq_cache_column_map_entry</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-column-schema-677495eb60413646/"><span class="design-entity-heading"><code>bioseq_cache_column_schema</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-decorated-path-5707c558ea92cbf3/"><span class="design-entity-heading"><code>bioseq_cache_decorated_path</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-digest-sink-52d2a386d4d48b30/"><span class="design-entity-heading"><code>bioseq_cache_digest_sink</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-explain-sink-1bfdfea3c6126891/"><span class="design-entity-heading"><code>bioseq_cache_explain_sink</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-late-fetch-sink-1aafcc014a855135/"><span class="design-entity-heading"><code>bioseq_cache_late_fetch_sink</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-occurrence-091aaae88ae61653/"><span class="design-entity-heading"><code>bioseq_cache_occurrence</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-path-description-ef91aaa0fd033914/"><span class="design-entity-heading"><code>bioseq_cache_path_description</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-path-domain-0cda9977e3cab606/"><span class="design-entity-heading"><code>bioseq_cache_path_domain</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-physical-identity-c4e7a640bf06028a/"><span class="design-entity-heading"><code>bioseq_cache_physical_identity</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-plan-digest-recipe-2b63c3ccfcb14e59/"><span class="design-entity-heading"><code>bioseq_cache_plan_digest_recipe</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-planner-bridge-0de0bdb76d13bf5a/"><span class="design-entity-heading"><code>bioseq_cache_planner_bridge</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-provider-1fc17edfc15b9f57/"><span class="design-entity-heading"><code>bioseq_cache_provider</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-provider-directory-af79b1a11c63bb7b/"><span class="design-entity-heading"><code>bioseq_cache_provider_directory</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-provider-registration-9c04ab646deb41a9/"><span class="design-entity-heading"><code>bioseq_cache_provider_registration</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-query-intent-8638f500fa1f4159/"><span class="design-entity-heading"><code>bioseq_cache_query_intent</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-reusable-source-1d089de7d90a8a29/"><span class="design-entity-heading"><code>bioseq_cache_reusable_source</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/struct/bioseq-cache-source-mapping-abe7a6560e572c76/"><span class="design-entity-heading"><code>bioseq_cache_source_mapping</code><span class="design-kind-badge">struct</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-api-3f366c379ee3fe07/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_api</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-column-map-entry-0751182bfed68fed/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_column_map_entry</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-column-schema-1ec72c982003ada3/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_column_schema</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-decorated-path-b17eda16d6eb09ac/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_decorated_path</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-digest-sink-1b090bee8dc7112d/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_digest_sink</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-explain-sink-87cb3c6acc62797e/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_explain_sink</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-late-fetch-sink-f794ea0a47a89c9c/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_late_fetch_sink</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-occurrence-2edc33d605dea638/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_occurrence</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-path-description-cccf666ace5ae46f/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_path_description</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-path-domain-434b2e1abd83a65f/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_path_domain</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-physical-identity-475f419353f37ea3/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_physical_identity</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-plan-digest-recipe-bb44432b37ea79c6/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_plan_digest_recipe</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-planner-bridge-93aca7e70254a101/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_planner_bridge</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-provider-7fdd406dab0544dc/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_provider</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-provider-directory-89183dc34c2e51b4/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_provider_directory</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-provider-flags-bb101e2adc4a50f0/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_provider_flags</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-provider-registration-1b8c6223440f089c/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_provider_registration</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-provider-security-digest-format-22d0980fa0c614fa/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_provider_security_digest_format</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-query-intent-468fc04593d3a3a2/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_query_intent</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-reusable-source-6e9d272cf86ad6c4/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_reusable_source</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-source-mapping-d92ab93447e63f05/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_source_mapping</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/cache-bioseq-cache-status-3e231fdb7e299c2f/"><span class="design-entity-heading"><code>bioseq::cache::bioseq_cache_status</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/compact-sequence-view-const-iterator-b1b24c213d72f4a9/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::const_iterator</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Read-only iterator over packed storage words.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/compact-sequence-view-iterator-0b7635ec1bbc01a9/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::iterator</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Read-only iterator over packed storage words.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/compact-sequence-view-storage-unit-c7a7e99aeb49c32f/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::storage_unit</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Packed storage word type borrowed from the owning batch.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/compact-sequence-view-traits-34465f57907ddc76/"><span class="design-entity-heading"><code>bioseq::io::compact_sequence_view::traits</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Traits of the packed sequence range represented by this view.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/sequence-batch-sequence-range-58e78e1857a083c7/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence_range</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Owning compact range used to define the batch alphabet and packing.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/sequence-batch-sequence-view-3bb337c503274373/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::sequence_view</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Borrowed packed sequence returned for one record.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/sequence-batch-storage-unit-c2dd81f3610b4728/"><span class="design-entity-heading"><code>bioseq::io::sequence_batch::storage_unit</code><span class="design-kind-badge">type_alias</span></span><span class="design-entity-summary">Packed word type used by the batch.</span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/type_alias/source-type-8469c7c5e5658eb7/"><span class="design-entity-heading"><code>source_type</code><span class="design-kind-badge">type_alias</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/variable/cache-k-cache-api-rendezvous-name-97caa3e923a22f52/"><span class="design-entity-heading"><code>bioseq::cache::k_cache_api_rendezvous_name</code><span class="design-kind-badge">variable</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/variable/cache-k-provider-abi-revision-1a4c202bb1296227/"><span class="design-entity-heading"><code>bioseq::cache::k_provider_abi_revision</code><span class="design-kind-badge">variable</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/variable/cache-k-provider-digest-bytes-13cbe18975ff27b9/"><span class="design-entity-heading"><code>bioseq::cache::k_provider_digest_bytes</code><span class="design-kind-badge">variable</span></span></a></li>
+  
+    <li><a class="design-entity-card dd-h005" href="/v0.1/reference/cpp/variable/cache-k-provider-directory-rendezvous-name-3853682949d41680/"><span class="design-entity-heading"><code>bioseq::cache::k_provider_directory_rendezvous_name</code><span class="design-kind-badge">variable</span></span></a></li>
+  
+  </ul>
+  
+</section>
+
+    </main>
+
+    <!-- ===== RIGHT TOC ===== -->
+    <aside data-rightrail class="dd-s0234">
+      <div class="dd-s0235">On this page</div>
+      <div id="toc-list" class="dd-s0236">
+        
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ============ SITE FOOTER ============ -->
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Getting started with BioseqDB</a><a href="/v0.1/tutorials/project_introduction/" class="dd-s0250 dd-h009">Introduction</a><a href="/v0.1/tutorials/project_biology/" class="dd-s0250 dd-h009">Biological foundations of sequence analysis</a><a href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0250 dd-h009">Sequence alignment and search strategies</a><a href="/v0.1/tutorials/project_minimizers/" class="dd-s0250 dd-h009">Minimizer extraction</a><a href="/v0.1/tutorials/project_chaining/" class="dd-s0250 dd-h009">Chaining seed anchors</a><a href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0250 dd-h009">Final alignment and postprocessing</a><a href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0250 dd-h009">Sequence representations and lazy evaluation</a><a href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0250 dd-h009">PostgreSQL API and custom scans</a><a href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0250 dd-h009">Physical sequence storage in PostgreSQL</a><a href="/v0.1/tutorials/project_index_storage/" class="dd-s0250 dd-h009">Persistent sequence indexes</a><a href="/v0.1/tutorials/project_benchmarking/" class="dd-s0250 dd-h009">Benchmarking and performance evaluation</a><a href="/v0.1/tutorials/project_conclusion/" class="dd-s0250 dd-h009">Conclusions</a><a href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0250 dd-h009">Configuration reference (settings available in BioseqDB)</a><a href="/v0.1/tutorials/bibliography/" class="dd-s0250 dd-h009">Bibliography</a><a href="/v0.1/reference/cpp/" class="dd-s0250 dd-h009">C++</a><a href="/v0.1/reference/sql/" class="dd-s0250 dd-h009">SQL</a>
+            
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 Bioseq contributors &mdash; an independent open-source project.</span>
+        <nav class="dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div data-backdrop class="dd-s0259"></div>
+
+  <!-- ===== ENTITY POPOVER ===== -->
+  <div id="entity-pop" class="dd-s0260"></div>
+
+</div>
+
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage","name":"C++ API","description":"C++ API reference","url":"https://bioseqdb.com/v0.1/reference/cpp/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"C++ API","item":"/v0.1/reference/cpp/"}]}]}</script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-init.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-languages.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.js"></script>
+<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-math.js"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/main.js"></script>
+<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/docs-design.mjs"></script>
+</body>
+</html>
