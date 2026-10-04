@@ -482,6 +482,12 @@ def convert(text: str) -> str:
     raw_tex = []
     def inspect(node):
         if isinstance(node, dict):
+            if node.get("t") == "Span":
+                # Preserve status-legend color under the site's strict CSP.
+                attributes = node["c"][0]
+                if ["style", "color: BrickRed"] in attributes[2]:
+                    attributes[2].remove(["style", "color: BrickRed"])
+                    attributes[1].append("project-color-brickred")
             if node.get("t") in {"RawInline", "RawBlock"} and node["c"][0] in {"tex", "latex"}:
                 raw_tex.append(node["c"][1])
             for value in node.values():

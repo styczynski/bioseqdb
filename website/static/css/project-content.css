@@ -52,3 +52,4 @@
 .tutorial-body figure { margin: 1.5rem 0; }
 .tutorial-body figcaption { color: #9bb0c0; font-size: .9rem; }
 .tutorial-body [data-math] { color: inherit; }
+.tutorial-body .project-color-brickred { color: #f2897f; }

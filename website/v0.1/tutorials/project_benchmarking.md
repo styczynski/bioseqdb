@@ -567,7 +567,7 @@ Blue: one lowest A and one lowest B measurement for each column for each configu
 
 MPF/MPS = minimizers per fragment/sequence. Vulkan rows compare with minimap2 on the same machine.
 
-$\cdot$ = no result. n/a: no comparison. <span style="color: BrickRed">$\bigcirc$</span> = setup rejected. <span style="color: BrickRed">$\times$</span> = execution failed.
+$\cdot$ = no result. n/a: no comparison. <span class="project-color-brickred">$\bigcirc$</span> = setup rejected. <span class="project-color-brickred">$\times$</span> = execution failed.
 
 <sup>1</sup>The GPU index exceeds the available memory budget.
 
