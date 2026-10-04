@@ -612,6 +612,9 @@ namespace {
     case content_node_kind::footnote: return "footnote";
     case content_node_kind::line_break: return "line_break";
     case content_node_kind::code_annotation: return "code_annotation";
+    case content_node_kind::raw_html: return "raw_html";
+    case content_node_kind::math_inline: return "math_inline";
+    case content_node_kind::math_display: return "math_display";
     }
     return "unknown";
 }
@@ -1134,6 +1137,9 @@ namespace {
     if (name == "footnote") return kind::footnote;
     if (name == "line_break") return kind::line_break;
     if (name == "code_annotation") return kind::code_annotation;
+    if (name == "raw_html") return kind::raw_html;
+    if (name == "math_inline") return kind::math_inline;
+    if (name == "math_display") return kind::math_display;
     throw std::runtime_error("site_model: unknown document node kind '"
                              + std::string(name) + "'");
 }

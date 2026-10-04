@@ -29,7 +29,7 @@ enum class content_node_kind : std::uint8_t {
     highlight,
     link, image, entity_link, code_span, code_block, admonition, block_quote,
     ordered_list, unordered_list, list_item, table, table_row, table_cell,
-    footnote, line_break, code_annotation
+    footnote, line_break, code_annotation, raw_html, math_inline, math_display
 };
 
 /// @brief A  document node that owns its text, attributes, and children.

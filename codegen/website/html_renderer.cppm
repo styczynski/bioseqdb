@@ -4,6 +4,8 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <regex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -71,6 +73,9 @@ struct code_language_view {
     const std::string lowered = to_ascii_lower(raw);
     if (lowered == "bash" || lowered == "shell" || lowered == "sh") return {"bash", "Bash"};
     if (lowered == "sql") return {"sql", "SQL"};
+    if (lowered == "plan" || lowered == "pgsql-plan" || lowered == "explain") {
+        return {"pgsql-plan", "PostgreSQL plan"};
+    }
     if (lowered == "cpp" || lowered == "c++" || lowered == "cppm" || lowered == "cxx") {
         return {"cpp", "C++"};
     }
@@ -136,6 +141,63 @@ struct html_content_writer {
     std::size_t code_ordinal{0};
     const content_node* terminal_result{nullptr};
 
+    // LaTeX conversion needs anchors, complex tables and disclosure blocks.
+    // Keep a small inert HTML vocabulary; scripts, styles, event handlers and
+    // arbitrary embedded objects never pass through authored Markdown.
+    void render_authored_html(std::string_view source) {
+        static const std::set<std::string> tags{
+            "a", "div", "span", "p", "br", "hr", "details", "summary",
+            "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
+            "colgroup", "col", "figure", "figcaption", "sup", "sub", "em",
+            "strong", "code", "pre", "ul", "ol", "li", "dl", "dt", "dd"};
+        static const std::set<std::string> attrs{
+            "id", "class", "title", "href", "colspan", "rowspan", "scope",
+            "data-table", "data-rows", "data-columns", "aria-label", "role"};
+        static const std::regex tag_re(R"(<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>)");
+        static const std::regex attr_re(R"attr(([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'))attr");
+        std::size_t cursor = 0;
+        while (cursor < source.size()) {
+            if (source.substr(cursor).starts_with("<!--")) {
+                const auto end = source.find("-->", cursor + 4);
+                cursor = end == std::string_view::npos ? source.size() : end + 3;
+                continue;
+            }
+            if (source[cursor] != '<') {
+                // Existing entities are ordinary HTML text, including &lt;.
+                out.push_back(source[cursor++]);
+                continue;
+            }
+            const std::string remainder(source.substr(cursor));
+            std::smatch match;
+            if (!std::regex_search(remainder, match, tag_re,
+                                   std::regex_constants::match_continuous)) {
+                out += "&lt;";
+                ++cursor;
+                continue;
+            }
+            const std::string tag = to_ascii_lower(match[2].str());
+            if (!tags.contains(tag)) {
+                append_escaped_text(out, match[0].str());
+            } else {
+                out += "<" + match[1].str() + tag;
+                if (match[1].str().empty()) {
+                    const std::string attributes = match[3].str();
+                    for (auto i = std::sregex_iterator(attributes.begin(), attributes.end(), attr_re);
+                         i != std::sregex_iterator(); ++i) {
+                        const std::string name = to_ascii_lower((*i)[1].str());
+                        const std::string value = (*i)[2].matched ? (*i)[2].str() : (*i)[3].str();
+                        if (!attrs.contains(name) || (name == "href" && !is_safe_href(value))) continue;
+                        out += " " + name + "=\"";
+                        append_escaped_attribute(out, value);
+                        out += "\"";
+                    }
+                }
+                out += ">";
+            }
+            cursor += match.length();
+        }
+    }
+
     void render_children(const std::vector<content_node>& children) {
         for (std::size_t index = 0; index < children.size(); ++index) {
             const content_node& child = children[index];
@@ -189,6 +251,9 @@ struct html_content_writer {
         case content_node_kind::image:
         case content_node_kind::entity_link:
         case content_node_kind::code_span:
+        case content_node_kind::math_inline:
+        case content_node_kind::math_display:
+        case content_node_kind::raw_html:
         case content_node_kind::footnote:
         case content_node_kind::line_break:
             return false;
@@ -232,6 +297,17 @@ struct html_content_writer {
             break;
         }
         case content_node_kind::text: append_escaped_text(out, node.text); break;
+        case content_node_kind::raw_html:
+            render_authored_html(node.text);
+            break;
+        case content_node_kind::math_inline:
+        case content_node_kind::math_display:
+            out += node.kind == content_node_kind::math_display
+                ? "<span class=\"project-math display\" data-math=\"display\">"
+                : "<span class=\"project-math\" data-math=\"inline\">";
+            append_escaped_text(out, node.text);
+            out += "</span>";
+            break;
         case content_node_kind::heading: {
             // The page template supplies h1. Keep body headings at h2 or below.
             int level = 2;
@@ -542,7 +618,14 @@ struct html_content_writer {
             if (safe && node.target.starts_with("http")) {
                 out += " rel=\"noreferrer\"";
             }
+            const bool source_link = safe
+                && node.target.starts_with("https://github.com/")
+                && (node.target.contains("/blob/") || node.target.contains("/tree/"));
+            if (source_link) out += " class=\"source-link\"";
             out.push_back('>');
+            if (source_link) {
+                out += "<svg class=\"github-mark\" aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"><path fill=\"currentColor\" d=\"M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z\"/></svg>";
+            }
             render_children(node.children);
             out += "</a>";
             break;
@@ -552,8 +635,14 @@ struct html_content_writer {
             out += "<img src=\"";
             append_escaped_attribute(out, safe ? node.target : std::string("#"));
             out += "\" alt=\"";
-            append_escaped_attribute(out, node.text);
-            out += "\">";
+            std::string alt = node.text;
+            const auto collect = [&alt](const content_node& item, auto&& self) -> void {
+                alt += item.text;
+                for (const auto& child : item.children) self(child, self);
+            };
+            for (const auto& child : node.children) collect(child, collect);
+            append_escaped_attribute(out, alt);
+            out += "\" loading=\"lazy\">";
             break;
         }
         case content_node_kind::entity_link: {

@@ -234,6 +234,24 @@ void verify_website_pipeline() {
         parse_markdown_content("# Sequence type\n\nThe `bioseq.seq` column stores DNA.\n");
     expect(count_kind(document, content_node_kind::heading) == 1, "markdown heading");
     expect(count_kind(document, content_node_kind::code_span) == 1, "markdown code span");
+    const auto project_markup = parse_markdown_content(
+        "<a id=\"equation-anchor\"></a>\n\n$x_i + 1$\n\n$$x^2$$\n\n"
+        "![A diagram](/static/figures/example.svg)\n\n"
+        "<div class=\"project-benchmark\" data-table=\"e2e\" onclick=\"alert(1)\"></div>\n");
+    const auto project_html = render_content_html(project_markup.children);
+    expect(project_html.contains("id=\"equation-anchor\"")
+               && project_html.contains("data-math=\"inline\"")
+               && project_html.contains("data-math=\"display\"")
+               && project_html.contains("alt=\"A diagram\"")
+               && project_html.contains("data-table=\"e2e\"")
+               && !project_html.contains("onclick"),
+           "project anchors, math, figures and inert table mounts survive rendering");
+    const auto unsafe_markup = parse_markdown_content(
+        "<a href=\"javascript:alert(1)\">bad</a>\n\n<script>alert(1)</script>\n");
+    const auto unsafe_html = render_content_html(unsafe_markup.children);
+    expect(!unsafe_html.contains("href=\"javascript:")
+               && !unsafe_html.contains("<script>"),
+           "authored HTML excludes executable markup and links");
 
     // Markdown extensions.
     expect(admonition_class("WARNING") == "warning", "admonition class");
@@ -3984,6 +4002,18 @@ void decorate_code_entity_ranges(
             body_nodes, identity_by_reference, route_by_id, tooltip_url);
         decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id,
                                     tooltip_url, item.metadata.slug);
+        // Resolve authored assets against this build's fingerprinted bundle.
+        const auto rewrite_assets = [&site, &base_path](content_node& node, auto&& self) -> void {
+            if (node.kind == content_node_kind::image || node.kind == content_node_kind::link) {
+                if (node.target.starts_with("/static/")) {
+                    node.target = site.assets_base_url + node.target.substr(8);
+                } else if (node.target.starts_with("/v0.1/") || node.target.starts_with("/benchmarks/")) {
+                    node.target = base_path + node.target.substr(1);
+                }
+            }
+            for (auto& child : node.children) self(child, self);
+        };
+        for (auto& node : body_nodes) rewrite_assets(node, rewrite_assets);
         const std::string on_this_page = build_on_this_page(body_nodes);
         const std::string body = render_content_html(body_nodes);
         std::string page = "{\"title\":" + json_text(item.metadata.title)

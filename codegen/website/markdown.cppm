@@ -53,6 +53,7 @@ int enter_markdown_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
     switch (type) {
     case MD_BLOCK_DOC: break;
     case MD_BLOCK_P: builder.push(content_node_kind::paragraph); break;
+    case MD_BLOCK_HTML: builder.push(content_node_kind::raw_html); break;
     case MD_BLOCK_QUOTE: builder.push(content_node_kind::block_quote); break;
     case MD_BLOCK_UL: builder.push(content_node_kind::unordered_list); break;
     case MD_BLOCK_OL: builder.push(content_node_kind::ordered_list); break;
@@ -107,6 +108,8 @@ int enter_markdown_span(MD_SPANTYPE type, void* detail, void* userdata) {
     case MD_SPAN_DEL: builder.push(content_node_kind::strikethrough); break;
     case MD_SPAN_MARK: builder.push(content_node_kind::highlight); break;
     case MD_SPAN_CODE: builder.push(content_node_kind::code_span); break;
+    case MD_SPAN_LATEXMATH: builder.push(content_node_kind::math_inline); break;
+    case MD_SPAN_LATEXMATH_DISPLAY: builder.push(content_node_kind::math_display); break;
     case MD_SPAN_A: {
         content_node& node = builder.push(content_node_kind::link);
         const auto* anchor = static_cast<MD_SPAN_A_DETAIL*>(detail);
@@ -143,9 +146,17 @@ int append_markdown_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, vo
     auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     std::string_view value(text, size);
     content_node& parent = builder.current();
-    if (parent.kind == content_node_kind::code_block) {
+    if (parent.kind == content_node_kind::code_block
+        || parent.kind == content_node_kind::raw_html
+        || parent.kind == content_node_kind::math_inline
+        || parent.kind == content_node_kind::math_display) {
         // Keep code-block text and newlines exactly as the parser supplies them.
         parent.text.append(value);
+        return 0;
+    }
+    if (type == MD_TEXT_HTML) {
+        parent.children.push_back(content_node{
+            .kind = content_node_kind::raw_html, .text = std::string(value)});
         return 0;
     }
     if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) {

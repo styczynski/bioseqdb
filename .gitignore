@@ -37,3 +37,4 @@ reporting/*
 
 # Locally collected native release packages and the publishable static site.
 /bin_artifacts/
+/artifacts/website/

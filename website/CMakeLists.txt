@@ -960,6 +960,7 @@ add_custom_target(bioseq_website_isolation_tests
 set(_sql_entities "${_output_root}/sql-entities.json")
 set(_site_model "${_output_root}/site-model.json")
 set(_landing_fasta "${_source_dir}/tests/fixtures/landing_reads.fasta")
+set(_readme_fasta "${_source_dir}/tests/fixtures/readme_samples.fasta")
 if(NOT EXISTS "${_landing_fasta}")
   message(FATAL_ERROR "website: real bioseq.load fixture is missing: ${_landing_fasta}")
 endif()
@@ -995,6 +996,7 @@ file(WRITE "${_cluster_child}"
 "  exit 1\n"
 "fi\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
+"\"${CMAKE_COMMAND}\" -E copy_if_different '${_readme_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/readme_samples.fasta\"\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
 "  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
 "  --sql-manifest '${_bioseq_extension_sql_manifest}' \\\n"
@@ -1039,7 +1041,7 @@ add_custom_command(
           "${_cpp_entities}" "${_plan_json}"
           "${_cache_extension_sql_manifest}"
           "${_bioseq_extension_sql_manifest}"
-          "${_landing_fasta}"
+          "${_landing_fasta}" "${_readme_fasta}"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
@@ -1197,8 +1199,33 @@ add_custom_command(
   COMMENT "website: publication success stamp"
   VERBATIM)
 add_custom_target(bioseq_website
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/export_site.py"
+          --source "${_output_root}/site"
+          --destination "${CMAKE_SOURCE_DIR}/artifacts/website"
   DEPENDS "${_website_success}" bioseq_private_postgres_tests
           bioseq_website_isolation_tests)
+
+# Authored content is checked in so the normal build needs neither TeX nor
+# Pandoc. This optional check verifies the conversion against its original
+# README, recursively included project sources and benchmark observations.
+find_program(_website_node_executable NAMES node nodejs)
+if(_website_node_executable)
+  set(_website_benchmark_contract_command
+    "${_website_node_executable}"
+    "${_source_dir}/tests/contract/test_project_benchmarks.mjs")
+else()
+  set(_website_benchmark_contract_command
+    "${CMAKE_COMMAND}" -E echo
+    "website: Node.js unavailable - skipping the benchmark interaction contract")
+endif()
+add_custom_target(bioseq_website_content_check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_project_chapters.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_project_benchmarks.py" --check
+  COMMAND ${_website_benchmark_contract_command}
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  COMMENT "website: check imported author content and benchmark observations"
+  VERBATIM)
 
 # --- assemble (§17.3 step 12) -------------------------------------------------
 if(NOT BIOSEQ_WEBSITE_VERSION_ARTIFACTS STREQUAL "")

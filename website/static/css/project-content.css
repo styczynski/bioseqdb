@@ -1,0 +1,28 @@
+.tutorial-body img[src*="/figures/"] {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.5rem auto;
+  padding: 1rem;
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+}
+.tutorial-body .project-math.display {
+  display: block;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: .5rem 0;
+}
+.tutorial-body .katex { font-size: 1.08em; }
+.tutorial-body .source-link { overflow-wrap: anywhere; }
+.tutorial-body .github-mark { vertical-align: -.15em; margin-right: .35em; flex-shrink: 0; }
+.tutorial-body a[id] { scroll-margin-top: 6rem; }
+.tutorial-body details { margin: 1.4rem 0; }
+.tutorial-body summary { cursor: pointer; color: #7dd3cf; padding: .5rem 0; }
+.tutorial-body th, .tutorial-body td { overflow-wrap: anywhere; }
+.tutorial-body figure { margin: 1.5rem 0; }
+.tutorial-body figcaption { color: #9bb0c0; font-size: .9rem; }
+.tutorial-body [data-math] { color: inherit; }
