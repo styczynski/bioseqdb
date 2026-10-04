@@ -1,7 +1,7 @@
 /* Match the authored cyan, orange and mint palette throughout code and plans. */
-code[class*="language-"],pre[class*="language-"]{color:#cbd8e4;background:transparent;text-shadow:none;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;tab-size:4}
-pre[class*="language-"]{overflow:auto;max-width:100%;white-space:pre;word-break:normal;overflow-wrap:normal}
-pre[class*="language-"]>code{font-size:inherit;line-height:inherit;white-space:inherit}
+code[class*="language-"],pre[class*="language-"],.doc-code>pre,.docs-content .doc-code>pre>code{color:#cbd8e4;background:transparent;text-shadow:none;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;tab-size:4}
+pre[class*="language-"],.doc-code>pre{overflow:auto;max-width:100%;white-space:pre;word-break:normal;overflow-wrap:normal}
+pre[class*="language-"]>code,.doc-code>pre>code{font-size:inherit;line-height:inherit;white-space:inherit}
 .token.comment,.token.prolog,.token.doctype,.token.cdata{color:#8094a6;font-style:normal}
 .token.keyword,.token.atrule,.token.selector{color:#65b9dd}
 .token.function,.token.function-name,.token.predicate{color:#f39762;font-weight:500}

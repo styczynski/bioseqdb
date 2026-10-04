@@ -490,8 +490,10 @@ def _verify_sql_text(name: str, source: Path, sql_bytes: bytes) -> str:
                     f"extension surface: {required}"
                 )
 
+    # A pipeline stage is an execution-statistics concept, not development
+    # provenance. Keep rejecting bare/numbered stages and all other terms.
     provenance_terms = re.compile(
-        r"\b(?:integration tests?|project|stage|phase|milestone|prototype|"
+        r"\b(?:integration tests?|project|(?<!pipeline )stage|phase|milestone|prototype|"
         r"proof[- ]of[- ]concept|revision|design document|tech spec|"
         r"doc(?:ument)?\s*0*\d+)\b",
         re.IGNORECASE,

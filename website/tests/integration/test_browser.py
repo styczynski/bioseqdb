@@ -561,6 +561,9 @@ def _load_benchmark_fixture_contract(site: Path, base_path: str) -> dict:
         "key": key, "title": tables[key]["title"], "tables": tables,
         "benchmark_count": len(tables), "manifest_route": route,
         "local_source_routes": {route}, "remote_sources": set(),
+        "local_source_sha256": {
+            path.relative_to(site).as_posix(): hashlib.sha256(payload).hexdigest(),
+        },
         "remote_artifacts": {}, "same_origin": True,
     }
 
@@ -633,19 +636,24 @@ def _load_static_contract(site: Path, base_path: str, version: str,
             tables = _result_tables(result_nodes)
             if example.get("expectation") == "error":
                 sqlstate = example.get("expected_sqlstate", "")
-                _check(not tables and bool(sqlstate)
-                       and f"SQLSTATE {sqlstate}:" in _node_text({"children": result_nodes}),
+                # Earlier statements may return rows before the expected error.
+                errors = [node for node in _nodes_of_kind(result_nodes, "admonition")
+                          if node.get("attributes", {}).get("class") == "warning"]
+                _check(bool(sqlstate) and any(
+                    f"SQLSTATE {sqlstate}:" in _node_text(node) for node in errors),
                        f"{canonical_id}: expected error output lost SQLSTATE {sqlstate}")
             else:
-                output_text = _node_text({"children": result_nodes})
+                # Preserve paragraph boundaries: a command-only result is
+                # followed immediately by its separate provenance paragraph.
+                output_text = "\n".join(_node_text(node) for node in result_nodes)
                 _check(bool(tables) or re.search(
                     r"\b(?:CREATE (?:TABLE|EXTENSION)|ALTER TABLE|DROP TABLE|"
                     r"INSERT \d+ \d+|UPDATE \d+|DELETE \d+|SET|RESET|CALL|DO)\b", output_text),
                     f"{canonical_id}: successful SQL has neither rows nor a command status")
-                for table in tables:
-                    _check(len(table) >= 1 and bool(table[0])
-                           and all(bool(cell.strip()) for cell in table[0]),
-                           f"{canonical_id}: result table lacks readable columns or rows")
+            for table in tables:
+                _check(len(table) >= 1 and bool(table[0])
+                       and all(bool(cell.strip()) for cell in table[0]),
+                       f"{canonical_id}: result table lacks readable columns or rows")
 
         source = (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text(
             encoding="utf-8")
@@ -1607,7 +1615,8 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
              "paddingRight", "paddingBottom", "paddingLeft", "overflowX"),
             "Markdown code geometry")
         code_reference = dict(records["data-code:first"])
-        code_reference["style"] += ";font-size:13px;line-height:1.65;color:#cbd8e4"
+        code_reference["style"] += (
+            ";font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#cbd8e4")
         _compare_design_style(
             page, ".doc-code:not(:has(.anno-cards)) code", code_reference,
             ("fontFamily", "fontSize", "lineHeight", "color"),
