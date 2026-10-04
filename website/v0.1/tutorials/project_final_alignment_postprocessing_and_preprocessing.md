@@ -52,89 +52,50 @@ The pseudocode below is directly taken from Block Aligner paper \[[38](../bibli
 
 The important thing in the paper is: $[r,r+h)\times[c,c+w)$; $Y=\lfloor B/S\rfloor-1$ which defines threshold, when block assumes the score cannot improve and decides to grow. Note that here $S$ was used by paper’s authors as the width of the strip, not the actual score computed.
 
-### Pseudocode for the Block Aligner algorithm.
-
 <a id="alg-adaptive-block-alignment"></a>
 
-1.  Procedure `ALIGN`($q,p,X,B_{min},B_{max},G^c_{open},G^c_{close},G^r_{open},G_{ext}$)
+Pseudocode for the Block Aligner algorithm.
 
-2.  $S\gets8$, $\mathit{max\_score}\gets0$, $\mathit{dir}\gets\textsc{GROW}$, $B\gets B_{min}$, $B_{prev}\gets0$, $i\gets0$, $j\gets0$
+```pseudocode
+Procedure `ALIGN`($q,p,X,B_{min},B_{max},G^c_{open},G^c_{close},G^r_{open},G_{ext}$)
+  $S\gets8$, $\mathit{max\_score}\gets0$, $\mathit{dir}\gets\textsc{GROW}$, $B\gets B_{min}$, $B_{prev}\gets0$, $i\gets0$, $j\gets0$
+  Initialize $D$, $D'$, $C$, $R$, and the trace array
+  While true // One step of ligner. Note that $i$, $j$, $B$, and $\mathit{dir}$ have already been updated.
+    If $\mathit{dir}=\textsc{RIGHT}$ // Block position $(i,j-S)\mapsto(i,j)$
+      $\mathit{curr\_score}\gets\verb|COMPUTE_RECT|((i,j+B-S),(S,B))$
+    Else If $\mathit{dir}=\textsc{DOWN}$ // Block position $(i-S,j)\mapsto(i,j)$
+      $\mathit{curr\_score}\gets\verb|COMPUTE_RECT|((i+B-S,j),(B,S))$
+    Else If $\mathit{dir}=\textsc{GROW}$
+      $\mathit{curr\_score}\gets\verb|COMPUTE_RECT|((i+B_{prev},j),(B_{prev},B-B_{prev}))$ // Grow down
+      $\mathit{curr\_score}\gets\verb|COMPUTE_RECT|((i,j+B_{prev}),(B-B_{prev},B))$ // Grow right
+    End If
 
-3.  Initialize $D$, $D'$, $C$, $R$, and the trace array
+    If $\mathit{curr\_score}>\mathit{max\_score}$
+      Update $\mathit{max\_score}$ with $\mathit{curr\_score}$ and its store its position
+      Save $i$, $j$, and the block right and bottom border scores as checkpoint
+    End If
 
-4.  While true (
+    **if** $\mathit{curr\_score}<\mathit{max\_score}-X$ for 2 consecutive steps, **then break** // X-drop
+    **if** $i+B>|q|$ **and** $j+B>|p|$, **then break** // Reached end of DP matrix
+    **if** $i+B>|q|$ **or** $j+B>|p|$, **then** shift $i$, $j$ by $S$ to avoid out of bounds **and continue**
 
-    One step of ligner. Note that $i$, $j$, $B$, and $\mathit{dir}$ have already been updated.
+    If $B<B_{max}$ and $Y$ steps pass without improving $\mathit{max\_score}$ // Block grow criteria
+      $B_{prev}=B$, $B\gets2B$, $\mathit{dir}\gets\textsc{GROW}$
+      Restore $i$, $j$, and block border scores from previous checkpoint
+      **continue**
+    End If
 
-    )
+    If $B>B_{min}$ and $\mathit{max\_score}$ is in the bottom-right corner region of block // Block shrink criteria
+      $B\gets B/2$, $i\gets i+B$, $j\gets j+B$
+      Save $i$, $j$, and the block right and bottom border scores as checkpoint
+    End If
 
-5.  If $\mathit{dir}=\textsc{RIGHT}$ (Block position $(i,j-S)\mapsto(i,j)$)
-
-6.  $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i,j+B-S),(S,B))$
-
-7.  ElsIf $\mathit{dir}=\textsc{DOWN}$ (Block position $(i-S,j)\mapsto(i,j)$)
-
-8.  $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i+B-S,j),(B,S))$
-
-9.  ElsIf $\mathit{dir}=\textsc{GROW}$
-
-10. $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i+B_{prev},j),(B_{prev},B-B_{prev}))$ (Grow down)
-
-11. $\mathit{curr\_score}\gets\texttt{COMPUTE\_RECT}((i,j+B_{prev}),(B-B_{prev},B))$ (Grow right)
-
-12. End If
-
-13. 
-
-14. If $\mathit{curr\_score}>\mathit{max\_score}$
-
-15. Update $\mathit{max\_score}$ with $\mathit{curr\_score}$ and its store its position
-
-16. Save $i$, $j$, and the block right and bottom border scores as checkpoint
-
-17. End If
-
-18. 
-
-19. **if** $\mathit{curr\_score}<\mathit{max\_score}-X$ for 2 consecutive steps, **then break** (X-drop)
-
-20. **if** $i+B>|q|$ **and** $j+B>|p|$, **then break** (Reached end of DP matrix)
-
-21. **if** $i+B>|q|$ **or** $j+B>|p|$, **then** shift $i$, $j$ by $S$ to avoid out of bounds **and continue**
-
-22. 
-
-23. If $B<B_{max}$ and $Y$ steps pass without improving $\mathit{max\_score}$ (Block grow criteria)
-
-24. $B_{prev}=B$, $B\gets2B$, $\mathit{dir}\gets\textsc{GROW}$
-
-25. Restore $i$, $j$, and block border scores from previous checkpoint
-
-26. **continue**
-
-27. End If
-
-28. 
-
-29. If $B>B_{min}$ and $\mathit{max\_score}$ is in the bottom-right corner region of block (Block shrink criteria)
-
-30. $B\gets B/2$, $i\gets i+B$, $j\gets j+B$
-
-31. Save $i$, $j$, and the block right and bottom border scores as checkpoint
-
-32. End If
-
-33. 
-
-34. $\mathit{dir}\gets\textsc{RIGHT}$ or <span class="smallcaps">DOWN</span> based on comparing right and bottom border cells
-
-35. Increment $i$, $j$ by $S$ based on $\mathit{dir}$
-
-36. End While
-
-37. return the trace array, and **if** X-drop, **then** $\mathit{max\_score}$, **else** $D[|q|][|p|]$
-
-38. End Procedure
+    $\mathit{dir}\gets\textsc{RIGHT}$ or <span class="smallcaps">DOWN</span> based on comparing right and bottom border cells
+    Increment $i$, $j$ by $S$ based on $\mathit{dir}$
+  End While
+  Return the trace array, and **if** X-drop, **then** $\mathit{max\_score}$, **else** $D[|q|][|p|]$
+End Procedure
+```
 
 ## Postprocessing
 

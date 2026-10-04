@@ -27,6 +27,7 @@ TOKENS: dict[str, str] = {}
 INPUTS: dict[str, dict] = {}
 LABELS: dict[str, tuple[str, str]] = {}
 SQL_AUDIT: list[dict] = []
+ALGORITHM_AUDIT: list[dict] = []
 REPOS = {"bioseqdb": ("https://github.com/styczynski/bioseqdb", "master")}
 CITATIONS: dict[str, int] = {}
 CITATION_ITEMS: dict[str, dict] = {}
@@ -279,6 +280,117 @@ def sql_example(code: str, path: str, index: int, label: str) -> str:
     return body
 
 
+def prepare_algorithms(path: str, text: str) -> str:
+    """Retain algorithmic control flow as indented rich-text pseudocode."""
+    index = 0
+
+    def algorithm(body: str, environment: str) -> str:
+        nonlocal index
+        original = body
+        captions, labels = [], []
+        body = macros(body, "captionof", 2, lambda kind, title: captions.append(title) or "")
+        body = macros(body, "caption", 1, lambda title, short: captions.append(title) or "", optional=True)
+        body = macros(body, "label", 1, lambda label: labels.append(label) or "")
+        body = macros(body, "algrenewtext", 2, lambda name, value: "")
+        body = re.sub(r"\\(?:begin|end)\{(?:algorithmic|enumerate)\}(?:\[[^]]*\])?", "", body)
+        body = re.sub(r"\\(?:small|footnotesize)\b", "", body)
+        # Layout-only parboxes appear in a long Block Aligner comment.
+        body = macros(body, "parbox", 2, lambda width, value, alignment: value, optional=True)
+        body = re.sub(r"\\raggedright\b", "", body)
+        body = macros(body, "Call", 2, lambda name, args: "\\texttt{" + name + "}(" + args + ")")
+        body = re.sub(r"\\Return\b", "Return ", body)
+
+        arguments = {"For": 1, "ForAll": 1, "While": 1, "If": 1,
+                     "ElsIf": 1, "Until": 1, "Function": 2, "Procedure": 2,
+                     "AlgCommentLine": 1}
+        opening = {"For", "ForAll", "While", "If", "Function", "Procedure", "Repeat"}
+        closing = {"EndFor": {"For", "ForAll"}, "EndWhile": {"While"},
+                   "EndIf": {"If"}, "EndFunction": {"Function"},
+                   "EndProcedure": {"Procedure"}, "Until": {"Repeat"}}
+        commands = set(arguments) | opening | set(closing) | {"Require", "Ensure", "State", "Statex", "Else", "item"}
+        pattern = re.compile(r"(?m)^[ \t]*\\(" + "|".join(sorted(commands, key=len, reverse=True)) + r")\b")
+        starts = list(pattern.finditer(body))
+        if not starts or body[:starts[0].start()].strip():
+            raise ValueError(f"Unrecognized algorithm preamble in {path}: {body[:300]}")
+        stack, rows, controls = [], [], []
+        for position, match in enumerate(starts):
+            command = match[1]
+            value = body[match.end():starts[position+1].start() if position+1 < len(starts) else len(body)].strip()
+            # Comments belong to the same statement even when their TeX is on
+            # a following line or inside the argument of a control command.
+            comments = []
+            value = macros(value, "Comment", 1, lambda comment: comments.append(comment) or "")
+            args, end = [], 0
+            for _ in range(arguments.get(command, 0)):
+                argument, end = group(value, end)
+                args.append(argument)
+            tail = value[end:].strip()
+            indent = len(stack)
+            if command in closing:
+                if not stack or stack[-1] not in closing[command]:
+                    raise ValueError(f"Unbalanced {command} in {path}, algorithm {index}: {stack}")
+                stack.pop()
+                indent = len(stack)
+            elif command in {"Else", "ElsIf"}:
+                if not stack or stack[-1] != "If":
+                    raise ValueError(f"{command} without If in {path}, algorithm {index}")
+                indent -= 1
+            if command in {"Function", "Procedure"}:
+                line = command + " \\texttt{" + args[0] + "}(" + args[1] + ") " + tail
+            elif command == "AlgCommentLine":
+                line = "// " + args[0] + " " + tail
+            elif command in {"Require", "Ensure"}:
+                line = command + ": " + tail
+            elif command in {"State", "Statex", "item"}:
+                line = tail
+                if command == "Statex" and line:
+                    indent += 1
+                line = macros(line, "hspace", 1, lambda width: "")
+                line = re.sub(r"\\strut\b", "", line)
+            else:
+                word = {"ForAll": "For all", "ElsIf": "Else If"}.get(command, re.sub(r"^End", "End ", command))
+                line = word + " " + " ".join(args) + " " + tail
+            if comments:
+                line += " // " + " // ".join(comments)
+            rows.append((indent, line.strip()))
+            controls.append(command)
+            if command in opening:
+                stack.append(command)
+        if stack:
+            raise ValueError(f"Unclosed algorithm controls in {path}, algorithm {index}: {stack}")
+
+        # Convert every logical statement in one Pandoc pass. Unique markers
+        # prove no line was omitted, merged, or duplicated during conversion.
+        marked = "\n\n".join(f"BIOSEQALGORITHMLINE{i:06d} " + line for i, (_, line) in enumerate(rows))
+        converted = convert(marked)
+        pieces = re.split(r"BIOSEQALGORITHMLINE(\d{6})", converted)
+        recovered = pieces[1::2]
+        if pieces[0].strip() or recovered != [f"{i:06d}" for i in range(len(rows))]:
+            raise ValueError(f"Algorithm statement loss in {path}, algorithm {index}: {recovered}")
+        rendered = [re.sub(r"\s+", " ", value).strip() for value in pieces[2::2]]
+        lines = [("  " * indent + value) if value else "" for (indent, _), value in zip(rows, rendered)]
+        caption = " ".join(convert(title).replace("\n", " ") for title in captions)
+        prefix = "\n\n".join(f'<a id="{anchor(label)}"></a>' for label in labels)
+        if caption:
+            prefix += ("\n\n" if prefix else "") + caption
+        fence = "```pseudocode\n" + "\n".join(lines) + "\n```"
+        ALGORITHM_AUDIT.append({"source": path, "index": index, "environment": environment,
+                                "labels": labels, "caption": caption, "statements": len(rows),
+                                "max_indent": max(indent for indent, _ in rows),
+                                "controls": dict(Counter(controls)),
+                                "source_sha256": hashlib.sha256(original.encode()).hexdigest()})
+        index += 1
+        return protect((prefix + "\n\n" if prefix else "") + fence, True)
+
+    text = re.sub(r"\\begin\{algorithm\}(?:\[[^]]*\])?(.*?)\\end\{algorithm\}",
+                  lambda match: algorithm(match[1], "algorithm"), text, flags=re.S)
+    text = re.sub(r"\\begingroup\s*\\captionsetup\{type=algorithm\}(.*?)\\endgroup",
+                  lambda match: algorithm(match[1], "algorithmic"), text, flags=re.S)
+    text = re.sub(r"\\begin\{algorithmic\}(?:\[[^]]*\])?(.*?)\\end\{algorithmic\}",
+                  lambda match: algorithm(match[1], "algorithmic"), text, flags=re.S)
+    return text
+
+
 def prepare_file(path: str, text: str | None = None) -> str:
     text = read_source(path) if text is None else text
     # Code is protected before TeX comment stripping, preserving % operators and
@@ -312,6 +424,7 @@ def prepare_file(path: str, text: str | None = None) -> str:
             return protect(f'![{Path(path).stem.replace("_", " ")} diagram]({url})', True)
         text = re.sub(r"\\begin\{" + env + r"\}.*?\\end\{" + env + r"\}", graphic, text, flags=re.S)
     text = strip_comments(text)
+    text = prepare_algorithms(path, text)
     if path.endswith("generated_benchmark_cells.tex"):
         return ""
     if path.endswith("generated_results.tex"):
@@ -459,32 +572,6 @@ def convert(text: str) -> str:
         return protect(f'<sup><a href="#project-note-{number}">{number}</a></sup>')
     text = macros(text, "footnote", 1, note)
     text = macros(text, "footnotetext", 1, note)
-    # Algorithmic layout is converted to a numbered list. Its statements and
-    # mathematical notation are retained, including conditional/end markers.
-    def algorithm(m):
-        body = m[1]
-        already_numbered = r"\begin{enumerate}" in body
-        body = re.sub(r"\\begin\{algorithmic\}(?:\[.*?\])?|\\end\{algorithmic\}", "", body)
-        body = macros(body, "caption", 1, lambda title, short: "\\paragraph{" + title + "}", optional=True)
-        body = re.sub(r"\\Statex\b", r"\\newline ", body)
-        body = re.sub(r"\\(Require|Ensure|State)\b", lambda x: "\n\\item " + ({"Require": "Input: ", "Ensure": "Output: "}.get(x[1], "")), body)
-        for name in ["For", "ForAll", "While", "If", "ElsIf", "Until"]:
-            body = macros(body, name, 1, lambda condition, name=name: "\n\\item " + name + " " + condition)
-        for name in ["Procedure", "Function"]:
-            body = macros(body, name, 2, lambda title, args, name=name: "\n\\item " + name + " \\texttt{" + title + "}(" + args + ")")
-        body = re.sub(r"\\Repeat\b", r"\n\\item Repeat", body)
-        body = re.sub(r"\\(EndFor|EndWhile|EndIf|EndProcedure|EndFunction|Else)\b", lambda x: "\n\\item " + re.sub(r"([a-z])([A-Z])", r"\1 \2", x[1]), body)
-        # \Call occurs both inside and outside math. \operatorname outside
-        # math loses its argument in Pandoc; \texttt preserves both forms.
-        body = macros(body, "Call", 2, lambda name, args: "\\texttt{" + name + "}(" + args + ")")
-        body = macros(body, "Comment", 1, lambda value: " (" + value + ")")
-        body = re.sub(r"\\Return\b", "return ", body)
-        first = body.find("\\item")
-        if first >= 0 and not already_numbered:
-            body = body[:first] + "\\begin{enumerate}\n" + body[first:] + "\n\\end{enumerate}"
-        return body
-    text = re.sub(r"\\begin\{algorithm\}(?:\[[^]]*\])?(.*?)\\end\{algorithm\}", algorithm, text, flags=re.S)
-    text = re.sub(r"\\begin\{algorithmic\}(?:\[[^]]*\])?(.*?)\\end\{algorithmic\}", algorithm, text, flags=re.S)
     text = macros(text, "caption", 1, lambda title, short: "\n\\par\\emph{" + title + "}\n", optional=True)
     # Pandoc can interpret tabular/longtable and figure captions after the
     # custom graphics have been replaced by Markdown placeholders.
@@ -668,7 +755,7 @@ def main() -> None:
         bib += "\n\n" + "\n\n".join(f'<a id="ref-{key}"></a>\n\n**[{len(CITATIONS) + i}]** {body}' for i, (key, body) in enumerate(REFERENCE_NOTES, 1))
     write_page("bibliography", "Bibliography", 200, bib)
     omitted = [dict(e, reason="Walkthrough replaced by the README tutorial" if "walkthrough" in e["path"] else "Printed front matter or publication boilerplate") for e in data["entries"] if e["path"] not in {x["path"] for x in entries}]
-    MANIFEST.write_text(json.dumps({"entrypoint": "papers/src/content/bioseqdb/thesis/main.tex", "inputs": list(INPUTS.values()), "pages": pages, "omitted": omitted, "omitted_main_sections": ["title-page metadata", "abstract", "printed table of contents", "chapter roadmap generated from metadata", "walkthrough-appendix pointer"], "text_policy": "Author sentences are preserved; thesis becomes project. Formatting, citations, references, executable setup, and reserved-word quoting are publication adaptations.", "sql_examples": SQL_AUDIT}, indent=2) + "\n")
+    MANIFEST.write_text(json.dumps({"entrypoint": "papers/src/content/bioseqdb/thesis/main.tex", "inputs": list(INPUTS.values()), "pages": pages, "omitted": omitted, "omitted_main_sections": ["title-page metadata", "abstract", "printed table of contents", "chapter roadmap generated from metadata", "walkthrough-appendix pointer"], "text_policy": "Author sentences are preserved; thesis becomes project. Formatting, citations, references, executable setup, and reserved-word quoting are publication adaptations.", "sql_examples": SQL_AUDIT, "algorithms": ALGORITHM_AUDIT}, indent=2) + "\n")
 
 
 def cli() -> None:

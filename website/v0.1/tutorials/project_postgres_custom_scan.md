@@ -228,17 +228,16 @@ The collect loop is the gap between batch 1 and batch 2 in panel (d) of Figur
 
 Now I not only need to build the tuple but somehow explain to Postgres that certain values correspond to requested values of function calls like `bioseq.dp_score(t.seq)`. PostgreSQL evaluates output expressions through an expression tree. Before returning its first alignment hit, the executor walks this tree and replaces the function calls with `Const` nodes. It writes the hit’s values and null flags into these nodes and rebuilds the output-expression evaluator so that it reads the changed fields. This makes Postgres know that we already computed these values. The idea was created by analyzing how ParadeDB provides its search results[ParadeDB current-result score · `exec_custom_scan 1784`](https://github.com/paradedb/paradedb/blob/main/pg_search/src/postgres/customscan/basescan/mod.rs#L1784)
 
-#### How to return tuple
-
 <a id="alg-scan-project-hit"></a>
 
-1.  Restore the original columns.
+How to return tuple
 
-2.  For every requested BioseqDB function like `score(seq)`, `target_start(seq)`, `cigar(seq)` and so on, write its field from this hit into the corresponding typed value node.
-
-3.  Rebuild the evaluator, then evaluate the output expressions.
-
-4.  Return the resulting SQL row
+```pseudocode
+Restore the original columns.
+For every requested BioseqDB function like `score(seq)`, `target_start(seq)`, `cigar(seq)` and so on, write its field from this hit into the corresponding typed value node.
+Rebuild the evaluator, then evaluate the output expressions.
+Return the resulting SQL row
+```
 
 ### Supporting joins
 

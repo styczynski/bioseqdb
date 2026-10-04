@@ -72,31 +72,23 @@ For affine scoring model we need to hold main state and one state for each gap o
   H_{i,j} &= \max\{M_{i,j},I_{i,j},D_{i,j}\}.
 \end{aligned}$$ Using $H$ to open a gap permits a transition from any previous state. Local alignment also includes zero in the final maximum.
 
-### Affine-gap alignment with an explicit boundary contract
-
 <a id="alg-affine-dp"></a>
 
-1.  Input: sequences $X[1\ldots n]$, $Y[1\ldots m]$, scores $s,q,e$, and a boundary contract $B$
+Affine-gap alignment with an explicit boundary contract
 
-2.  Output: score, endpoints, and an optional CIGAR string
-
-3.  initialize $H$, $I$, and $D$ according to $B$
-
-4.  For $i\gets 1$ to $n$
-
-5.  For $j\gets 1$ to $m$
-
-6.  update $M_{i,j}$, $I_{i,j}$, $D_{i,j}$, and $H_{i,j}$ with Equation [affine dp](../project_alignment_foundations/#eq-affine-dp)
-
-7.  store the predecessor of each winning state when traceback is requested
-
-8.  End For
-
-9.  End For
-
-10. select the endpoint permitted by $B$
-
-11. follow predecessors to an allowed start and run-length encode the operations
+```pseudocode
+Require: sequences $X[1\ldots n]$, $Y[1\ldots m]$, scores $s,q,e$, and a boundary contract $B$
+Ensure: score, endpoints, and an optional CIGAR string
+initialize $H$, $I$, and $D$ according to $B$
+For $i\gets 1$ to $n$
+  For $j\gets 1$ to $m$
+    update $M_{i,j}$, $I_{i,j}$, $D_{i,j}$, and $H_{i,j}$ with Equation [affine dp](../project_alignment_foundations/#eq-affine-dp)
+    store the predecessor of each winning state when traceback is requested
+  End For
+End For
+select the endpoint permitted by $B$
+follow predecessors to an allowed start and run-length encode the operations
+```
 
 The algorithm state matrix can be used to retrieve the edit path as CIGAR string. This is the standard compact representation of gapped alignments described in chapter 1\[[83](../bibliography/#ref-sam_format_specification)\]
 

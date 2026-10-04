@@ -87,146 +87,85 @@ The figure [storage write path](../project_postgres_storage/#fig-storage-write-
 
 <a id="alg-storage-flush-stripe"></a>
 
-1.  Input: columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$ (default $150{,}000$), comparators $\mathrm{Compare}_c$ (possibly $\mathrm{NULL}$)
-
-2.  $G_{\max}\gets\lceil S/G\rceil$
-
-3.  $s\gets\mathrm{NULL}$ (open stripe, or none)
-
-4.  Procedure `AllocateNewStripe`()
-
-5.  $s.n\gets 0$ (rows already in this stripe)
-
-6.  $s.P\gets 0^{|C|\times G}$ (presence bits of the current group)
-
-7.  $s.B\gets\varepsilon^{|C|}$ (serialized present values of the current group)
-
-8.  $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$ (skip min, max, and slot count of every column chunk)
-
-9.  $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$ (packed streams of every serialized group)
-
-10. $s.N\gets 0^{G_{\max}}$ (row count of each serialized group)
-
-11. return $s$
-
-12. End Procedure
-
-13. Procedure `WriteRow`($v$)
-
-14. If $\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$
-
-15. `FlushStripe`($s$)
-
-16. End If
-
-17. If $\neg\mathrm{IsOpen}(s)$
-
-18. $s\gets\texttt{AllocateNewStripe}()$
-
-19. End If
-
-20. $g\gets\lfloor s.n/G\rfloor$,$r\gets s.n\bmod G$
-
-21. ForAll $c\in C$
-
-22. If $\mathrm{IsNull}(v_c)$
-
-23. $s.P_{c,r}\gets 0$
-
-24. Else
-
-25. If $\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$
-
-26. **error**
-
-27. End If
-
-28. $s.P_{c,r}\gets 1$
-
-29. $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
-
-30. If $\mathrm{Compare}_c\neq\mathrm{NULL}$
-
-31. $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
-
-32. $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$ ($\bot$ is the identity)
-
-33. End If
-
-34. End If
-
-35. $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
-
-36. End For
-
-37. If $r=G-1$
-
-38. `SerializeGroup`($s$, $g$, $G$)
-
-39. End If
-
-40. $s.n\gets s.n+1$
-
-41. If $s.n\ge S$
-
-42. `FlushStripe`($s$)
-
-43. End If
-
-44. End Procedure
-
-45. Procedure `SerializeGroup`($s$, $g$, $k$)
-
-46. $s.N_g\gets k$
-
-47. ForAll $c\in C$
-
-48. $s.\mathrm{chunk}_{c,g}.P\gets
-            \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
-
-49. End For
-
-50. ForAll $c\in C$
-
-51. $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$ (identity if incompressible)
-
-52. $s.B_c\gets\varepsilon$
-
-53. End For
-
-54. End Procedure
-
-55. Procedure `FlushStripe`($s$)
-
-56. $k\gets s.n\bmod G$
-
-57. If $k>0$
-
-58. `SerializeGroup`($s$, $\lfloor s.n/G\rfloor$, $k$)
-
-59. End If
-
-60. $m\gets\lceil s.n/G\rceil$
-
-61. ForAll $c\in C$
-
-62. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
-
-63. $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
-
-64. End For
-
-65. `WriteCatalog`($s$)
-
-66. $s\gets\mathrm{NULL}$
-
-67. End Procedure
-
-68. Procedure `WriteCatalog`($s$)
-
-69. $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$ (Saves row count for group, aggegate stats and deletion mask)
-
-70. End Procedure
+Appending rows
+
+```pseudocode
+Require: columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$ (default $150{,}000$), comparators $\mathrm{Compare}_c$ (possibly $\mathrm{NULL}$)
+$G_{\max}\gets\lceil S/G\rceil$
+$s\gets\mathrm{NULL}$ // open stripe, or none
+
+Procedure `AllocateNewStripe`()
+  $s.n\gets 0$ // rows already in this stripe
+  $s.P\gets 0^{|C|\times G}$ // presence bits of the current group
+  $s.B\gets\varepsilon^{|C|}$ // serialized present values of the current group
+  $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$ // skip min, max, and slot count of every column chunk
+  $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$ // packed streams of every serialized group
+  $s.N\gets 0^{G_{\max}}$ // row count of each serialized group
+  Return $s$
+End Procedure
+
+Procedure `WriteRow`($v$)
+  If $\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$
+    `FlushStripe`($s$)
+  End If
+  If $\neg\mathrm{IsOpen}(s)$
+    $s\gets\verb|AllocateNewStripe|()$
+  End If
+  $g\gets\lfloor s.n/G\rfloor$,$r\gets s.n\bmod G$
+  For all $c\in C$
+    If $\mathrm{IsNull}(v_c)$
+      $s.P_{c,r}\gets 0$
+    Else
+      If $\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$
+        **error**
+      End If
+      $s.P_{c,r}\gets 1$
+      $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
+      If $\mathrm{Compare}_c\neq\mathrm{NULL}$
+        $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
+        $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$ // $\bot$ is the identity
+      End If
+    End If
+    $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
+  End For
+  If $r=G-1$
+    `SerializeGroup`($s$, $g$, $G$)
+  End If
+  $s.n\gets s.n+1$
+  If $s.n\ge S$
+    `FlushStripe`($s$)
+  End If
+End Procedure
+
+Procedure `SerializeGroup`($s$, $g$, $k$)
+  $s.N_g\gets k$
+  For all $c\in C$
+    $s.\mathrm{chunk}_{c,g}.P\gets \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
+  End For
+  For all $c\in C$
+    $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$ // identity if incompressible
+    $s.B_c\gets\varepsilon$
+  End For
+End Procedure
+
+Procedure `FlushStripe`($s$)
+  $k\gets s.n\bmod G$
+  If $k>0$
+    `SerializeGroup`($s$, $\lfloor s.n/G\rfloor$, $k$)
+  End If
+  $m\gets\lceil s.n/G\rceil$
+  For all $c\in C$
+    $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
+    $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
+  End For
+  `WriteCatalog`($s$)
+  $s\gets\mathrm{NULL}$
+End Procedure
+
+Procedure `WriteCatalog`($s$)
+  $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$ // Saves row count for group, aggegate stats and deletion mask
+End Procedure
+```
 
 In’s important that closing the writer also flushes any leftover stripe, so all in-memory buffers are saved to disk when transaction is committed.
 

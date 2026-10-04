@@ -305,144 +305,79 @@ This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time w
 
 *(a) The reference and query limits and diagonal band decide whether a pair can be scored or not. (b) If distance checks pass, then we perform scans in a loop. The picture shows one pass of the scan for the current anchor $i=8$. The numbers inside the circles are anchor indices. The orange arrow from $j$ to $p_j$ shows the predecessor previously saved for anchor $j$. After $j$ is scored without stopping, the arrow’s destination receives the current mark $i=8$. The numbered steps visit anchors $7,6,\ldots,1$. The small $s$ boxes show the single skip counter for current anchor 8. Step 2 doesn’t affect $s$ as this anchor doesn’t have a predecessor in this scan pass (it’s unmarked). Step 5 improves the score and changes $s=2$ to $s=1$. Anchor 0 is already outside the main loop because $\verb|max_iter|=7$, so we don’t scan it, but we check it later with $m=0$. Step 7 stops with $e=1$, so saved $m=0$ satisfies $m<e$ and is checked once. The score of $m=0$ equal to 17 wins, but in some other scan other anchor could have a better score.*
 
-#### Minimap2’s ordered predecessor scan for one query segment
-
 <a id="alg-chaining-b1"></a>
 
-1.  Input: sorted anchors $a_0,\ldots,a_{n-1}$; ordinary non-cDNA mode; configured distance limits, $B=\verb|bw|$, `max_iter`, and `max_skip`
-
-2.  Output: chain scores $f_i$ and predecessor indices $p_i$
-
-3.  $D_x\gets\max(\verb|max_dist_x|,B)$
-
-4.  $D_y\gets\max(\verb|max_dist_y|,B)$
-
-5.  Function `CanScore`($j,i$)
-
-6.  $d_q\gets q_i-q_j,\quad d_r\gets r_i-r_j$
-
-7.  If $a_j,a_i$ use different references or strands
-
-8.  return false
-
-9.  End If
-
-10. If $d_r\leq0$ **or** $d_r>D_x$
-
-11. return false
-
-12. End If
-
-13. If $d_q\leq0$ **or** $d_q>D_x$ **or** $d_q>D_y$
-
-14. return false
-
-15. End If
-
-16. If $\lvert d_r-d_q\rvert>B$
-
-17. return false
-
-18. End If
-
-19. return true
-
-20. End Function
-
-21. $t_j\gets0$ for every $j$; $m\gets-1$; $st\gets0$ ($m$ is one saved anchor index)
-
-22. For $i\gets0$ **to** $n-1$
-
-23. While $st<i$ and ($a_{st}$ has a different reference or strand from $a_i$, or $r_i-r_{st}>D_x$)
-
-24. $st\gets st+1$
-
-25. End While
-
-26. $st\gets\max(st,i-\verb|max_iter|)$ (hard lower bound for the main scan)
-
-27. $f_i\gets\ell_i,\quad p_i\gets-1,\quad s\gets0,\quad
-                e\gets st-1$
-
-28. For $j\gets i-1$ **down to** $st$
-
-29. If `CanScore`($j,i$)
-
-30. $c\gets f_j+E(j,i)$
-
-31. If $c>f_i$
-
-32. $f_i\gets c,\quad p_i\gets j$
-
-33. If $s>0$
-
-34. $s\gets s-1$
-
-35. End If
-
-36. ElsIf $t_j=i$
-
-37. $s\gets s+1$
-
-38. If $s>\verb|max_skip|$
-
-39. $e\gets j$
-
-40. **break**
-
-41. End If
-
-42. End If
-
-43. If $p_j\geq0$
-
-44. $t_{p_j}\gets i$ (mark one older anchor for this scan)
-
-45. End If
-
-46. End If
-
-47. End For
-
-48. If $m<0$, or $a_m$ has a different reference or strand from $a_i$, or $r_i-r_m>D_x$
-
-49. $m\gets-1$
-
-50. For $j\gets i-1$ **down to** $st$
-
-51. If $m<0$ **or** $f_j>f_m$
-
-52. $m\gets j$
-
-53. End If
-
-54. End For
-
-55. End If
-
-56. If $m\geq0$ and $m<e$
-
-57. If `CanScore`($m,i$)
-
-58. $c\gets f_m+E(m,i)$
-
-59. If $c>f_i$
-
-60. $f_i\gets c,\quad p_i\gets m$
-
-61. End If
-
-62. End If
-
-63. End If
-
-64. If $m<0$, or ($a_m,a_i$ use the same reference and strand, $r_i-r_m\leq D_x$, and $f_i>f_m$)
-
-65. $m\gets i$
-
-66. End If
-
-67. End For
+Minimap2’s ordered predecessor scan for one query segment
+
+```pseudocode
+Require: sorted anchors $a_0,\ldots,a_{n-1}$; ordinary non-cDNA mode; configured distance limits, $B=\verb|bw|$, `max_iter`, and `max_skip`
+Ensure: chain scores $f_i$ and predecessor indices $p_i$
+$D_x\gets\max(\verb|max_dist_x|,B)$
+$D_y\gets\max(\verb|max_dist_y|,B)$
+Function `CanScore`($j,i$)
+  $d_q\gets q_i-q_j,\quad d_r\gets r_i-r_j$
+  If $a_j,a_i$ use different references or strands
+    Return false
+  End If
+  If $d_r\leq0$ **or** $d_r>D_x$
+    Return false
+  End If
+  If $d_q\leq0$ **or** $d_q>D_x$ **or** $d_q>D_y$
+    Return false
+  End If
+  If $\lvert d_r-d_q\rvert>B$
+    Return false
+  End If
+  Return true
+End Function
+$t_j\gets0$ for every $j$; $m\gets-1$; $st\gets0$ // $m$ is one saved anchor index
+For $i\gets0$ **to** $n-1$
+  While $st<i$ and ($a_{st}$ has a different reference or strand from $a_i$, or $r_i-r_{st}>D_x$)
+    $st\gets st+1$
+  End While
+  $st\gets\max(st,i-\verb|max_iter|)$ // hard lower bound for the main scan
+  $f_i\gets\ell_i,\quad p_i\gets-1,\quad s\gets0,\quad e\gets st-1$
+  For $j\gets i-1$ **down to** $st$
+    If `CanScore`($j,i$)
+      $c\gets f_j+E(j,i)$
+      If $c>f_i$
+        $f_i\gets c,\quad p_i\gets j$
+        If $s>0$
+          $s\gets s-1$
+        End If
+      Else If $t_j=i$
+        $s\gets s+1$
+        If $s>\verb|max_skip|$
+          $e\gets j$
+          **break**
+        End If
+      End If
+      If $p_j\geq0$
+        $t_{p_j}\gets i$ // mark one older anchor for this scan
+      End If
+    End If
+  End For
+  If $m<0$, or $a_m$ has a different reference or strand from $a_i$, or $r_i-r_m>D_x$
+    $m\gets-1$
+    For $j\gets i-1$ **down to** $st$
+      If $m<0$ **or** $f_j>f_m$
+        $m\gets j$
+      End If
+    End For
+  End If
+  If $m\geq0$ and $m<e$
+    If `CanScore`($m,i$)
+      $c\gets f_m+E(m,i)$
+      If $c>f_i$
+        $f_i\gets c,\quad p_i\gets m$
+      End If
+    End If
+  End If
+  If $m<0$, or ($a_m,a_i$ use the same reference and strand, $r_i-r_m\leq D_x$, and $f_i>f_m$)
+    $m\gets i$
+  End If
+End For
+```
 
 > [!NOTE]
 > **Algorithm details**
@@ -514,101 +449,56 @@ After the last scored batch, the algorithm takes horizontal maximum of a vector 
 
 The algorithm is described in detail in Algorithm [chaining b5](../project_chaining/#alg-chaining-b5).
 
-#### Bounded SIMD B1
-
 <a id="alg-chaining-b5"></a>
 
-1.  Input: target $i$, window $[st_i,i)$, SIMD width $L$, $S=\verb|max_chain_skip|>0$, $\verb|max_chain_iter|>0$, saved index $m$
+Bounded SIMD B1
 
-2.  Output: $f_i,p_i$
-
-3.  $U\gets\max\{1,\lfloor S/L\rfloor+1\}$ (stop limit for entire vector)
-
-4.  $\mathbf H\gets[\ell_i]^L,\quad
-             \mathbf P\gets[-1]^L,\quad u\gets0$ (one temporary winner per lane)
-
-5.  $o\gets st_i$ ($o$ bounds the interval skipped at limit $U$, initially $[st_i,o)$ is empty)
-
-6.  For $b\gets0,1,\ldots$ while $\mathrm{end}_b>st_i$
-
-7.  calculate $\mathrm{begin}_b,\mathrm{end}_b,a_b,\mathbf j_b$ using Equation [chaining simd batch map](../project_chaining/#eq-chaining-simd-batch-map)
-
-8.  $\mathbf A\gets[\lambda<a_b]_{\lambda=0}^{L-1}$ (mask unused lanes in the oldest partial batch)
-
-9.  $\boldsymbol\epsilon\gets
-               \texttt{PairScoreBatch}(\mathbf j_b,i,\mathbf A)$ ($E(j,i)$, or $-\infty$ for a rejected pair)
-
-10. $\mathbf C\gets
-               \texttt{Select}(\boldsymbol\epsilon\neq-\infty,
-                 \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty)$ (total candidate scores)
-
-11. $\mathbf I\gets(\mathbf C>\mathbf H)$ (strict lane-wise score improvements)
-
-12. $\mathbf H\gets\texttt{Select}(\mathbf I,\mathbf C,\mathbf H)$
-
-13. $\mathbf P\gets\texttt{Select}(\mathbf I,\mathbf j_b,\mathbf P)$ (older candidates with equal scores do not replace)
-
-14. If $\texttt{Any}(\mathbf I)$
-
-15. $u\gets0$
-
-16. Else
-
-17. $u\gets u+1$
-
-18. End If
-
-19. If $u\geq U$ and $\mathrm{begin}_b>st_i$
-
-20. $o\gets \mathrm{begin}_b$ (batch loop omits $[st_i,o)$)
-
-21. **break**
-
-22. End If
-
-23. End For
-
-24. $f_i\gets\texttt{HorizontalMax}(\mathbf H)$
-
-25. $\mathbf T\gets\texttt{Select}(\mathbf H=f_i,\mathbf P,-1)$
-
-26. $p_i\gets\texttt{HorizontalMax}(\mathbf T)$ (If scores are equal, we choose the largest predecessor index)
-
-27. If $f_i=\ell_i$
-
-28. $p_i\gets-1$
-
-29. End If
-
-30. If $m<st_i$ or $m$ is outside the current reference and strand window
-
-31. $m\gets\operatorname*{arg\,max}_{st_i\leq j<i}(f_j,j)$, or $-1$ if this interval is empty (We compare score first and then index)
-
-32. End If
-
-33. If $st_i\leq m<o$
-
-34. $\epsilon_m\gets\texttt{PairScoreOneSIMDLane}(m,i)$ ($-\infty$ when the pair is rejected)
-
-35. If $\epsilon_m\neq-\infty$
-
-36. $c\gets f_m+\epsilon_m$
-
-37. If $c>f_i$
-
-38. $f_i\gets c,\quad p_i\gets m$
-
-39. End If
-
-40. End If
-
-41. End If
-
-42. If $m<0$ or $f_i\geq f_m$
-
-43. $m\gets i$ (Update special anchor $m$, choosing the newer anchor on a tie)
-
-44. End If
+```pseudocode
+Require: target $i$, window $[st_i,i)$, SIMD width $L$, $S=\verb|max_chain_skip|>0$, $\verb|max_chain_iter|>0$, saved index $m$
+Ensure: $f_i,p_i$
+$U\gets\max\{1,\lfloor S/L\rfloor+1\}$ // stop limit for entire vector
+$\mathbf H\gets[\ell_i]^L,\quad \mathbf P\gets[-1]^L,\quad u\gets0$ // one temporary winner per lane
+$o\gets st_i$ // $o$ bounds the interval skipped at limit $U$, initially $[st_i,o)$ is empty
+For $b\gets0,1,\ldots$ while $\mathrm{end}_b>st_i$
+  calculate $\mathrm{begin}_b,\mathrm{end}_b,a_b,\mathbf j_b$ using Equation [chaining simd batch map](../project_chaining/#eq-chaining-simd-batch-map)
+  $\mathbf A\gets[\lambda<a_b]_{\lambda=0}^{L-1}$ // mask unused lanes in the oldest partial batch
+  $\boldsymbol\epsilon\gets \verb|PairScoreBatch|(\mathbf j_b,i,\mathbf A)$ // $E(j,i)$, or $-\infty$ for a rejected pair
+  $\mathbf C\gets \verb|Select|(\boldsymbol\epsilon\neq-\infty, \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty)$ // total candidate scores
+  $\mathbf I\gets(\mathbf C>\mathbf H)$ // strict lane-wise score improvements
+  $\mathbf H\gets\verb|Select|(\mathbf I,\mathbf C,\mathbf H)$
+  $\mathbf P\gets\verb|Select|(\mathbf I,\mathbf j_b,\mathbf P)$ // older candidates with equal scores do not replace
+  If $\verb|Any|(\mathbf I)$
+    $u\gets0$
+  Else
+    $u\gets u+1$
+  End If
+  If $u\geq U$ and $\mathrm{begin}_b>st_i$
+    $o\gets \mathrm{begin}_b$ // batch loop omits $[st_i,o)$
+    **break**
+  End If
+End For
+$f_i\gets\verb|HorizontalMax|(\mathbf H)$
+$\mathbf T\gets\verb|Select|(\mathbf H=f_i,\mathbf P,-1)$
+$p_i\gets\verb|HorizontalMax|(\mathbf T)$ // If scores are equal, we choose the largest predecessor index
+If $f_i=\ell_i$
+  $p_i\gets-1$
+End If
+If $m<st_i$ or $m$ is outside the current reference and strand window
+  $m\gets\operatorname*{arg\,max}_{st_i\leq j<i}(f_j,j)$, or $-1$ if this interval is empty // We compare score first and then index
+End If
+If $st_i\leq m<o$
+  $\epsilon_m\gets\verb|PairScoreOneSIMDLane|(m,i)$ // $-\infty$ when the pair is rejected
+  If $\epsilon_m\neq-\infty$
+    $c\gets f_m+\epsilon_m$
+    If $c>f_i$
+      $f_i\gets c,\quad p_i\gets m$
+    End If
+  End If
+End If
+If $m<0$ or $f_i\geq f_m$
+  $m\gets i$ // Update special anchor $m$, choosing the newer anchor on a tie
+End If
+```
 
 ### Summary of forward chaining algorithms for CPU
 
@@ -687,176 +577,100 @@ The minimap2 backtracking uses the same technique as BioseqDB Vulkan minimizer s
 
 Algorithm [chaining minimap2 boundary](../project_chaining/#alg-chaining-minimap2-boundary) shows the code for the cut search loop.
 
-#### Minimap2 cut selection function for anchor $e$
-
 <a id="alg-chaining-minimap2-boundary"></a>
 
-1.  Input: unmarked end $e$, scores $f$, predecessors $p$, marks $t$
+Minimap2 cut selection function for anchor $e$
 
-2.  Input: drop limit $D=\verb|max_drop|$
-
-3.  Output: cut $b$, which is excluded from the new chain
-
-4.  Function `ChooseCut`($e,f,p,t,D$)
-
-5.  $i\gets e,\quad b\gets e,\quad \delta_{\mathrm{best}}\gets0$
-
-6.  Repeat
-
-7.  $t_i\gets2$ (temporary mark)
-
-8.  $i\gets p_i$
-
-9.  If $i<0$
-
-10. $\delta\gets f_e$
-
-11. Else
-
-12. $\delta\gets f_e-f_i$
-
-13. End If
-
-14. If $\delta>\delta_{\mathrm{best}}$
-
-15. $\delta_{\mathrm{best}}\gets\delta,\quad b\gets i$
-
-16. ElsIf $\delta_{\mathrm{best}}-\delta>D$
-
-17. **break**
-
-18. End If
-
-19. Until $i<0\ \lor\ (i\geq0\ \land\ t_i\neq0)$
-
-20. $h\gets i,\quad j\gets e$ ($h$ is where this search stopped)
-
-21. While $j\geq0$ and $j\neq h$
-
-22. $t_j\gets0,\quad j\gets p_j$ (clear only temporary marks)
-
-23. End While
-
-24. return $b$
-
-25. End Function
+```pseudocode
+Require: unmarked end $e$, scores $f$, predecessors $p$, marks $t$
+Require: drop limit $D=\verb|max_drop|$
+Ensure: cut $b$, which is excluded from the new chain
+Function `ChooseCut`($e,f,p,t,D$)
+  $i\gets e,\quad b\gets e,\quad \delta_{\mathrm{best}}\gets0$
+  Repeat
+    $t_i\gets2$ // temporary mark
+    $i\gets p_i$
+    If $i<0$
+      $\delta\gets f_e$
+    Else
+      $\delta\gets f_e-f_i$
+    End If
+    If $\delta>\delta_{\mathrm{best}}$
+      $\delta_{\mathrm{best}}\gets\delta,\quad b\gets i$
+    Else If $\delta_{\mathrm{best}}-\delta>D$
+      **break**
+    End If
+  Until $i<0\ \lor\ (i\geq0\ \land\ t_i\neq0)$
+  $h\gets i,\quad j\gets e$ // $h$ is where this search stopped
+  While $j\geq0$ and $j\neq h$
+    $t_j\gets0,\quad j\gets p_j$ // clear only temporary marks
+  End While
+  Return $b$
+End Function
+```
 
 Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minimap2-backtrack) shows also how two passes for count/write are integrated. Minimap2 uses first pass to count all anchors i.e $N_C$ (this value is used to allocate array $U$). Array $U$ holds anchor count for a chain in lower 32 bits and score in higher 32 bits (this packing is defined by $\text{Pack}$ function). $U$ is then chain-reversed into $B_\gamma$ array, which undergoes sorting by reference coordinates $\text{ReferencePos}(B_\gamma[0])$ The final array $A$ contains all anchors, while output array $U$ contains packed `uint_64t` metadata for chain (count and score).
 
-#### Minimap2 scalar backtracking and final chain order
-
 <a id="alg-chaining-minimap2-backtrack"></a>
 
-1.  Input: input anchors $a_0,\ldots,a_{n-1}$, scores $f$, predecessors $p$
+Minimap2 scalar backtracking and final chain order
 
-2.  Input: limits $S=\verb|min_sc|$, $K=\verb|min_cnt|$, and $D=\verb|max_drop|$
-
-3.  Output: packed minimap2 records $U$ and anchor array $A$ with each chain in forward order and chains sorted by reference start
-
-4.  define $\texttt{Pack}(s,c)=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c$
-
-5.  $Z\gets[(f_i,i)\mid 0\leq i<n\text{ and }f_i\geq S]$
-
-6.  sort $Z$ by increasing score only (read it backward below)
-
-7.  use temporary array $V[0\ldots n)$ (reuse an existing $n$-entry array)
-
-8.  For $\mathrm{phase}\in
-            \langle\mathrm{count},\mathrm{write}\rangle$
-
-9.  $t[0\ldots n)\gets0,\quad N_C\gets0,\quad N_V\gets0$ ($t$ marks anchors, $N_C$ counts chains, $N_V$ counts retained indices)
-
-10. For $k\gets |Z|-1$ **down to** $0$
-
-11. $e\gets Z_k.\mathrm{index}$
-
-12. If $t_e=0$
-
-13. $b\gets\texttt{ChooseCut}(e,f,p,t,D)$
-
-14. $N_V^{\mathrm{start}}\gets N_V,\quad i\gets e$ (cursor before tracing this end)
-
-15. While $i\neq b$
-
-16. If $\mathrm{phase}=\mathrm{write}$
-
-17. $V[N_V]\gets i$
-
-18. End If
-
-19. $N_V\gets N_V+1,\quad t_i\gets1,\quad i\gets p_i$
-
-20. End While
-
-21. $c\gets N_V-N_V^{\mathrm{start}}$
-
-22. If $b<0$
-
-23. $s\gets f_e$
-
-24. Else
-
-25. $s\gets f_e-f_b$
-
-26. End If
-
-27. If $s\geq S$ and $c>0$ and $c\geq K$
-
-28. If $\mathrm{phase}=\mathrm{write}$
-
-29. $U[N_C]\gets\texttt{Pack}(s,c)$
-
-30. End If
-
-31. $N_C\gets N_C+1$
-
-32. Else
-
-33. $N_V\gets N_V^{\mathrm{start}}$ (discard indices but keep the marks)
-
-34. End If
-
-35. End If
-
-36. End For
-
-37. If $\mathrm{phase}=\mathrm{count}$
-
-38. allocate $U[0\ldots N_C)$
-
-39. End If
-
-40. End For
-
-41. $o\gets0$
-
-42. For $\gamma\gets0$ **to** $N_C-1$
-
-43. $c_\gamma\gets\operatorname{uint32}(U[\gamma])$ (low 32 bits store the anchor count)
-
-44. $B_\gamma\gets
-              [a_{V[o+c_\gamma-1]},\ldots,a_{V[o]}]$ (reverse one chain)
-
-45. $o\gets o+c_\gamma$
-
-46. End For
-
-47. $\pi\gets
-            \operatorname*{argsort}_{0\leq\gamma<N_C}\text{ReferencePos}(B_\gamma[0])$ (increasing $\text{ReferencePos}$)
-
-48. $U_{\mathrm{old}}\gets U,\quad U\gets[\ ],\quad A\gets[\ ]$
-
-49. For $m\gets0$ **to** $N_C-1$
-
-50. $\gamma\gets\pi_m$
-
-51. append $U_{\mathrm{old}}[\gamma]$ to $U$
-
-52. append every anchor in $B_\gamma$ to $A$
-
-53. End For
-
-54. return $(U,A)$
+```pseudocode
+Require: input anchors $a_0,\ldots,a_{n-1}$, scores $f$, predecessors $p$
+Require: limits $S=\verb|min_sc|$, $K=\verb|min_cnt|$, and $D=\verb|max_drop|$
+Ensure: packed minimap2 records $U$ and anchor array $A$ with each chain in forward order and chains sorted by reference start
+define $\verb|Pack|(s,c)=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c$
+$Z\gets[(f_i,i)\mid 0\leq i<n\text{ and }f_i\geq S]$
+sort $Z$ by increasing score only // read it backward below
+use temporary array $V[0\ldots n)$ // reuse an existing $n$-entry array
+For $\mathrm{phase}\in \langle\mathrm{count},\mathrm{write}\rangle$
+  $t[0\ldots n)\gets0,\quad N_C\gets0,\quad N_V\gets0$ // $t$ marks anchors, $N_C$ counts chains, $N_V$ counts retained indices
+  For $k\gets |Z|-1$ **down to** $0$
+    $e\gets Z_k.\mathrm{index}$
+    If $t_e=0$
+      $b\gets\verb|ChooseCut|(e,f,p,t,D)$
+      $N_V^{\mathrm{start}}\gets N_V,\quad i\gets e$ // cursor before tracing this end
+      While $i\neq b$
+        If $\mathrm{phase}=\mathrm{write}$
+          $V[N_V]\gets i$
+        End If
+        $N_V\gets N_V+1,\quad t_i\gets1,\quad i\gets p_i$
+      End While
+      $c\gets N_V-N_V^{\mathrm{start}}$
+      If $b<0$
+        $s\gets f_e$
+      Else
+        $s\gets f_e-f_b$
+      End If
+      If $s\geq S$ and $c>0$ and $c\geq K$
+        If $\mathrm{phase}=\mathrm{write}$
+          $U[N_C]\gets\verb|Pack|(s,c)$
+        End If
+        $N_C\gets N_C+1$
+      Else
+        $N_V\gets N_V^{\mathrm{start}}$ // discard indices but keep the marks
+      End If
+    End If
+  End For
+  If $\mathrm{phase}=\mathrm{count}$
+    allocate $U[0\ldots N_C)$
+  End If
+End For
+$o\gets0$
+For $\gamma\gets0$ **to** $N_C-1$
+  $c_\gamma\gets\operatorname{uint32}(U[\gamma])$ // low 32 bits store the anchor count
+  $B_\gamma\gets [a_{V[o+c_\gamma-1]},\ldots,a_{V[o]}]$ // reverse one chain
+  $o\gets o+c_\gamma$
+End For
+$\pi\gets \operatorname*{argsort}_{0\leq\gamma<N_C}\text{ReferencePos}(B_\gamma[0])$ // increasing $\text{ReferencePos}$
+$U_{\mathrm{old}}\gets U,\quad U\gets[\ ],\quad A\gets[\ ]$
+For $m\gets0$ **to** $N_C-1$
+  $\gamma\gets\pi_m$
+  append $U_{\mathrm{old}}[\gamma]$ to $U$
+  append every anchor in $B_\gamma$ to $A$
+End For
+Return $(U,A)$
+```
 
 > [!NOTE]
 > **Start positions**
@@ -934,110 +748,54 @@ In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending
 
 - $\alpha_\lambda$ says whether its collection lane is active (this is SIMD mask to determine if we need to terminate the chain if we either reach $-1$ or already marked anchor)
 
-#### BioseqDB SIMD path collection and backtracking
-
 <a id="alg-chaining-simd-backtrack"></a>
 
-1.  Input: anchors $a[0\ldots n)$, scores $f$, predecessors $p$, thresholds $S,K$, width $L$, and empty outputs $C,A$
+BioseqDB SIMD path collection and backtracking
 
-2.  Function `ChooseCutsSIMD`($\mathbf e,p,t,V,n$)
-
-3.  $q\gets|\mathbf e|,\quad \mathbf j\gets\mathbf e,\quad
-          \boldsymbol\ell\gets\mathbf0,\quad \mathbf b\gets-\mathbf1,\quad
-          \boldsymbol\alpha\gets\mathbf1$
-
-4.  For $d\gets0,\ldots,n-1$ while (Note that all things detnoted by $\lambda$ are evaluated for $0\leq\lambda<q$ in one SIMD vector) $\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0$
-
-5.  $h_\lambda\gets
-            [\alpha_\lambda=1\land t_{j_\lambda}=1],\quad
-            \eta_\lambda\gets\alpha_\lambda\land\neg h_\lambda$ (check if we reached marked anchor in the lane)
-
-6.  $b_\lambda\gets j_\lambda$ if $h_\lambda=1$, and $(V_{\lambda,d},\ell_\lambda)\gets
-            (j_\lambda,\ell_\lambda+1)$ if $\eta_\lambda=1$ (scatter)
-
-7.  $j_\lambda\gets
-            \begin{cases}p_{j_\lambda},&\eta_\lambda=1\\-1,&\text{otherwise}
-            \end{cases},\quad \alpha_\lambda\gets[j_\lambda\geq0]$
-
-8.  End For
-
-9.  **assert** $\sum_{\lambda=0}^{q-1}\alpha_\lambda = 0$ (All of the lanes should terminate chains)
-
-10. return $(\boldsymbol\ell,\mathbf b)$
-
-11. End Function
-
-12. Function `BacktrackSIMD`($a,f,p,S,K,L,C,A$)
-
-13. allocate $V\in\operatorname{int32}^{L\times n}$, and set $t[0\ldots n)\gets0$ ($0$: unclaimed, $1$: claimed)
-
-14. $Z\gets\operatorname{sort}_{\uparrow}
-          [(f_i,i)\mid0\leq i<n\land f_i\geq S],\quad k\gets|Z|-1$
-
-15. If $k\geq0$
-
-16. $e\gets Z_k.\mathrm{index},\quad j\gets e,\quad c\gets0$
-
-17. While $j\geq0\land c<n$
-
-18. $g\gets
-              \begin{cases}L,&\operatorname{Run}_L(j,c)\\
-              1,&\text{otherwise}\end{cases}$
-
-19. $(V_{0,c+u},t_{j-u})\gets(j-u,1)$ for $0\leq u<g$, then $(j,c)\gets(p_{j-g+1},c+g)$
-
-20. End While
-
-21. **assert** $j < 0$
-
-22. **if** $f_e\geq S\land c\geq K$ **then append** $(f_e,c,|A|)$ to $C$ and $(a_{V_{0,c-1}},\ldots,a_{V_{0,0}})$ to $A$
-
-23. $k\gets k-1$
-
-24. End If
-
-25. While $k\geq0$
-
-26. $q\gets\min(L,k+1),\quad
-            \mathbf e\gets(e_0,\ldots,e_{q-1}),\quad
-            e_\lambda\gets Z_{k-\lambda}.\mathrm{index}$
-
-27. **if** $(S>0\lor K>0)\land
-            \bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1$ **then** $k\gets k-q$ and **continue**
-
-28. $(\boldsymbol\ell,\mathbf b)\gets
-            \texttt{ChooseCutsSIMD}(\mathbf e,p,t,V,n)$
-
-29. For $\lambda\gets0$ **to** $q-1$
-
-30. $c\gets0,\quad o\gets0$ ($c$ holds length of chain and $o$ is the offset in the $A$ where we store it)
-
-31. While $o<\ell_\lambda$
-
-32. $g\gets\min(L,\ell_\lambda-o),\quad
-                r\gets\operatorname{FirstMarked}(t,V_\lambda,o,g)$
-
-33. $t_{V_{\lambda,o+u}}\gets1$ for $0\leq u<r$, and $c\gets c+r$
-
-34. **if** $r<g$ **then** $b_\lambda\gets V_{\lambda,o+r}$ and **break**, **otherwise** $o\gets o+g$
-
-35. End While
-
-36. $s\gets
-              \begin{cases}f_{e_\lambda},&b_\lambda<0\\
-              f_{e_\lambda}-f_{b_\lambda},&b_\lambda\geq0\end{cases}$
-
-37. **if** $s\geq S\land c\geq K$ **then append** $(s,c,|A|)$ to $C$ and $(a_{V_{\lambda,c-1}},\ldots,a_{V_{\lambda,0}})$ to $A$
-
-38. End For
-
-39. $k\gets k-q$
-
-40. End While
-
-41. return $(C,A)$
-
-42. End Function
+```pseudocode
+Require: anchors $a[0\ldots n)$, scores $f$, predecessors $p$, thresholds $S,K$, width $L$, and empty outputs $C,A$
+Function `ChooseCutsSIMD`($\mathbf e,p,t,V,n$)
+  $q\gets|\mathbf e|,\quad \mathbf j\gets\mathbf e,\quad \boldsymbol\ell\gets\mathbf0,\quad \mathbf b\gets-\mathbf1,\quad \boldsymbol\alpha\gets\mathbf1$
+  For $d\gets0,\ldots,n-1$ while $\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0$ // Note that all things detnoted by $\lambda$ are evaluated for $0\leq\lambda<q$ in one SIMD vector
+    $h_\lambda\gets [\alpha_\lambda=1\land t_{j_\lambda}=1],\quad \eta_\lambda\gets\alpha_\lambda\land\neg h_\lambda$ // check if we reached marked anchor in the lane
+    $b_\lambda\gets j_\lambda$ if $h_\lambda=1$, and $(V_{\lambda,d},\ell_\lambda)\gets (j_\lambda,\ell_\lambda+1)$ if $\eta_\lambda=1$ // scatter
+    $j_\lambda\gets \begin{cases}p_{j_\lambda},&\eta_\lambda=1\\-1,&\text{otherwise} \end{cases},\quad \alpha_\lambda\gets[j_\lambda\geq0]$
+  End For
+  **assert** $\sum_{\lambda=0}^{q-1}\alpha_\lambda = 0$ // All of the lanes should terminate chains
+  Return $(\boldsymbol\ell,\mathbf b)$
+End Function
+Function `BacktrackSIMD`($a,f,p,S,K,L,C,A$)
+  allocate $V\in\operatorname{int32}^{L\times n}$, and set $t[0\ldots n)\gets0$ // $0$: unclaimed, $1$: claimed
+  $Z\gets\operatorname{sort}_{\uparrow} [(f_i,i)\mid0\leq i<n\land f_i\geq S],\quad k\gets|Z|-1$
+  If $k\geq0$
+    $e\gets Z_k.\mathrm{index},\quad j\gets e,\quad c\gets0$
+    While $j\geq0\land c<n$
+      $g\gets \begin{cases}L,&\operatorname{Run}_L(j,c)\\ 1,&\text{otherwise}\end{cases}$
+      $(V_{0,c+u},t_{j-u})\gets(j-u,1)$ for $0\leq u<g$, then $(j,c)\gets(p_{j-g+1},c+g)$
+    End While
+    **assert** $j < 0$
+    **if** $f_e\geq S\land c\geq K$ **then append** $(f_e,c,|A|)$ to $C$ and $(a_{V_{0,c-1}},\ldots,a_{V_{0,0}})$ to $A$
+    $k\gets k-1$
+  End If
+  While $k\geq0$
+    $q\gets\min(L,k+1),\quad \mathbf e\gets(e_0,\ldots,e_{q-1}),\quad e_\lambda\gets Z_{k-\lambda}.\mathrm{index}$
+    **if** $(S>0\lor K>0)\land \bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1$ **then** $k\gets k-q$ and **continue**
+    $(\boldsymbol\ell,\mathbf b)\gets \verb|ChooseCutsSIMD|(\mathbf e,p,t,V,n)$
+    For $\lambda\gets0$ **to** $q-1$
+      $c\gets0,\quad o\gets0$ // $c$ holds length of chain and $o$ is the offset in the $A$ where we store it
+      While $o<\ell_\lambda$
+        $g\gets\min(L,\ell_\lambda-o),\quad r\gets\operatorname{FirstMarked}(t,V_\lambda,o,g)$
+        $t_{V_{\lambda,o+u}}\gets1$ for $0\leq u<r$, and $c\gets c+r$
+        **if** $r<g$ **then** $b_\lambda\gets V_{\lambda,o+r}$ and **break**, **otherwise** $o\gets o+g$
+      End While
+      $s\gets \begin{cases}f_{e_\lambda},&b_\lambda<0\\ f_{e_\lambda}-f_{b_\lambda},&b_\lambda\geq0\end{cases}$
+      **if** $s\geq S\land c\geq K$ **then append** $(s,c,|A|)$ to $C$ and $(a_{V_{\lambda,c-1}},\ldots,a_{V_{\lambda,0}})$ to $A$
+    End For
+    $k\gets k-q$
+  End While
+  Return $(C,A)$
+End Function
+```
 
 > [!NOTE]
 > **Minor improvements**
@@ -1411,127 +1169,75 @@ Figure [chaining minimap2 rmq](../project_chaining/#fig-chaining-minimap2-rmq) 
 
 Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rmq) shows how RMQ forward chaining is implemented inside minimap2. <span class="smallcaps">RangeBest</span> function returns the anchor with the largest $h(j)$ in the interval, or $\bot$ if the interval contains no retained anchor, while <span class="smallcaps">CompleteLink</span> function calculates $E(j,i)$ from Equations [chaining link score](../project_chaining/#eq-chaining-link-score)–[chaining penalty](../project_chaining/#eq-chaining-penalty), together with $\delta$ and the exact (local scan) condition in Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact).
 
-#### Minimap2 RMQ forward chaining
-
 <a id="alg-chaining-minimap2-rmq"></a>
 
-1.  Input: sorted anchors $a_0,\ldots,a_{n-1}$, distance $D$, inner distance $D_{\mathrm{in}}$, bandwidth $B$, tree cap $C$, skip limit $S$
+Minimap2 RMQ forward chaining
 
-2.  Output: scores $f$ and predecessor indices $p$
-
-3.  Function `Minimap2RMQForward`($a,D,D_{\mathrm{in}},B,C,S$)
-
-4.  $D\gets\max(D,B),\quad
-          D_{\mathrm{in}}\gets\min(D,\max(0,D_{\mathrm{in}}))$
-
-5.  $T\gets\varnothing,\quad T_{\mathrm{in}}\gets\varnothing$ (augmented AVL trees)
-
-6.  $t\gets(0,\ldots,0)$ (B1 marks for the optional local scan)
-
-7.  For $i\gets0$ **to** $n-1$
-
-8.  `InsertCompletedReferenceGroup`($T,a,f,i$)
-
-9.  If $D_{\mathrm{in}}>0$
-
-10. `InsertCompletedReferenceGroup`($T_{\mathrm{in}},a,f,i$)
-
-11. End If
-
-12. `RemoveExpiredEntries`($T,a,i,D,C$)
-
-13. If $D_{\mathrm{in}}>0$
-
-14. `RemoveExpiredEntries`($T_{\mathrm{in}},a,i,D_{\mathrm{in}},C$)
-
-15. End If
-
-16. $f_i\gets\ell_i,\quad p_i\gets-1$
-
-17. $j^\star\gets
-            \texttt{RangeBest}(T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0))$
-
-18. If $j^\star\neq\bot$
-
-19. $(e,\delta,\mathrm{exact})\gets
-              \texttt{CompleteLink}(j^\star,i)$ ($e=E(j^\star,i)$)
-
-20. If $\delta\leq B\land f_{j^\star}+e>f_i$
-
-21. $f_i\gets f_{j^\star}+e,\quad p_i\gets j^\star$
-
-22. End If
-
-23. If $\neg\mathrm{exact}\land T_{\mathrm{in}}\neq\varnothing
-                 \land q_i>0$
-
-24. $(f_i,p_i)\gets
-                \texttt{ScanLocalInterval}(T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t)$ (Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan))
-
-25. End If
-
-26. End If
-
-27. End For
-
-28. return $f,p$
-
-29. End Function
+```pseudocode
+Require: sorted anchors $a_0,\ldots,a_{n-1}$, distance $D$, inner distance $D_{\mathrm{in}}$, bandwidth $B$, tree cap $C$, skip limit $S$
+Ensure: scores $f$ and predecessor indices $p$
+Function `Minimap2RMQForward`($a,D,D_{\mathrm{in}},B,C,S$)
+  $D\gets\max(D,B),\quad D_{\mathrm{in}}\gets\min(D,\max(0,D_{\mathrm{in}}))$
+  $T\gets\varnothing,\quad T_{\mathrm{in}}\gets\varnothing$ // augmented AVL trees
+  $t\gets(0,\ldots,0)$ // B1 marks for the optional local scan
+  For $i\gets0$ **to** $n-1$
+    `InsertCompletedReferenceGroup`($T,a,f,i$)
+    If $D_{\mathrm{in}}>0$
+      `InsertCompletedReferenceGroup`($T_{\mathrm{in}},a,f,i$)
+    End If
+    `RemoveExpiredEntries`($T,a,i,D,C$)
+    If $D_{\mathrm{in}}>0$
+      `RemoveExpiredEntries`($T_{\mathrm{in}},a,i,D_{\mathrm{in}},C$)
+    End If
+    $f_i\gets\ell_i,\quad p_i\gets-1$
+    $j^\star\gets \verb|RangeBest|(T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0))$
+    If $j^\star\neq\bot$
+      $(e,\delta,\mathrm{exact})\gets \verb|CompleteLink|(j^\star,i)$ // $e=E(j^\star,i)$
+      If $\delta\leq B\land f_{j^\star}+e>f_i$
+        $f_i\gets f_{j^\star}+e,\quad p_i\gets j^\star$
+      End If
+      If $\neg\mathrm{exact}\land T_{\mathrm{in}}\neq\varnothing \land q_i>0$
+        $(f_i,p_i)\gets \verb|ScanLocalInterval|(T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t)$ // Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan)
+      End If
+    End If
+  End For
+  Return $f,p$
+End Function
+```
 
 Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan) shows how local scan is implemented. I didn’t want to show other tree maintenance operations as there aren’t many valuable details to discuss (this is usual AVL tree maintenance).
 
 Similarily to minimap2 forward chaining we use $t_j$ array to mark visited candidates i.e mark $t_j=i$ means that a candidate already tested for target $i$ points to $j$ through its saved predecessor. It must be noted that the for loop in the local scan algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan) utilises the fact that anchors are sorted by query coordinate so we can just go to the leftmost node in the interval and iterate each leaf from left to right (I’m reiterating this to showcase that the for loop hides this complexity in hte pseudocode).
 
-#### Minimap2 local scan after the primary RMQ query
-
 <a id="alg-chaining-rmq-local-scan"></a>
 
-1.  Input: maintained inner tree $T_{\mathrm{in}}$, target $i$, local limit $D_{\mathrm{in}}$, bandwidth $B$, skip limit $S$
+Minimap2 local scan after the primary RMQ query
 
-2.  Input: completed earlier scores and predecessors $f,p$, marks $t$, and current result $(f_i,p_i)$
-
-3.  Output: updated $(f_i,p_i)$ and marks $t$
-
-4.  Function `ScanLocalInterval`($T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t$)
-
-5.  $s\gets0$
-
-6.  For retained $j\in T_{\mathrm{in}}$ with $q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1$, by decreasing $(q_j,j)$
-
-7.  $c\gets f_j+E(j,i),\quad
-            \delta\gets|d_r(j,i)-d_q(j,i)|$
-
-8.  If $\delta\leq B$
-
-9.  If $c>f_i$
-
-10. $f_i\gets c,\quad p_i\gets j,\quad s\gets\max(0,s-1)$
-
-11. ElsIf $t_j=i$
-
-12. $s\gets s+1$
-
-13. If $s>S$
-
-14. **break**
-
-15. End If
-
-16. End If
-
-17. If $p_j\geq0$
-
-18. $t_{p_j}\gets i$
-
-19. End If
-
-20. End If
-
-21. End For
-
-22. return $(f_i,p_i)$
-
-23. End Function
+```pseudocode
+Require: maintained inner tree $T_{\mathrm{in}}$, target $i$, local limit $D_{\mathrm{in}}$, bandwidth $B$, skip limit $S$
+Require: completed earlier scores and predecessors $f,p$, marks $t$, and current result $(f_i,p_i)$
+Ensure: updated $(f_i,p_i)$ and marks $t$
+Function `ScanLocalInterval`($T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t$)
+  $s\gets0$
+  For retained $j\in T_{\mathrm{in}}$ with $q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1$, by decreasing $(q_j,j)$
+    $c\gets f_j+E(j,i),\quad \delta\gets|d_r(j,i)-d_q(j,i)|$
+    If $\delta\leq B$
+      If $c>f_i$
+        $f_i\gets c,\quad p_i\gets j,\quad s\gets\max(0,s-1)$
+      Else If $t_j=i$
+        $s\gets s+1$
+        If $s>S$
+          **break**
+        End If
+      End If
+      If $p_j\geq0$
+        $t_{p_j}\gets i$
+      End If
+    End If
+  End For
+  Return $(f_i,p_i)$
+End Function
+```
 
 ### RMQ re-chaining in the pipeline
 
@@ -1642,72 +1348,43 @@ BioseqDB’s `vulkan_tiled_dynamic_programming` is the usual chaining algorithm 
 
 The host first sets $$D=\max\{\verb|max_gap|,\verb|bandwidth|\}.$$ and sorts anchors to filter them by adjacent reference gap greater than $D$. For a fixed target, lane $u$ first scores predecessor $i-u-1$. The next iteration moves all lanes 32 positions to the back. Every active lane calculates the complete value $f_j+E(j,i)$ to then select one pair $(\text{score},j)$.
 
-#### BioseqDB Vulkan forward chaining for one hard range
-
 <a id="alg-chaining-vulkan"></a>
 
-1.  Input: sorted range $a_b,\ldots,a_{e-1}$, distance $D$, scan limit $K$, skip parameter $S$
+BioseqDB Vulkan forward chaining for one hard range
 
-2.  Output: scores $f$ and absolute predecessor indices $p$
-
-3.  $U\gets\infty$ if $S\leq0$, otherwise $U\gets\lfloor S/32\rfloor+1$
-
-4.  For $i\gets b$ **to** $e-1$
-
-5.  $f_i\gets\ell_i,\quad p_i\gets-1$
-
-6.  $o\gets1,\quad u\gets0$
-
-7.  While $o\leq K\land i-o\geq b$
-
-8.  $B\gets$ the longest prefix of $(i-o,\ldots,i-o-31)$ with $j\geq b$, $i-j\leq K$, and $r_i-r_j\leq D$
-
-9.  If $B=\varnothing$
-
-10. **break**
-
-11. End If
-
-12. ForAll $j\in B$ in 32 lanes
-
-13. $c_j\gets f_j+E(j,i)$ (invalid links use $-\infty$)
-
-14. End For
-
-15. $j^\star\gets
-            \operatorname*{arg\,max}_{j\in B}(c_j,j)$ (larger $j$ breaks a score tie)
-
-16. $c\gets c_{j^\star}$
-
-17. If $c>f_i$
-
-18. $f_i\gets c,\quad p_i\gets j^\star,\quad u\gets0$
-
-19. ElsIf $S>0$
-
-20. $u\gets u+1$
-
-21. If $u\geq U$
-
-22. **break**
-
-23. End If
-
-24. End If
-
-25. If $|B|<32$
-
-26. **break**
-
-27. End If
-
-28. $o\gets o+32$
-
-29. End While
-
-30. $\operatorname{await}(\mathrm{targetUpdates}_i)$ (make $f_i,p_i$ visible before target $i+1$)
-
-31. End For
+```pseudocode
+Require: sorted range $a_b,\ldots,a_{e-1}$, distance $D$, scan limit $K$, skip parameter $S$
+Ensure: scores $f$ and absolute predecessor indices $p$
+$U\gets\infty$ if $S\leq0$, otherwise $U\gets\lfloor S/32\rfloor+1$
+For $i\gets b$ **to** $e-1$
+  $f_i\gets\ell_i,\quad p_i\gets-1$
+  $o\gets1,\quad u\gets0$
+  While $o\leq K\land i-o\geq b$
+    $B\gets$ the longest prefix of $(i-o,\ldots,i-o-31)$ with $j\geq b$, $i-j\leq K$, and $r_i-r_j\leq D$
+    If $B=\varnothing$
+      **break**
+    End If
+    For all $j\in B$ in 32 lanes
+      $c_j\gets f_j+E(j,i)$ // invalid links use $-\infty$
+    End For
+    $j^\star\gets \operatorname*{arg\,max}_{j\in B}(c_j,j)$ // larger $j$ breaks a score tie
+    $c\gets c_{j^\star}$
+    If $c>f_i$
+      $f_i\gets c,\quad p_i\gets j^\star,\quad u\gets0$
+    Else If $S>0$
+      $u\gets u+1$
+      If $u\geq U$
+        **break**
+      End If
+    End If
+    If $|B|<32$
+      **break**
+    End If
+    $o\gets o+32$
+  End While
+  $\operatorname{await}(\mathrm{targetUpdates}_i)$ // make $f_i,p_i$ visible before target $i+1$
+End For
+```
 
 ## Selecting primary and secondary chains
 
@@ -1741,43 +1418,29 @@ BioseqDB uses the same classification logic as minimap2. Below, in Algorithm [c
 
 The algorithm for classification was taken from minimap2 paper and its source code \[[21](../bibliography/#ref-minimap2_paper)\]:
 
-### Primary and secondary chain selection in minimap2
-
 <a id="alg-chaining-primary-secondary"></a>
 
-1.  Input: chains $C$, query intervals $I_c$, scores $s_c$, limits $\lambda,L$
+Primary and secondary chain selection in minimap2
 
-2.  Output: ordered primary list $P$ and parent $\pi(c)$ for every chain
-
-3.  $P\gets[\,]$
-
-4.  For $c\in C$ in decreasing order of $s_c$
-
-5.  $u\gets\bigl|I_c\setminus\bigcup_{p\in P}I_p\bigr|,\quad \pi(c)\gets c$ (initially primary)
-
-6.  For $p\in P$ (in decreasing score order)
-
-7.  $o\gets|I_c\cap I_p|$
-
-8.  $a\gets\min(|I_c|,|I_p|),\quad b\gets\max(|I_c|,|I_p|)$
-
-9.  If $o>0\land o/a-u/b>\lambda\land u\leq L$
-
-10. $\pi(c)\gets p$ (secondary alternative to $p$)
-
-11. **break**
-
-12. End If
-
-13. End For
-
-14. If $\pi(c)=c$
-
-15. append $c$ to $P$
-
-16. End If
-
-17. End For
+```pseudocode
+Require: chains $C$, query intervals $I_c$, scores $s_c$, limits $\lambda,L$
+Ensure: ordered primary list $P$ and parent $\pi(c)$ for every chain
+$P\gets[\,]$
+For $c\in C$ in decreasing order of $s_c$
+  $u\gets\bigl|I_c\setminus\bigcup_{p\in P}I_p\bigr|,\quad \pi(c)\gets c$ // initially primary
+  For $p\in P$ // in decreasing score order
+    $o\gets|I_c\cap I_p|$
+    $a\gets\min(|I_c|,|I_p|),\quad b\gets\max(|I_c|,|I_p|)$
+    If $o>0\land o/a-u/b>\lambda\land u\leq L$
+      $\pi(c)\gets p$ // secondary alternative to $p$
+      **break**
+    End If
+  End For
+  If $\pi(c)=c$
+    append $c$ to $P$
+  End If
+End For
+```
 
 > [!NOTE]
 > **Second classification**

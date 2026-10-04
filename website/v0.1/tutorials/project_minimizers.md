@@ -89,19 +89,17 @@ Minimap2 stores the most recent $w$ candidates in a circular buffer It also stor
 
 Minimap2 stores kmers and apply hash function each time from scratch.
 
-#### Scalar minimap2-style rescan
-
 <a id="alg-rewrite-minimap-rescan"></a>
 
-1.  Store $k$-mer binary representation and its reverse complement and update them each step. Calculate hash for both of them and take the minimum.
+Scalar minimap2-style rescan
 
-2.  Write this hash into the next slot of the $w$-slot circular buffer.
-
-3.  If new hash is less than or equal to the saved minimum, emit new minimizer.
-
-4.  Else, if the overwritten slot held the current minimum, emit new minimizer and scan all $w$ slots from oldest to newest, and save the rightmost record having the smallest hash as new minimum.
-
-5.  At the end of the sequence, write the remaining saved minimum from buffer as final minimizers.
+```pseudocode
+Store $k$-mer binary representation and its reverse complement and update them each step. Calculate hash for both of them and take the minimum.
+Write this hash into the next slot of the $w$-slot circular buffer.
+If new hash is less than or equal to the saved minimum, emit new minimizer.
+Else, if the overwritten slot held the current minimum, emit new minimizer and scan all $w$ slots from oldest to newest, and save the rightmost record having the smallest hash as new minimum.
+At the end of the sequence, write the remaining saved minimum from buffer as final minimizers.
+```
 
 ## A1: Naive SIMD rescan
 
@@ -119,21 +117,18 @@ Each SIMD lane will load fragments of input data:
 
 Note that algorithm fundamentally stays the same, we only now divided input sequence into chunks and translated each operation (hashing, comparisons) into SIMD instructions:
 
-### Naive SIMDified minimap2 rescan algorithm
-
 <a id="alg-simd-minimap-rescan"></a>
 
-1.  Split input sequence into chunks each corresponding to the lane of SIMD vector. Each lane handles different chunk (chunks overlap slightly to make sure we don’t omit any window)
+Naive SIMDified minimap2 rescan algorithm
 
-2.  Store $k$-mer binary representations and its reverse complements and update them each step for each lane. Calculate hashes for both of them and take the minimum for each lane.
-
-3.  Write all hashes for each laneinto the next slot of the $w$-slot circular buffer (this buffer now stores SIMD vectors instead of single hashes).
-
-4.  If the new hash vector is less than equal to the minimum vector element-wise, extract corresponding elements and emit new minimizers.
-
-5.  Else (new hash vector is greater then minimum vector on each position), if the overwritten slot held the current minimum for any lane, emit new minimizers and scan all $w$ slots from oldest to newest, and save the new minimums vector.
-
-6.  At the end of the sequence, emit all remaining minimums as final minimizers.
+```pseudocode
+Split input sequence into chunks each corresponding to the lane of SIMD vector. Each lane handles different chunk (chunks overlap slightly to make sure we don’t omit any window)
+Store $k$-mer binary representations and its reverse complements and update them each step for each lane. Calculate hashes for both of them and take the minimum for each lane.
+Write all hashes for each laneinto the next slot of the $w$-slot circular buffer (this buffer now stores SIMD vectors instead of single hashes).
+If the new hash vector is less than equal to the minimum vector element-wise, extract corresponding elements and emit new minimizers.
+Else (new hash vector is greater then minimum vector on each position), if the overwritten slot held the current minimum for any lane, emit new minimizers and scan all $w$ slots from oldest to newest, and save the new minimums vector.
+At the end of the sequence, emit all remaining minimums as final minimizers.
+```
 
 As you can see this algorithm works well only if new hash values are greater than current minimum on each position. If not, we still have branching. This is problematic as vectorized algorithms works well if the branching is minimal and CPU pipeline isn’t penalized for wrong branch prediction. Even if we assume the predictor is perfect, we still do expensive rescan for each lane if at least one needs to be updated. Assume one lane needs a rescan with probability $1/w$, then a group of $L$ independent lanes enters the shared slow path with probability $$1-\left(1-\frac1w\right)^L.$$ For $w=10$ and $L=4$, this is about $34.4\%$. This means that we will need to duplicate work much more often than in scalar case.
 
@@ -206,114 +201,67 @@ The idea for one group is as follows:
 
 The figure [rewrite chronological groups](../project_minimizers/#fig-rewrite-chronological-groups) illustrates calculation of window minima for $L=4$ lanes: $x_0, x_1, ... x_{L-1}$. The entire algorithm looks as follows:
 
-### One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows
-
 <a id="alg-rewrite-generic-chronological"></a>
 
-1.  **Carry:** $C$ = last $k-1$ bases, $T$ = last $w-1$ candidates, $c^\star$ = preceding window minimum
+One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows
 
-2.  While the next $L$ candidate bases are available
-
-3.  $U\gets$ next $L$ bases
-
-4.  $Y\gets C\mathbin\Vert U$
-
-5.  $\mathbf F,\mathbf R\gets\mathbf0$
-
-6.  For $t=0,\ldots,k-1$
-
-7.  $\mathbf z\gets\operatorname{load}_L(Y[t\,..\,t+L))$
-
-8.  $\mathbf F\gets F\mathbin\Vert z$
-
-9.  $\mathbf R\gets\overline{z}\mathbin\Vert R$
-
-10. End For
-
-11. ForAll lanes $\ell$
-
-12. $a_\ell\gets H(\min(F_\ell,R_\ell))$
-
-13. If $F_\ell=R_\ell$ or $a_\ell=h_{\max}$
-
-14. $x_\ell\gets\infty$
-
-15. Else
-
-16. $x_\ell\gets\operatorname{pack}
-              (a_\ell,\operatorname{position}_\ell,[R_\ell<F_\ell])$
-
-17. End If
-
-18. End For
-
-19. $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$
-
-20. $\mathbf M\gets\infty$
-
-21. For $s=0,\ldots,w-1$
-
-22. $\mathbf V\gets D[s\,..\,s+L)$
-
-23. $\mathbf M\gets
-            \operatorname{select}(h(\mathbf V)\leq h(\mathbf M),
-                                  \mathbf V,\mathbf M)$
-
-24. End For
-
-25. Hence $M_\ell$ is the rightmost minimum of the complete window ending at $x_\ell$
-
-26. $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
-
-27. ForAll lanes $\ell$
-
-28. $e\gets\emptyset$
-
-29. If $x_\ell=P_\ell$
-
-30. $e\gets\operatorname{event}^{\mathrm{NEW}}(P_\ell)$
-
-31. End If
-
-32. If $\operatorname{pos}(P_\ell)=\operatorname{pos}(x_\ell)$
-
-33. $e\gets\operatorname{event}^{\mathrm{EXPIRED}}(P_\ell)$ (expiration)
-
-34. End If
-
-35. If $e$ is <span class="smallcaps">Expired</span>
-
-36. Check all $w$ windows for an equal hash on a different position
-
-37. $e\gets\operatorname{event}^{\mathrm{TIE}}(P_\ell)$
-
-38. End If
-
-39. If $e$ is <span class="smallcaps">Tie</span>
-
-40. Reread the $w$ records only to construct ordered output (slow path)
-
-41. End If
-
-42. End For
-
-43. $C\gets Y[L\,..\,L+k-1)$
-
-44. $T\gets D[L\,..\,L+w-1)$
-
-45. $c^\star\gets M_{L-1}$
-
-46. End While
-
-47. If $0<q<L$ bases remain
-
-48. Run the same body once with $q$ active lanes and sentinels elsewhere
-
-49. Both loops still execute $k$ and $w$ steps
-
-50. $C\gets Y[q\,..\,q+k-1)$, $T\gets D[q\,..\,q+w-1)$, $c^\star\gets M_{q-1}$
-
-51. End If
+```pseudocode
+**Carry:** $C$ = last $k-1$ bases, $T$ = last $w-1$ candidates, $c^\star$ = preceding window minimum
+While the next $L$ candidate bases are available
+  $U\gets$ next $L$ bases
+  $Y\gets C\mathbin\Vert U$
+  $\mathbf F,\mathbf R\gets\mathbf0$
+  // Build forward/reverse kmers symbol by symbol.
+  For $t=0,\ldots,k-1$
+    $\mathbf z\gets\operatorname{load}_L(Y[t\,..\,t+L))$
+    $\mathbf F\gets F\mathbin\Vert z$
+    $\mathbf R\gets\overline{z}\mathbin\Vert R$
+  End For
+  // Calculate hashes from kmers.
+  For all lanes $\ell$
+    $a_\ell\gets H(\min(F_\ell,R_\ell))$
+    If $F_\ell=R_\ell$ or $a_\ell=h_{\max}$
+      $x_\ell\gets\infty$
+    Else
+      $x_\ell\gets\operatorname{pack} (a_\ell,\operatorname{position}_\ell,[R_\ell<F_\ell])$
+    End If
+  End For
+  $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$
+  $\mathbf M\gets\infty$
+  // Calculate $M$, which holds the rightmost minima of all $w$ windows.
+  For $s=0,\ldots,w-1$
+    $\mathbf V\gets D[s\,..\,s+L)$
+    $\mathbf M\gets \operatorname{select}(h(\mathbf V)\leq h(\mathbf M), \mathbf V,\mathbf M)$
+  End For
+  // One step = three field loads + one compare + three selects.
+  Hence $M_\ell$ is the rightmost minimum of the complete window ending at $x_\ell$
+  $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
+  For all lanes $\ell$
+    $e\gets\emptyset$
+    If $x_\ell=P_\ell$
+      $e\gets\operatorname{event}^{\mathrm{NEW}}(P_\ell)$
+    End If
+    If $\operatorname{pos}(P_\ell)=\operatorname{pos}(x_\ell)$
+      $e\gets\operatorname{event}^{\mathrm{EXPIRED}}(P_\ell)$ // expiration
+    End If
+    If $e$ is <span class="smallcaps">Expired</span>
+      Check all $w$ windows for an equal hash on a different position
+      $e\gets\operatorname{event}^{\mathrm{TIE}}(P_\ell)$
+    End If
+    If $e$ is <span class="smallcaps">Tie</span>
+      Reread the $w$ records only to construct ordered output // slow path
+    End If
+  End For
+  $C\gets Y[L\,..\,L+k-1)$
+  $T\gets D[L\,..\,L+w-1)$
+  $c^\star\gets M_{L-1}$
+End While
+If $0<q<L$ bases remain
+  Run the same body once with $q$ active lanes and sentinels elsewhere
+  Both loops still execute $k$ and $w$ steps
+  $C\gets Y[q\,..\,q+k-1)$, $T\gets D[q\,..\,q+w-1)$, $c^\star\gets M_{q-1}$
+End If
+```
 
 ## Bioseq prototype
 
@@ -373,49 +321,32 @@ The regressions on `collect_seed_hits` and `mm_est_err` were caused by SIMD chai
 
 Algorithm [two stack](../project_minimizers/#alg-two-stack) shows pseudocode for algorithm (A2) inspired by SIMD-Minimizers paper \[[36](../bibliography/#ref-groot_koerkamp_simd_minimizers_2025)\].
 
-### V8 `collect_minimizers_two_stack_simd` (per-step body)
-
 <a id="alg-two-stack"></a>
 
-1.  **state**: $\textit{prefix\_min}[L]$, $\textit{ring}[w][L]$, $\textit{step}$, $\textit{ring\_idx}$
+V8 `collect_minimizers_two_stack_simd` (per-step body)
 
-2.  $\textit{hash} \gets \verb|rolling_kmer_hash|.\textsc{Next}(d, c_\text{in}, c_\text{out})$
-
-3.  $\textit{strand}, \textit{palindrome} \gets \textsc{StrandMask}(\textit{hash})$
-
-4.  $\textit{valid} \gets \neg\textit{palindrome}$
-
-5.  $\textit{hs} \gets \textsc{IfThenElse}(\textit{strand}, \textit{hash}\,|\,1, \textit{hash}\,\&\,{\sim}1)$ (Set strand bit)
-
-6.  $\textit{elem} \gets \textsc{IfThenElse}(\textit{valid}, ((\textit{hash}\,\&\,\textbf{0xffff\_0000})\,|\,\textit{pos\_local}), \textbf{0xffff\_ffff})$
-
-7.  $\textit{ring}[\textit{ring\_idx}] \gets \textit{elem}$ (single ring buffer slot per lane)
-
-8.  $\textit{better} \gets \textit{elem} < \textit{prefix\_min}$
-
-9.  $\textit{prefix\_min} \gets \textsc{IfThenElse}(\textit{better}, \textit{elem}, \textit{prefix\_min})$
-
-10. $\textit{ring\_idx} \mathrel{+}= 1$, $\textit{step} \mathrel{+}= 1$, $\textit{pos\_local} \mathrel{+}= 1$
-
-11. If $\textit{ring\_idx} = w$ (rebuild suffix)
-
-12. $\textit{ring}[i] \gets \min(\textit{ring}[i..w-1])$ **for all** $i$ ($O(w)$ iteration)
-
-13. $\textit{prefix\_min} \gets \textit{elem}$
-
-14. $\textit{ring\_idx} \gets 0$
-
-15. End If
-
-16. $\textit{window\_min} \gets \min(\textit{prefix\_min}, \textit{ring}[\textit{ring\_idx}])$
-
-17. If $\textit{step} \ge k+w-1$ **and** $\textit{window\_min}.\text{pos} \ne \textit{last\_emit\_pos}$
-
-18. SaveWindowMinimum(*window_min*)
-
-19. $\textit{last\_emit\_pos} \gets \textit{window\_min}.\text{pos}$
-
-20. End If
+```pseudocode
+**state**: $\textit{prefix\_min}[L]$, $\textit{ring}[w][L]$, $\textit{step}$, $\textit{ring\_idx}$
+$\textit{hash} \gets \verb|rolling_kmer_hash|.\textsc{Next}(d, c_\text{in}, c_\text{out})$
+$\textit{strand}, \textit{palindrome} \gets \textsc{StrandMask}(\textit{hash})$
+$\textit{valid} \gets \neg\textit{palindrome}$
+$\textit{hs} \gets \textsc{IfThenElse}(\textit{strand}, \textit{hash}\,|\,1, \textit{hash}\,\&\,{\sim}1)$ // Set strand bit
+$\textit{elem} \gets \textsc{IfThenElse}(\textit{valid}, ((\textit{hash}\,\&\,\textbf{0xffff\_0000})\,|\,\textit{pos\_local}), \textbf{0xffff\_ffff})$
+$\textit{ring}[\textit{ring\_idx}] \gets \textit{elem}$ // single ring buffer slot per lane
+$\textit{better} \gets \textit{elem} < \textit{prefix\_min}$
+$\textit{prefix\_min} \gets \textsc{IfThenElse}(\textit{better}, \textit{elem}, \textit{prefix\_min})$
+$\textit{ring\_idx} \mathrel{+}= 1$, $\textit{step} \mathrel{+}= 1$, $\textit{pos\_local} \mathrel{+}= 1$
+If $\textit{ring\_idx} = w$ // rebuild suffix
+  $\textit{ring}[i] \gets \min(\textit{ring}[i..w-1])$ **for all** $i$ // $O(w)$ iteration
+  $\textit{prefix\_min} \gets \textit{elem}$
+  $\textit{ring\_idx} \gets 0$
+End If
+$\textit{window\_min} \gets \min(\textit{prefix\_min}, \textit{ring}[\textit{ring\_idx}])$
+If $\textit{step} \ge k+w-1$ **and** $\textit{window\_min}.\text{pos} \ne \textit{last\_emit\_pos}$
+  SaveWindowMinimum(*window_min*)
+  $\textit{last\_emit\_pos} \gets \textit{window\_min}.\text{pos}$
+End If
+```
 
 The V8 numbers were already encouraging: `mm_sketch_simd` dropped from V6’s 24 ms to 17 ms at 903 kbp – a 30 % reduction on the minimizer-only phase, which translated into the SIMD pipeline being only 1.4 % behind scalar overall (down from V6’s 8 % behind).
 
@@ -613,142 +544,78 @@ The core part is OrderedSketchTile which runs the rescan algorithm in count mode
 
 The positive value $A$ is the pessimistic output capacity planned by the caller using heuristic. <span class="smallcaps">HostAndDevice</span> creates an $A$-record device output before count. If the actual pipeline overflows, then we return error.
 
-### Vulkan scheduling in BioseqDB
-
 <a id="alg-vulkan-sketch-host-schedule"></a>
 
-1.  Input: packed query batch $Q$, $k$, $w$, device group limit $G_{\max}$
+Vulkan scheduling in BioseqDB
 
-2.  Input: positive planned output capacity $A$
-
-3.  Input: policy $P\in\{\textsc{HostAndDevice},\textsc{DeviceOnly}\}$
-
-4.  $\mathcal T\gets\texttt{PlanTiles}(Q,k,w,G_{\max})$
-
-5.  $T\gets|\mathcal T|$
-
-6.  return without a GPU dispatch **if** $T=0$
-
-7.  $G\gets\min(\lceil T/64\rceil,G_{\max}),\quad S\gets256,
-             \quad B\gets\lceil T/S\rceil$
-
-8.  `PrepareDeviceInputs`($Q,\mathcal T$)
-
-9.  allocate device buffers *Count*$[T]$, *Offset*$[T]$, and *Block*$[B]$
-
-10. **if** $P=\textsc{HostAndDevice}$ **then** $\mathit{Output}\gets\texttt{HostCreateDeviceOutput}(A)$
-
-11. `BeginCommandBuffer`()
-
-12. `RecordHostToGPUBarrier`()
-
-13. $\mathit{countTask}\gets
-             \texttt{RecordOrderedSketchTile}(\textsc{Count},Q,\mathcal T,k,w,G,
-                                            \mathit{Count})$
-
-14. `AwaitGPU`($\mathit{countTask}$)
-
-15. $\mathit{localTask}\gets
-             \texttt{RecordPrefixScanBlock}(\mathit{Count},\mathit{Offset},
-                                          \mathit{Block},T,S,B)$
-
-16. `AwaitGPU`($\mathit{localTask}$)
-
-17. $\mathit{blockTask}\gets
-             \texttt{RecordPrefixScanAdd}(0,\mathit{Block},B)$
-
-18. `AwaitGPU`($\mathit{blockTask}$)
-
-19. $\mathit{offsetTask}\gets
-             \texttt{RecordPrefixScanAdd}(1,\mathit{Offset},\mathit{Block},T,S)$
-
-20. If $P=\textsc{DeviceOnly}$
-
-21. `SubmitAndHostAwait`($\mathit{offsetTask}$)
-
-22. $N_{\rm out}\gets
-               \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
-
-23. return overflow **if** $N_{\rm out}>A$
-
-24. $\mathit{Output}\gets\texttt{HostCreateDeviceOutput}(N_{\rm out})$
-
-25. `BeginCommandBuffer`()
-
-26. `RecordHostToGPUBarrier`()
-
-27. End If
-
-28. `AwaitGPU`($\mathit{offsetTask}$)
-
-29. $\mathit{emitTask}\gets
-             \texttt{RecordOrderedSketchTile}(\textsc{Emit},Q,\mathcal T,k,w,G,
-                                            \mathit{Offset},\mathit{Output})$
-
-30. `SubmitAndHostAwait`($\mathit{emitTask}$)
-
-31. If $P=\textsc{HostAndDevice}$
-
-32. $N_{\rm out}\gets
-               \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
-
-33. return overflow **if** $N_{\rm out}>A$
-
-34. $\mathit{HostOutput}\gets
-               \texttt{CopyMapped}(\mathit{Output}[0\ldots N_{\rm out}))$
-
-35. Else
-
-36. $\mathit{HostOutput}\gets\varnothing$
-
-37. End If
-
-38. return $(\mathit{Output},\mathit{HostOutput},N_{\rm out})$
-
-### `RecordOrderedSketchTile` call
+```pseudocode
+Require: packed query batch $Q$, $k$, $w$, device group limit $G_{\max}$
+Require: positive planned output capacity $A$
+Require: policy $P\in\{\textsc{HostAndDevice},\textsc{DeviceOnly}\}$
+$\mathcal T\gets\verb|PlanTiles|(Q,k,w,G_{\max})$
+$T\gets|\mathcal T|$
+Return without a GPU dispatch **if** $T=0$
+$G\gets\min(\lceil T/64\rceil,G_{\max}),\quad S\gets256, \quad B\gets\lceil T/S\rceil$
+`PrepareDeviceInputs`($Q,\mathcal T$)
+allocate device buffers *Count*$[T]$, *Offset*$[T]$, and *Block*$[B]$
+**if** $P=\textsc{HostAndDevice}$ **then** $\mathit{Output}\gets\verb|HostCreateDeviceOutput|(A)$
+`BeginCommandBuffer`()
+`RecordHostToGPUBarrier`()
+$\mathit{countTask}\gets \verb|RecordOrderedSketchTile|(\textsc{Count},Q,\mathcal T,k,w,G, \mathit{Count})$
+`AwaitGPU`($\mathit{countTask}$)
+$\mathit{localTask}\gets \verb|RecordPrefixScanBlock|(\mathit{Count},\mathit{Offset}, \mathit{Block},T,S,B)$
+`AwaitGPU`($\mathit{localTask}$)
+$\mathit{blockTask}\gets \verb|RecordPrefixScanAdd|(0,\mathit{Block},B)$
+`AwaitGPU`($\mathit{blockTask}$)
+$\mathit{offsetTask}\gets \verb|RecordPrefixScanAdd|(1,\mathit{Offset},\mathit{Block},T,S)$
+If $P=\textsc{DeviceOnly}$
+  `SubmitAndHostAwait`($\mathit{offsetTask}$)
+  $N_{\rm out}\gets \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
+  Return overflow **if** $N_{\rm out}>A$
+  $\mathit{Output}\gets\verb|HostCreateDeviceOutput|(N_{\rm out})$
+  `BeginCommandBuffer`()
+  `RecordHostToGPUBarrier`()
+End If
+`AwaitGPU`($\mathit{offsetTask}$)
+$\mathit{emitTask}\gets \verb|RecordOrderedSketchTile|(\textsc{Emit},Q,\mathcal T,k,w,G, \mathit{Offset},\mathit{Output})$
+`SubmitAndHostAwait`($\mathit{emitTask}$)
+If $P=\textsc{HostAndDevice}$
+  $N_{\rm out}\gets \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
+  Return overflow **if** $N_{\rm out}>A$
+  $\mathit{HostOutput}\gets \verb|CopyMapped|(\mathit{Output}[0\ldots N_{\rm out}))$
+Else
+  $\mathit{HostOutput}\gets\varnothing$
+End If
+Return $(\mathit{Output},\mathit{HostOutput},N_{\rm out})$
+```
 
 <a id="alg-vulkan-ordered-invocation"></a>
 
-1.  Procedure `RecordOrderedSketchTile`($g,\mathit{mode}$)
+`RecordOrderedSketchTile` call
 
-2.  Input: global invocation ID $0\leq g<64\mathbin{\cdot}G$
-
-3.  Input: dispatch-wide $\mathit{mode}\in\{\textsc{Count},\textsc{Emit}\}$
-
-4.  Input: bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$ from Algorithm [vulkan sketch host schedule](../project_minimizers/#alg-vulkan-sketch-host-schedule)
-
-5.  Input: bound *Offset* and *Output* in <span class="smallcaps">Emit</span> mode
-
-6.  $j\gets g$
-
-7.  While $j<T$
-
-8.  $\mathit{localCount}\gets0$
-
-9.  ForAll record $e$ streamed by `RunScalarRescanTile`($Q,\mathcal T[j],k,w$)
-
-10. If $\mathit{mode}=\textsc{Emit}$
-
-11. $\mathit{Output}[\mathit{Offset}[j]
-                     +\mathit{localCount}]\gets e$
-
-12. End If
-
-13. $\mathit{localCount}\gets\mathit{localCount}+1$
-
-14. End For
-
-15. If $\mathit{mode}=\textsc{Count}$
-
-16. $\mathit{Count}[j]\gets\mathit{localCount}$
-
-17. End If
-
-18. $j\gets j+64\mathbin{\cdot}G$
-
-19. End While
-
-20. End Procedure
+```pseudocode
+Procedure `RecordOrderedSketchTile`($g,\mathit{mode}$)
+  Require: global invocation ID $0\leq g<64\mathbin{\cdot}G$
+  Require: dispatch-wide $\mathit{mode}\in\{\textsc{Count},\textsc{Emit}\}$
+  Require: bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$
+    from Algorithm [vulkan sketch host schedule](../project_minimizers/#alg-vulkan-sketch-host-schedule)
+  Require: bound *Offset* and *Output* in <span class="smallcaps">Emit</span> mode
+  $j\gets g$
+  While $j<T$
+    $\mathit{localCount}\gets0$
+    For all record $e$ streamed by `RunScalarRescanTile`($Q,\mathcal T[j],k,w$)
+      If $\mathit{mode}=\textsc{Emit}$
+        $\mathit{Output}[\mathit{Offset}[j] +\mathit{localCount}]\gets e$
+      End If
+      $\mathit{localCount}\gets\mathit{localCount}+1$
+    End For
+    If $\mathit{mode}=\textsc{Count}$
+      $\mathit{Count}[j]\gets\mathit{localCount}$
+    End If
+    $j\gets j+64\mathbin{\cdot}G$
+  End While
+End Procedure
+```
 
 ## Packed minimizer representation
 

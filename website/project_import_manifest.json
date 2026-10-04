@@ -668,5 +668,418 @@
       "adaptation": "Visible SQL unchanged",
       "expected_sqlstate": null
     }
+  ],
+  "algorithms": [
+    {
+      "source": "chapters/02_alignment_foundations.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:affine-dp"
+      ],
+      "caption": "Affine-gap alignment with an explicit boundary contract",
+      "statements": 11,
+      "max_indent": 2,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "State": 5,
+        "For": 2,
+        "EndFor": 2
+      },
+      "source_sha256": "ac2991b43aafa735f3b716632835a695fe2d17622a74e4f33a46e61c33fb0ab1"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:rewrite-minimap-rescan"
+      ],
+      "caption": "Scalar minimap2-style rescan",
+      "statements": 5,
+      "max_indent": 0,
+      "controls": {
+        "item": 5
+      },
+      "source_sha256": "3836888552fdadf4086d6983a1f2bda16d318f23994a8f6dd2b6319ca47b1a76"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 1,
+      "environment": "algorithm",
+      "labels": [
+        "alg:simd-minimap-rescan"
+      ],
+      "caption": "Naive SIMDified minimap2 rescan algorithm",
+      "statements": 6,
+      "max_indent": 0,
+      "controls": {
+        "item": 6
+      },
+      "source_sha256": "8076ea83e1977315a07da30155013db4df86a0d7295b5eb8defa2f53a2e419c9"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 2,
+      "environment": "algorithm",
+      "labels": [
+        "alg:rewrite-generic-chronological"
+      ],
+      "caption": "One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows",
+      "statements": 55,
+      "max_indent": 3,
+      "controls": {
+        "State": 28,
+        "While": 1,
+        "AlgCommentLine": 4,
+        "For": 2,
+        "EndFor": 4,
+        "ForAll": 2,
+        "If": 6,
+        "Else": 1,
+        "EndIf": 6,
+        "EndWhile": 1
+      },
+      "source_sha256": "dbf288dc4584778078dcafd7deb5405e55b45b63ba135efff34eccdf248c9b10"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 3,
+      "environment": "algorithm",
+      "labels": [
+        "alg:two-stack"
+      ],
+      "caption": "V8 `collect_minimizers_two_stack_simd` (per-step body)",
+      "statements": 20,
+      "max_indent": 1,
+      "controls": {
+        "State": 16,
+        "If": 2,
+        "EndIf": 2
+      },
+      "source_sha256": "66fe4fd91805c22d096910e12953937374bd0c97f107ed1026ab6c51127a931b"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 4,
+      "environment": "algorithm",
+      "labels": [
+        "alg:vulkan-sketch-host-schedule"
+      ],
+      "caption": "Vulkan scheduling in BioseqDB",
+      "statements": 38,
+      "max_indent": 1,
+      "controls": {
+        "Require": 3,
+        "State": 30,
+        "If": 2,
+        "EndIf": 2,
+        "Else": 1
+      },
+      "source_sha256": "411151d464a314639880bd4678f51eb1707065a4ddd1226a7b36092889c15e6a"
+    },
+    {
+      "source": "chapters/05_minimizers.tex",
+      "index": 5,
+      "environment": "algorithm",
+      "labels": [
+        "alg:vulkan-ordered-invocation"
+      ],
+      "caption": "`RecordOrderedSketchTile` call",
+      "statements": 21,
+      "max_indent": 4,
+      "controls": {
+        "Procedure": 1,
+        "Require": 4,
+        "Statex": 1,
+        "State": 6,
+        "While": 1,
+        "ForAll": 1,
+        "If": 2,
+        "EndIf": 2,
+        "EndFor": 1,
+        "EndWhile": 1,
+        "EndProcedure": 1
+      },
+      "source_sha256": "ad89614652692d3c8486a3ce2241a5cf7fddbd6cd88ecc9717ca7019b812b244"
+    },
+    {
+      "source": "chapters/06_chaining/02_cpu.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-b1"
+      ],
+      "caption": "Minimap2\u2019s ordered predecessor scan for one query segment",
+      "statements": 67,
+      "max_indent": 5,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "State": 24,
+        "Function": 1,
+        "If": 15,
+        "EndIf": 15,
+        "EndFunction": 1,
+        "For": 3,
+        "While": 1,
+        "EndWhile": 1,
+        "ElsIf": 1,
+        "EndFor": 3
+      },
+      "source_sha256": "7d4f55b8ec1ede300cbde76b1f8e7b31936d86b669e69b4f3a2b7751772a8d1e"
+    },
+    {
+      "source": "chapters/06_chaining/02_cpu.tex",
+      "index": 1,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-b5"
+      ],
+      "caption": "Bounded SIMD B1",
+      "statements": 44,
+      "max_indent": 3,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "State": 23,
+        "For": 1,
+        "If": 8,
+        "Else": 1,
+        "EndIf": 8,
+        "EndFor": 1
+      },
+      "source_sha256": "d47b1b6beebdf292e0763dbc087dd1c51286652cdf502cf4987e33243e6dcb99"
+    },
+    {
+      "source": "chapters/06_chaining/03_backtracking.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-minimap2-boundary"
+      ],
+      "caption": "Minimap2 cut selection function for anchor $e$",
+      "statements": 25,
+      "max_indent": 3,
+      "controls": {
+        "Require": 2,
+        "Ensure": 1,
+        "Function": 1,
+        "State": 10,
+        "Repeat": 1,
+        "If": 2,
+        "Else": 1,
+        "EndIf": 2,
+        "ElsIf": 1,
+        "Until": 1,
+        "While": 1,
+        "EndWhile": 1,
+        "EndFunction": 1
+      },
+      "source_sha256": "b7d83d4dee11bb6c153196b304945ee8cc4546dd561f0dd256d1b3e78607d765"
+    },
+    {
+      "source": "chapters/06_chaining/03_backtracking.tex",
+      "index": 1,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-minimap2-backtrack"
+      ],
+      "caption": "Minimap2 scalar backtracking and final chain order",
+      "statements": 54,
+      "max_indent": 5,
+      "controls": {
+        "Require": 2,
+        "Ensure": 1,
+        "State": 27,
+        "For": 4,
+        "If": 6,
+        "While": 1,
+        "EndIf": 6,
+        "EndWhile": 1,
+        "Else": 2,
+        "EndFor": 4
+      },
+      "source_sha256": "d7a6acb5793763cf5d61bc06750e654ed4d6d91801ef6cd603e88e41df31291b"
+    },
+    {
+      "source": "chapters/06_chaining/03_backtracking.tex",
+      "index": 2,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-simd-backtrack"
+      ],
+      "caption": "BioseqDB SIMD path collection and backtracking",
+      "statements": 42,
+      "max_indent": 4,
+      "controls": {
+        "Require": 1,
+        "Function": 2,
+        "State": 25,
+        "For": 2,
+        "EndFor": 2,
+        "EndFunction": 2,
+        "If": 1,
+        "While": 3,
+        "EndWhile": 3,
+        "EndIf": 1
+      },
+      "source_sha256": "d94778d0010237a04115ddf91badec99b4e9b184c16a0e272f2e6b8a4a5ba478"
+    },
+    {
+      "source": "chapters/06_chaining/06_rmq.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-minimap2-rmq"
+      ],
+      "caption": "Minimap2 RMQ forward chaining",
+      "statements": 29,
+      "max_indent": 4,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "Function": 1,
+        "State": 13,
+        "For": 1,
+        "If": 5,
+        "EndIf": 5,
+        "EndFor": 1,
+        "EndFunction": 1
+      },
+      "source_sha256": "c45e23c6a986365fca2cff5b0bb183ca75d5fd4ae1048a27dfaca43019e5c417"
+    },
+    {
+      "source": "chapters/06_chaining/06_rmq.tex",
+      "index": 1,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-rmq-local-scan"
+      ],
+      "caption": "Minimap2 local scan after the primary RMQ query",
+      "statements": 23,
+      "max_indent": 5,
+      "controls": {
+        "Require": 2,
+        "Ensure": 1,
+        "Function": 1,
+        "State": 7,
+        "For": 1,
+        "If": 4,
+        "ElsIf": 1,
+        "EndIf": 4,
+        "EndFor": 1,
+        "EndFunction": 1
+      },
+      "source_sha256": "26c86dab72b8ff8807dd9dcc8b755f4b7a409fa9da62aa25bf0739cccf5b980a"
+    },
+    {
+      "source": "chapters/06_chaining/07_gpu.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-vulkan"
+      ],
+      "caption": "BioseqDB Vulkan forward chaining for one hard range",
+      "statements": 31,
+      "max_indent": 4,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "State": 14,
+        "For": 1,
+        "While": 1,
+        "If": 4,
+        "EndIf": 4,
+        "ForAll": 1,
+        "EndFor": 2,
+        "ElsIf": 1,
+        "EndWhile": 1
+      },
+      "source_sha256": "a02ce9e872827083deaf26421218a1b0ddd91c6e62adb6dff89d461d01458594"
+    },
+    {
+      "source": "chapters/06_chaining/08_primary_secondary.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:chaining-primary-secondary"
+      ],
+      "caption": "Primary and secondary chain selection in minimap2",
+      "statements": 17,
+      "max_indent": 3,
+      "controls": {
+        "Require": 1,
+        "Ensure": 1,
+        "State": 7,
+        "For": 2,
+        "If": 2,
+        "EndIf": 2,
+        "EndFor": 2
+      },
+      "source_sha256": "6cb2e00350d02e7a3f1e48231505de26fa0f70e53136bef416713a8f1a0fd12d"
+    },
+    {
+      "source": "chapters/07_final_alignment_postprocessing_and_preprocessing/01_base_level_alignment.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:adaptive-block-alignment"
+      ],
+      "caption": "Pseudocode for the Block Aligner algorithm.",
+      "statements": 38,
+      "max_indent": 3,
+      "controls": {
+        "Procedure": 1,
+        "State": 24,
+        "While": 1,
+        "If": 4,
+        "ElsIf": 2,
+        "EndIf": 4,
+        "EndWhile": 1,
+        "EndProcedure": 1
+      },
+      "source_sha256": "2c7548791dc48a8f750b27129ee41000bef86bebdcbcc059f17053032fdb3264"
+    },
+    {
+      "source": "chapters/10_postgres_custom_scan/03_match_fields.tex",
+      "index": 0,
+      "environment": "algorithm",
+      "labels": [
+        "alg:scan-project-hit"
+      ],
+      "caption": "How to return tuple",
+      "statements": 4,
+      "max_indent": 0,
+      "controls": {
+        "item": 4
+      },
+      "source_sha256": "db8c647534c532e5637f83ed33d9e1bdee14b620ff1861ac706f0fcf1302ddd1"
+    },
+    {
+      "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
+      "index": 0,
+      "environment": "algorithmic",
+      "labels": [
+        "alg:storage-flush-stripe"
+      ],
+      "caption": "Appending rows",
+      "statements": 75,
+      "max_indent": 4,
+      "controls": {
+        "Require": 1,
+        "State": 34,
+        "Statex": 5,
+        "Procedure": 5,
+        "EndProcedure": 5,
+        "If": 8,
+        "EndIf": 8,
+        "ForAll": 4,
+        "Else": 1,
+        "EndFor": 4
+      },
+      "source_sha256": "6bb2deb1c297efc8554a10d37899df94200e3b00b93ae13ffcb63eed22c4fef2"
+    }
   ]
 }
