@@ -493,7 +493,7 @@ Figure [phase evolution](../project_minimizers/#fig-phase-evolution) shows full
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-python-01.svg)
 
-*Evolution of the minimizer-phase cost (`mm_sketch` wrapper plus `mm_sketch_simd` inner) at 903 kbp across the iteration rounds discussed inuujj –. Numbers are means of three runs at `-O3 -DNDEBUG`. V8 is the two-stack port, V8.5 defers the minimap2 hash to emit time, V11 adds dual-stream interleaving, and V12 forces inlining of the per-step body via a free-function template. The dashed horizontal line is the scalar `mm_sketch` baseline. Even with some optimisations still SIMD routine is slower than scalar execution.*
+*Evolution of the minimizer-phase cost (`mm_sketch` wrapper plus `mm_sketch_simd` inner) at 903 kbp across the iteration rounds discussed inuujj §[v6 rescan](../project_minimizers/#sec-v6-rescan)–§[v11 v12](../project_minimizers/#sec-v11-v12). Numbers are means of three runs at `-O3 -DNDEBUG`. V8 is the two-stack port, V8.5 defers the minimap2 hash to emit time, V11 adds dual-stream interleaving, and V12 forces inlining of the per-step body via a free-function template. The dashed horizontal line is the scalar `mm_sketch` baseline. Even with some optimisations still SIMD routine is slower than scalar execution.*
 
 ### Seeding prototype V13: Existmator fix
 

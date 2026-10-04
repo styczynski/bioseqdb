@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import io
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,7 +44,9 @@ def pandoc(text: str, source="latex", target="gfm-tex_math_gfm+tex_math_dollars+
 def protect(markdown: str, block=False) -> str:
     key = f"BIOSEQPLACEHOLDER{len(TOKENS):06d}"
     TOKENS[key] = markdown
-    return ("\n\n" + key + "\n\n") if block else key
+    # An empty TeX group terminates any preceding control word, including
+    # print commands and section signs, without inserting visible text.
+    return ("\n\n" + key + "\n\n") if block else "{}" + key
 
 
 def restore(text: str) -> str:
@@ -254,7 +257,11 @@ def sql_example(code: str, path: str, index: int, label: str) -> str:
         reason = "author SQL executed with isolated deterministic setup"
     else:
         body = "```sql\n" + code.strip() + "\n```"
-        if "Session B" in code:
+        if label == "lst:constant-extra-mmsearch":
+            reason = "Documented planner bug: conflicting same-alias calls can pass on a specific BioseqJoin path; not a supported query contract"
+        elif label == "lst:ambiguous-target-binding":
+            reason = "Deliberately unsupported same-alias searches: the source illustrates ambiguous score ownership before showing the runnable self-join solution"
+        elif "Session B" in code:
             reason = "Concurrent sessions: the one-connection website runner cannot reproduce the interleaving"
         elif "bioseq_internal." in code:
             reason = "Internal storage-schema illustration, not application DDL"
@@ -344,6 +351,9 @@ def prepare_file(path: str, text: str | None = None) -> str:
 
 def convert(text: str) -> str:
     text = publication_words(text)
+    # This print-mode switch must not merge with a protected reference token
+    # into a new TeX control word (\leavevmodeBIOSEQPLACEHOLDER...).
+    text = re.sub(r"\\leavevmode\b", "", text)
     # Printed cache keys switch out of math between angle brackets. Adjacent
     # dollar spans are ambiguous in Markdown, so keep each key in one formula.
     text = re.sub(r"\$\\langle\$([^$]+)\$\\rangle\$",
@@ -426,7 +436,9 @@ def convert(text: str) -> str:
     for name in ["colorlet", "setlength", "lstdefinestyle", "renewcommand"]:
         text = macros(text, name, 2, lambda a, b: "")
     text = macros(text, "definecolor", 3, lambda a, b, c: "")
+    previous_tokens = set(TOKENS)
     text = convert_code_references(text)
+    code_reference_tokens = set(TOKENS) - previous_tokens
     for name in ["cite", "autocite", "parencite", "textcite", "footcite"]:
         text = macros(text, name, 1, lambda keys, opt: protect(
             "\\[" + ", ".join(f'[{CITATIONS[key.strip()]}](../bibliography/#ref-{anchor(key.strip())})' for key in keys.split(",")) + "\\]"), optional=True)
@@ -453,7 +465,7 @@ def convert(text: str) -> str:
         body = m[1]
         already_numbered = r"\begin{enumerate}" in body
         body = re.sub(r"\\begin\{algorithmic\}(?:\[.*?\])?|\\end\{algorithmic\}", "", body)
-        body = macros(body, "caption", 1, lambda title: "\\paragraph{" + title + "}")
+        body = macros(body, "caption", 1, lambda title, short: "\\paragraph{" + title + "}", optional=True)
         body = re.sub(r"\\Statex\b", r"\\newline ", body)
         body = re.sub(r"\\(Require|Ensure|State)\b", lambda x: "\n\\item " + ({"Require": "Input: ", "Ensure": "Output: "}.get(x[1], "")), body)
         for name in ["For", "ForAll", "While", "If", "ElsIf", "Until"]:
@@ -473,11 +485,15 @@ def convert(text: str) -> str:
         return body
     text = re.sub(r"\\begin\{algorithm\}(?:\[[^]]*\])?(.*?)\\end\{algorithm\}", algorithm, text, flags=re.S)
     text = re.sub(r"\\begin\{algorithmic\}(?:\[[^]]*\])?(.*?)\\end\{algorithmic\}", algorithm, text, flags=re.S)
-    text = macros(text, "caption", 1, lambda title: "\n\\par\\emph{" + title + "}\n")
+    text = macros(text, "caption", 1, lambda title, short: "\n\\par\\emph{" + title + "}\n", optional=True)
     # Pandoc can interpret tabular/longtable and figure captions after the
     # custom graphics have been replaced by Markdown placeholders.
     # Unknown raw TeX is otherwise silently discarded by Markdown writers.
     # Make such content a failed import so later source changes remain auditable.
+    merged_commands = re.findall(r"\\[A-Za-z]+BIOSEQPLACEHOLDER\d+", text)
+    if merged_commands:
+        raise ValueError(f"Protected content merged with a TeX command in {CURRENT_SLUG}: {merged_commands}")
+    protected_counts = Counter(re.findall(r"BIOSEQPLACEHOLDER\d+", text))
     ast = json.loads(pandoc(text, "latex", "json"))
     raw_tex = []
     heading_levels = []
@@ -508,6 +524,14 @@ def convert(text: str) -> str:
     if raw_tex:
         raise ValueError(f"Unconverted TeX in {CURRENT_SLUG}: {raw_tex}")
     result = pandoc(json.dumps(ast), "json")
+    lost_tokens = protected_counts - Counter(re.findall(r"BIOSEQPLACEHOLDER\d+", result))
+    if lost_tokens:
+        lost_content = [TOKENS[key] for key in lost_tokens]
+        raise ValueError(f"Protected content was lost in {CURRENT_SLUG}: {lost_content}")
+    note_content = "\n".join(NOTES + [body for _, body in REFERENCE_NOTES])
+    for key in code_reference_tokens:
+        if key not in result and TOKENS[key] not in note_content:
+            raise ValueError(f"Source-code reference was lost in {CURRENT_SLUG}: {TOKENS[key]}")
     def restore_html_table(match):
         block = match[0]
         for key in re.findall(r"BIOSEQPLACEHOLDER\d+", block):

@@ -43,6 +43,8 @@ The depiction of the index file layout is presented in the Figure [index mmi la
 
 ![02 mapper indexes diagram](/static/figures/project/chapters-12-index-storage-02-mapper-indexes-tikz-01.svg)
 
+*Interpretation of one `.mmi` index. For very large datasets index files are split into multiple parts where each of them follows the same format. Minimap2 needs to store sequence ID (RID [minimap minimizer cpp decl](../project_minimizers/#lst-minimap-minimizer-cpp-decl)), because the index parts are generated for a set of sequences, not just one, so each part needs to identify which reference sequence the minimizer comes from. Arrows represent how specific elements of arrays look like in close inspection. Panel (a) depicts high-level structure of the index [high level mmi index format description](../project_index_storage/#lst-high-level-mmi-index-format-description). Panel (b) presents records storing sequence information. Panel (c) shows each bucket of minimizers, which stores its own hash-map via two lists. Panel (d) shows how elements of $p$ looks like and key/values in the hash-map list. Hash map key is always remaining 42 bits with bit indicating that there’s single value for that key. If the bit is set, then value in the key/value pair is (sequence id, position, strand bit), if not, then value points via offset/count pair into the list $p$. The list $p$ stores the same (sequence id, position, strand bit) values.*
+
 The idea of storing hash-map as two lists inside bucket is also presented in the Figure [index mmi construction](../project_index_storage/#fig-index-mmi-construction) below to allow easier understanding of the index concept.
 
 <a id="fig-index-mmi-construction"></a>
@@ -97,6 +99,8 @@ Figure [index storage layouts](../project_index_storage/#fig-index-storage-layo
 <a id="fig-index-storage-layouts"></a>
 
 ![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-01.svg)
+
+*Each index is drawn as five rows. The green brace represents the fact that the index structure represents all sequences stored in the table. The orange arrow shows that one locator corresponds to exactly one chunk (one row in the index table). The blue arrow shows that one fragment can have multiple chunks. In case of **`CHUNKED_PER_TABLE`** we only store chunk number and for **`CHUNKED_PER_FRAGMENT`** I store fragment’s number and chunk number.*
 
 In reality the fragment’s number can be viewed as a generic sub-key. This distorts the original meaning of **`CHUNKED_PER_FRAGMENT`**, because in relity it’s just "per-sequence" but with extra key: $\langle\text{query\_key, sub\_key, chunk\_no}\rangle$, while **`CHUNKED_PER_TABLE`** has $\langle\text{chunk\_no}\rangle$. This idea is depicted below by real SQL schema of internal storage:
 
@@ -226,6 +230,8 @@ The directory contains metadata information like how many distinct hashes are th
 <a id="fig-index-mpf-mps"></a>
 
 ![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-02.svg)
+
+*Each row with two key in brackets $\langle\text{query\_key, sub\_key}\rangle$ represent binary string that will be split into multiple chunks that could be find by complex key $\langle\text{query\_key, sub\_key, chunk\_number}\rangle$. There’s always one special sub-key for directory for grouped MPF and MPS, these formats also store two rows per one sub-key.*
 
 MPS index building needs to spend additional work on sorting and merging so later queries can skip unrelated hash ranges, while MPF just keeps smaller hashmaps based on fragments. The current default BioseqDB active minimizer index is MPF.
 

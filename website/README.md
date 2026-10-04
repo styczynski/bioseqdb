@@ -36,8 +36,8 @@ cmake --build build/website --target bioseq_website -j 3
 ```
 
 The target validates and publishes its build-tree site, then exports the complete
-HTML and assets to `artifacts/website/`. That directory can be served as the
-website root; publication to a remote host is a separate step. Runnable examples
+HTML and assets to `artifacts/website/`, which is committed to Git. That directory
+can be served as the website root; publication to a remote host is a separate step. Runnable examples
 execute on the private PostgreSQL cluster. Saved EXPLAIN plans remain examples
 from the author's README. Citation links lead to the bibliography page, and
 source references retain their repository, revision and line anchors.

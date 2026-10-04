@@ -1622,6 +1622,8 @@ The G3SA paper divides GPU kernel into 4 stages:
 
 *Simplified depictions of G3SA pipeline*
 
+[G3SA chaining pipeline · `chaining_kernel_wrapper 775`](https://github.com/sunwookim028/G3SA/blob/main/minimap2/src/kernel_wrapper.cu#L775) [Commented CUDA AVL entry point · `gpu_chain_rmq 406`](https://github.com/sunwookim028/G3SA/blob/main/minimap2/src/krmq_cuda.cu#L406)
+
 The main difference between G3SA is that it uses specialised paths depending on data size and it calculates rows instead of columns in the score matrix for anchors: the first kernel instead of looking at previous anchors and updating itself, looks at next anchors and updates them [chaining work split](../project_chaining/#fig-chaining-work-split).
 
 <a id="fig-chaining-work-split"></a>
@@ -1630,7 +1632,7 @@ The main difference between G3SA is that it uses specialised paths depending on 
 
 *Different approaches (transposed) of minimap2 and G3SA*
 
-After long analysis I decided to implement the simpler approach. Instead of writing multiple kernels, just naively port existing chaining logic to Vulkan API.
+After long analysis I decided to implement the simpler approach. Instead of writing multiple kernels, just naively port existing chaining logic to Vulkan API. [G3SA short ranking kernel · `mm_compute_chain_short_rmq 970`](https://github.com/sunwookim028/G3SA/blob/main/minimap2/src/chaining_kernel.cu#L970) [G3SA ranking-pass launches · `chaining_kernel_wrapper_rmq 595`](https://github.com/sunwookim028/G3SA/blob/main/minimap2/src/kernel_wrapper.cu#L595)
 
 ### BioseqDB Vulkan tiled DP
 

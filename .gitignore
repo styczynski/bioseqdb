@@ -35,6 +35,5 @@ bench/*observed*/**
 reporting/**
 reporting/*
 
-# Locally collected native release packages and the publishable static site.
+# Locally collected native release packages.
 /bin_artifacts/
-/artifacts/website/

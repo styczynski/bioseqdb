@@ -556,7 +556,7 @@
       "index": 1,
       "label": "lst:ambiguous-target-binding",
       "runnable": false,
-      "reason": "Parameterized application example; ambiguous or unsupported ownership is discussed in the surrounding text",
+      "reason": "Deliberately unsupported same-alias searches: the source illustrates ambiguous score ownership before showing the runnable self-join solution",
       "adaptation": "Visible SQL unchanged",
       "expected_sqlstate": null
     },
@@ -583,7 +583,7 @@
       "index": 4,
       "label": "lst:constant-extra-mmsearch",
       "runnable": false,
-      "reason": "illustrative API, internal schema, unsupported example, or multi-session example",
+      "reason": "Documented planner bug: conflicting same-alias calls can pass on a specific BioseqJoin path; not a supported query contract",
       "adaptation": "Visible SQL unchanged",
       "expected_sqlstate": null
     },
