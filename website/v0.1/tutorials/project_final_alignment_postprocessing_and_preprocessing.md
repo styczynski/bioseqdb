@@ -52,7 +52,7 @@ The pseudocode below is directly taken from Block Aligner paper \[[38](../bibli
 
 The important thing in the paper is: $[r,r+h)\times[c,c+w)$; $Y=\lfloor B/S\rfloor-1$ which defines threshold, when block assumes the score cannot improve and decides to grow. Note that here $S$ was used by paper’s authors as the width of the strip, not the actual score computed.
 
-##### Pseudocode for the Block Aligner algorithm.
+### Pseudocode for the Block Aligner algorithm.
 
 <a id="alg-adaptive-block-alignment"></a>
 

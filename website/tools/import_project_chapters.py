@@ -480,8 +480,17 @@ def convert(text: str) -> str:
     # Make such content a failed import so later source changes remain auditable.
     ast = json.loads(pandoc(text, "latex", "json"))
     raw_tex = []
+    heading_levels = []
     def inspect(node):
         if isinstance(node, dict):
+            if node.get("t") == "Header":
+                # The page template supplies H1. Preserve source nesting while
+                # compressing absent LaTeX levels (e.g. section -> paragraph).
+                original_level = node["c"][0]
+                while heading_levels and heading_levels[-1] >= original_level:
+                    heading_levels.pop()
+                node["c"][0] = len(heading_levels) + 2
+                heading_levels.append(original_level)
             if node.get("t") == "Span":
                 # Preserve status-legend color under the site's strict CSP.
                 attributes = node["c"][0]
@@ -509,7 +518,6 @@ def convert(text: str) -> str:
         return block
     result = re.sub(r"<table>.*?</table>", restore_html_table, result, flags=re.S)
     result = restore(result)
-    result = re.sub(r"^(#{1,5}) ", r"\1# ", result, flags=re.M)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 

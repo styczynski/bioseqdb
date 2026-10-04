@@ -160,11 +160,11 @@ The main idea behind MPF and MPS was:
 
 The figure [index mpf mps](../project_index_storage/#fig-index-mpf-mps) below shows 6 minimizer occurrences in a sequence, and panel (c) shows the byte strings that store them. Panels (a) and (b) show the same six minimizers in two groupings. Panel (c)and later illustrate the encoding of the strctures in binary strings (every rectangle onward is the binary string `blob` of one heap row from Listing [chunked per fragment row](../project_index_storage/#lst-chunked-per-fragment-row)), where the label on the left is that row’s `query_key` and `sub_key`. If a string is longer than one chunk, later chunks continue it under the same two numbers.
 
-#### Binary coding of non-grouped MPF
+### Binary coding of non-grouped MPF
 
 There are two types of MPF index depedning on BioseqDB setting flag: `bioseq.aligner.grouped_soa_generation.enabled`. The non-grouped version is depicted in panel (c). The sub-key is just the fragment number. The entry intself contains two arrays similar to what minimap2 [index mmi layout](../project_index_storage/#fig-index-mmi-layout) does. The first array with `controls` contains hash value, start position in `positions` array and count of how many positiosn have that same hash. `positions` just represent minimizer positions. Usually in headers there’s additional metadata and some of it is redundant as the exact shapes evolved during my implementation. There are versions and special magic values to potentially error if index was corrupted.
 
-#### Binary coding of grouped MPF
+### Binary coding of grouped MPF
 
 I tried to improve MPF by doing something more sophisticated. The MPF can changed format based on grouped generation setting flag. Panel (d) shows how grouped MPF looks like:
 
@@ -217,7 +217,7 @@ On the figure Panel (d) I didn’t depict all fields in the MPF grouped directo
 
 <a id="tab-fields-in-grouped-mpf-directory-entry"></a>
 
-#### Binary coding for MPS
+### Binary coding for MPS
 
 The MPS index stores the same rows as non-grouped MPF, but this time we also have additional one directory row. Also the fragment keys are just not reffering to fragments anymore, but they represent groups of hashes similarily to minimap2 [index mmi layout](../project_index_storage/#fig-index-mmi-layout).
 

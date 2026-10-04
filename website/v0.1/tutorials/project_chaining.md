@@ -305,7 +305,7 @@ This saved anchor can then remain saved after $m<i-\verb|max_iter|$. Each time w
 
 *(a) The reference and query limits and diagonal band decide whether a pair can be scored or not. (b) If distance checks pass, then we perform scans in a loop. The picture shows one pass of the scan for the current anchor $i=8$. The numbers inside the circles are anchor indices. The orange arrow from $j$ to $p_j$ shows the predecessor previously saved for anchor $j$. After $j$ is scored without stopping, the arrow’s destination receives the current mark $i=8$. The numbered steps visit anchors $7,6,\ldots,1$. The small $s$ boxes show the single skip counter for current anchor 8. Step 2 doesn’t affect $s$ as this anchor doesn’t have a predecessor in this scan pass (it’s unmarked). Step 5 improves the score and changes $s=2$ to $s=1$. Anchor 0 is already outside the main loop because $\verb|max_iter|=7$, so we don’t scan it, but we check it later with $m=0$. Step 7 stops with $e=1$, so saved $m=0$ satisfies $m<e$ and is checked once. The score of $m=0$ equal to 17 wins, but in some other scan other anchor could have a better score.*
 
-##### Minimap2’s ordered predecessor scan for one query segment
+#### Minimap2’s ordered predecessor scan for one query segment
 
 <a id="alg-chaining-b1"></a>
 
@@ -514,7 +514,7 @@ After the last scored batch, the algorithm takes horizontal maximum of a vector 
 
 The algorithm is described in detail in Algorithm [chaining b5](../project_chaining/#alg-chaining-b5).
 
-##### Bounded SIMD B1
+#### Bounded SIMD B1
 
 <a id="alg-chaining-b5"></a>
 
@@ -687,7 +687,7 @@ The minimap2 backtracking uses the same technique as BioseqDB Vulkan minimizer s
 
 Algorithm [chaining minimap2 boundary](../project_chaining/#alg-chaining-minimap2-boundary) shows the code for the cut search loop.
 
-##### Minimap2 cut selection function for anchor $e$
+#### Minimap2 cut selection function for anchor $e$
 
 <a id="alg-chaining-minimap2-boundary"></a>
 
@@ -743,7 +743,7 @@ Algorithm [chaining minimap2 boundary](../project_chaining/#alg-chaining-minima
 
 Algorithm [chaining minimap2 backtrack](../project_chaining/#alg-chaining-minimap2-backtrack) shows also how two passes for count/write are integrated. Minimap2 uses first pass to count all anchors i.e $N_C$ (this value is used to allocate array $U$). Array $U$ holds anchor count for a chain in lower 32 bits and score in higher 32 bits (this packing is defined by $\text{Pack}$ function). $U$ is then chain-reversed into $B_\gamma$ array, which undergoes sorting by reference coordinates $\text{ReferencePos}(B_\gamma[0])$ The final array $A$ contains all anchors, while output array $U$ contains packed `uint_64t` metadata for chain (count and score).
 
-##### Minimap2 scalar backtracking and final chain order
+#### Minimap2 scalar backtracking and final chain order
 
 <a id="alg-chaining-minimap2-backtrack"></a>
 
@@ -934,7 +934,7 @@ In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending
 
 - $\alpha_\lambda$ says whether its collection lane is active (this is SIMD mask to determine if we need to terminate the chain if we either reach $-1$ or already marked anchor)
 
-##### BioseqDB SIMD path collection and backtracking
+#### BioseqDB SIMD path collection and backtracking
 
 <a id="alg-chaining-simd-backtrack"></a>
 
@@ -1411,7 +1411,7 @@ Figure [chaining minimap2 rmq](../project_chaining/#fig-chaining-minimap2-rmq) 
 
 Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rmq) shows how RMQ forward chaining is implemented inside minimap2. <span class="smallcaps">RangeBest</span> function returns the anchor with the largest $h(j)$ in the interval, or $\bot$ if the interval contains no retained anchor, while <span class="smallcaps">CompleteLink</span> function calculates $E(j,i)$ from Equations [chaining link score](../project_chaining/#eq-chaining-link-score)–[chaining penalty](../project_chaining/#eq-chaining-penalty), together with $\delta$ and the exact (local scan) condition in Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact).
 
-##### Minimap2 RMQ forward chaining
+#### Minimap2 RMQ forward chaining
 
 <a id="alg-chaining-minimap2-rmq"></a>
 
@@ -1482,7 +1482,7 @@ Algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local
 
 Similarily to minimap2 forward chaining we use $t_j$ array to mark visited candidates i.e mark $t_j=i$ means that a candidate already tested for target $i$ points to $j$ through its saved predecessor. It must be noted that the for loop in the local scan algorithm [chaining rmq local scan](../project_chaining/#alg-chaining-rmq-local-scan) utilises the fact that anchors are sorted by query coordinate so we can just go to the leftmost node in the interval and iterate each leaf from left to right (I’m reiterating this to showcase that the for loop hides this complexity in hte pseudocode).
 
-##### Minimap2 local scan after the primary RMQ query
+#### Minimap2 local scan after the primary RMQ query
 
 <a id="alg-chaining-rmq-local-scan"></a>
 
@@ -1640,7 +1640,7 @@ BioseqDB’s `vulkan_tiled_dynamic_programming` is the usual chaining algorithm 
 
 The host first sets $$D=\max\{\verb|max_gap|,\verb|bandwidth|\}.$$ and sorts anchors to filter them by adjacent reference gap greater than $D$. For a fixed target, lane $u$ first scores predecessor $i-u-1$. The next iteration moves all lanes 32 positions to the back. Every active lane calculates the complete value $f_j+E(j,i)$ to then select one pair $(\text{score},j)$.
 
-##### BioseqDB Vulkan forward chaining for one hard range
+#### BioseqDB Vulkan forward chaining for one hard range
 
 <a id="alg-chaining-vulkan"></a>
 
@@ -1739,7 +1739,7 @@ BioseqDB uses the same classification logic as minimap2. Below, in Algorithm [c
 
 The algorithm for classification was taken from minimap2 paper and its source code \[[21](../bibliography/#ref-minimap2_paper)\]:
 
-##### Primary and secondary chain selection in minimap2
+### Primary and secondary chain selection in minimap2
 
 <a id="alg-chaining-primary-secondary"></a>
 

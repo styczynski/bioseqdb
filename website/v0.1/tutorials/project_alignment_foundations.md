@@ -72,7 +72,7 @@ For affine scoring model we need to hold main state and one state for each gap o
   H_{i,j} &= \max\{M_{i,j},I_{i,j},D_{i,j}\}.
 \end{aligned}$$ Using $H$ to open a gap permits a transition from any previous state. Local alignment also includes zero in the final maximum.
 
-##### Affine-gap alignment with an explicit boundary contract
+### Affine-gap alignment with an explicit boundary contract
 
 <a id="alg-affine-dp"></a>
 

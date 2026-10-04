@@ -328,7 +328,7 @@ BioseqDB uses task-parallel (most parallel-friendly mode) execution with prefilt
 
 AWS machines were missing GPUs so all Vulkan rows are grouped together and marked as not available.
 
-##### Reading comparisons and highlights.
+#### Reading comparisons and highlights.
 
 Each cell places the A duration above its comparison, followed by the B duration and its own comparison.
 

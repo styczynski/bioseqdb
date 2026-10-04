@@ -89,7 +89,7 @@ Minimap2 stores the most recent $w$ candidates in a circular buffer It also stor
 
 Minimap2 stores kmers and apply hash function each time from scratch.
 
-##### Scalar minimap2-style rescan
+#### Scalar minimap2-style rescan
 
 <a id="alg-rewrite-minimap-rescan"></a>
 
@@ -119,7 +119,7 @@ Each SIMD lane will load fragments of input data:
 
 Note that algorithm fundamentally stays the same, we only now divided input sequence into chunks and translated each operation (hashing, comparisons) into SIMD instructions:
 
-##### Naive SIMDified minimap2 rescan algorithm
+### Naive SIMDified minimap2 rescan algorithm
 
 <a id="alg-simd-minimap-rescan"></a>
 
@@ -206,7 +206,7 @@ The idea for one group is as follows:
 
 The figure [rewrite chronological groups](../project_minimizers/#fig-rewrite-chronological-groups) illustrates calculation of window minima for $L=4$ lanes: $x_0, x_1, ... x_{L-1}$. The entire algorithm looks as follows:
 
-##### One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows
+### One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows
 
 <a id="alg-rewrite-generic-chronological"></a>
 
@@ -373,7 +373,7 @@ The regressions on `collect_seed_hits` and `mm_est_err` were caused by SIMD chai
 
 Algorithm [two stack](../project_minimizers/#alg-two-stack) shows pseudocode for algorithm (A2) inspired by SIMD-Minimizers paper \[[36](../bibliography/#ref-groot_koerkamp_simd_minimizers_2025)\].
 
-##### V8 `collect_minimizers_two_stack_simd` (per-step body)
+### V8 `collect_minimizers_two_stack_simd` (per-step body)
 
 <a id="alg-two-stack"></a>
 
@@ -613,7 +613,7 @@ The core part is OrderedSketchTile which runs the rescan algorithm in count mode
 
 The positive value $A$ is the pessimistic output capacity planned by the caller using heuristic. <span class="smallcaps">HostAndDevice</span> creates an $A$-record device output before count. If the actual pipeline overflows, then we return error.
 
-##### Vulkan scheduling in BioseqDB
+### Vulkan scheduling in BioseqDB
 
 <a id="alg-vulkan-sketch-host-schedule"></a>
 
@@ -705,7 +705,7 @@ The positive value $A$ is the pessimistic output capacity planned by the caller 
 
 38. return $(\mathit{Output},\mathit{HostOutput},N_{\rm out})$
 
-##### `RecordOrderedSketchTile` call
+### `RecordOrderedSketchTile` call
 
 <a id="alg-vulkan-ordered-invocation"></a>
 
