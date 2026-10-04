@@ -24,6 +24,7 @@
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/project-content.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/project-benchmarks.css">
+<link rel="stylesheet" href="{{ site.assets_base_url }}css/site-header.css">
 </head>
 <body id="page-top" class="{% block body_class %}docs-design-page{% endblock %}">
 {% block skip_link %}<a class="skip-link" href="#doc-main">Skip to main content</a>{% endblock %}
@@ -31,49 +32,35 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="dd-s0002">
-    <div class="dd-s0003">
-      <button data-menu aria-label="Menu" class="dd-s0004">
-        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
-      </button>
-      <a data-nav href="{{ nav.documentation }}" class="dd-s0006">
-        <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
-        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
-        <span data-docsbadge class="dd-s0010">DOCS</span>
-      </a>
-
-      <nav data-topnav class="dd-s0011">
-        <a href="{{ nav.documentation }}" data-nav class="dd-s0012">Docs</a>
-        <a href="{{ site.base_path }}" class="dd-s0013">Product</a>
-        <a href="{{ site.base_path }}benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
-        <a href="{{ site.versions_page_url }}" class="dd-s0013">Versions</a>
-      </nav>
-
-      <!-- SEARCH -->
-      <div data-search-wrap class="dd-s0015">
-        <div data-search-box class="dd-s0016">
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
-          <kbd class="dd-s0019">/</kbd>
-        </div>
-        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+  <header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="BioseqDB home">
+      <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
+      <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
       </div>
-
-      <!-- VERSION -->
-      <div data-ver-wrap class="dd-s0021">
-        <button id="ver-btn" class="dd-s0022">
-          <span class="dd-s0023"></span>{{ site.version }} <span class="docs-version-status">{{ site.status_label }}</span>
-          <span data-caret class="dd-s0025"></span>
-        </button>
-        <div id="ver-menu" data-versions-url="{{ site.versions_url }}" class="dd-s0026">
-          <a data-ver href="{{ nav.documentation }}" aria-current="page" class="dd-s0027">{{ site.version }} <span class="docs-version-current">current</span></a>
-          <a data-ver-all href="{{ site.versions_page_url }}" class="dd-s0029">All versions</a>
-        </div>
-      </div>
-
-      <a data-ghbtn href="{{ site.repository_url }}" rel="noreferrer" class="dd-s0031">GitHub</a>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
     </div>
-  </header>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
+        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">current</span></a>
+        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+  </div>
+</header>
 
   <!-- ============ BODY GRID ============ -->
   <div data-bodygrid class="dd-s0032">
@@ -182,10 +169,11 @@
   <div data-backdrop class="dd-s0259"></div>
 
   <!-- ===== ENTITY POPOVER ===== -->
-  <div id="entity-pop" class="dd-s0260"></div>
+
 
 </div>
 {% endblock %}
+<div id="entity-pop"></div>
 {% if page.jsonld %}<script type="application/ld+json">{{ page.jsonld }}</script>{% endif %}
 <script src="{{ site.assets_base_url }}js/prism-init.js"></script>
 <script src="{{ site.prism_js_url }}"></script>
@@ -194,6 +182,8 @@
 <script src="{{ site.assets_base_url }}js/project-math.js"></script>
 <script type="module" src="{{ site.assets_base_url }}js/project-benchmarks.mjs"></script>
 <script type="module" src="{{ site.js_url }}"></script>
-{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/docs-design.mjs"></script>{% endblock %}
+<script type="module" src="{{ site.assets_base_url }}js/site-header.mjs"></script>
+<script type="module" src="{{ site.assets_base_url }}js/docs-design.mjs"></script>
+{% block design_script %}{% endblock %}
 </body>
 </html>

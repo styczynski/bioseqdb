@@ -606,7 +606,9 @@ def dynamicize_landing(markup: str, catalog: StyleCatalog) -> str:
     code_end = card + code_match.end()
     dynamic_code = (
         f'<pre{code_match.group(1)}><code id="hero-query-code" '
-        'class="language-sql" data-annotated-query>{{ examples.hero_query.visible_sql }}</code></pre>'
+        'class="language-sql" data-annotated-query '
+        'data-entity-ranges="{{ examples.hero_query.entity_ranges }}">'
+        '{{ examples.hero_query.visible_sql }}</code></pre>'
     )
     markup = markup[:code_start] + dynamic_code + markup[code_end:]
 
@@ -638,7 +640,8 @@ def dynamicize_landing(markup: str, catalog: StyleCatalog) -> str:
             1,
         )
         replacement = (
-            panel_open.replace("<code", f'<code id="landing-example-{index}" class="language-sql">', 1)
+            panel_open.replace("<code", f'<code id="landing-example-{index}" class="language-sql" '
+                               f'data-entity-ranges="{{{{ examples.{slot}.entity_ranges }}}}">', 1)
             + f'{{{{ examples.{slot}.visible_sql }}}}'
             + match.group(4)
         )
@@ -689,7 +692,47 @@ def dynamicize_landing(markup: str, catalog: StyleCatalog) -> str:
     return markup
 
 
+def shared_header() -> str:
+    """One navigation/search surface, using the supplied documentation palette."""
+    return '''<header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="BioseqDB home">
+      <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
+      <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
+        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">current</span></a>
+        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+  </div>
+</header>'''
+
+
+def replace_header(markup: str, old_id: str, replacement: str) -> str:
+    start = markup.index(f'<header id="{old_id}"')
+    begin, end = element_span(markup, start, "header")
+    return markup[:begin] + replacement + markup[end:]
+
+
 def landing_template(markup: str) -> str:
+    markup = replace_header(markup, "nav", shared_header())
     return f'''{{% extends "base.html.j2" %}}
 {{% block body_class %}}landing-design-page{{% endblock %}}
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/landing-design.css">{{% endblock %}}
@@ -845,6 +888,10 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
 
 
 def base_template(markup: str) -> str:
+    markup = replace_header(markup, "dnav", shared_header())
+    pop_start = markup.index('<div id="entity-pop"')
+    pop_begin, pop_end = element_span(markup, pop_start)
+    markup = markup[:pop_begin] + markup[pop_end:]
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -871,12 +918,14 @@ def base_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-benchmarks.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 </head>
 <body id="page-top" class="{{% block body_class %}}docs-design-page{{% endblock %}}">
 {{% block skip_link %}}<a class="skip-link" href="#doc-main">Skip to main content</a>{{% endblock %}}
 {{% block page %}}
 {markup}
 {{% endblock %}}
+<div id="entity-pop"></div>
 {{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
 <script src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
 <script src="{{{{ site.prism_js_url }}}}"></script>
@@ -885,7 +934,9 @@ def base_template(markup: str) -> str:
 <script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/project-benchmarks.mjs"></script>
 <script type="module" src="{{{{ site.js_url }}}}"></script>
-{{% block design_script %}}<script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>{{% endblock %}}
+<script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
+{{% block design_script %}}{{% endblock %}}
 </body>
 </html>
 '''
@@ -893,6 +944,20 @@ def base_template(markup: str) -> str:
 
 def benchmarks_template(markup: str) -> str:
     """Wrap the translated benchmark export in its dedicated production frame."""
+    # The original status/reload controls remain connected to the benchmark
+    # runtime; the shared navigation lives outside its rerendered template.
+    header_at = markup.index('<header id="bhead"')
+    _, header_end = element_span(markup, header_at, "header")
+    header = markup[header_at:header_end]
+    status_at = header.index('<div data-hidesm class="bd-s0013"')
+    status_begin, status_end = element_span(header, status_at)
+    button_at = header.index('<button data-bench-click="onReload"')
+    button_begin, button_end = element_span(header, button_at, "button")
+    toolbar = ('<div id="bhead" class="benchmark-toolbar">'
+               '<a href="#benchmark-methodology">Methodology &amp; machines</a>'
+               + header[status_begin:status_end].replace(' data-hidesm', '')
+               + header[button_begin:button_end] + '</div>')
+    markup = replace_header(markup, "bhead", toolbar)
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -914,16 +979,34 @@ def benchmarks_template(markup: str) -> str:
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/benchmarks-design.css">
+<link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/code-theme.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 </head>
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
+{shared_header()}
 <div id="benchmarks-app"
      data-loader-url="{{{{ site.assets_base_url }}}}js/project-benchmark-loader.mjs"
      data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"></div>
+{{% if page.benchmark_methodology_html %}}<section id="benchmark-methodology" class="benchmark-methodology markdown tutorial-body">
+{{{{ page.benchmark_methodology_html }}}}
+</section>{{% endif %}}
 <template id="benchmarks-app-template">
 {markup}
 </template>
+<div id="entity-pop"></div>
 {{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
+<script src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
+<script src="{{{{ site.prism_js_url }}}}"></script>
+<script src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
+<script src="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.js"></script>
+<script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
+<script type="module" src="{{{{ site.js_url }}}}"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/benchmarks-design.mjs"></script>
 </body>
 </html>

@@ -6,24 +6,35 @@
 <div data-screen-label="BioseqDB landing" class="ld-s0001">
 
   <!-- NAV -->
-  <header id="nav" class="ld-s0002">
-    <div class="ld-s0003">
-      <div class="ld-s0004">
-        <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="34" height="34" alt="BioseqDB logo" class="ld-s0005">
-        <span class="ld-s0006">Bioseq<span class="ld-s0007">DB</span></span>
+  <header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="BioseqDB home">
+      <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
+      <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
       </div>
-      <nav class="ld-s0008">
-        <a href="#workflow" class="ld-s0009 ld-h001">Workflow</a>
-        <a href="#examples" class="ld-s0009 ld-h001">Examples</a>
-        <a href="#index" class="ld-s0009 ld-h001">Index</a>
-        <a href="#scale" class="ld-s0009 ld-h001">Scale</a>
-      </nav>
-      <div class="ld-s0010">
-        <a href="{{ site.repository_url }}" rel="noreferrer" class="ld-s0011">GitHub</a>
-        <a href="{{ nav.documentation }}" class="ld-s0012">Read the docs</a>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
+        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">current</span></a>
+        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">All versions</a>
       </div>
     </div>
-  </header>
+    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+  </div>
+</header>
 
   <main id="main">
 
@@ -89,7 +100,7 @@
             <span class="ld-s0053"></span>
             <span class="ld-s0054">query.sql</span>
           </div>
-          <pre class="ld-s0055"><code id="hero-query-code" class="language-sql" data-annotated-query>{{ examples.hero_query.visible_sql }}</code></pre>
+          <pre class="ld-s0055"><code id="hero-query-code" class="language-sql" data-annotated-query data-entity-ranges="{{ examples.hero_query.entity_ranges }}">{{ examples.hero_query.visible_sql }}</code></pre>
           {% if examples.hero_query.result %}
 <div data-live-result="hero_query" class="ld-s0064">
   <div class="ld-s0065">{{ examples.hero_query.result.rows | length }} rows</div>
@@ -222,13 +233,13 @@
           </div>
           <div class="ld-s0123">
             <div data-example-panel="0" data-sql-example-code="hero_query">
-              <pre class="ld-s0124"><code id="landing-example-0" class="language-sql">{{ examples.hero_query.visible_sql }}</code></pre>
+              <pre class="ld-s0124"><code id="landing-example-0" class="language-sql" data-entity-ranges="{{ examples.hero_query.entity_ranges }}">{{ examples.hero_query.visible_sql }}</code></pre>
             </div>
             <div data-example-panel="1" data-sql-example-code="similarity_search" hidden>
-              <pre class="ld-s0125"><code id="landing-example-1" class="language-sql">{{ examples.similarity_search.visible_sql }}</code></pre>
+              <pre class="ld-s0125"><code id="landing-example-1" class="language-sql" data-entity-ranges="{{ examples.similarity_search.entity_ranges }}">{{ examples.similarity_search.visible_sql }}</code></pre>
             </div>
             <div data-example-panel="2" data-sql-example-code="sequence_storage" hidden>
-              <pre class="ld-s0125"><code id="landing-example-2" class="language-sql">{{ examples.sequence_storage.visible_sql }}</code></pre>
+              <pre class="ld-s0125"><code id="landing-example-2" class="language-sql" data-entity-ranges="{{ examples.sequence_storage.entity_ranges }}">{{ examples.sequence_storage.visible_sql }}</code></pre>
             </div>
           </div>
         </div>
