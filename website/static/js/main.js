@@ -55,3 +55,35 @@ function decorateCode(code) {
 }
 
 document.querySelectorAll("code[data-entity-ranges]").forEach(decorateCode);
+
+// Keep transparent vector diagrams on the site's dark surface when enlarged.
+document.addEventListener("click", (event) => {
+  const link = event.target.closest?.("a.project-figure-link");
+  if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  const dialog = document.createElement("dialog");
+  dialog.className = "figure-viewer";
+  dialog.setAttribute("aria-label", "Full-size diagram");
+  const toolbar = document.createElement("div");
+  toolbar.className = "figure-viewer-bar";
+  const download = document.createElement("a");
+  download.href = link.href;
+  download.download = "";
+  download.textContent = "Download SVG";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", () => dialog.close());
+  toolbar.append(download, close);
+  const scroll = document.createElement("div");
+  scroll.className = "figure-viewer-scroll";
+  const image = document.createElement("img");
+  image.src = link.href;
+  image.alt = link.querySelector("img")?.alt || "Diagram";
+  scroll.append(image);
+  dialog.append(toolbar, scroll);
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => { dialog.remove(); link.focus(); });
+  dialog.addEventListener("click", (click) => { if (click.target === dialog) dialog.close(); });
+  dialog.showModal();
+});

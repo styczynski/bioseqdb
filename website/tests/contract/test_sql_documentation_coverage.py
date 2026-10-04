@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Check generated SQL reference coverage against source manifests and catalog.
+
+The manifests determine declarations and authored prose. The catalog determines
+installed routine/type metadata. Neither inventory is an execution allowlist.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+DOCUMENTED_KINDS = {
+    "type", "function", "sql_function", "procedure", "aggregate", "operator",
+    "cast", "schema", "table", "view", "sequence", "opclass", "access_method", "guc", "index",
+}
+
+
+def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dict:
+    model = json.loads(model_path.read_text())
+    entities = model["sql_entities"]
+    by_id = {entity["canonical_id"]: entity for entity in entities}
+    assert len(by_id) == len(entities), "duplicate SQL documentation identities"
+    assert not model.get("omitted_sql_entities"), "extension catalog entities were omitted"
+    declared = 0
+    authored = 0
+    public = 0
+    for path in manifests:
+        manifest = json.loads(path.read_text())
+        for source in manifest["entities"]:
+            if source["kind"] not in DOCUMENTED_KINDS:
+                continue
+            declared += 1
+            identity = source["identity"]
+            assert identity in by_id, f"missing source declaration: {identity}"
+            rendered = by_id[identity]
+            assert rendered["summary"], f"empty SQL summary: {identity}"
+            assert rendered["attributes"]["installed_identity"] == source["installed_identity"]
+            if source["brief"]:
+                authored += 1
+                assert rendered["summary"] == source["brief"], f"rewritten authored brief: {identity}"
+            if source["public_documentation"]:
+                public += 1
+            if source.get("source_path"):
+                assert rendered["declaration"]["path"] == source["source_path"]
+                assert rendered["declaration"]["line"] == source["source_line"]
+            if source["kind"] == "type" and source["columns"]:
+                assert len(rendered["fields"]) == len(source["columns"]), f"missing type fields: {identity}"
+                assert all(field["type"] for field in rendered["fields"]), f"missing field SQL types: {identity}"
+    catalog = json.loads(catalog_path.read_text())
+    catalog_entities = catalog["entities"]
+    installed = {entity.get("attributes", {}).get("installed_identity", entity["canonical_id"])
+                 for entity in entities}
+    # SQL routine aliases (varchar/character varying, sql_function/function) and
+    # aggregate transition bindings may use different manifest identity strings.
+    by_signature = {(entity["qualified_name"], entity["normalized_signature"]): entity
+                    for entity in entities}
+    for source in catalog_entities:
+        identity = source["canonical_id"]
+        key = (source["qualified_name"], source["normalized_signature"])
+        assert identity in installed or key in by_signature, f"missing live extension member: {identity}"
+        current = by_signature.get(key)
+        if current:
+            for name, definition in source.get("attributes", {}).items():
+                if name.startswith("constraint "):
+                    assert current["attributes"].get(name) == definition, f"lost table constraint: {identity}/{name}"
+        if source.get("fields"):
+            assert current is not None and current["fields"], f"lost live fields: {identity}"
+            assert [(field["name"], field["type"]) for field in current["fields"]] == [
+                (field["name"], field["type"]) for field in source["fields"]
+            ], f"catalog field names/types changed: {identity}"
+    return {"declared_entities": declared, "authored_summaries": authored,
+            "runnable_public_entities": public, "live_catalog_entities": len(catalog_entities),
+            "documented_entities_with_overload_groups": len(entities)}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, action="append", required=True)
+    parser.add_argument("--catalog", type=Path, required=True)
+    args = parser.parse_args()
+    print(json.dumps(validate(args.model, args.manifest, args.catalog), indent=2))
+
+
+if __name__ == "__main__":
+    main()

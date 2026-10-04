@@ -7,6 +7,7 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -316,6 +317,11 @@ struct sql_manifest_public_entity {
     std::string details;
     std::string result_sql_type;
     std::vector<parameter_description> parameters;
+    std::vector<parameter_description> fields;
+    std::map<std::string, std::string, std::less<>> attributes;
+    std::string catalog_identity;
+    std::string qualified_name;
+    bool public_documentation{};
 };
 
 /// @brief SQL manifest data needed for catalog checks and website documentation.
@@ -328,13 +334,16 @@ struct sql_manifest_public_projection {
     std::vector<sql_manifest_public_entity> entities;
     std::vector<std::string> catalog_schemas;
     std::vector<std::string> restricted_sequence_names;
+    // Documentation discovery never changes the original executor ACL surface.
+    std::vector<sql_manifest_public_entity> documentation_entities;
+    std::vector<std::string> documentation_schemas;
 };
 
-/// @brief Reads public SQL documentation and identity lists from a manifest.
+/// @brief Reads source documentation and the separate runnable ACL projection.
 ///
 /// Requires the annotated-C++ manifest format and checks identity uniqueness
-/// and schema substitution. Public types and functions must have a brieg.
-/// Only entries marked public_documentation become website entities.
+/// and schema substitution. Public types and functions must have a brief.
+/// Documentation includes all SQL declarations; execution grants retain the public allowlist.
 [[nodiscard]] sql_manifest_public_projection
 parse_sql_manifest_public_projection(
         std::string_view text,
@@ -440,6 +449,7 @@ parse_sql_manifest_public_projection(
     std::set<std::string, std::less<>> stable_identities;
     std::set<std::string, std::less<>> installed_identities;
     std::set<std::string, std::less<>> catalog_schemas;
+    std::set<std::string, std::less<>> documentation_schemas;
     std::set<std::string, std::less<>> restricted_sequence_names;
     const auto resolve_extension_identity =
         [&extension_schema](std::string identity) {
@@ -520,23 +530,41 @@ parse_sql_manifest_public_projection(
             && schema_name(installed_name) == "bioseq_internal") {
             restricted_sequence_names.emplace(installed_name);
         }
-        if (!public_documentation) {
+        const bool documentable = kind == "type" || kind == "function"
+            || kind == "sql_function" || kind == "procedure"
+            || kind == "aggregate" || kind == "operator" || kind == "cast"
+            || kind == "schema" || kind == "table" || kind == "view"
+            || kind == "sequence" || kind == "opclass"
+            || kind == "access_method" || kind == "guc" || kind == "index";
+        if (!documentable && !public_documentation) {
             continue;
         }
-        std::string brief = require_string(entity, "brief");
-        if (brief.empty()) {
+        const auto optional_string = [&entity](std::string_view key) {
+            const auto* value = entity.if_contains(key);
+            return value && value->is_string() ? std::string(value->as_string()) : std::string{};
+        };
+        std::string brief = public_documentation ? require_string(entity, "brief") : optional_string("brief");
+        if (public_documentation && brief.empty()) {
             fail("website-public entity '" + stable_identity
                  + "' has no Doxygen brief");
         }
-        if (kind != "type" && kind != "function"
+        if (public_documentation && kind != "type" && kind != "function"
             && kind != "sql_function") {
             fail("website-public entity '" + stable_identity
                  + "' has unsupported website kind '" + kind + "'");
         }
-        catalog_schemas.emplace(schema_name(installed_name));
+        if (public_documentation) {
+            catalog_schemas.emplace(schema_name(installed_name));
+        }
+        if (kind == "schema") {
+            documentation_schemas.emplace(installed_name);
+        } else if (installed_name.find('.') != std::string_view::npos) {
+            documentation_schemas.emplace(schema_name(installed_name));
+        }
         std::vector<parameter_description> parameters;
-        const boost::json::value& parameters_value =
-            require_member(entity, "parameters");
+        const boost::json::value empty_parameters = boost::json::array{};
+        const boost::json::value& parameters_value = entity.if_contains("parameters")
+            ? entity.at("parameters") : empty_parameters;
         if (!parameters_value.is_array()) {
             fail("parameters must be an array for '" + stable_identity + "'");
         }
@@ -553,27 +581,114 @@ parse_sql_manifest_public_projection(
                 .type = require_string(parameter, "sql_type"),
             };
             (void)require_bool(parameter, "has_default");
+            if (const auto* text = parameter.if_contains("documentation");
+                text && text->is_string() && !text->as_string().empty()) {
+                documentation.description.push_back(content_node{
+                    .kind = content_node_kind::text,
+                    .text = std::string(text->as_string()),
+                });
+            }
             parameters.push_back(std::move(documentation));
         }
-        projection.entities.push_back(sql_manifest_public_entity{
-            .stable_identity = std::move(stable_identity),
-            .installed_identity = std::move(installed_identity),
+        sql_manifest_public_entity documented{
+            .stable_identity = stable_identity,
+            .installed_identity = installed_identity,
             .kind = kind,
-            .name = require_string(entity, "name"),
-            .source_module = require_string(entity, "source_module"),
-            .source_path = require_string(entity, "source_path"),
-            .source_line = require_size(entity, "source_line"),
-            .brief = std::move(brief),
-            .details = require_string(entity, "details"),
-            .result_sql_type = require_string(entity, "result_sql_type"),
+            .name = optional_string("name"),
+            .source_module = optional_string("source_module"),
+            .source_path = optional_string("source_path"),
+            .source_line = entity.if_contains("source_line") ? require_size(entity, "source_line") : 0,
+            .brief = brief,
+            .details = optional_string("details"),
+            .result_sql_type = optional_string("result_sql_type"),
             .parameters = std::move(parameters),
-        });
+        };
+        documented.public_documentation = public_documentation;
+        documented.catalog_identity = installed_identity;
+        if (kind == "sql_function") {
+            documented.catalog_identity = "sql:function:" + std::string(installed_body);
+        }
+        documented.qualified_name = std::string(installed_name);
+        if (kind == "access_method") documented.qualified_name = documented.name;
+        if (kind == "index") {
+            // Index annotations inherit a C++ owner's spelling in stable IDs;
+            // their installed SQL schema is the owning table's schema.
+            if (const auto* dependencies = entity.if_contains("dependencies");
+                dependencies && dependencies->is_array()) {
+                for (const auto& dependency : dependencies->as_array()) {
+                    const auto value = resolve_extension_identity(std::string(dependency.as_string()));
+                    if (!value.starts_with("sql:table:")) continue;
+                    const auto table_name = std::string_view(value).substr(10);
+                    documented.qualified_name = std::string(schema_name(table_name)) + "." + documented.name;
+                    documented.catalog_identity = "sql:index:" + documented.qualified_name;
+                    break;
+                }
+            }
+        }
+        // Aggregate manifest identities contain the C++ transition binding.
+        // Resolve that declaration to its emitted SQL argument types.
+        if (kind == "aggregate") {
+            const auto* options = entity.if_contains("options");
+            const auto* transition = options && options->is_object()
+                ? options->as_object().if_contains("transition") : nullptr;
+            for (const auto& candidate_value : entities_value.as_array()) {
+                const auto& candidate = candidate_value.as_object();
+                const auto* declaration = candidate.if_contains("cpp_declaration");
+                if (!transition || !transition->is_string() || !declaration
+                    || *declaration != *transition) continue;
+                const auto& arguments = candidate.at("parameters").as_array();
+                std::string signature = documented.qualified_name.substr(
+                    0, documented.qualified_name.find(':')) + "(";
+                for (std::size_t index = 1; index < arguments.size(); ++index) {
+                    if (index != 1) signature += ',';
+                    signature += resolve_extension_identity(
+                        require_string(arguments[index].as_object(), "sql_type"));
+                }
+                signature += ')';
+                documented.catalog_identity = "sql:aggregate:" + signature;
+                documented.qualified_name = signature.substr(0, signature.find('('));
+                break;
+            }
+        }
+        for (const auto key : {"options", "routine_properties"}) {
+            const auto* options = entity.if_contains(key);
+            if (!options || !options->is_object()) continue;
+            for (const auto& option : options->as_object()) {
+                if (option.value().is_string() && !option.value().as_string().empty()) {
+                    documented.attributes.emplace(std::string(option.key()),
+                        std::string(option.value().as_string()));
+                }
+            }
+        }
+        if (const auto* condition = entity.if_contains("active_condition");
+            condition && condition->is_string() && !condition->as_string().empty()) {
+            documented.attributes["active_condition"] = std::string(condition->as_string());
+        }
+        if (const auto* columns = entity.if_contains("columns"); columns && columns->is_array()) {
+            for (const auto& column_id : columns->as_array()) {
+                for (const auto& column_value : entities_value.as_array()) {
+                    const auto& column = column_value.as_object();
+                    if (column.at("identity") != column_id) continue;
+                    parameter_description field{.name = require_string(column, "name")};
+                    const std::string description = require_string(column, "brief");
+                    if (!description.empty()) field.description.push_back(content_node{
+                        .kind = content_node_kind::text, .text = description});
+                    documented.fields.push_back(std::move(field));
+                    break;
+                }
+            }
+        }
+        // Keep the security projection byte-for-byte equivalent in membership.
+        if (public_documentation) projection.entities.push_back(documented);
+        projection.documentation_entities.push_back(std::move(documented));
     }
-    if (projection.entities.empty()) {
-        fail("no entity is marked public_documentation");
+    if (projection.documentation_entities.empty()) {
+        fail("no SQL entity is available for documentation");
     }
     projection.catalog_schemas.assign(
         catalog_schemas.begin(), catalog_schemas.end());
+    projection.documentation_schemas.assign(
+        documentation_schemas.begin(), documentation_schemas.end());
     projection.stable_identities.assign(
         stable_identities.begin(), stable_identities.end());
     projection.installed_identities.assign(
@@ -635,6 +750,7 @@ namespace {
     case entity_kind::sql_schema: return "sql_schema";
     case entity_kind::sql_type: return "sql_type";
     case entity_kind::sql_function: return "sql_function";
+    case entity_kind::sql_object: return "sql_object";
     case entity_kind::overload_group: return "overload_group";
     }
     return "unknown";
@@ -831,6 +947,24 @@ namespace {
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    boost::json::array fields;
+    for (const parameter_description& field : entity.fields) {
+        boost::json::object item;
+        item["name"] = field.name;
+        item["type"] = field.type;
+        item["default"] = field.default_value
+            ? boost::json::value(*field.default_value) : boost::json::value(nullptr);
+        boost::json::array description;
+        for (const content_node& node : field.description) {
+            description.push_back(serialize_node(node));
+        }
+        item["description"] = std::move(description);
+        fields.push_back(std::move(item));
+    }
+    object["fields"] = std::move(fields);
+    boost::json::array enum_values;
+    for (const std::string& value : entity.enum_values) enum_values.push_back(boost::json::value(value));
+    object["enum_values"] = std::move(enum_values);
     object["implementation_entity_id"] = entity.implementation_entity_id
         ? boost::json::value(*entity.implementation_entity_id)
         : boost::json::value(nullptr);
@@ -926,6 +1060,13 @@ namespace {
     return json_quote(html_escape(value));
 }
 
+[[nodiscard]] bool reference_attribute_visible(std::string_view name) {
+    return name != "refid" && name != "stable_identity" && name != "installed_identity"
+        && name != "documentation_authority" && name != "sql_manifest_script_sha256"
+        && name != "public_documentation" && name != "catalog_comment"
+        && name != "declaration" && name != "sql_kind";
+}
+
 namespace {
 
 [[nodiscard]] std::string content_plain_text(const content_node& node) {
@@ -956,7 +1097,13 @@ namespace {
     boost::json::object object;
     object["canonical_id"] = html_escape(entity.canonical_id);
     object["domain"] = entity.domain == entity_domain::sql ? "sql" : "cpp";
-    object["kind"] = html_escape(entity_kind_name(entity.kind));
+    std::string display_kind(entity_kind_name(entity.kind));
+    if (entity.domain == entity_domain::sql) {
+        if (const auto kind = entity.attributes.find("sql_kind"); kind != entity.attributes.end())
+            display_kind = kind->second;
+        else if (display_kind.starts_with("sql_")) display_kind.erase(0,4);
+    }
+    object["kind"] = html_escape(display_kind);
     object["qualified_name"] = html_escape(entity.qualified_name);
     object["display_name"] = html_escape(entity.display_name);
     object["normalized_signature"] = html_escape(entity.normalized_signature);
@@ -976,13 +1123,26 @@ namespace {
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    boost::json::array fields;
+    for (const parameter_description& field : entity.fields) {
+        boost::json::object item;
+        item["name"] = html_escape(field.name);
+        item["type"] = html_escape(field.type);
+        item["default"] = field.default_value
+            ? boost::json::value(html_escape(*field.default_value))
+            : boost::json::value(nullptr);
+        item["description"] = html_escape(content_plain_text(field.description));
+        fields.push_back(std::move(item));
+    }
+    object["fields"] = std::move(fields);
+    boost::json::array enum_values;
+    for (const std::string& value : entity.enum_values) enum_values.push_back(boost::json::value(html_escape(value)));
+    object["enum_values"] = std::move(enum_values);
     // Emit SQL attributes and C++ qualifiers in map order.
     if (!entity.attributes.empty()) {
         boost::json::array attributes;
         for (const auto& [name, value] : entity.attributes) {
-            if (name == "refid") {
-                continue;  // internal Doxygen routing alias, never page content
-            }
+            if (!reference_attribute_visible(name)) continue;
             boost::json::object item;
             item["name"] = html_escape(name);
             item["value"] = html_escape(value);
@@ -1099,6 +1259,7 @@ namespace {
     if (name == "sql_schema") return entity_kind::sql_schema;
     if (name == "sql_type") return entity_kind::sql_type;
     if (name == "sql_function") return entity_kind::sql_function;
+    if (name == "sql_object") return entity_kind::sql_object;
     return entity_kind::overload_group;
 }
 
@@ -1286,6 +1447,26 @@ namespace {
             }
             entity.parameters.push_back(std::move(documented));
         }
+    }
+    if (const boost::json::value* field_items = object.if_contains("fields");
+        field_items != nullptr && field_items->is_array()) {
+        for (const boost::json::value& field_item : field_items->as_array()) {
+            const boost::json::object& fields = field_item.as_object();
+            parameter_description documented;
+            documented.name = std::string(fields.at("name").as_string());
+            documented.type = std::string(fields.at("type").as_string());
+            documented.default_value = as_optional_string(fields.at("default"));
+            if (const boost::json::value* description = fields.if_contains("description");
+                description != nullptr && description->is_array()) {
+                for (const boost::json::value& node : description->as_array()) {
+                    documented.description.push_back(deserialize_node(node));
+                }
+            }
+            entity.fields.push_back(std::move(documented));
+        }
+    }
+    if (const auto* values = object.if_contains("enum_values"); values && values->is_array()) {
+        for (const auto& value : values->as_array()) entity.enum_values.emplace_back(value.as_string());
     }
     entity.implementation_entity_id = object.if_contains("implementation_entity_id")
         ? as_optional_string(object.at("implementation_entity_id")) : std::nullopt;
@@ -1926,6 +2107,18 @@ namespace {
             parameters.push_back(std::move(item));
         }
         record["parameters"] = std::move(parameters);
+        boost::json::array fields;
+        for (const parameter_description& field : entity.fields) {
+            boost::json::object item;
+            item["name"] = field.name;
+            item["type"] = field.type;
+            item["description"] = content_plain_text(field.description);
+            fields.push_back(std::move(item));
+        }
+        record["fields"] = std::move(fields);
+        boost::json::array values;
+        for (const auto& value : entity.enum_values) values.push_back(boost::json::value(value));
+        record["enum_values"] = std::move(values);
         records[entity.canonical_id] = std::move(record);
     }
     root["entities"] = std::move(records);

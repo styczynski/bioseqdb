@@ -14,6 +14,7 @@ module bioseq.codegen.website:html_renderer;
 
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
+import :markdown;
 
 // Converts content_node trees to HTML for template *_html fields.
 // Escapes text and attribute values and checks link targets before writing
@@ -140,6 +141,63 @@ struct html_content_writer {
     std::string out;
     std::size_t code_ordinal{0};
     const content_node* terminal_result{nullptr};
+
+    void render_algorithm(const content_node& node) {
+        out += "<figure class=\"algorithm-panel\"><figcaption class=\"algorithm-bar\">"
+               "<span>Algorithm</span><span class=\"algorithm-language\">Pseudocode</span>"
+               "</figcaption><div class=\"algorithm-scroll\" tabindex=\"0\" "
+               "role=\"region\" aria-label=\"Algorithm listing\"><div class=\"algorithm-lines\">";
+        static const std::regex keyword(
+            R"(^(Require:|Ensure:|Else If|End Function|End Procedure|End While|End For|End If|For all|Function|Procedure|Repeat|Until|Return|While|Else|For|If)(?=\s|$))");
+        std::size_t cursor = 0;
+        std::size_t number = 1;
+        while (cursor < node.text.size()) {
+            const auto end = node.text.find('\n', cursor);
+            const std::string line = node.text.substr(cursor,
+                end == std::string::npos ? std::string::npos : end - cursor);
+            const auto first = line.find_first_not_of(' ');
+            const std::size_t indent = first == std::string::npos ? line.size() : first;
+            out += "<div class=\"algorithm-line\" data-line=\"" + std::to_string(number++)
+                + "\"><span class=\"algorithm-line-body\">";
+            append_escaped_text(out, std::string_view(line).substr(0, indent));
+            std::string body = line.substr(indent);
+            std::smatch match;
+            if (std::regex_search(body, match, keyword)) {
+                out += "<span class=\"algorithm-keyword\">";
+                append_escaped_text(out, match.str());
+                out += "</span>";
+                body.erase(0, match.length());
+            }
+            // MD4C supplies the same math, links, code and emphasis nodes as prose.
+            // Keep leading spaces outside the parser, which treats them as block syntax.
+            const auto leading = body.find_first_not_of(' ');
+            if (leading != std::string::npos) {
+                append_escaped_text(out, std::string_view(body).substr(0, leading));
+                body.erase(0, leading);
+            }
+            const auto comment = body.find("//");
+            const auto render_inline = [this](std::string_view text) {
+                const auto parsed = parse_markdown_content(text);
+                for (const auto& child : parsed.children) {
+                    if (child.kind == content_node_kind::paragraph) render_children(child.children);
+                    else render_node(child);
+                }
+            };
+            const auto statement = std::string_view(body).substr(0, comment);
+            render_inline(statement);
+            if (comment != std::string::npos) {
+                const auto last = statement.find_last_not_of(' ');
+                if (last != std::string_view::npos)
+                    append_escaped_text(out, statement.substr(last + 1));
+                out += "<span class=\"algorithm-comment\">";
+                render_inline(std::string_view(body).substr(comment));
+                out += "</span>";
+            }
+            out += "</span></div>";
+            cursor = end == std::string::npos ? node.text.size() : end + 1;
+        }
+        out += "</div></div></figure>";
+    }
 
     // LaTeX conversion needs anchors, complex tables and disclosure blocks.
     // Keep a small inert HTML vocabulary; scripts, styles, event handlers and
@@ -366,12 +424,22 @@ struct html_content_writer {
         case content_node_kind::strikethrough: wrap("del", node); break;
         case content_node_kind::highlight: wrap("mark", node); break;
         case content_node_kind::code_span:
-            out += "<code>";
+            out += "<code";
+            if (const auto ranges = attribute_or(node, "entity_ranges", ""); !ranges.empty()) {
+                out += " data-entity-ranges=\"";
+                append_escaped_attribute(out, ranges);
+                out += "\"";
+            }
+            out += ">";
             append_escaped_text(out, node.text);
             render_children(node.children);
             out += "</code>";
             break;
         case content_node_kind::code_block: {
+            if (attribute_or(node, "language", "") == "pseudocode") {
+                render_algorithm(node);
+                break;
+            }
             // Choose the code language and block ID. Ordinary blocks get a language
             // label and Copy butto, with a Prism class  for supported languages.
             const code_language_view language =
@@ -632,6 +700,12 @@ struct html_content_writer {
         }
         case content_node_kind::image: {
             const bool safe = is_safe_href(node.target);
+            const bool figure = safe && node.target.contains("/figures/");
+            if (figure) {
+                out += "<a class=\"project-figure-link\" aria-label=\"Open full-size diagram\" href=\"";
+                append_escaped_attribute(out, node.target);
+                out += "\">";
+            }
             out += "<img src=\"";
             append_escaped_attribute(out, safe ? node.target : std::string("#"));
             out += "\" alt=\"";
@@ -643,6 +717,7 @@ struct html_content_writer {
             for (const auto& child : node.children) collect(child, collect);
             append_escaped_attribute(out, alt);
             out += "\" loading=\"lazy\">";
+            if (figure) out += "</a>";
             break;
         }
         case content_node_kind::entity_link: {
@@ -741,10 +816,17 @@ struct html_content_writer {
         case content_node_kind::list_item: wrap("li", node); break;
         case content_node_kind::table: {
             const std::string_view table_class = attribute_or(node, "class", "");
+            const bool wide_result = table_class == "result-table"
+                && !node.children.empty() && node.children.front().children.size() > 4;
+            if (table_class == "result-table") {
+                out += "<div class=\"result-scroll\" tabindex=\"0\" role=\"region\" "
+                       "aria-label=\"SQL result table; scroll horizontally for more columns\">";
+            }
             out += "<table";
             if (!table_class.empty()) {
                 out += " class=\"";
                 append_escaped_attribute(out, table_class);
+                if (wide_result) out += " result-table-wide";
                 out.push_back('"');
             }
             if (table_class == "result-table") {
@@ -765,6 +847,7 @@ struct html_content_writer {
                 render_children(node.children);
             }
             out += "</table>";
+            if (table_class == "result-table") out += "</div>";
             break;
         }
         case content_node_kind::table_row: wrap("tr", node); break;

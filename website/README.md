@@ -41,3 +41,17 @@ can be served as the website root; publication to a remote host is a separate st
 execute on the private PostgreSQL cluster. Saved EXPLAIN plans remain examples
 from the author's README. Citation links lead to the bibliography page, and
 source references retain their repository, revision and line anchors.
+
+SQL reference pages are generated from every SQL declaration in the production
+extension manifests and every installed extension member in PostgreSQL's
+catalog. Doxygen comments above `bioseq_sql` annotations provide the summaries,
+parameter descriptions and details. Composite fields, enum values, domain
+constraints, routine signatures and PostgreSQL properties come from the catalog.
+Tables, views, operators, aggregates and other annotated SQL objects are included;
+objects in `bioseq_internal` are marked internal. The build checks the resulting
+reference against both inventories before rendering it.
+
+The `bioseq_sql_public_api` documentation group continues to control the existing
+runnable-example grants. Adding a reference page does not grant an example access
+to that SQL entity. SQL code blocks and inline SQL names use the same generated
+reference records for links and hover descriptions.

@@ -24,6 +24,16 @@
     </tbody></table></div>
   </section>
   {% endif %}
+  {% if entity.fields %}
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    {% for field in entity.fields %}<tr><td><code>{{ field.name }}</code></td><td><code>{{ field.type }}</code>{% if field.default %} = <code>{{ field.default }}</code>{% endif %}</td><td>{% if field.description %}{{ field.description }}{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+  {% endif %}
+  {% if entity.enum_values %}
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="values" data-toc data-title="Values">Values<a data-hash href="#values" class="dd-s0052">#</a></h2><ul>{% for value in entity.enum_values %}<li><code>{{ value }}</code></li>{% endfor %}</ul></section>
+  {% endif %}
   {% if entity.return_type %}<p class="design-return"><span>Returns</span><code>{{ entity.return_type }}</code></p>{% endif %}
 
   {% if entity.attributes %}

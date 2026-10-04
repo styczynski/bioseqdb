@@ -513,6 +513,17 @@ def _assert_authored_content_contract(version: str) -> None:
                                     "\n".join(sources.values())))
     _check(actual_figures == {item["svg"] for item in figures},
            "authored chapters do not embed every exported original figure")
+    _check(figure_manifest.get("theme", {}).get("background") == "transparent",
+           "project SVG exports lost their transparent website theme")
+    for item in figures:
+        path = _WEBSITE_ROOT / "static" / item["svg"]
+        _check(hashlib.sha256(path.read_bytes()).hexdigest() == item.get("svg_sha256"),
+               f"figure palette manifest is stale for {path.name}")
+    algorithms = [body for source in sources.values()
+                  for body in re.findall(r'^```pseudocode\n(.*?)^```[ \t]*$',
+                                         source, re.M | re.S)]
+    _check(len(algorithms) == 19 and sum(len(body.splitlines()) for body in algorithms) == 605,
+           "project algorithm inventory lost original listings or statements")
     provenance = json.loads((_WEBSITE_ROOT / "project_import_manifest.json").read_text())
     _check(provenance.get("entrypoint") == "papers/src/content/bioseqdb/thesis/main.tex",
            "chapter provenance lost the original main.tex entry point")
@@ -1031,24 +1042,36 @@ def _exercise_copy(page) -> None:
 
 
 def _exercise_code_entities(page, expected_ids: set[str]) -> None:
-    """Verify repeatable fence entity declarations became exact in-code hover
-    ranges after Prism without changing source text."""
-    code = page.locator("pre code[data-entity-ranges]").first
-    _check(code.count() == 1,
-           f"{page.url}: required code block has no entity-range metadata")
-    refs = code.locator("a.entity-ref[data-entity-id]")
-    ids = {refs.nth(i).get_attribute("data-entity-id") or ""
-           for i in range(refs.count())}
-    _check(ids == expected_ids,
-           f"decorated code entity IDs are {sorted(ids)}, expected {sorted(expected_ids)}")
-    _check(bool(refs.first.get_attribute("href")), "code entity-ref missing href")
-    text = code.text_content() or ""
-    for ref_id in expected_ids:
-        qualified = code.locator(f'a.entity-ref[data-entity-id="{ref_id}"]')
-        _check(qualified.count() == 1,
-               f"entity {ref_id} was split or decorated more than once")
-        _check(qualified.first.inner_text() in text,
-               f"entity decoration for {ref_id} altered the source spelling")
+    """Every catalog range survives syntax highlighting as one exact hover link."""
+    blocks = page.locator("code[data-entity-ranges]")
+    _check(blocks.count() > 0, f"{page.url}: SQL samples have no entity ranges")
+    ids = set()
+    for index in range(blocks.count()):
+        code = blocks.nth(index)
+        metadata = json.loads(code.get_attribute("data-entity-ranges") or "[]")
+        refs = code.locator("a.entity-ref[data-entity-id]")
+        _check(refs.count() == len(metadata), "SQL entity range was lost or duplicated")
+        text = code.text_content() or ""
+        for item in metadata:
+            # Generator offsets follow browser UTF-16 text ranges, not UTF-8 bytes.
+            encoded = text.encode("utf-16-le")
+            spelling = encoded[item["start"] * 2:(item["start"] + item["len"]) * 2].decode("utf-16-le")
+            matches = refs.filter(has_text=spelling)
+            _check(matches.count() > 0, f"SQL reference lost original spelling {spelling!r}")
+            ids.add(item["id"])
+        _check(refs.evaluate_all("refs => refs.every(ref => ref.href && ref.dataset.entityDataUrl)"),
+               "SQL reference missing route or hover dataset")
+    _check(expected_ids <= ids,
+           f"required SQL references missing: {sorted(expected_ids - ids)}")
+    for spelling in ("bioseq.seq", "bioseq.score", "mmsearch"):
+        refs = page.locator("code a.entity-ref").filter(has_text=spelling)
+        _check(refs.count() > 0, f"automatic SQL references missing {spelling}")
+        refs.first.focus()
+        page.wait_for_function("document.getElementById('entity-pop').getAttribute('aria-hidden') === 'false'")
+        _check(bool(page.locator("#entity-pop .entity-pop-body").inner_text().strip()),
+               f"empty SQL tooltip for {spelling}")
+        page.keyboard.press("Escape")
+        page.wait_for_function("document.getElementById('entity-pop').getAttribute('aria-hidden') === 'true'")
 
 
 _GOLDEN_TOKENS = _TESTS_ROOT / "fixtures" / "search_tokens_golden.json"
@@ -1145,44 +1168,25 @@ def _exercise_docs_search(page, request_urls: list[str], contract: dict,
 
 
 def _exercise_nav(page) -> None:
-    """The literal landing header changes to its legible glass state on scroll."""
-    nav = page.locator("header#nav")
-    _check(nav.count() == 1, "landing navigation header is missing")
-
-    def wait_for_nav_state(predicate, description: str) -> dict:
-        state = {"scrollY": -1, "background": ""}
-        for _ in range(120):
-            state = page.evaluate(
-                """() => ({
-                  scrollY: window.scrollY,
-                  background: document.getElementById('nav')?.style.background || ''
-                })""")
-            if predicate(state):
-                return state
-            page.wait_for_timeout(25)
-        raise AssertionFail(f"{description}: final state {state}")
-
-    # The supplied design deliberately enables smooth scrolling.  Override that
-    # presentation detail while exercising the nav state machine, then wait on
-    # the state itself instead of a timing-sensitive animation interval.
-    page.evaluate(
-        """() => {
-          document.documentElement.style.setProperty('scroll-behavior', 'auto', 'important');
-          window.scrollTo(0, 120);
-        }""")
-    wait_for_nav_state(
-        lambda state: "rgba" in state["background"],
-        "landing navigation did not reach its scrolled state")
-    _check("rgba" in (nav.evaluate("element => element.style.background") or ""),
-           "landing navigation did not react to page scroll")
-    page.evaluate("() => window.scrollTo(0, 0)")
-    wait_for_nav_state(
-        lambda state: state["scrollY"] == 0 and state["background"] == "transparent",
-        "landing navigation did not reach its restored state")
-    _check(nav.evaluate("element => element.style.background") == "transparent",
-           "landing navigation did not restore its top-of-page state")
-    page.evaluate(
-        "() => document.documentElement.style.removeProperty('scroll-behavior')")
+    """The common header remains legible and reachable while the page scrolls."""
+    nav = page.locator("header#dnav.site-header")
+    _check(nav.count() == 1, "shared navigation header is missing")
+    page.evaluate("""() => {
+      document.documentElement.style.setProperty('scroll-behavior', 'auto', 'important');
+      window.scrollTo(0, 120);
+    }""")
+    page.wait_for_timeout(40)
+    state = nav.evaluate("""node => ({top: node.getBoundingClientRect().top,
+      background: getComputedStyle(node).backgroundColor,
+      position: getComputedStyle(node).position})""")
+    _check(abs(state["top"]) <= 1 and state["position"] == "sticky",
+           f"shared header did not stay at the viewport top: {state}")
+    _check(state["background"] == "rgba(7, 19, 32, 0.86)",
+           "shared header lost its readable design background")
+    page.evaluate("""() => {
+      window.scrollTo(0, 0);
+      document.documentElement.style.removeProperty('scroll-behavior');
+    }""")
 
 
 def _exercise_version_selector(page, request_urls: list[str]) -> None:
@@ -1328,6 +1332,9 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
         _check(type_labels.count() == expected_columns
                and all(bool(label.strip()) for label in type_labels.all_text_contents()),
                f"{tutorial['slug']}: result table omits PostgreSQL column type labels")
+        _check(tables.nth(index).evaluate(
+            "table => table.classList.contains('result-table-wide')") == (expected_columns > 4),
+            f"{tutorial['slug']}: wide SQL result classification differs from its column count")
     body_text = page.locator("main#doc-main").inner_text()
     _check(body_text.count("Executed against Bioseq extension")
            == len(tutorial.get("sql_examples", [])),
@@ -1349,6 +1356,130 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
                    "cells => cells.every((cell) => "
                    "getComputedStyle(cell).whiteSpace === 'pre-wrap')"),
                f"{tutorial['slug']}: EXPLAIN rows lost pre-wrap rendering")
+    _assert_content_scroll_layout(page, tutorial["slug"])
+
+
+def _assert_content_scroll_layout(page, label: str) -> None:
+    """Wide content keeps readable columns/lines inside a keyboard-scrollable region."""
+    _check(page.locator("table.result-table, .algorithm-lines").evaluate_all(
+        "nodes => nodes.every(node => node.parentElement.matches('.result-scroll, .algorithm-scroll'))"),
+        f"{label}: results or algorithms lack their local scroll wrapper")
+    regions = page.locator(".result-scroll, .algorithm-scroll")
+    states = regions.evaluate_all("""nodes => nodes.map(node => {
+        const oldLeft = node.scrollLeft;
+        node.scrollLeft = node.scrollWidth;
+        const canScroll = node.scrollLeft > 0;
+        node.scrollLeft = oldLeft;
+        return {overflow: getComputedStyle(node).overflowX,
+                tabindex: node.tabIndex, role: node.getAttribute('role'),
+                label: node.getAttribute('aria-label'),
+                client: node.clientWidth, scroll: node.scrollWidth, canScroll};
+    })""")
+    for state in states:
+        _check(state["overflow"] == "auto" and state["tabindex"] == 0
+               and state["role"] == "region" and state["label"],
+               f"{label}: wide content lost its accessible scroll container: {state}")
+        if state["scroll"] > state["client"] + 1:
+            _check(state["canScroll"], f"{label}: overflowing content cannot scroll locally")
+    widths = page.locator(".result-table-wide th, .result-table-wide td").evaluate_all(
+        """cells => cells.map(cell => ({width: cell.getBoundingClientRect().width,
+            wrap: getComputedStyle(cell).overflowWrap,
+            break: getComputedStyle(cell).wordBreak}))""")
+    _check(all(cell["width"] >= 143 and cell["wrap"] == "normal"
+               and cell["break"] == "normal" for cell in widths),
+           f"{label}: wide SQL result columns collapse or break one character at a time")
+    _check(page.locator(".algorithm-line-body").evaluate_all(
+        "nodes => nodes.every(node => getComputedStyle(node).whiteSpace === 'pre')"),
+        f"{label}: algorithm indentation or line spacing collapses")
+
+
+def _exercise_algorithms(page, source: str, slug: str) -> None:
+    expected = re.findall(r'^```pseudocode\n(.*?)^```[ \t]*$', source, re.M | re.S)
+    panels = page.locator("main#doc-main .algorithm-panel")
+    _check(panels.count() == len(expected),
+           f"{slug}: original algorithms were omitted or rendered as ordinary code")
+    for index, body in enumerate(expected):
+        panel = panels.nth(index)
+        lines = body.splitlines()
+        rendered = panel.locator(".algorithm-line")
+        _check(rendered.count() == len(lines),
+               f"{slug}: algorithm {index + 1} lost source statements")
+        state = panel.evaluate("""panel => ({
+            radius: parseFloat(getComputedStyle(panel).borderRadius),
+            lines: [...panel.querySelectorAll('.algorithm-line')].map(line => ({
+                number: line.dataset.line,
+                gutter: getComputedStyle(line, '::before').content,
+                indent: line.querySelector('.algorithm-line-body').textContent.match(/^ */)[0].length,
+            }))})""")
+        _check(state["radius"] >= 10, f"{slug}: algorithm {index + 1} lost its rounded panel")
+        for number, (original, actual) in enumerate(zip(lines, state["lines"]), 1):
+            _check(actual["number"] == str(number) and actual["gutter"].strip('"') == str(number),
+                   f"{slug}: algorithm {index + 1} line numbers are missing or out of order")
+            indent = len(original) - len(original.lstrip(" "))
+            _check(actual["indent"] == indent,
+                   f"{slug}: algorithm {index + 1}, line {number} lost nesting indentation")
+        original_math = [value.strip() for value in re.findall(r'\$([^$\n]+)\$', body)]
+        rendered_math = [value.strip() for value in panel.locator(
+            '.project-math annotation[encoding="application/x-tex"]').all_text_contents()]
+        _check(rendered_math == original_math,
+               f"{slug}: algorithm {index + 1} changed or omitted a mathematical expression")
+        keywords = panel.locator(".algorithm-keyword")
+        _check(keywords.count() > 0, f"{slug}: algorithm {index + 1} lacks control-flow highlighting")
+        _check(keywords.evaluate_all(
+            "nodes => nodes.every(node => getComputedStyle(node).color === 'rgb(244, 137, 79)')"),
+            f"{slug}: algorithm {index + 1} lost its website keyword palette")
+
+
+def _exercise_figure_viewer(page) -> None:
+    """Transparent SVGs remain readable and zoomable on a dark modal surface."""
+    original_viewport = page.viewport_size
+    original_url = page.url
+    link = page.locator("main#doc-main a.project-figure-link").first
+    _check(link.count() == 1, "project diagram has no full-size viewer link")
+    target = link.evaluate("node => node.href")
+    alt = link.locator("img").get_attribute("alt")
+    for width in (1280, 360):
+        page.set_viewport_size({"width": width, "height": 900})
+        link.focus()
+        link.locator("img").click()
+        dialog = page.locator("dialog.figure-viewer[open]")
+        dialog.wait_for(state="visible", timeout=3000)
+        image = dialog.locator(".figure-viewer-scroll img")
+        image.evaluate("node => node.decode()")
+        _check(page.url == original_url and image.evaluate("node => node.src") == target,
+               "full-size viewer changed the SVG URL or navigated away from its chapter")
+        _check(image.get_attribute("alt") == alt
+               and dialog.get_attribute("aria-label") == "Full-size diagram",
+               "full-size viewer lost the accessible diagram description")
+        download = dialog.locator("a[download]")
+        _check(download.count() == 1 and download.evaluate("node => node.href") == target,
+               "full-size viewer does not offer the original SVG download")
+        state = dialog.evaluate("""node => {
+            const box = node.getBoundingClientRect();
+            const scroll = node.querySelector('.figure-viewer-scroll');
+            const image = scroll.querySelector('img');
+            scroll.scrollLeft = scroll.scrollWidth;
+            const moved = scroll.scrollLeft > 0;
+            scroll.scrollLeft = 0;
+            return {dark: getComputedStyle(node).backgroundColor === 'rgb(7, 19, 32)',
+                    contained: box.left >= 0 && box.top >= 0
+                        && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
+                    imageWidth: image.getBoundingClientRect().width,
+                    overflow: getComputedStyle(scroll).overflowX, moved};
+        }""")
+        _check(state["dark"] and state["contained"] and state["imageWidth"] >= 959,
+               f"full-size viewer lost its dark, enlarged, viewport-contained presentation at {width}px")
+        if width == 360:
+            _check(state["overflow"] == "auto" and state["moved"],
+                   "mobile full-size diagram cannot scroll horizontally")
+        page.keyboard.press("Escape")
+        dialog.wait_for(state="hidden", timeout=3000)
+        page.wait_for_function(
+            "link => document.activeElement === link", arg=link.element_handle(), timeout=3000)
+        _check(page.locator("dialog.figure-viewer").count() == 0,
+               "closing the diagram left an orphaned modal")
+    if original_viewport:
+        page.set_viewport_size(original_viewport)
 
 
 def _exercise_project_content(page, tutorial: dict, base_path: str, version: str) -> None:
@@ -1386,8 +1517,14 @@ def _exercise_project_content(page, tutorial: dict, base_path: str, version: str
            f"{slug}: an original SVG failed to load")
     if expected_figures:
         _check(figures.evaluate_all(
-            "images => images.every(image => getComputedStyle(image).backgroundColor === 'rgb(255, 255, 255)')"),
-            f"{slug}: original figure text needs its light background")
+            """images => images.every(image => {
+                const style = getComputedStyle(image);
+                return style.backgroundColor === 'rgba(0, 0, 0, 0)' && style.padding === '0px'
+                    && Math.abs(image.getBoundingClientRect().width
+                        - image.closest('p').getBoundingClientRect().width) <= 1;
+            })"""),
+            f"{slug}: themed figures lost their transparent full-column presentation")
+    _exercise_algorithms(page, source, slug)
     bibliography = _public_route(base_path, f"{version}/tutorials/bibliography/")
     citations = page.locator('main#doc-main a[href*="#ref-"]')
     for index in range(citations.count()):
@@ -1401,6 +1538,7 @@ def _exercise_project_content(page, tutorial: dict, base_path: str, version: str
            f"{slug}: project mathematics was left as raw LaTeX")
     if slug == "project_biology":
         _check(math.count() > 0, "biology formulas were not rendered")
+        _exercise_figure_viewer(page)
     if slug == "project_postgres_custom_scan":
         links = page.locator('main#doc-main a[href^="https://github.com/"][href*="/blob/"]')
         _check(links.count() >= 5, "original PostgreSQL source references were lost")
@@ -1431,8 +1569,8 @@ def _assert_landing_routes(page, base_path: str, version: str) -> None:
     first = _public_route(
         base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/")
     read_links = page.locator("a", has_text="Read the docs")
-    _check(read_links.count() == 3,
-           f"supplied landing has three Read the docs links, got {read_links.count()}")
+    _check(read_links.count() == 2,
+           f"landing has two content Read the docs links below its common header, got {read_links.count()}")
     for index in range(read_links.count()):
         _check(read_links.nth(index).get_attribute("href") == first,
                f"landing Read the docs must target first tutorial {first}")
@@ -1480,7 +1618,7 @@ def _assert_literal_design_structure(page, label: str, design: dict) -> None:
         pairs = (
             ("data-screen-label:BioseqDB landing",
              '[data-screen-label="BioseqDB landing"]'),
-            ("id:nav", "#nav"), ("id:annotate", "#annotate"),
+            ("id:annotate", "#annotate"),
             ("id:workflow", "#workflow"), ("id:cta", "#cta"),
         )
     elif label == "benchmarks":
@@ -1489,7 +1627,6 @@ def _assert_literal_design_structure(page, label: str, design: dict) -> None:
         pairs = (
             ("data-screen-label:BioseqDB benchmarks",
              '[data-screen-label="BioseqDB benchmarks"]'),
-            ("id:bhead", "#bhead"),
             ("data-bgrid:first", "[data-bgrid]"),
             ("data-bnav:first", "[data-bnav]"),
             ("data-ctrls:first", "[data-ctrls]"),
@@ -1501,11 +1638,9 @@ def _assert_literal_design_structure(page, label: str, design: dict) -> None:
         pairs = (
             ("data-screen-label:BioseqDB documentation",
              '[data-screen-label="BioseqDB documentation"]'),
-            ("id:dnav", "#dnav"), ("data-bodygrid:first", "[data-bodygrid]"),
-            ("id:sidebar", "#sidebar"), ("data-search-wrap:first", "[data-search-wrap]"),
-            ("data-search-box:first", "[data-search-box]"),
+            ("data-bodygrid:first", "[data-bodygrid]"),
+            ("id:sidebar", "#sidebar"),
             ("data-rightrail:first", "[data-rightrail]"),
-            ("id:doc-search", "#doc-search"), ("id:search-dd", "#search-dd"),
         )
     for source_key, selector in pairs:
         node = page.locator(selector)
@@ -1547,13 +1682,14 @@ def _compare_design_style(page, actual_selector: str, reference: dict,
 
 
 def _exercise_design_style_parity(page, label: str, design: dict) -> None:
+    # The requested common header intentionally replaces the three prototypes;
+    # all page-specific content retains its original design declarations.
+    _compare_design_style(
+        page, "#dnav", design["docs"]["id:dnav"],
+        ("position", "top", "zIndex", "backgroundColor", "borderBottomWidth",
+         "borderBottomColor", "backdropFilter"), "shared navigation")
     if label == "landing":
         records = design["landing"]
-        _compare_design_style(
-            page, "#nav", records["id:nav"],
-            ("position", "top", "zIndex", "backgroundColor", "borderBottomWidth",
-             "borderBottomColor", "backdropFilter"),
-            "landing navigation")
         _compare_design_style(
             page, "#annotate", records["id:annotate"],
             ("display", "gap", "alignItems", "position"), "landing query anatomy")
@@ -1596,11 +1732,6 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
 
     if label == "benchmarks":
         records = design["benchmarks"]
-        _compare_design_style(
-            page, "#bhead", records["id:bhead"],
-            ("position", "top", "zIndex", "backgroundColor",
-             "borderBottomWidth", "borderBottomColor", "backdropFilter"),
-            "benchmark header")
         _compare_design_style(
             page, "[data-bgrid]", records["data-bgrid:first"],
             ("display", "alignItems"), "benchmark body grid")
@@ -1933,11 +2064,10 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     _check(f"{benchmark['benchmark_count']} benchmarks" in
            page.locator("#bhead").inner_text(), "benchmark status count is stale")
     for label, expected in {
-        "Docs": _public_route(base_path, f"{version}/"),
-        "Product": _public_route(base_path, ""),
+        "Docs": _public_route(base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/"),
         "Benchmarks": _public_route(base_path, "benchmarks/"),
     }.items():
-        link = page.locator("#bhead nav a", has_text=label)
+        link = page.locator("#dnav nav a", has_text=label)
         _check(link.count() == 1 and urlsplit(link.get_attribute("href")).path == expected,
                f"benchmark {label} navigation lost the configured mount")
     controls = page.locator("[data-ctrls] select")
@@ -2041,17 +2171,29 @@ def _exercise_responsive(page, label: str) -> None:
             _check(menu.get_attribute("aria-expanded") == "false"
                    and not backdrop.is_visible(),
                    f"{label}: Escape did not close the docs drawer")
-        if label not in ("landing", "benchmarks"):
-            clipped_controls = page.locator(
-                "#dnav [data-menu], #dnav a[data-nav], #dnav [data-topnav], "
-                "#dnav [data-search-box], #doc-search, #dnav [data-ver-wrap], "
-                "#dnav [data-ghbtn]").evaluate_all("""nodes => nodes.filter(node => {
-                    const box = node.getBoundingClientRect();
-                    return box.width > 0 && box.height > 0
-                        && (box.left < 0 || box.right > innerWidth + 1);
-                }).map(node => node.id || node.className)""")
-            _check(not clipped_controls,
-                   f"{label}: header controls clipped at {width}px: {clipped_controls}")
+        header = page.locator("header#dnav.site-header")
+        _check(header.count() == 1, f"{label}: shared header missing at {width}px")
+        for text in ("Docs", "Benchmarks"):
+            _check(header.get_by_role("link", name=text, exact=True).is_visible(),
+                   f"{label}: {text} navigation hidden at {width}px")
+        _check(header.locator("#doc-search").is_visible(),
+               f"{label}: common search hidden at {width}px")
+        geometry = header.locator(".site-header-inner > *").evaluate_all("""nodes => {
+          const boxes = nodes.map(node => ({name: node.className,
+            rect: node.getBoundingClientRect()})).filter(x => x.rect.width && x.rect.height);
+          const clipped = boxes.filter(x => x.rect.left < 0 || x.rect.right > innerWidth + 1);
+          const overlapping = [];
+          boxes.forEach((a, i) => boxes.slice(i + 1).forEach(b => {
+            if (Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left) > 1 &&
+                Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top) > 1)
+              overlapping.push([a.name, b.name]);
+          }));
+          return {clipped: clipped.map(x => x.name), overlapping};
+        }""")
+        _check(not geometry["clipped"] and not geometry["overlapping"],
+               f"{label}: header controls overlap/clip at {width}px: {geometry}")
+        if label.startswith("tutorial:"):
+            _assert_content_scroll_layout(page, label)
         if label == "benchmarks":
             columns = page.locator("[data-bgrid]").evaluate(
                 "node => getComputedStyle(node).gridTemplateColumns")
@@ -2203,6 +2345,12 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
             h1 = page.locator("h1")
             _check(h1.count() == 1, f"{label}: expected exactly one <h1>, got {h1.count()}")
 
+            if label in ("landing", "benchmarks"):
+                _exercise_docs_search(
+                    page, request_urls, contract,
+                    _public_route(base_path,
+                                  f"{version}/tutorials/project_postgres_custom_scan/"))
+                _exercise_version_selector(page, request_urls)
             if label == "landing":
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])

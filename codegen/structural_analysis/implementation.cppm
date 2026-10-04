@@ -1322,6 +1322,11 @@ struct scope_region {
             current = section::details;
         } else if (command("param")) {
             std::string rest = after_command("param");
+            if (rest.starts_with('[')) {
+                const auto direction_end = rest.find(']');
+                if (direction_end != std::string::npos)
+                    rest = std::string{trim_view(std::string_view{rest}.substr(direction_end + 1))};
+            }
             const std::size_t split = rest.find_first_of(" \t");
             result.parameters.push_back(documented_parameter{
                 .name = split == std::string::npos
@@ -6436,6 +6441,20 @@ class structural_consumer final : public clang::ASTConsumer {
                 subject_begin = std::min(
                     subject_begin,
                     attribute.spelling_range.begin.byte_offset);
+            }
+            // Individual attribute spelling ranges may start after the opening
+            // [[ token. Associate preceding comments with the complete block,
+            // including when several result/function annotations are stacked.
+            for (const detail::attribute_block& block : raw_blocks) {
+                const bool belongs_to_declaration = std::ranges::any_of(
+                    declaration.attributes, [&block](const attribute_record& attribute) {
+                        return attribute.spelling_range.begin.byte_offset
+                                   >= block.range.begin.byte_offset
+                            && attribute.spelling_range.end.byte_offset
+                                   <= block.range.end.byte_offset;
+                    });
+                if (belongs_to_declaration) subject_begin = std::min(
+                    subject_begin, block.range.begin.byte_offset);
             }
             std::vector<documentation_record> lexical_candidates;
             lexical_candidates.push_back(

@@ -195,7 +195,7 @@ enum class entity_domain : std::uint8_t { cpp, sql };
 /// @brief Entity  kind used for page routes, coverage counts, and search.
 enum class entity_kind : std::uint8_t {
     namespace_, module, class_, struct_, union_, enum_, enum_value, concept_,
-    type_alias, function, variable, sql_schema, sql_type, sql_function,
+    type_alias, function, variable, sql_schema, sql_type, sql_function, sql_object,
     overload_group
 };
 
@@ -234,6 +234,8 @@ struct reference_entity {
     std::string summary_text;
     std::vector<content_node> detail_content;
     std::vector<parameter_description> parameters;
+    std::vector<parameter_description> fields;
+    std::vector<std::string> enum_values;
     std::optional<std::string> return_type;
     std::optional<std::string> module_name;
     std::optional<source_span> declaration;

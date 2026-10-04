@@ -55,6 +55,7 @@ struct reference_coverage_report {
     case entity_kind::sql_schema: return "schema";
     case entity_kind::sql_type: return "type";
     case entity_kind::sql_function: return "function";
+    case entity_kind::sql_object: return "object";
     case entity_kind::overload_group: return "overload_group";
     }
     return "entity";

@@ -222,6 +222,12 @@ void rewrite_entity_link_routes(
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
     const std::map<std::string, std::string, std::less<>>& route_by_id,
     const std::string& tooltip_url);
+void decorate_code_entity_ranges(
+    std::vector<content_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::map<std::string, std::string, std::less<>>& qualified_by_id,
+    const std::string& tooltip_url,
+    const std::string& where);
 }  // namespace
 
 /// @brief Checks parser, renderer, and serializer integration.
@@ -229,6 +235,31 @@ void rewrite_entity_link_routes(
 /// Exercises Markdown and Doxygen parsing, entity matching, JSON output, and
 /// templates with, small examples. PostgreSQL execution is tested  separately.
 void verify_website_pipeline() {
+    const auto algorithm = parse_markdown_content(
+        "```pseudocode\nRequire: $x$\nFor $i$\n  If $x_i$\n    Return `score` // saved score\n  End If\nEnd For\n```\n");
+    const auto algorithm_html = render_content_html(algorithm.children);
+    expect(algorithm_html.contains("class=\"algorithm-panel\"")
+        && algorithm_html.contains("data-line=\"6\"")
+        && algorithm_html.contains("algorithm-line-body\">    <span")
+        && algorithm_html.contains("class=\"algorithm-keyword\">Return")
+        && algorithm_html.contains("class=\"algorithm-comment\"")
+        && algorithm_html.contains("data-math=\"inline\">x_i"),
+        "algorithm listing keeps indentation, line numbers, keywords, math and comments");
+    std::vector<content_node> linked_sql = parse_markdown_content(
+        "```sql\n-- λ bioseq.score(ignore)\nSELECT bioseq.score(t), bioseq.score(t), mmsearch(t,q), 'bioseq.score(t)', $$mmsearch(t,q)$$;\n```\n\n`bioseq.seq`\n").children;
+    const std::map<std::string, std::string, std::less<>> names{
+        {"sql:function:bioseq.score(anyelement)", "bioseq.score"},
+        {"sql:overload_group:public.mmsearch", "public.mmsearch"},
+        {"sql:type:bioseq.seq", "bioseq.seq"}};
+    const std::map<std::string, std::string, std::less<>> routes{
+        {"sql:function:bioseq.score(anyelement)", "/score/"},
+        {"sql:overload_group:public.mmsearch", "/mmsearch/"},
+        {"sql:type:bioseq.seq", "/seq/"}};
+    decorate_code_entity_ranges(linked_sql, routes, names, "/entities.json", "self-test");
+    const auto ranges = boost::json::parse(linked_sql.front().attributes.at("entity_ranges")).as_array();
+    expect(ranges.size() == 3 && ranges[0].as_object().at("start").as_int64() == 33
+        && render_content_html(linked_sql).contains("sql:type:bioseq.seq"),
+        "automatic SQL links repeat names, resolve bare functions, skip comments/literals, and count UTF-16 offsets");
     // MD4C.
     const content_node document =
         parse_markdown_content("# Sequence type\n\nThe `bioseq.seq` column stores DNA.\n");
@@ -426,7 +457,7 @@ void verify_website_pipeline() {
                   "brief": "Aligns a query sequence to a target sequence.",
                   "details": "Returns the best alignment.",
                   "parameters": [
-                    {"name":"query","sql_type":"bioseq.seq","has_default":false},
+                    {"name":"query","sql_type":"bioseq.seq","has_default":false,"documentation":"Query sequence."},
                     {"name":"target","sql_type":"bioseq.seq","has_default":false}
                   ],
                   "result_sql_type": "double precision"
@@ -462,6 +493,42 @@ void verify_website_pipeline() {
                     "sql:guc-value:bioseq.external.enabled")
                     != sql_manifest.stable_identities.end(),
            "SQL manifest derives public catalog and internal ACL identities");
+    expect(sql_manifest.documentation_entities.size() == 2
+               && sql_manifest.documentation_schemas
+                    == std::vector<std::string>{"bioseq_internal", "public"}
+               && sql_manifest.entities.front().parameters.front().description.front().text
+                    == "Query sequence.",
+           "automatic documentation preserves source parameters without expanding runnable ACL grants");
+    reference_entity typed_entity;
+    typed_entity.domain = entity_domain::sql;
+    typed_entity.kind = entity_kind::sql_type;
+    typed_entity.canonical_id = "sql:type:bioseq.options";
+    typed_entity.qualified_name = "bioseq.options";
+    typed_entity.fields.push_back(parameter_description{
+        .name = "kmer_size", .type = "integer", .default_value = "15",
+        .description = {content_node{.kind = content_node_kind::text,
+                                     .text = "Length of each minimizer k-mer."}},
+    });
+    typed_entity.enum_values = {"first", "second"};
+    const auto restored_type = deserialize_reference_entities(
+        serialize_sql_entities({typed_entity}));
+    const auto type_tooltip = parse_json_value(serialize_reference_tooltips({typed_entity}));
+    const auto& tooltip_record = type_tooltip.at("entities").at(typed_entity.canonical_id);
+    expect(restored_type.size() == 1 && restored_type.front().fields.size() == 1
+               && restored_type.front().fields.front().type == "integer"
+               && restored_type.front().fields.front().default_value == "15"
+               && restored_type.front().enum_values == typed_entity.enum_values
+               && tooltip_record.at("fields").as_array().size() == 1
+               && tooltip_record.at("enum_values").as_array().size() == 2,
+           "SQL fields and enum values survive model serialization and tooltip publication");
+    typed_entity.attributes["stable_identity"] = typed_entity.canonical_id;
+    typed_entity.attributes["sql_manifest_script_sha256"] = "internal-hash";
+    typed_entity.attributes["constraint positive"] = "CHECK (kmer_size > 0)";
+    const std::string public_type_view = serialize_reference_entity(typed_entity);
+    expect(public_type_view.find("internal-hash") == std::string::npos
+               && public_type_view.find("stable_identity") == std::string::npos
+               && public_type_view.find("constraint positive") != std::string::npos,
+           "entity pages retain useful constraints and omit build identity metadata");
     const auto sql_manifest_rejects = [](std::string_view json) {
         try {
             (void)parse_sql_manifest_public_projection(
@@ -2266,172 +2333,130 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
         model.staged_extension_sha256 = found->second;
     }
 
-    // Match public manifest entries to their exact installed catalog IDs.
-    // Check names, comments, and, result types against the catalog, then use the
-    // manifes documentation for each public page. Keep other entries as inventory.
+    // Documentation follows every generated declaration and live extension member.
+    // The public manifest projection remains the separate runnable-example ACL.
     if (!options.contains("sql-manifest")) {
-        throw std::runtime_error(
-            "website SQL projection requires the generated --sql-manifest");
+        throw std::runtime_error("website SQL projection requires the generated --sql-manifest");
     }
     const std::vector<loaded_sql_manifest_projection> manifests =
         load_sql_manifest_projections(options);
-    struct public_manifest_binding {
+    struct manifest_binding {
         const sql_manifest_public_entity* entity;
         const sql_manifest_public_projection* projection;
     };
-    std::map<std::string, public_manifest_binding, std::less<>>
-        public_by_installed_identity;
+    std::map<std::string, manifest_binding, std::less<>> documented_by_catalog_identity;
+    const auto catalog_identity_key = [](std::string_view identity) {
+        const auto open = identity.find('(');
+        if (open == std::string_view::npos || !identity.ends_with(')')) return std::string(identity);
+        std::string result(identity.substr(0,open + 1));
+        const auto arguments = bioseq::codegen::sql::parse_routine_argument_declarations(
+            identity.substr(open + 1, identity.size() - open - 2));
+        for (const auto& argument : arguments) {
+            const auto type = canonical_result_type_key(argument.sql_type);
+            result += std::to_string(type.size()) + ':' + type;
+        }
+        result += ')';
+        return result;
+    };
     for (const loaded_sql_manifest_projection& manifest : manifests) {
         model.inputs.push_back(source_input{
-            .path = "generated/" + manifest.projection.extension_name
-                + "-sql-manifest.json",
-            .content_hash =
-                bioseq::common::sha256_hex(manifest.text),
+            .path = "generated/" + manifest.projection.extension_name + "-sql-manifest.json",
+            .content_hash = bioseq::common::sha256_hex(manifest.text),
         });
-        for (const sql_manifest_public_entity& entity :
-             manifest.projection.entities) {
-            public_by_installed_identity.emplace(
-                entity.installed_identity,
-                public_manifest_binding{
-                    .entity = std::addressof(entity),
-                    .projection = std::addressof(manifest.projection),
-                });
+        for (const sql_manifest_public_entity& entity : manifest.projection.documentation_entities) {
+            documented_by_catalog_identity.emplace(catalog_identity_key(entity.catalog_identity),
+                manifest_binding{std::addressof(entity), std::addressof(manifest.projection)});
         }
     }
-
-    std::vector<reference_entity> kept;
-    std::vector<reference_entity> omitted;
     std::set<std::string, std::less<>> matched;
-    const auto display_result_type = [](std::string value) {
-        if (value == "float8") return std::string{"double precision"};
-        if (value == "int8") return std::string{"bigint"};
-        if (value == "int4") return std::string{"integer"};
-        if (value == "int2") return std::string{"smallint"};
-        if (value == "bool") return std::string{"boolean"};
-        if (value == "varchar") return std::string{"character varying"};
-        if (value == "bpchar") return std::string{"character"};
-        return value;
-    };
-    for (reference_entity& entity : model.sql_entities) {
-        const auto selected =
-            public_by_installed_identity.find(entity.canonical_id);
-        if (selected == public_by_installed_identity.end()) {
-            omitted.push_back(std::move(entity));
-            continue;
+    const auto apply_source_documentation = [](reference_entity& entity,
+            const sql_manifest_public_entity& source,
+            const sql_manifest_public_projection& projection) {
+        if (!source.name.empty()) entity.display_name = source.name;
+        if (!source.brief.empty()) entity.summary_text = source.brief;
+        if (!source.details.empty()) entity.detail_content = {content_node{
+            .kind = content_node_kind::paragraph,
+            .children = {content_node{.kind = content_node_kind::text, .text = source.details}},
+        }};
+        // Preserve catalog argument types/defaults while attaching authored names and docs.
+        if (entity.parameters.empty()) entity.parameters = source.parameters;
+        else for (std::size_t index = 0; index < entity.parameters.size()
+                 && index < source.parameters.size(); ++index) {
+            entity.parameters[index].name = source.parameters[index].name;
+            entity.parameters[index].description = source.parameters[index].description;
         }
-        const sql_manifest_public_entity& manifest_entity =
-            *selected->second.entity;
-        const std::string identity_prefix =
-            "sql:" + manifest_entity.kind + ":";
-        if (!manifest_entity.installed_identity.starts_with(
-                identity_prefix)) {
-            throw std::runtime_error(
-                "SQL manifest identity/kind mismatch for '"
-                + manifest_entity.installed_identity + "'");
+        for (parameter_description& field : entity.fields) {
+            const auto authored = std::ranges::find(source.fields, field.name,
+                &parameter_description::name);
+            if (authored != source.fields.end() && !authored->description.empty())
+                field.description = authored->description;
         }
-        const std::string identity_body =
-            manifest_entity.installed_identity.substr(
-                identity_prefix.size());
-        const std::size_t signature_start =
-            identity_body.find('(');
-        const std::string manifest_qualified_name =
-            identity_body.substr(0, signature_start);
-        const entity_kind expected_kind =
-            manifest_entity.kind == "type"
-                ? entity_kind::sql_type
-                : entity_kind::sql_function;
-        if (entity.kind != expected_kind) {
-            throw std::runtime_error(
-                "SQL manifest/catalog kind mismatch for '"
-                + manifest_entity.installed_identity + "'");
-        }
-        if (entity.qualified_name != manifest_qualified_name
-            || (expected_kind == entity_kind::sql_function
-                && entity.normalized_signature != identity_body)) {
-            throw std::runtime_error(
-                "SQL manifest/catalog identity-shape mismatch for '"
-                + manifest_entity.installed_identity + "'");
-        }
-        const auto catalog_comment =
-            entity.attributes.find("catalog_comment");
-        if (catalog_comment == entity.attributes.end()
-            || catalog_comment->second != manifest_entity.brief) {
-            throw std::runtime_error(
-                "SQL manifest/catalog COMMENT mismatch for '"
-                + manifest_entity.installed_identity + "'");
-        }
-        if (!manifest_entity.result_sql_type.empty()
-            && entity.return_type
-            && canonical_result_type_key(*entity.return_type)
-                   != canonical_result_type_key(
-                       manifest_entity.result_sql_type)) {
-            throw std::runtime_error(
-                "SQL manifest/catalog result-type mismatch for '"
-                + manifest_entity.installed_identity
-                + "': manifest has '"
-                + manifest_entity.result_sql_type
-                + "', catalog has '" + *entity.return_type + "'");
-        }
-        matched.insert(entity.canonical_id);
-        entity.qualified_name = manifest_qualified_name;
-        entity.display_name = manifest_entity.name;
-        entity.normalized_signature =
-            expected_kind == entity_kind::sql_function
-                ? identity_body
-                : manifest_qualified_name;
-        entity.summary_text = manifest_entity.brief;
-        entity.detail_content.clear();
-        if (!manifest_entity.details.empty()) {
-            entity.detail_content.push_back(content_node{
-                .kind = content_node_kind::paragraph,
-                .children = {
-                    content_node{
-                        .kind = content_node_kind::text,
-                        .text = manifest_entity.details,
-                    },
-                },
-            });
-        }
-        entity.parameters = manifest_entity.parameters;
-        if (!manifest_entity.result_sql_type.empty()) {
-            entity.return_type =
-                display_result_type(manifest_entity.result_sql_type);
-        }
-        entity.module_name = manifest_entity.source_module;
-        if (!manifest_entity.source_path.empty()
-            && manifest_entity.source_line != 0) {
+        entity.module_name = source.source_module;
+        if (!source.source_path.empty() && source.source_line != 0) {
             source_span declaration;
-            declaration.path = manifest_entity.source_path;
-            declaration.first_line = manifest_entity.source_line;
+            declaration.path = source.source_path;
+            declaration.first_line = source.source_line;
             entity.declaration = std::move(declaration);
         }
-        entity.attributes["documentation_authority"] =
-            "generated_sql_manifest";
-        entity.attributes["sql_manifest_script_sha256"] =
-            selected->second.projection->script_sha256;
-        bind_public_manifest_identity(entity, manifest_entity);
+        for (const auto& [key,value] : source.attributes) entity.attributes.try_emplace(key,value);
+        entity.attributes["sql_kind"] = source.kind;
+        entity.attributes["documentation_authority"] = "generated_sql_manifest";
+        entity.attributes["sql_manifest_script_sha256"] = projection.script_sha256;
+        if (entity.qualified_name.starts_with("bioseq_internal."))
+            entity.attributes["visibility"] = "Internal";
+        bind_public_manifest_identity(entity,source);
         entity.attributes.erase("catalog_comment");
-        kept.push_back(std::move(entity));
+    };
+    for (reference_entity& entity : model.sql_entities) {
+        const auto selected = documented_by_catalog_identity.find(catalog_identity_key(entity.canonical_id));
+        if (selected == documented_by_catalog_identity.end()) {
+            entity.attributes.erase("catalog_comment");
+            continue;
+        }
+        const auto& source = *selected->second.entity;
+        // Preserve strict source/catalog agreement for the previously public API.
+        if (source.public_documentation) {
+            const auto comment = entity.attributes.find("catalog_comment");
+            if (comment == entity.attributes.end() || comment->second != source.brief)
+                throw std::runtime_error("SQL manifest/catalog COMMENT mismatch for '" + source.installed_identity + "'");
+            if (!source.result_sql_type.empty() && entity.return_type
+                && canonical_result_type_key(*entity.return_type) != canonical_result_type_key(source.result_sql_type))
+                throw std::runtime_error("SQL manifest/catalog result-type mismatch for '" + source.installed_identity + "'");
+            const auto expected_kind = source.kind == "type" ? entity_kind::sql_type : entity_kind::sql_function;
+            if (entity.kind != expected_kind || entity.qualified_name != source.qualified_name)
+                throw std::runtime_error("SQL manifest/catalog identity-shape mismatch for '" + source.installed_identity + "'");
+        }
+        matched.insert(source.stable_identity);
+        apply_source_documentation(entity,source,*selected->second.projection);
     }
     for (const loaded_sql_manifest_projection& manifest : manifests) {
-        for (const sql_manifest_public_entity& entity :
-             manifest.projection.entities) {
-            if (!matched.contains(entity.installed_identity)) {
-                throw std::runtime_error(
-                    "SQL manifest public entity '" + entity.stable_identity
-                    + "' resolves to '" + entity.installed_identity
-                    + "', which is not a pg_depend member of extension "
-                    + manifest.projection.extension_name
+        for (const sql_manifest_public_entity& source : manifest.projection.documentation_entities) {
+            if (matched.contains(source.stable_identity)) continue;
+            if (source.public_documentation)
+                throw std::runtime_error("SQL manifest public entity '" + source.stable_identity
+                    + "' is not a pg_depend member of extension " + manifest.projection.extension_name
                     + " captured from the live catalog");
-            }
+            reference_entity entity;
+            entity.domain = entity_domain::sql;
+            entity.kind = source.kind == "type" ? entity_kind::sql_type
+                : source.kind == "function" || source.kind == "sql_function" ? entity_kind::sql_function
+                : source.kind == "schema" ? entity_kind::sql_schema : entity_kind::sql_object;
+            entity.qualified_name = source.qualified_name;
+            entity.display_name = source.name.empty() ? source.qualified_name : source.name;
+            const auto prefix = source.catalog_identity.find(':',4);
+            entity.normalized_signature = source.catalog_identity.substr(prefix + 1);
+            entity.summary_text = "SQL " + source.kind + " " + entity.normalized_signature + ".";
+            if (!source.result_sql_type.empty()) entity.return_type = source.result_sql_type;
+            entity.fields = source.fields;
+            entity.attributes["extension"] = manifest.projection.extension_name;
+            entity.attributes["declaration"] = "Generated extension SQL";
+            apply_source_documentation(entity,source,manifest.projection);
+            model.sql_entities.push_back(std::move(entity));
         }
     }
-    model.sql_entities = std::move(kept);
-    model.omitted_sql_entities = std::move(omitted);
+    model.omitted_sql_entities.clear();
 
-    // Add a group  page when a public SQL function has several signatures.
-    // It owns the shared function name and links to each overload. Only
-    // functions selected for public documentation take part
+    // Group every overloaded SQL function under its shared qualified name.
     {
         std::map<std::string, std::vector<const reference_entity*>, std::less<>> by_name;
         for (const reference_entity& entity : model.sql_entities) {
@@ -2464,8 +2489,9 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             group.attributes["stable_identity"] = group.canonical_id;
             group.attributes["installed_identity"] =
                 "sql:overload_group:" + name;
-            group.summary_text = "Overloaded SQL function with "
-                + std::to_string(members.size()) + " signatures.";
+            group.summary_text = members.front()->summary_text.empty()
+                ? "Overloaded SQL function with " + std::to_string(members.size()) + " signatures."
+                : members.front()->summary_text;
             for (const reference_entity* member : members) {
                 group.overload_ids.push_back(member->canonical_id);
             }
@@ -3186,10 +3212,10 @@ namespace {
     if (std::ranges::none_of(
             manifests,
             [](const loaded_sql_manifest_projection& manifest) {
-                return !manifest.projection.catalog_schemas.empty();
+                return !manifest.projection.documentation_schemas.empty();
             })) {
         throw std::runtime_error(
-            "SQL manifest public projections have no installed catalog schemas");
+            "SQL manifest documentation projections have no installed catalog schemas");
     }
 
     std::vector<reference_entity> entities;
@@ -3198,12 +3224,17 @@ namespace {
             manifest.projection;
         for (reference_entity& entity : load_extension_type_entities(
                  conninfo, projection.extension_name,
-                 projection.catalog_schemas)) {
+                 projection.documentation_schemas)) {
             entities.push_back(std::move(entity));
         }
         for (reference_entity& entity : load_extension_function_entities(
                  conninfo, projection.extension_name,
-                 projection.catalog_schemas)) {
+                 projection.documentation_schemas)) {
+            entities.push_back(std::move(entity));
+        }
+        for (reference_entity& entity : load_extension_relation_entities(
+                 conninfo, projection.extension_name,
+                 projection.documentation_schemas)) {
             entities.push_back(std::move(entity));
         }
     }
@@ -3507,78 +3538,150 @@ void rewrite_entity_link_routes(
     return out;
 }
 
-// Find the source ranges named by entity= fence attributes. Each entity
-// must exist and its qualified name must occur exactly once in the block.
-// Reject overlapping ranges. Save the ranges for the browser to turn into
-// links after syntax highlighting, while  keeping the displayed code text.
+// Link catalog identifiers in SQL and inline code without changing the source text.
+// Explicit entity= annotations disambiguate a spelling; overload groups otherwise
+// own a function name. Quoted strings and comments are not parsed as executable SQL.
 void decorate_code_entity_ranges(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& route_by_id,
     const std::map<std::string, std::string, std::less<>>& qualified_by_id,
     const std::string& tooltip_url,
     const std::string& where) {
-    struct code_range {
-        std::size_t start;
-        std::size_t len;
-        std::string id;
-        std::string route;
+    std::map<std::string, std::string, std::less<>> ids;
+    const auto priority = [](std::string_view id) {
+        if (id.starts_with("sql:type:")) return 4;
+        if (id.find("overload") != std::string_view::npos) return 3;
+        if (id.starts_with("sql:function:")) return 2;
+        return 1;
     };
-    for (content_node& node : nodes) {
-        if (node.kind == content_node_kind::code_block) {
-            const auto info = node.attributes.find("info");
-            if (info != node.attributes.end() && !info->second.empty()) {
-                const fence_descriptor fence = parse_fence_info(info->second);
-                std::vector<code_range> ranges;
-                for (const std::string& id : fence.entities) {
-                    const auto qualified = qualified_by_id.find(id);
-                    if (qualified == qualified_by_id.end()) {
-                        throw std::runtime_error("code entity '" + id
-                            + "' does not exist in " + where);
-                    }
-                    const std::string& spelling = qualified->second;
-                    const std::size_t first = node.text.find(spelling);
-                    if (spelling.empty() || first == std::string::npos) {
-                        throw std::runtime_error("code entity spelling '" + spelling
-                            + "' is not present in the block in " + where);
-                    }
-                    if (node.text.find(spelling, first + 1) != std::string::npos) {
-                        throw std::runtime_error("code entity spelling '" + spelling
-                            + "' is ambiguous (appears more than once) in " + where);
-                    }
-                    const auto route = route_by_id.find(id);
-                    ranges.push_back(code_range{first, spelling.size(), id,
-                        route != route_by_id.end() ? route->second : std::string()});
-                }
-                if (!ranges.empty()) {
-                    std::ranges::sort(ranges, [](const code_range& lhs,
-                                                 const code_range& rhs) {
-                        return lhs.start < rhs.start;
-                    });
-                    for (std::size_t index = 1; index < ranges.size(); ++index) {
-                        if (ranges[index].start
-                            < ranges[index - 1].start + ranges[index - 1].len) {
-                            throw std::runtime_error("code entity ranges overlap in " + where);
-                        }
-                    }
-                    std::string json = "[";
-                    for (std::size_t index = 0; index < ranges.size(); ++index) {
-                        if (index != 0) {
-                            json += ",";
-                        }
-                        json += "{\"start\":" + std::to_string(ranges[index].start)
-                            + ",\"len\":" + std::to_string(ranges[index].len)
-                            + ",\"id\":\"" + json_escape(ranges[index].id) + "\""
-                            + ",\"route\":\"" + json_escape(ranges[index].route) + "\""
-                            + ",\"tooltip\":\"" + json_escape(tooltip_url) + "\"}";
-                    }
-                    json += "]";
-                    node.attributes["entity_ranges"] = std::move(json);
-                }
-            }
-        }
-        decorate_code_entity_ranges(node.children, route_by_id, qualified_by_id,
-                                    tooltip_url, where);
+    for (const auto& [id, qualified] : qualified_by_id) {
+        if (!id.starts_with("sql:") || qualified.empty()) continue;
+        const auto add = [&](const std::string& spelling) {
+            const auto existing = ids.find(spelling);
+            if (existing == ids.end() || priority(id) > priority(existing->second))
+                ids[spelling] = id;
+        };
+        add(qualified);
+        if (const auto dot = qualified.rfind('.'); dot != std::string::npos)
+            add(qualified.substr(dot + 1));
     }
+    const auto identifier = [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    };
+    // Browser text ranges count UTF-16 units, while source strings contain UTF-8.
+    const auto utf16_length = [](std::string_view text) {
+        std::size_t count = 0;
+        for (unsigned char c : text) {
+            if ((c & 0xc0) != 0x80) count += c >= 0xf0 ? 2 : 1;
+        }
+        return count;
+    };
+    const auto walk = [&](std::vector<content_node>& list, auto&& self) -> void {
+        for (content_node& node : list) {
+            const bool inline_code = node.kind == content_node_kind::code_span;
+            const auto language = node.attributes.find("language");
+            if (inline_code || (node.kind == content_node_kind::code_block
+                && language != node.attributes.end() && language->second == "sql")) {
+                auto names = ids;
+                if (const auto info = node.attributes.find("info"); info != node.attributes.end()) {
+                    for (const auto& id : parse_fence_info(info->second).entities) {
+                        const auto found = qualified_by_id.find(id);
+                        if (found == qualified_by_id.end())
+                            throw std::runtime_error("code entity '" + id + "' does not exist in " + where);
+                        if (node.text.find(found->second) == std::string::npos)
+                            throw std::runtime_error("code entity spelling '" + found->second
+                                + "' is not present in the block in " + where);
+                        names[found->second] = id;
+                    }
+                }
+                std::string json = "[";
+                std::string source_text = node.text;
+                if (inline_code) {
+                    const auto append = [&source_text](const content_node& child, auto&& self_append) -> void {
+                        source_text += child.text;
+                        for (const auto& nested : child.children) self_append(nested, self_append);
+                    };
+                    for (const auto& child : node.children) append(child, append);
+                }
+                const std::string_view text = source_text;
+                for (std::size_t pos = 0; pos < text.size();) {
+                    if (text.substr(pos).starts_with("--")) {
+                        const auto end = text.find('\n', pos);
+                        pos = end == std::string_view::npos ? text.size() : end;
+                        continue;
+                    }
+                    if (text.substr(pos).starts_with("/*")) {
+                        std::size_t depth = 1;
+                        pos += 2;
+                        while (pos < text.size() && depth) {
+                            if (text.substr(pos).starts_with("/*")) { ++depth; pos += 2; }
+                            else if (text.substr(pos).starts_with("*/")) { --depth; pos += 2; }
+                            else ++pos;
+                        }
+                        continue;
+                    }
+                    if (text[pos] == '\'') {
+                        ++pos;
+                        while (pos < text.size()) {
+                            if (text[pos++] != '\'') continue;
+                            if (pos < text.size() && text[pos] == '\'') { ++pos; continue; }
+                            break;
+                        }
+                        continue;
+                    }
+                    if (text[pos] == '$') {
+                        auto end = pos + 1;
+                        while (end < text.size() && identifier(text[end]) && text[end] != '$') ++end;
+                        if (end < text.size() && text[end] == '$') {
+                            const auto delimiter = text.substr(pos, end - pos + 1);
+                            const auto close = text.find(delimiter, end + 1);
+                            pos = close == std::string_view::npos ? text.size() : close + delimiter.size();
+                            continue;
+                        }
+                    }
+                    if (!identifier(text[pos]) && text[pos] != '"') { ++pos; continue; }
+                    const auto begin = pos;
+                    std::string spelling;
+                    do {
+                        if (text[pos] == '"') {
+                            ++pos;
+                            while (pos < text.size() && text[pos] != '"') spelling += text[pos++];
+                            if (pos < text.size()) ++pos;
+                        } else {
+                            while (pos < text.size() && identifier(text[pos])) {
+                                const char c = text[pos++];
+                                spelling += c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+                            }
+                        }
+                        if (pos + 1 >= text.size() || text[pos] != '.'
+                            || (!identifier(text[pos + 1]) && text[pos + 1] != '"')) break;
+                        spelling += '.';
+                        ++pos;
+                    } while (pos < text.size());
+                    auto next = pos;
+                    while (next < text.size() && (text[next] == ' ' || text[next] == '\n')) ++next;
+                    const auto found = names.find(spelling);
+                    if (found == names.end()) continue;
+                    const bool qualified = spelling.find('.') != std::string::npos;
+                    const bool invocation = next < text.size() && text[next] == '(';
+                    if (!qualified && !inline_code && !invocation) continue;
+                    const auto route = route_by_id.find(found->second);
+                    if (route == route_by_id.end()) continue;
+                    if (json.size() > 1) json += ',';
+                    json += "{\"start\":" + std::to_string(utf16_length(text.substr(0, begin)))
+                        + ",\"len\":" + std::to_string(utf16_length(text.substr(begin, pos - begin)))
+                        + ",\"id\":\"" + json_escape(found->second) + "\""
+                        + ",\"route\":\"" + json_escape(route->second) + "\""
+                        + ",\"tooltip\":\"" + json_escape(tooltip_url) + "\"}";
+                }
+                json += ']';
+                if (json.size() > 2) node.attributes["entity_ranges"] = std::move(json);
+            }
+            self(node.children, self);
+        }
+    };
+    walk(nodes, walk);
 }
 
 /// @brief Renders a saved site model into, a staging directory.
@@ -3932,8 +4035,62 @@ void decorate_code_entity_ranges(
         return toc;
     };
 
-    const std::string landing_examples_json =
-        serialize_landing_examples(model.landing_examples);
+    // The explorer uses the author's chapter text and hardware tables directly.
+    // Select content-tree sections, so revisions have one source of truth.
+    std::vector<content_node> methodology;
+    for (const tutorial& item : model.tutorials) {
+        if (item.metadata.slug != "project_benchmarking") continue;
+        enum class section { none, methods, machines, aligners, gpu };
+        section active = section::none;
+        for (const content_node& source : item.content) {
+            if (source.kind == content_node_kind::heading) {
+                const auto title = node_plain_text(source, node_plain_text);
+                if (title == "Benchmarking methodology") active = section::methods;
+                else if (title == "Complete raw results") {
+                    active = section::machines;
+                    content_node heading = source;
+                    heading.children = {content_node{.kind = content_node_kind::text,
+                        .text = "Local and AWS machine specifications"}};
+                    methodology.push_back(std::move(heading));
+                    continue;
+                } else if (title == "Comparison with other aligners") active = section::aligners;
+                else if (title == "Vulkan on a Vast.ai GPU instance") active = section::gpu;
+                else if (title != "Reading comparisons and highlights.") active = section::none;
+            }
+            if (active == section::none) continue;
+            if (active == section::aligners && source.kind == content_node_kind::raw_html
+                && source.text.contains("tab-bench-external")) {
+                active = section::none;
+                continue;
+            }
+            methodology.push_back(source);
+            if ((active == section::machines || active == section::gpu)
+                && source.kind == content_node_kind::table) active = section::none;
+        }
+    }
+    const auto rebase_methodology = [&url, &version](content_node& node, auto&& self) -> void {
+        if (node.kind == content_node_kind::link && node.target.starts_with("../"))
+            node.target = url(version + "/tutorials/" + node.target.substr(3));
+        for (auto& child : node.children) self(child, self);
+    };
+    for (auto& node : methodology) rebase_methodology(node, rebase_methodology);
+    build_on_this_page(methodology);
+    const std::string methodology_html = render_content_html(methodology);
+
+    boost::json::value landing_data = boost::json::parse(
+        serialize_landing_examples(model.landing_examples));
+    for (const auto& example : model.landing_examples) {
+        std::vector<content_node> sql_nodes{content_node{
+            .kind = content_node_kind::code_block, .text = example.visible_sql,
+            .attributes = {{"language", "sql"}}}};
+        decorate_code_entity_ranges(sql_nodes, route_by_id, qualified_by_id,
+                                    tooltip_url, "landing " + example.slot);
+        const auto ranges = sql_nodes.front().attributes.find("entity_ranges");
+        landing_data.as_object().at(example.slot).as_object()["entity_ranges"] =
+            boost::json::parse(json_text(
+                ranges == sql_nodes.front().attributes.end() ? "[]" : ranges->second));
+    }
+    const std::string landing_examples_json = boost::json::serialize(landing_data);
     render("index.html", "landing.html.j2",
            "{\"title\":" + json_text(config.title)
                + ",\"description\":" + json_text(config.short_description)
@@ -3952,7 +4109,8 @@ void decorate_code_entity_ranges(
                + json_text("Explore BioseqDB benchmark configurations and measured CI reports")
                + ",\"canonical\":"
                + json_text(canonical("benchmarks/index.html"))
-               + ",\"page_type\":" + json_text("benchmarks") + "}",
+               + ",\"page_type\":" + json_text("benchmarks")
+               + ",\"benchmark_methodology_html\":" + json_quote(methodology_html) + "}",
            "", "");
 
     // Render the root-level page used for missing URLs.
@@ -4067,6 +4225,7 @@ void decorate_code_entity_ranges(
                                    &config,
                                    &doc_nav,
                                    &identity_by_reference,
+                                   &qualified_by_id,
                                    &model,
                                    &render,
                                    &revision,
@@ -4128,9 +4287,11 @@ void decorate_code_entity_ranges(
             if (!entity.parameters.empty()) {
                 add_toc("Parameters", "parameters");
             }
+            if (!entity.fields.empty()) add_toc("Fields", "fields");
+            if (!entity.enum_values.empty()) add_toc("Values", "values");
             const bool has_visible_attributes = std::ranges::any_of(
                 entity.attributes, [](const auto& attribute) {
-                    return attribute.first != "refid";
+                    return reference_attribute_visible(attribute.first);
                 });
             if (has_visible_attributes) {
                 add_toc(entity.domain == entity_domain::sql ? "Attributes" : "Qualifiers",
@@ -4152,6 +4313,8 @@ void decorate_code_entity_ranges(
             std::vector<content_node> detail_nodes = entity.detail_content;
             rewrite_entity_link_routes(
                 detail_nodes, identity_by_reference, route_by_id, tooltip_url);
+            decorate_code_entity_ranges(detail_nodes, route_by_id, qualified_by_id,
+                                       tooltip_url, entity.canonical_id);
             page += ",\"detail_html\":";
             page += detail_nodes.empty()
                 ? std::string("null")

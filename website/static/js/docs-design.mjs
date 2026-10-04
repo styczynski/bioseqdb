@@ -2,10 +2,7 @@
 // The generated search, versions, and entity JSON files are the only data
 // sources; this module contains presentation metadata, never documentation data.
 
-import { normalizeSearchText } from "./search_tokens.mjs";
-
 const root = document.querySelector('[data-screen-label="BioseqDB documentation"]');
-const MAX_SEARCH_RESULTS = 40;
 
 function headerOffset() {
   const header = document.getElementById("dnav");
@@ -293,83 +290,6 @@ function toc() {
   update();
 }
 
-const SEARCH_TYPES = ["Tutorial", "Function", "Class", "Type"];
-const SEARCH_LABELS = {
-  Tutorial: "Tutorials",
-  Function: "Functions",
-  Class: "Classes",
-  Type: "Types",
-};
-const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T" };
-
-function searchType(record) {
-  const kind = String(record.kind || "").toLowerCase();
-  const group = String(record.group || "").toLowerCase();
-  if (group === "tutorials" || group === "pages" ||
-      kind === "tutorial" || kind === "page") return "Tutorial";
-  if (kind.includes("function") || kind === "overload_group") return "Function";
-  if (kind.includes("type") || kind.includes("alias") ||
-      kind.includes("enum") || kind === "sql_schema") return "Type";
-  return "Class";
-}
-
-function rankedSearch(records, query) {
-  const normalized = normalizeSearchText(query);
-  if (!normalized) return records.slice(0, MAX_SEARCH_RESULTS);
-  const tokens = normalized.split(" ").filter(Boolean);
-  const scored = [];
-  records.forEach((record) => {
-    const title = normalizeSearchText(record.title || "");
-    const qualified = normalizeSearchText(record.qualified_name || "");
-    const names = String(record.name_tokens || `${title} ${qualified}`);
-    const text = String(record.text_tokens || normalizeSearchText(record.summary || ""));
-    let tier = -1;
-    if (title === normalized || qualified === normalized) tier = 0;
-    else if (title.startsWith(normalized) || qualified.startsWith(normalized) ||
-             names.split(" ").some((token) => token.startsWith(normalized))) tier = 1;
-    else if (tokens.every((token) => names.includes(token))) tier = 2;
-    else if (tokens.every((token) => `${names} ${text}`.includes(token))) tier = 3;
-    if (tier >= 0) scored.push({ record, tier });
-  });
-  scored.sort((left, right) => left.tier - right.tier ||
-    String(left.record.title || "").localeCompare(String(right.record.title || "")));
-  return scored.slice(0, MAX_SEARCH_RESULTS).map((entry) => entry.record);
-}
-
-function appendHighlight(target, text, query) {
-  const display = String(text || "");
-  const raw = query.trim().toLowerCase();
-  const candidates = [raw, ...normalizeSearchText(query).split(" ")].filter(Boolean);
-  let start = -1;
-  let length = 0;
-  for (const candidate of candidates) {
-    start = display.toLowerCase().indexOf(candidate);
-    if (start >= 0) {
-      length = candidate.length;
-      break;
-    }
-  }
-  if (start < 0) {
-    target.textContent = display;
-    return;
-  }
-  target.append(document.createTextNode(display.slice(0, start)));
-  const mark = document.createElement("span");
-  mark.className = "doc-search-highlight";
-  mark.textContent = display.slice(start, start + length);
-  target.append(mark, document.createTextNode(display.slice(start + length)));
-}
-
-function firstDataUrl(elements, names) {
-  for (const element of elements) {
-    if (!element) continue;
-    for (const name of names) {
-      if (element.dataset[name]) return element.dataset[name];
-    }
-  }
-  return "";
-}
-
 function requireCurrentSchema(data, schema, schemaRevision, context) {
   if (!data || typeof data !== "object" || Array.isArray(data) ||
       data.schema !== schema || !Number.isInteger(data.schema_revision) ||
@@ -377,343 +297,6 @@ function requireCurrentSchema(data, schema, schemaRevision, context) {
     throw new Error(`${context} schema is not current`);
   }
   return data;
-}
-
-function search() {
-  const input = document.getElementById("doc-search");
-  const dropdown = document.getElementById("search-dd");
-  const wrap = root.querySelector("[data-search-wrap]");
-  const box = root.querySelector("[data-search-box]");
-  if (!input || !dropdown || !wrap || !box) return;
-  const source = root.querySelector("[data-search-index]") ||
-    document.querySelector("#search-dialog[data-search-index]") ||
-    document.querySelector("[data-search-index]");
-  const url = firstDataUrl([input, dropdown, wrap, source, root], ["searchIndex"]);
-  let records = null;
-  let loadPromise = null;
-  let options = [];
-  let selected = -1;
-
-  input.setAttribute("role", "combobox");
-  input.setAttribute("aria-autocomplete", "list");
-  input.setAttribute("aria-controls", dropdown.id);
-  input.setAttribute("aria-expanded", "false");
-  dropdown.setAttribute("role", "listbox");
-  dropdown.setAttribute("aria-label", "Search results");
-
-  const setOpen = (open) => {
-    dropdown.style.display = open ? "block" : "none";
-    input.setAttribute("aria-expanded", open ? "true" : "false");
-    if (!open) {
-      selected = -1;
-      input.removeAttribute("aria-activedescendant");
-    }
-  };
-  const setFocusStyle = (focused) => {
-    box.style.borderColor = focused ?
-      "rgba(70,184,222,0.55)" : "rgba(255,255,255,0.14)";
-    box.style.background = focused ?
-      "rgba(70,184,222,0.06)" : "rgba(255,255,255,0.04)";
-  };
-  const setSelected = (next) => {
-    if (!options.length) {
-      selected = -1;
-      input.removeAttribute("aria-activedescendant");
-      return;
-    }
-    selected = (next + options.length) % options.length;
-    options.forEach((option, index) => {
-      const active = index === selected;
-      option.setAttribute("aria-selected", active ? "true" : "false");
-      option.style.background = active ? "rgba(70,184,222,0.09)" : "transparent";
-      if (active) {
-        input.setAttribute("aria-activedescendant", option.id);
-        option.scrollIntoView({ block: "nearest" });
-      }
-    });
-  };
-  const renderMessage = (message, value = "") => {
-    dropdown.replaceChildren();
-    options = [];
-    selected = -1;
-    input.removeAttribute("aria-activedescendant");
-    const empty = document.createElement("div");
-    empty.className = "doc-search-empty";
-    empty.append(document.createTextNode(message));
-    if (value) {
-      const display = document.createElement("span");
-      display.textContent = value;
-      empty.append(display);
-    }
-    dropdown.appendChild(empty);
-    setOpen(true);
-  };
-  const render = () => {
-    if (!records) {
-      renderMessage("Loading search index…");
-      return;
-    }
-    const query = input.value;
-    const matches = rankedSearch(records, query);
-    dropdown.replaceChildren();
-    options = [];
-    selected = -1;
-    input.removeAttribute("aria-activedescendant");
-    if (!matches.length) {
-      renderMessage("No matches for ", query);
-      return;
-    }
-    SEARCH_TYPES.forEach((type) => {
-      const items = matches.filter((record) => searchType(record) === type);
-      if (!items.length) return;
-      const heading = document.createElement("div");
-      heading.className = "doc-search-group";
-      heading.textContent = SEARCH_LABELS[type];
-      dropdown.appendChild(heading);
-      items.forEach((record) => {
-        const link = document.createElement("a");
-        link.className = "doc-search-result";
-        link.href = record.route;
-        link.id = `doc-search-option-${options.length}`;
-        link.dataset.searchResult = "";
-        link.setAttribute("role", "option");
-        link.setAttribute("aria-selected", "false");
-        link.tabIndex = -1;
-        const badge = document.createElement("span");
-        badge.className = `doc-search-badge doc-search-${type.toLowerCase()}`;
-        badge.setAttribute("aria-hidden", "true");
-        badge.textContent = SEARCH_GLYPHS[type];
-        const text = document.createElement("span");
-        text.className = "doc-search-text";
-        const title = document.createElement("span");
-        title.className = "doc-search-title";
-        appendHighlight(title, record.title || record.qualified_name || record.route, query);
-        text.appendChild(title);
-        if (record.summary) {
-          const summary = document.createElement("span");
-          summary.className = "doc-search-summary";
-          summary.textContent = record.summary;
-          text.appendChild(summary);
-        }
-        link.append(badge, text);
-        const index = options.length;
-        link.addEventListener("mouseenter", () => setSelected(index));
-        link.addEventListener("focus", () => setSelected(index));
-        link.addEventListener("click", () => setOpen(false));
-        dropdown.appendChild(link);
-        options.push(link);
-      });
-    });
-    setOpen(true);
-  };
-  const load = () => {
-    if (records) return Promise.resolve(records);
-    if (!url) {
-      records = [];
-      return Promise.resolve(records);
-    }
-    if (!loadPromise) {
-      loadPromise = fetch(url, { credentials: "same-origin" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`search index ${response.status}`);
-          return response.json();
-        })
-        .then((data) => {
-          requireCurrentSchema(data, "bioseq.website.search", 2, "search index");
-          if (!Array.isArray(data.records)) {
-            throw new Error("search index records are invalid");
-          }
-          records = data.records;
-          return records;
-        })
-        .catch(() => {
-          loadPromise = null;
-          throw new Error("search index unavailable");
-        });
-    }
-    return loadPromise;
-  };
-  const open = async () => {
-    setFocusStyle(true);
-    setOpen(true);
-    if (!url) {
-      renderMessage("Search index is unavailable.");
-      return;
-    }
-    render();
-    try {
-      await load();
-      if (document.activeElement === input || wrap.contains(document.activeElement)) render();
-    } catch {
-      if (document.activeElement === input) renderMessage("Search is temporarily unavailable.");
-    }
-  };
-  const close = (blur = false) => {
-    setOpen(false);
-    setFocusStyle(false);
-    if (blur) input.blur();
-  };
-
-  input.addEventListener("focus", open);
-  input.addEventListener("input", () => {
-    if (records) render();
-    else open();
-  });
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setSelected(selected + 1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setSelected(selected < 0 ? options.length - 1 : selected - 1);
-    } else if (event.key === "Home" && options.length) {
-      event.preventDefault();
-      setSelected(0);
-    } else if (event.key === "End" && options.length) {
-      event.preventDefault();
-      setSelected(options.length - 1);
-    } else if (event.key === "Enter" && options.length) {
-      event.preventDefault();
-      const option = options[selected < 0 ? 0 : selected];
-      location.assign(option.href);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      close(true);
-    }
-  });
-  wrap.addEventListener("focusout", (event) => {
-    const next = event.relatedTarget;
-    if (!(next instanceof Node) || !wrap.contains(next)) close();
-  });
-  document.addEventListener("click", (event) => {
-    if (!wrap.contains(event.target)) close();
-  });
-  document.addEventListener("keydown", (event) => {
-    const target = event.target;
-    const tag = target?.tagName?.toLowerCase() || "";
-    const typing = ["input", "textarea", "select"].includes(tag) || target?.isContentEditable;
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      input.focus();
-      input.select();
-    } else if (event.key === "/" && !typing && !event.altKey && !event.ctrlKey && !event.metaKey) {
-      event.preventDefault();
-      input.focus();
-    }
-  });
-}
-
-function version() {
-  const button = document.getElementById("ver-btn");
-  const menu = document.getElementById("ver-menu");
-  if (!button || !menu) return;
-  const wrap = button.closest("[data-ver-wrap]");
-  const caret = button.querySelector("[data-caret]");
-  const source = document.querySelector("[data-versions-url],[data-versions]");
-  const url = firstDataUrl(
-    [menu, button, wrap, root, source],
-    ["versionsUrl", "versions"]
-  );
-  const currentTemplate = menu.querySelector('[data-ver][aria-current="page"], [data-ver]');
-  const allVersionsTemplate = menu.querySelector("[data-ver-all]")?.cloneNode(true);
-  const regularTemplate = [...menu.querySelectorAll("[data-ver]")]
-    .find((link) => link !== currentTemplate);
-  const currentClass = currentTemplate?.className || "dd-s0026";
-  const regularClass = regularTemplate?.className || "dd-s0028 dd-h001";
-  const badgeClass = currentTemplate?.querySelector("span")?.className || "dd-s0027";
-
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-controls", menu.id);
-  button.setAttribute("aria-expanded", "false");
-  menu.setAttribute("role", "menu");
-  const setOpen = (open) => {
-    menu.style.display = open ? "block" : "none";
-    button.setAttribute("aria-expanded", open ? "true" : "false");
-    if (caret) caret.style.transform = open ? "rotate(180deg)" : "none";
-  };
-  const menuItems = () => [...menu.querySelectorAll('a[href]')];
-
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    setOpen(button.getAttribute("aria-expanded") !== "true");
-  });
-  button.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    event.preventDefault();
-    setOpen(true);
-    const items = menuItems();
-    items[event.key === "ArrowUp" ? items.length - 1 : 0]?.focus();
-  });
-  menu.addEventListener("keydown", (event) => {
-    const items = menuItems();
-    const index = items.indexOf(document.activeElement);
-    if (event.key === "ArrowDown" && items.length) {
-      event.preventDefault();
-      items[(index + 1 + items.length) % items.length].focus();
-    } else if (event.key === "ArrowUp" && items.length) {
-      event.preventDefault();
-      items[(index - 1 + items.length) % items.length].focus();
-    } else if (event.key === "Home" && items.length) {
-      event.preventDefault();
-      items[0].focus();
-    } else if (event.key === "End" && items.length) {
-      event.preventDefault();
-      items[items.length - 1].focus();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-      button.focus();
-    }
-  });
-  document.addEventListener("click", (event) => {
-    if (!wrap?.contains(event.target)) setOpen(false);
-  });
-
-  if (!url) return;
-  fetch(url, { credentials: "same-origin" })
-    .then((response) => {
-      if (!response.ok) throw new Error(`versions ${response.status}`);
-      return response.json();
-    })
-    .then((data) => {
-      requireCurrentSchema(data, "bioseq.website.versions", 1, "versions");
-      if (!Array.isArray(data.versions)) {
-        throw new Error("versions records are invalid");
-      }
-      const fragment = document.createDocumentFragment();
-      let foundCurrent = false;
-      data.versions.forEach((record) => {
-        if (!record || typeof record.route !== "string") return;
-        const link = document.createElement("a");
-        link.dataset.ver = "";
-        link.href = record.route;
-        link.setAttribute("role", "menuitem");
-        const targetPath = new URL(record.route, location.href).pathname.replace(/\/+$/, "/");
-        const currentPath = location.pathname.replace(/\/+$/, "/");
-        const current = currentPath.startsWith(targetPath) && !foundCurrent;
-        if (current) foundCurrent = true;
-        link.className = current ? currentClass : regularClass;
-        link.append(document.createTextNode(record.label || record.route));
-        if (current) {
-          link.setAttribute("aria-current", "page");
-          const badge = document.createElement("span");
-          badge.className = badgeClass;
-          badge.textContent = "current";
-          link.append(document.createTextNode(" "), badge);
-        }
-        fragment.appendChild(link);
-      });
-      if (fragment.childElementCount) {
-        if (allVersionsTemplate instanceof Element) {
-          allVersionsTemplate.setAttribute("role", "menuitem");
-          fragment.appendChild(allVersionsTemplate);
-        }
-        menu.replaceChildren(fragment);
-      }
-    })
-    .catch(() => {
-      // Keep the server-rendered current-version link when the manifest is absent.
-    });
 }
 
 const entityDatasets = new Map();
@@ -744,6 +327,10 @@ function loadEntityDataset(url) {
 
 function entityKind(kind) {
   const value = String(kind || "").toLowerCase();
+  if (value === "sql_object") {
+    return { label: "SQL object", tone: "type", color: "#8fd6ba",
+      background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)" };
+  }
   if (value.includes("function") || value === "overload_group") {
     return {
       label: "Function", tone: "function", color: "#7fcbe8",
@@ -764,12 +351,13 @@ function entityKind(kind) {
 
 function entityLocation(kind) {
   const value = String(kind || "").toLowerCase();
-  return value.startsWith("sql_") ? "bioseq — SQL" : "bioseq — C++ reference";
+  return value.startsWith("sql_") || value === "overload_group" ? "bioseq — SQL" : "bioseq — C++ reference";
 }
 
 function popovers() {
   const pop = document.getElementById("entity-pop");
-  if (!pop) return;
+  if (!pop || pop.dataset.initialized) return;
+  pop.dataset.initialized = "true";
   const selector = "[data-entity-id][data-entity-data-url]";
   let hideTimer = 0;
   let activeAnchor = null;
@@ -845,6 +433,29 @@ function popovers() {
       returns.appendChild(type);
       body.appendChild(returns);
     }
+    if (Array.isArray(record.fields) && record.fields.length) {
+      const fields = document.createElement("div");
+      fields.className = "entity-pop-params";
+      record.fields.forEach((field) => {
+        const row = document.createElement("div");
+        row.className = "entity-pop-param";
+        const name = document.createElement("code");
+        name.className = "entity-pop-param-name";
+        name.textContent = field.name;
+        const detail = document.createElement("span");
+        detail.className = "entity-pop-param-detail";
+        detail.textContent = [field.type, field.description].filter(Boolean).join(" — ");
+        row.append(name, detail);
+        fields.appendChild(row);
+      });
+      body.appendChild(fields);
+    }
+    if (Array.isArray(record.enum_values) && record.enum_values.length) {
+      const values = document.createElement("p");
+      values.className = "entity-pop-return";
+      values.textContent = `Values: ${record.enum_values.join(", ")}`;
+      body.appendChild(values);
+    }
     if (record.route) {
       const view = document.createElement("span");
       view.className = `entity-pop-view entity-pop-${meta.tone}`;
@@ -896,21 +507,21 @@ function popovers() {
     hideTimer = window.setTimeout(hide, 120);
   };
   const closestAnchor = (target) => target instanceof Element ? target.closest(selector) : null;
-  root.addEventListener("mouseover", (event) => {
+  document.addEventListener("mouseover", (event) => {
     const anchor = closestAnchor(event.target);
     if (!anchor || anchor.contains(event.relatedTarget)) return;
     show(anchor);
   });
-  root.addEventListener("mouseout", (event) => {
+  document.addEventListener("mouseout", (event) => {
     const anchor = closestAnchor(event.target);
     if (!anchor || anchor.contains(event.relatedTarget)) return;
     scheduleHide();
   });
-  root.addEventListener("focusin", (event) => {
+  document.addEventListener("focusin", (event) => {
     const anchor = closestAnchor(event.target);
     if (anchor) show(anchor);
   });
-  root.addEventListener("focusout", (event) => {
+  document.addEventListener("focusout", (event) => {
     const anchor = closestAnchor(event.target);
     if (anchor && !anchor.contains(event.relatedTarget)) scheduleHide();
   });
@@ -1080,10 +691,10 @@ if (root) {
   reveal();
   sidebar();
   toc();
-  search();
-  version();
   copyButtons();
-  popovers();
   responsive();
   navigation();
 }
+
+// SQL references are shared by documentation, product examples and benchmarks.
+popovers();

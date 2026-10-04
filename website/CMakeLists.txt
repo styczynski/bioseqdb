@@ -1037,11 +1037,18 @@ add_custom_command(
           --disable-prepared-transactions
           --bootstrap "${_output_root}/create-extension.sql"
           -- bash "${_cluster_child}"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
+          --model "${_site_model}"
+          --manifest "${_cache_extension_sql_manifest}"
+          --manifest "${_bioseq_extension_sql_manifest}"
+          --catalog "${_sql_entities}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}" "${_cluster_child}"
           "${_cpp_entities}" "${_plan_json}"
           "${_cache_extension_sql_manifest}"
           "${_bioseq_extension_sql_manifest}"
           "${_landing_fasta}" "${_readme_fasta}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
