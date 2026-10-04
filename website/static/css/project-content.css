@@ -13,10 +13,12 @@
 .tutorial-body > table td,
 .tutorial-body details table th,
 .tutorial-body details table td {
+  min-width: 8rem;
   padding: .65rem .85rem;
   border-bottom: 1px solid rgba(255, 255, 255, .08);
   text-align: left;
   vertical-align: top;
+  overflow-wrap: normal;
 }
 .tutorial-body > table th,
 .tutorial-body details table th {
@@ -47,7 +49,6 @@
 .tutorial-body a[id] { scroll-margin-top: 6rem; }
 .tutorial-body details { margin: 1.4rem 0; }
 .tutorial-body summary { cursor: pointer; color: #7dd3cf; padding: .5rem 0; }
-.tutorial-body th, .tutorial-body td { overflow-wrap: anywhere; }
 .tutorial-body figure { margin: 1.5rem 0; }
 .tutorial-body figcaption { color: #9bb0c0; font-size: .9rem; }
 .tutorial-body [data-math] { color: inherit; }

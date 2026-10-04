@@ -1316,6 +1316,21 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
 def _exercise_project_content(page, tutorial: dict, base_path: str, version: str) -> None:
     """Original diagrams, mathematics, bibliography, and source links survive rendering."""
     slug = tutorial["slug"]
+    header = page.locator(".design-page-header")
+    _check(header.locator("h1").inner_text() == tutorial["title"],
+           f"{slug}: authored chapter title changed")
+    description = tutorial.get("description", "")
+    if description == tutorial["title"]:
+        _check(header.locator("p").count() == 0,
+               f"{slug}: chapter heading is repeated as its description")
+    else:
+        _check(header.locator("p").inner_text() == description,
+               f"{slug}: distinct authored chapter description was lost")
+    prose_cells = page.locator(".tutorial-body > table th, .tutorial-body > table td")
+    _check(prose_cells.evaluate_all(
+        "cells => cells.every(cell => cell.getBoundingClientRect().width >= 128 "
+        "&& getComputedStyle(cell).overflowWrap === 'normal')"),
+        f"{slug}: general table columns became too narrow to read")
     source = (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text()
     expected_figures = re.findall(r'/static/figures/project/[^)\s]+\.svg', source)
     figures = page.locator('main#doc-main img[src*="/figures/project/"]')
@@ -1354,6 +1369,7 @@ def _exercise_project_content(page, tutorial: dict, base_path: str, version: str
         _check(links.evaluate_all(
             "links => links.every(link => link.matches('.source-link') && link.querySelector('svg.github-mark'))"),
             "original PostgreSQL source references lost their GitHub icons")
+    if slug == "getting_started":
         plans = page.locator("main#doc-main code.language-pgsql-plan")
         _check(plans.count() > 0 and plans.locator(".token.plan-node").count() > 0,
                "authored EXPLAIN examples lost plan-specific highlighting")
@@ -1986,6 +2002,17 @@ def _exercise_responsive(page, label: str) -> None:
             _check(menu.get_attribute("aria-expanded") == "false"
                    and not backdrop.is_visible(),
                    f"{label}: Escape did not close the docs drawer")
+        if label not in ("landing", "benchmarks"):
+            clipped_controls = page.locator(
+                "#dnav [data-menu], #dnav a[data-nav], #dnav [data-topnav], "
+                "#dnav [data-search-box], #doc-search, #dnav [data-ver-wrap], "
+                "#dnav [data-ghbtn]").evaluate_all("""nodes => nodes.filter(node => {
+                    const box = node.getBoundingClientRect();
+                    return box.width > 0 && box.height > 0
+                        && (box.left < 0 || box.right > innerWidth + 1);
+                }).map(node => node.id || node.className)""")
+            _check(not clipped_controls,
+                   f"{label}: header controls clipped at {width}px: {clipped_controls}")
         if label == "benchmarks":
             columns = page.locator("[data-bgrid]").evaluate(
                 "node => getComputedStyle(node).gridTemplateColumns")

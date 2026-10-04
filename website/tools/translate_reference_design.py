@@ -62,6 +62,7 @@ STATIC_COPIES = (
 )
 
 OBSOLETE_STATIC = (
+    "project-benchmark-template.html",
     "licenses/LICENSE-Prism-MIT.txt",
     "media/cinematic_band.mp4",
     "media/sequence_column_type.png",
@@ -1238,6 +1239,7 @@ DOCS_RUNTIME_CSS = r'''
 .docs-design-page .doc-search-title{display:block;color:#eef4f9;font-family:'IBM Plex Mono';font-size:13.5px}
 .docs-design-page .doc-search-highlight{color:#f4894f;font-weight:600;background:rgba(242,101,34,.14);border-radius:3px}
 .docs-design-page .doc-search-summary{display:block;margin-top:2px;color:#8ea3b5;font-size:12px;line-height:1.45}
+@media(max-width:560px){.docs-design-page [data-search-wrap]{min-width:0}}
 .docs-design-page .entity-pop-head{padding:13px 15px 12px;border-bottom:1px solid rgba(255,255,255,.08)}
 .docs-design-page .entity-pop-meta{display:flex;align-items:center;gap:8px;margin-bottom:9px}
 .docs-design-page .entity-pop-kind{padding:2px 7px;border:1px solid rgba(70,184,222,.32);border-radius:5px;background:rgba(70,184,222,.14);color:#7fcbe8;font-family:'IBM Plex Mono';font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
@@ -1311,7 +1313,9 @@ def write_generated() -> None:
     cell_end = excerpt.index('\n                            </td>', cell_start)
     second = excerpt[cell_start:cell_end].replace('cell.text', 'cell.secondText').replace('cell.valueColor', 'cell.secondColor').replace('cell.arrow', 'cell.secondArrow').replace('cell.ratioText', 'cell.secondRatioText').replace('cell.chipColor', 'cell.secondChipColor')
     excerpt = excerpt[:cell_end] + '<div class="project-benchmark-b">' + second + '</div>' + excerpt[cell_end:]
-    (WEBSITE / "static" / "project-benchmark-template.html").write_text(excerpt + benchmarks[tip_begin:tip_end] + "\n", encoding="utf-8")
+    (WEBSITE / "static" / "project-benchmark-template.json").write_text(
+        json.dumps({"html": excerpt + benchmarks[tip_begin:tip_end] + "\n"}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
     (WEBSITE / "static" / "css" / "project-benchmarks.css").write_text(benchmark_catalog.css() + "\n" + BENCHMARK_RUNTIME_CSS + "\n", encoding="utf-8")
 
     # Literal declaration equality: every unique authored HTML style value and
@@ -1351,7 +1355,7 @@ def write_generated() -> None:
 
 
 GENERATED_PATHS = (
-    "static/project-benchmark-template.html",
+    "static/project-benchmark-template.json",
     "static/css/project-benchmarks.css",
     "templates/base.html.j2",
     "templates/benchmarks.html.j2",

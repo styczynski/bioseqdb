@@ -5,8 +5,8 @@
     <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb">
       {% for crumb in page.breadcrumb %}<a href="{{ crumb.url }}">{{ crumb.name }}</a><span class="dd-s0043" aria-hidden="true">/</span>{% endfor %}
     </nav>
-    <h1 class="dd-s0045">{{ page.title }}</h1>
-    <p class="dd-s0046">{{ page.description }}</p>
+    <h1 class="dd-s0046">{{ page.title }}</h1>
+    {% if page.description != page.title %}<p class="dd-s0047">{{ page.description }}</p>{% endif %}
   </header>
 
   <div class="docs-content tutorial-body">{{ page.body_html }}</div>

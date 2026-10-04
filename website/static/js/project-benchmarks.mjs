@@ -37,9 +37,11 @@ const excerpts = [...document.querySelectorAll('.project-benchmark[data-table]')
 if (excerpts.length) {
   Promise.all([
     loader.loadSources(loader.DEFAULT_SOURCES),
-    fetch(new URL('../project-benchmark-template.html', import.meta.url)).then((response) => {
+    fetch(new URL('../project-benchmark-template.json', import.meta.url)).then(async (response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.text();
+      const template = await response.json();
+      if (typeof template.html !== 'string') throw new Error('Invalid benchmark table template');
+      return template.html;
     }),
   ]).then(([files, markup]) => {
     const model = loader.buildModel(files);
