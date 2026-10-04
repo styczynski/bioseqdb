@@ -874,6 +874,7 @@ function popovers() {
     anchor.setAttribute("aria-describedby", pop.id);
     position(anchor);
     requestAnimationFrame(() => {
+      if (serial !== requestSerial || activeAnchor !== anchor || !anchor.isConnected) return;
       pop.style.opacity = "1";
       pop.style.transform = "none";
     });

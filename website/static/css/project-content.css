@@ -44,7 +44,7 @@
   padding: .5rem 0;
 }
 .tutorial-body .katex { font-size: 1.08em; }
-.tutorial-body .source-link { overflow-wrap: anywhere; }
+.tutorial-body .source-link { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .tutorial-body .github-mark { vertical-align: -.15em; margin-right: .35em; flex-shrink: 0; }
 .tutorial-body a[id] { scroll-margin-top: 6rem; }
 .tutorial-body details { margin: 1.4rem 0; }

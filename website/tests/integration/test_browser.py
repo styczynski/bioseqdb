@@ -958,6 +958,36 @@ def _exercise_tooltip(page, request_urls: list[str], contract: dict) -> None:
     except Exception as error:  # noqa: BLE001
         raise AssertionFail(f"Escape did not dismiss the tooltip: {error}")
 
+    # Freeze the reveal frame so Escape deterministically lands after data has
+    # loaded but before the animation runs. A stale frame must not reopen it.
+    pending = ref.evaluate("""async anchor => {
+        const original = window.requestAnimationFrame;
+        const frames = [];
+        window.requestAnimationFrame = callback => { frames.push(callback); return 0; };
+        try {
+            anchor.blur();
+            anchor.focus();
+            await Promise.resolve();
+            await Promise.resolve();
+            const tooltip = document.getElementById('entity-pop');
+            const armed = tooltip.getAttribute('aria-hidden') === 'false'
+                && anchor.getAttribute('aria-describedby') === tooltip.id;
+            document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+            frames.forEach(callback => callback(performance.now()));
+            return {armed, frames: frames.length, opacity: tooltip.style.opacity,
+                    hidden: tooltip.getAttribute('aria-hidden'),
+                    describedBy: anchor.getAttribute('aria-describedby')};
+        } finally {
+            window.requestAnimationFrame = original;
+        }
+    }""")
+    _check(pending["armed"] and pending["frames"] > 0,
+           "entity tooltip regression did not intercept an active reveal frame")
+    _check(pending["opacity"] == "0" and pending["hidden"] == "true"
+           and not pending["describedBy"],
+           "a queued entity tooltip animation reopened the tooltip after Escape")
+    page.locator("#entity-pop").wait_for(state="hidden", timeout=3000)
+
 
 def _exercise_copy(page) -> None:
     """If a fenced code block is present (§10.5), verify every Copy button is
