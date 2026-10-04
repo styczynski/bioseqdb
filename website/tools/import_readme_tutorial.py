@@ -85,7 +85,7 @@ def generate():
              "cerain": "certain", "Row nuber": "Row number", "target-iadex": "target-index",
              "alignement": "alignment", "Autmatic": "Automatic"}
     for before, after in fixes.items():
-        body = body.replace(before, after)
+        body = re.sub(r"(?<!\w)" + re.escape(before) + r"(?!\w)", after, body)
     description = body.split(". ", 1)[0] + "."
     header = f"---\ntitle: Getting started with BioseqDB\nslug: getting_started\ndescription: {description}\norder: 0\nkeywords: [PostgreSQL, sequences, SQL, getting started]\ndraft: false\n---\n\n"
     sequence = ''.join(hashlib.md5(str(i).encode()).hexdigest().translate(str.maketrans('0123456789abcdef', 'ACGTACGTACGTACGT')) for i in range(1, 65))

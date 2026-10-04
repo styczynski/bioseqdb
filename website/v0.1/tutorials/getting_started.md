@@ -126,9 +126,9 @@ Please note that in this example I use sequences longer than >30 bases. Due to h
 
 Please note that the current software is an alpha version and still has
 numerous issues. The memory checks can be too restrictive. Currently when there's less than 2GiB available BioseqDB reports the following error:
-`transient query eexecution stats disagree with its generated backend`, which does not explain the actual issue.
+`transient query execution stats disagree with its generated backend`, which does not explain the actual issue.
 Because memory cannot  be allocated, the query reports that index cannot be built, so in stats the index access strategy sets the flag as unavailable.
-I check the "transient query eexecution stats" to confirm that what user chose to do is actually done (detects GPU fallbacks, scalar fallbacks and other hidden behaviour).
+I check the "transient query execution stats" to confirm that what user chose to do is actually done (detects GPU fallbacks, scalar fallbacks and other hidden behaviour).
 In the future this error needs to detect that, the problem was memory allocation, so UX is much better
 
 Additionally please `bioseq.index.insert_maintenance.enabled` set to off as currently BioseqDB defaults to grouped-MPF which does not support automatic index update on insert.
@@ -330,7 +330,7 @@ Custom Scan (BioseqScan) on samples (actual time=0.010..0.015 rows=3 loops=1)
         Cache Ending Size: 60
         Total Cache Entries: 4
 Planning Time: 0.028 ms
-Eexecution Time: 0.031 ms
+Execution Time: 0.031 ms
 ```
 
 </details>
@@ -356,7 +356,7 @@ two matches for Anna and one for Ben Because they are exact occurrences in this 
 Requesting `cigar` enables additional pipeline stage for base alignment, because the pipeline needs to know exactly which bases  were substituted/inserted or deleted. However,
 `score` alone does not enable it and can return zero (less exact score is used based only on chaining).
 
-If you encounter `"transient query eexecution stats disagree with its generated backend"` error here or in the next step, you should have at least 2GiB of free memory available
+If you encounter `"transient query execution stats disagree with its generated backend"` error here or in the next step, you should have at least 2GiB of free memory available
 
 ```sql runnable id=readme_step_06 timeout=60s entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
@@ -653,7 +653,7 @@ Result (actual time=1.281..1.295 rows=3 loops=1)
               min_diff: 30
               best_n: 5
             * Submit results [targets=2 persisted_index=0 recomputed=2]
-            * Eexecution statistics [requested_backend=simd_cpu actual_backend=mixed_invalid requested_index_source=persisted actual_index_source=recomputed attempted=2 fully_attested=0 unattested=2 environment_mixed=false persisted_identity_mixed=false identity_conflict=false saturated=false]
+            * Execution statistics [requested_backend=simd_cpu actual_backend=mixed_invalid requested_index_source=persisted actual_index_source=recomputed attempted=2 fully_attested=0 unattested=2 environment_mixed=false persisted_identity_mixed=false identity_conflict=false saturated=false]
             * First unattested [target_row=1 query_ordinal=0]
             * Index outcomes [targets=2 persisted=0 missing_persisted=2 recomputed=2]
             * GPU dispatch [seed=0 chain=0 chain_backtrack=0 coordinate_vote=0 extend=0 backend_declines=0 backend_fallbacks=0]
@@ -670,7 +670,7 @@ Result (actual time=1.281..1.295 rows=3 loops=1)
               Cache Ending Size: 16608
               Total Cache Entries: 5
 Planning Time: 0.241 ms
-Eexecution Time: 1.432 ms
+Execution Time: 1.432 ms
 ```
 
 </details>
@@ -1443,4 +1443,4 @@ SET bioseq.index.insert_maintenance.enabled = on;
 -- No update_index() call is needed for these new rows.
 ```
 
-This codesnippet avoid recomputing minimizer each time. Note that joins without these defaults (grouped-MPF for bounded SIMD) still require `aligner_options(index_read_requirement => 2)` to work correctly.
+This code snippet avoid recomputing minimizer each time. Note that joins without these defaults (grouped-MPF for bounded SIMD) still require `aligner_options(index_read_requirement => 2)` to work correctly.
