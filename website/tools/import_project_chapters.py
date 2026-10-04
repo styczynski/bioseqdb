@@ -344,6 +344,21 @@ def prepare_file(path: str, text: str | None = None) -> str:
 
 def convert(text: str) -> str:
     text = publication_words(text)
+    # Printed cache keys switch out of math between angle brackets. Adjacent
+    # dollar spans are ambiguous in Markdown, so keep each key in one formula.
+    text = re.sub(r"\$\\langle\$([^$]+)\$\\rangle\$",
+                  lambda m: r"$\langle\text{" + m[1].replace(r"\\", " ") + r"}\rangle$", text)
+    # MD4C treats text-adjacent dollars as literal currency. Keep mathematical
+    # tokens together and repair missing spaces in these source expressions.
+    text = text.replace(r"2$\times$", r"$2\times$")
+    text = text.replace(r"Count$[j]$", r"$\text{Count}[j]$")
+    text = re.sub(r"\$([ij])\$th", lambda m: "$" + m[1] + r"\text{th}$", text)
+    for word, formula in [("simplified", "h(j)"), ("model", r"j^\star"), ("predicate", "P_i")]:
+        text = text.replace(word + "$" + formula + "$", word + " $" + formula + "$")
+        text = text.replace(word + r"\(" + formula + r"\)", word + r" \(" + formula + r"\)")
+    # An asterisk in math nested inside an italic caption can end Markdown's
+    # emphasis span. The equivalent TeX command avoids that delimiter clash.
+    text = text.replace(r"${V13}^{*}$", r"${V13}^{\ast}$")
     # Remove print-only float wrappers before conversion. Otherwise Pandoc
     # places the protected Markdown images inside raw HTML paragraphs.
     def figure_body(match):
@@ -384,6 +399,7 @@ def convert(text: str) -> str:
     text = re.sub(r"\\begin\{longtable\}.*?\\end\{longtable\}", longtable, text, flags=re.S)
     def literal_code(body):
         body = re.sub(r"\\([_&#%${}])", r"\1", body)
+        body = body.replace(r"\[", "[").replace(r"\]", "]")
         for delimiter in ["|", "!", "+", ";"]:
             if delimiter not in body and "\\" not in body:
                 return "\\verb" + delimiter + body + delimiter

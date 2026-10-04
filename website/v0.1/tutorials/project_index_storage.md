@@ -98,9 +98,7 @@ Figure [index storage layouts](../project_index_storage/#fig-index-storage-layo
 
 ![03 mpf and mps diagram](/static/figures/project/chapters-12-index-storage-03-mpf-and-mps-tikz-01.svg)
 
-In reality the fragment’s number can be viewed as a generic sub-key. This distorts the original meaning of **`CHUNKED_PER_FRAGMENT`**, because in relity it’s just "per-sequence" but with extra key: $\langle$query_key,  
-sub_key,  
-chunk_no$\rangle$, while **`CHUNKED_PER_TABLE`** has $\langle$chunk_no$\rangle$. This idea is depicted below by real SQL schema of internal storage:
+In reality the fragment’s number can be viewed as a generic sub-key. This distorts the original meaning of **`CHUNKED_PER_FRAGMENT`**, because in relity it’s just "per-sequence" but with extra key: $\langle\text{query\_key, sub\_key, chunk\_no}\rangle$, while **`CHUNKED_PER_TABLE`** has $\langle\text{chunk\_no}\rangle$. This idea is depicted below by real SQL schema of internal storage:
 
 <a id="lst-chunked-per-fragment-row"></a>
 

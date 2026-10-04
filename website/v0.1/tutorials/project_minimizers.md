@@ -347,7 +347,7 @@ The porting involved several iterations over the minimap2 source to understand h
 
 The first approach (apart from direct minimap2 scalar rescan already existing in the ported code) was implementation of A1 SIMD rescan.
 
-As correctly predicted our benchmark (Table [v6 phase](../project_minimizers/#tab-v6-phase)) showed that the scalar `mm_sketch` took 12.5 ms on a 903 kbp pair, while the “vectorised” `mm_sketch_simd` took 24 ms – a 2$\times$ slowdown. This was caused by the fact that any minimum going outside the window causes rescan of all lanes.
+As correctly predicted our benchmark (Table [v6 phase](../project_minimizers/#tab-v6-phase)) showed that the scalar `mm_sketch` took 12.5 ms on a 903 kbp pair, while the “vectorised” `mm_sketch_simd` took 24 ms – a $2\times$ slowdown. This was caused by the fact that any minimum going outside the window causes rescan of all lanes.
 
 | Phase                   | scalar (ms) | V6 SIMD (ms) | V6 over scalar |
 |:------------------------|------------:|-------------:|---------------:|
@@ -552,13 +552,13 @@ In all of the experiments we used adjustable minimizer represetations with hash 
 
 ### Seeding prototypes summary
 
-The combination of the V12 inlinening fixes, the V13 estimator fix and replacing `boost::unordered_map` (marked as ${V13}^{*}$) yielded finally observable improvements. We didn’t want to implement new hashing scheme at this time, only see the impact of using different hash storage.
+The combination of the V12 inlinening fixes, the V13 estimator fix and replacing `boost::unordered_map` (marked as ${V13}^{\ast}$) yielded finally observable improvements. We didn’t want to implement new hashing scheme at this time, only see the impact of using different hash storage.
 
 <a id="fig-speedup-summary"></a>
 
 ![05 minimizers diagram](/static/figures/project/chapters-05-minimizers-python-03.svg)
 
-*Wall-clock delta versus scalar for the three SIMD configurations, expressed as percent (negative = faster). ${V13}^{*}$ now performs better than scalar, however this is nowhere near results reported in SIMD Minimizers paper.*
+*Wall-clock delta versus scalar for the three SIMD configurations, expressed as percent (negative = faster). ${V13}^{\ast}$ now performs better than scalar, however this is nowhere near results reported in SIMD Minimizers paper.*
 
 The summary table:
 
@@ -609,7 +609,7 @@ In algorithms below I assume $Q$ in entire queries batch (for short queries comb
 
 When we collect results we need to either: have fixed memory offsets per tile and perform another host pass to extract results or we can do lazy approach where we execute pipeline twice. First we use count mode to caculate where to place results and then do a second pass to actually write them. This makes pipeline do twice as much work, but avoids any additional host pass and we can directly use output results. The limtiations of our work is that we didn’t measure the difference between these approaches or between G3SA approach.
 
-The core part is OrderedSketchTile which runs the rescan algorithm in count mode and writes Count. The Count$[j]$ is the number of output records for tile $j$. PrefixScanBlock reads Count. Each of its $B$ single-invocation workgroups scans at most $S=256$ entries. It writes local offsets into Offset and one total per block into Block. Two stages (calls) of PrefixScanAdd are used to calculate global offsets.
+The core part is OrderedSketchTile which runs the rescan algorithm in count mode and writes Count. The $\text{Count}[j]$ is the number of output records for tile $j$. PrefixScanBlock reads Count. Each of its $B$ single-invocation workgroups scans at most $S=256$ entries. It writes local offsets into Offset and one total per block into Block. Two stages (calls) of PrefixScanAdd are used to calculate global offsets.
 
 The positive value $A$ is the pessimistic output capacity planned by the caller using heuristic. <span class="smallcaps">HostAndDevice</span> creates an $A$-record device output before count. If the actual pipeline overflows, then we return error.
 

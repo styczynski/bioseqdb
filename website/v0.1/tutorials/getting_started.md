@@ -1,7 +1,7 @@
 ---
 title: Getting started with BioseqDB
 slug: getting_started
-description: Store, index and search biological sequences with SQL.
+description: BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.
 order: 0
 keywords: [PostgreSQL, sequences, SQL, getting started]
 draft: false

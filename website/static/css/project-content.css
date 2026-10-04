@@ -1,3 +1,28 @@
+.tutorial-body { overflow-wrap: anywhere; }
+.tutorial-body > table,
+.tutorial-body details table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 8px;
+  border-collapse: collapse;
+  font-size: .9rem;
+}
+.tutorial-body > table th,
+.tutorial-body > table td,
+.tutorial-body details table th,
+.tutorial-body details table td {
+  padding: .65rem .85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  text-align: left;
+  vertical-align: top;
+}
+.tutorial-body > table th,
+.tutorial-body details table th {
+  background: rgba(43, 166, 208, .06);
+  color: #cbd8e4;
+}
 .tutorial-body img[src*="/figures/"] {
   display: block;
   max-width: 100%;

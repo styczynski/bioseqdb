@@ -31,7 +31,7 @@ In BioseqDB I used existing implementation of KSW2 (the algorithm by the author 
 | Special stop conditions (see below) | Z-drop | X-drop after two consecutive low-scoring steps |
 | Parameters that affect sizes of searched regions | "bandwith" is the maximum distance from the diagonal for the diagonal band | Block size, which is the initial size of the square |
 
-I previously introduced X-drop and Z-drop concepts [xdrop zdrop strategies](../project_alignment_foundations/#lst-xdrop-zdrop-strategies), but formally they can be formulated as follows. Let’s say $S^\star$ is the best score reached at $(i^\star,j^\star)$ and we test this best score against the current score $S$ at $(i,j)$ (meaning that we are matching $i$th symbol of target vs. $j$th symbol of query): <a id="eq-zdrop"></a> $$\begin{aligned}
+I previously introduced X-drop and Z-drop concepts [xdrop zdrop strategies](../project_alignment_foundations/#lst-xdrop-zdrop-strategies), but formally they can be formulated as follows. Let’s say $S^\star$ is the best score reached at $(i^\star,j^\star)$ and we test this best score against the current score $S$ at $(i,j)$ (meaning that we are matching $i\text{th}$ symbol of target vs. $j\text{th}$ symbol of query): <a id="eq-zdrop"></a> $$\begin{aligned}
   \text{X-drop:}\quad&S^\star-S>X,\\
   \text{Z-drop:}\quad&S^\star-S>Z+e_{g}\left|(i-i^\star)-(j-j^\star)\right|.
 \end{aligned}$$ $e_{g}$ here is gap-extension penalty, which in this context means that we can disard all symbols from the best score to the current position by introducing a gap. This means that effectively we just stop earlier if the distance from the diagonal gets to large, so practically Z-drop is more restrictive for correct setup.

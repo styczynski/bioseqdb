@@ -590,7 +590,7 @@ For example, select input rows with $40\leq id<100$. Completed sources cover $0\
 
 - $p(t)$: the new SQL predicate $P$ evaluates to `TRUE` on $t$
 
-- $c_i(t)$: cached source $i$ has tuple with alginment for which the original predicate$P_i$ evaluates to `TRUE` on $t$.
+- $c_i(t)$: cached source $i$ has tuple with alginment for which the original predicate $P_i$ evaluates to `TRUE` on $t$.
 
 Order the selected cached sources from $1$ to $m$, source $i$ supplies part $B_i$, while the reminder we have to compute is $D$: <a id="eq-cache-branch"></a> <a id="eq-cache-difference"></a> $$\begin{aligned}
  B_i &= \{(t,h)\mid T(t)\land A(t,h)\land p(t)\land c_i(t)

@@ -102,7 +102,7 @@ We defined the anchors that are input to chaining pipeline stage, however chaini
 >
 > Although chaining can be decomposed into several steps that are dispatched to differrent functions, in BioseqDB this is an internal implementation detail and we don’t allow users to alter for example which backtracking backend is used (although we could expose parts of chaining as composable components in the future)
 
-Forward chaining (which is the core component) produces the score array $f$ and predecessor array $p$. Second most important step is backtracking (as typically in case of DP algorithms which fill some state matrices) reads the sorted anchors, $f$, and $p$. The backtracking writes theflat output anchor array supplied by the caller, denoted by $A$ ($A$ can be viewed as type `anchor A`$$$$).
+Forward chaining (which is the core component) produces the score array $f$ and predecessor array $p$. Second most important step is backtracking (as typically in case of DP algorithms which fill some state matrices) reads the sorted anchors, $f$, and $p$. The backtracking writes theflat output anchor array supplied by the caller, denoted by $A$ ($A$ can be viewed as type `anchor A[]`).
 
 The chaining can be fully decomposed into the following steps:
 
@@ -1407,7 +1407,7 @@ Figure [chaining minimap2 rmq](../project_chaining/#fig-chaining-minimap2-rmq) 
 
 ![06 rmq diagram](/static/figures/project/chapters-06-chaining-06-rmq-tikz-01.svg)
 
-*Minimap2 RMQ for one target. (a) We maintain the range of reference coordinates in the array to know where the window starts (what is the anchor with lowest reference coordinate that still fits in the $r_i-D$ window). (b) Select the best anchor according to linear scoring model$j^\star$; “max $h$” is the largest value in a node’s subtree. (c) If the selected anchor $j^\star$ is not exact (Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact)), then we run the local scan. The blue rectangle is the local interval the green band satisfies $\delta\leq B$, orange crosses mark rejected candidates, including one inside the local interval. A scanned link (blue dot) replaces the current result only if both checks below pass. The local scan can stop early and do not iterate over all anchors in the local interval if for example skip counter $S$ is reached.*
+*Minimap2 RMQ for one target. (a) We maintain the range of reference coordinates in the array to know where the window starts (what is the anchor with lowest reference coordinate that still fits in the $r_i-D$ window). (b) Select the best anchor according to linear scoring model $j^\star$; “max $h$” is the largest value in a node’s subtree. (c) If the selected anchor $j^\star$ is not exact (Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact)), then we run the local scan. The blue rectangle is the local interval the green band satisfies $\delta\leq B$, orange crosses mark rejected candidates, including one inside the local interval. A scanned link (blue dot) replaces the current result only if both checks below pass. The local scan can stop early and do not iterate over all anchors in the local interval if for example skip counter $S$ is reached.*
 
 Algorithm [chaining minimap2 rmq](../project_chaining/#alg-chaining-minimap2-rmq) shows how RMQ forward chaining is implemented inside minimap2. <span class="smallcaps">RangeBest</span> function returns the anchor with the largest $h(j)$ in the interval, or $\bot$ if the interval contains no retained anchor, while <span class="smallcaps">CompleteLink</span> function calculates $E(j,i)$ from Equations [chaining link score](../project_chaining/#eq-chaining-link-score)–[chaining penalty](../project_chaining/#eq-chaining-penalty), together with $\delta$ and the exact (local scan) condition in Equation [chaining rmq exact](../project_chaining/#eq-chaining-rmq-exact).
 
@@ -1607,7 +1607,7 @@ The G3SA paper divides GPU kernel into 4 stages:
 
 2.  **First backtracking and packing:** G3SA applies minimap2’s cut and marking rule, reverses accepted paths, and packs their anchors into a buffer.
 
-3.  **Conditional ranking:** If the difference between sizes of query and target is big (see Figure [chaining pipelines](../project_chaining/#fig-chaining-pipelines)), then kernel compares simplified$h(j)$ and calculates one complete link score for the best canidate (similar to how minimap2 does RMQ rescoring mentioned earlier)
+3.  **Conditional ranking:** If the difference between sizes of query and target is big (see Figure [chaining pipelines](../project_chaining/#fig-chaining-pipelines)), then kernel compares simplified $h(j)$ and calculates one complete link score for the best canidate (similar to how minimap2 does RMQ rescoring mentioned earlier)
 
 4.  **Final backtracking:** This is done via minimap2 scalar backtracking algorithm
 

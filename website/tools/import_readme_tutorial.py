@@ -86,7 +86,8 @@ def generate():
              "alignement": "alignment", "Autmatic": "Automatic"}
     for before, after in fixes.items():
         body = body.replace(before, after)
-    header = "---\ntitle: Getting started with BioseqDB\nslug: getting_started\ndescription: Store, index and search biological sequences with SQL.\norder: 0\nkeywords: [PostgreSQL, sequences, SQL, getting started]\ndraft: false\n---\n\n"
+    description = body.split(". ", 1)[0] + "."
+    header = f"---\ntitle: Getting started with BioseqDB\nslug: getting_started\ndescription: {description}\norder: 0\nkeywords: [PostgreSQL, sequences, SQL, getting started]\ndraft: false\n---\n\n"
     sequence = ''.join(hashlib.md5(str(i).encode()).hexdigest().translate(str.maketrans('0123456789abcdef', 'ACGTACGTACGTACGT')) for i in range(1, 65))
     fixture = ''.join(f'>sample_{i} synthetic DNA\n{s}\n' for i, s in enumerate((sequence * 2, sequence[256:768], sequence), 1))
     return header + body + '\n', fixture
