@@ -991,7 +991,8 @@ def benchmarks_template(markup: str) -> str:
 <div id="benchmarks-app"
      data-loader-url="{{{{ site.assets_base_url }}}}js/project-benchmark-loader.mjs"
      data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"></div>
-{{% if page.benchmark_methodology_html %}}<section id="benchmark-methodology" class="benchmark-methodology markdown tutorial-body">
+{{% if page.benchmark_methodology_html %}}<section id="benchmark-methodology" class="benchmark-methodology markdown tutorial-body" aria-labelledby="benchmark-methodology-title">
+<h2 id="benchmark-methodology-title">Methodology &amp; machines</h2>
 {{{{ page.benchmark_methodology_html }}}}
 </section>{{% endif %}}
 <template id="benchmarks-app-template">
