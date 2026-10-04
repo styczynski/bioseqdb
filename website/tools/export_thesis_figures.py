@@ -9,6 +9,8 @@ of the normal website build. Example:
 The source graph starts at main.tex and follows metadata !partial paths and
 \\input/\\include recursively. Text, plot data and drawing commands come from
 those sources unchanged apart from the requested thesis -> project wording.
+The website palette is applied at export time; the paper's source colors and
+all drawing geometry, labels and plot data remain unchanged.
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,22 @@ SOURCE = REPO / 'papers/src/content/bioseqdb/thesis'
 OUTPUT = REPO / 'website/static/figures/project'
 TIKZ = re.compile(r'\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}', re.S)
 PYTHON = re.compile(r'\\begin\{CacheMeCode\}[^\n]*\n(.*?)\\end\{CacheMeCode\}', re.S)
+BACKGROUND = '071320'
+FOREGROUND = 'CBD8E4'
+PALETTE = {
+    'Blue': '46B8DE',
+    'Teal': '7DD3CF',
+    'Red': 'F2897F',
+    'Orange': 'F4894F',
+    'Gray': '849BB0',
+    'Green': '8FD6BA',
+    'Purple': 'B5A0E8',
+    'Yellow': 'E6C063',
+    'BlueLine': '46B8DE',
+    'TealLine': '7DD3CF',
+    'RedLine': 'F2897F',
+    'OrangeLine': 'F4894F',
+}
 
 
 def source_graph():
@@ -102,6 +119,29 @@ def project_wording(text):
     )
 
 
+def tex_palette():
+    # Redefine the mixing endpoints before the author's color aliases/styles.
+    # Thus black!12 becomes a subtle light grid on navy, while Blue!10 remains
+    # a tinted panel. Merely replacing final SVG black would leave pale panels
+    # behind light labels and lose the source's contrast relationships.
+    colors = {'black': FOREGROUND, 'white': BACKGROUND,
+              'WebsiteSurface': BACKGROUND}
+    colors.update({name.lower(): value for name, value in PALETTE.items()
+                   if not name.endswith('Line')})
+    colors['cyan'] = PALETTE['Blue']
+    colors['magenta'] = PALETTE['Purple']
+    colors.update({'Thesis' + name: value for name, value in PALETTE.items()})
+    return '\n'.join(r'\definecolor{' + name + '}{HTML}{' + value + '}'
+                     for name, value in colors.items())
+
+
+def theme_tex_colors(text):
+    # xcolor's implicit mix endpoint is hardcoded RGB white, even when the
+    # named white color is redefined. Spell out that endpoint so tint fills
+    # use the website surface, including styles shared by multiple drawings.
+    return re.sub(r'(!\d+(?:\.\d+)?)(?![\d.!])', r'\1!WebsiteSurface', text)
+
+
 def preamble(definitions):
     return r'''\def\pgfsysdriver{pgfsys-dvisvgm.def}
 \documentclass[tikz,border=4pt]{standalone}
@@ -120,7 +160,7 @@ def preamble(definitions):
 \setlength{\linewidth}{16cm}
 \renewcommand{\footnotemark}{}
 \input{figure_palette.tex}
-''' + definitions + '\n\\begin{document}\n'
+''' + tex_palette() + '\n' + theme_tex_colors(definitions) + '\n\\begin{document}\n\\color{black}\n'
 
 
 def figures(paths):
@@ -154,7 +194,7 @@ def command(args, cwd, env=None):
 def render_tikz(item, definitions, work):
     work.mkdir(parents=True, exist_ok=True)
     tex = work / 'figure.tex'
-    tex.write_text(preamble(definitions) + item['_content'] + '\n\\end{document}\n')
+    tex.write_text(preamble(definitions) + theme_tex_colors(item['_content']) + '\n\\end{document}\n')
     env = os.environ.copy()
     env['TEXINPUTS'] = str(SOURCE) + os.pathsep + env.get('TEXINPUTS', '')
     command(['latex', '-interaction=nonstopmode', '-halt-on-error', 'figure.tex'], work, env)
@@ -162,15 +202,19 @@ def render_tikz(item, definitions, work):
     svg = work / 'figure.svg'
     # hypertex treats site-absolute paths as DVI files. Restore website routes
     # after vector export while leaving ordinary external HTTPS links intact.
-    svg.write_text(re.sub(r'file:(/[^\"\']*?)\.dvi#', r'\1#', svg.read_text()))
+    content = re.sub(r'file:(/[^\"\']*?)\.dvi#', r'\1#', svg.read_text())
+    # Hypertex/font icon specials occasionally emit SVG's literal black
+    # independently of the TeX color stack. Adapt only their paint attributes.
+    content = re.sub(r'''(fill|stroke)=(['"])black\2''',
+                     lambda m: m[1] + '=' + m[2] + '#' + FOREGROUND.lower() + m[2], content)
+    svg.write_text(content)
     return svg
 
 
 def render_python(item, work):
     work.mkdir(parents=True, exist_ok=True)
     content = textwrap.dedent(item['_content']).strip()
-    palette = (SOURCE / 'figure_palette.tex').read_text()
-    for name, value in re.findall(r'\\newcommand\{\\Thesis(\w+)Hex\}\{([0-9A-F]+)\}', palette):
+    for name, value in PALETTE.items():
         key = re.sub(r'([a-z])([A-Z])', r'\1_\2', name).upper()
         content = content.replace('__THESIS_' + key + '__', value)
     content = content.replace('__LINEWIDTH__', str(16 / 2.54))
@@ -178,9 +222,23 @@ def render_python(item, work):
     content = content.replace("matplotlib.use('pgf')", "matplotlib.use('svg')")
     content = content.replace('get_filename_from_extension(".pgf")', '"figure.svg"')
     content = content.replace("get_filename_from_extension('.pgf')", '"figure.svg"')
+    # Only color literals are adapted; author data, labels and artist geometry
+    # are executed unchanged. Opaque marker centers still mask the line below.
+    literals = {'white': '#' + BACKGROUND, 'black': '#' + FOREGROUND,
+                '#000000': '#' + FOREGROUND, '#333333': '#' + FOREGROUND,
+                '#555555': '#9BB0C0', '#e5e5e5': '#344B5E'}
+    content = re.sub(r'([\'"])(white|black|#[0-9a-fA-F]{6})\1',
+                     lambda m: m[1] + literals.get(m[2], m[2]) + m[1], content)
     # Fixed metadata and hash salt make checked-in SVG output reproducible.
-    bootstrap = "import matplotlib\nmatplotlib.rcParams['svg.hashsalt'] = 'bioseq-website'\n"
-    content = re.sub(r'(plt\.savefig\([^\n]*)(\))', r'\1, metadata={"Date": None}\2', content)
+    # transparent=True removes the figure and axes backgrounds, not the bars,
+    # confidence bands or marker centers that carry information.
+    settings = {'svg.hashsalt': 'bioseq-website', 'text.color': '#' + FOREGROUND,
+                'axes.labelcolor': '#' + FOREGROUND, 'axes.edgecolor': '#849BB0',
+                'xtick.color': '#' + FOREGROUND, 'ytick.color': '#' + FOREGROUND,
+                'grid.color': '#849BB0', 'hatch.color': '#' + FOREGROUND}
+    bootstrap = 'import matplotlib\nmatplotlib.rcParams.update(' + repr(settings) + ')\n'
+    content = re.sub(r'(plt\.savefig\([^\n]*)(\))',
+                     r'\1, transparent=True, metadata={"Date": None}\2', content)
     script = work / 'figure.py'
     script.write_text(bootstrap + content + '\n')
     command([sys.executable, str(script)], work)
@@ -204,7 +262,9 @@ def main():
             return
         work = args.work_dir / destination.stem
         svg = render_tikz(item, definitions, work) if item['kind'] == 'tikz' else render_python(item, work)
-        shutil.copyfile(svg, destination)
+        # Matplotlib's multiline path data otherwise leaves trailing spaces.
+        # SVG treats these as equivalent separators; keep generated diffs clean.
+        destination.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines()) + '\n')
         print('Exported ' + item['svg'], flush=True)
     failures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -222,8 +282,12 @@ def main():
         if destination.is_file():
             attrs = ET.parse(destination).getroot().attrib
             item.update({key: attrs[key] for key in ('width', 'height', 'viewBox') if key in attrs})
+            item['svg_sha256'] = hashlib.sha256(destination.read_bytes()).hexdigest()
     (OUTPUT / 'manifest.json').write_text(json.dumps({
         'entrypoint': 'papers/src/content/bioseqdb/thesis/main.tex',
+        'theme': {'name': 'website-dark', 'background': 'transparent',
+                  'surface': '#' + BACKGROUND, 'foreground': '#' + FOREGROUND,
+                  'palette': {name: '#' + value for name, value in PALETTE.items()}},
         'sources': [p.relative_to(SOURCE).as_posix() for p in paths],
         'figures': items,
     }, indent=2) + '\n')

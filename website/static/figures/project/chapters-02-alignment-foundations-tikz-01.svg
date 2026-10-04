@@ -52,11 +52,11 @@
 </defs>
 <g id='page1'>
 <g stroke-miterlimit='10' transform='translate(-74.825316,118.698755)scale(0.996264,-0.996264)'>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <g stroke-width='0.4'>
 <g transform='translate(37.82176,177.00592)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-71'/>
 <use x='-67.593939' y='118.698755' xlink:href='#g1-108'/>
@@ -68,12 +68,12 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
 <path d='M29.87546 130.02924V172.70836H72.55458V130.02924ZM72.55458 172.70836' fill='none'/>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -82,10 +82,10 @@
 </g>
 </g>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M31.57545 172.70836C31.57545 173.64725 30.81435 174.40836 29.87546 174.40836S28.17546 173.64725 28.17546 172.70836S28.93657 171.00836 29.87546 171.00836S31.57545 171.76947 31.57545 172.70836ZM29.87546 172.70836' stroke='none'/>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M74.25458 130.02924C74.25458 130.96812 73.49347 131.72923 72.55458 131.72923S70.85458 130.96812 70.85458 130.02924C70.85458 129.09035 71.61569 128.32924 72.55458 128.32924S74.25458 129.09035 74.25458 130.02924ZM72.55458 130.02924' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -98,7 +98,7 @@
  </g>
 </g>
 </g>
-<g fill='#fff9d7' stroke='#fff9d7'>
+<g fill='#2a2e2a' stroke='#2a2e2a'>
 <path d='M10.81218 115.80287V123.20042H90.4795V115.80287ZM90.4795 123.20042' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -111,7 +111,7 @@
 </g>
 <g transform='translate(140.34663,177.00592)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-69'/>
 <use x='-68.554336' y='118.698755' xlink:href='#g1-110'/>
@@ -126,26 +126,26 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
 <path d='M116.6564 133.7278V169.29373H202.01463V133.7278ZM202.01463 169.29373' fill='none'/>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M116.6564 155.06735V169.29373H150.7996' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M176.4069 133.7278H202.01463V144.53998' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -164,9 +164,9 @@
  </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
-<g fill='#fff9d7'>
+<g fill='#2a2e2a'>
 <g stroke-width='0.55'>
 <path d='M131.45195 115.80287V123.20042H187.21909V115.80287ZM187.21909 123.20042'/>
 </g>
@@ -175,7 +175,7 @@
 </g>
 <g transform='translate(244.07237,177.88092)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-83'/>
 <use x='-69.705506' y='118.698755' xlink:href='#g1-101'/>
@@ -192,26 +192,26 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
 <path d='M224.77692 133.7278V169.29373H310.13515V133.7278ZM310.13515 169.29373' fill='none'/>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M224.77692 169.29373H310.13515' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M224.77692 133.7278H310.13515' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -230,7 +230,7 @@
  </g>
 </g>
 </g>
-<g fill='#fff9d7' stroke='#fff9d7'>
+<g fill='#2a2e2a' stroke='#2a2e2a'>
 <path d='M249.81503 115.80287V123.20042H302.16841V115.80287ZM302.16841 123.20042' stroke='none'/>
 </g>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
@@ -257,7 +257,7 @@
 </g>
 <g transform='translate(364.59216,177.00592)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-76'/>
 <use x='-69.066413' y='118.698755' xlink:href='#g1-111'/>
@@ -268,14 +268,14 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
-<g fill='#f4f4f4'>
+<g fill='#121f2d'>
 <path d='M354.23656 130.02924V172.70836H396.91568V130.02924ZM396.91568 172.70836'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -284,10 +284,10 @@
 </g>
 </g>
 </g>
-<g fill='#ffd900' stroke='#ffd900'>
+<g fill='#e6c063' stroke='#e6c063'>
 <path d='M365.99477 165.87953C365.99477 166.87366 365.18889 167.67953 364.19476 167.67953C363.20064 167.67953 362.39476 166.87366 362.39476 165.87953S363.20064 164.07953 364.19476 164.07953C365.18889 164.07953 365.99477 164.8854 365.99477 165.87953ZM364.19476 165.87953' stroke='none'/>
 </g>
-<g fill='#ffd900' stroke='#ffd900'>
+<g fill='#e6c063' stroke='#e6c063'>
 <path d='M388.18787 143.68643C388.18787 144.68056 387.38199 145.48643 386.38786 145.48643C385.39374 145.48643 384.58786 144.68056 384.58786 143.68643S385.39374 141.88643 386.38786 141.88643C387.38199 141.88643 388.18787 142.6923 388.18787 143.68643ZM386.38786 143.68643' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -300,9 +300,9 @@
  </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
-<g fill='#fff9d7'>
+<g fill='#2a2e2a'>
 <g stroke-width='0.55'>
 <path d='M353.66739 115.80287V123.20042H397.48485V115.80287ZM397.48485 123.20042'/>
 </g>
@@ -331,7 +331,7 @@
 </g>
 <g transform='translate(31.21043,75.9986)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-69'/>
 <use x='-68.554336' y='118.698755' xlink:href='#g1-120'/>
@@ -346,19 +346,19 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
 <path d='M8.5359 32.72047V68.2864H93.89413V32.72047ZM93.89413 68.2864' fill='none'/>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M8.5359 32.72047H93.89413V68.2864' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -367,7 +367,7 @@
 </g>
 </g>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M10.2359 68.2864C10.2359 69.2253 9.4748 69.9864 8.5359 69.9864C7.59702 69.9864 6.8359 69.2253 6.8359 68.2864C6.8359 67.34752 7.59702 66.58641 8.5359 66.58641C9.4748 66.58641 10.2359 67.34752 10.2359 68.2864ZM8.5359 68.2864' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -380,7 +380,7 @@
  </g>
 </g>
 </g>
-<g fill='#fff9d7' stroke='#fff9d7'>
+<g fill='#2a2e2a' stroke='#2a2e2a'>
 <path d='M8.5359 14.79555V22.1931H58.3282V14.79555ZM58.3282 22.1931' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -398,7 +398,7 @@
 </g>
 <g transform='translate(143.39275,76.8736)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-79'/>
 <use x='-67.657695' y='118.698755' xlink:href='#g1-118'/>
@@ -411,19 +411,19 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
 <path d='M116.6564 32.72047V68.2864H202.01463V32.72047ZM202.01463 68.2864' fill='none'/>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M116.6564 68.2864V32.72047H202.01463' fill='none'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -442,9 +442,9 @@
  </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
-<g fill='#fff9d7'>
+<g fill='#2a2e2a'>
 <g stroke-width='0.55'>
 <path d='M123.48479 14.79555V22.1931H175.83817V14.79555ZM175.83817 22.1931'/>
 </g>
@@ -463,7 +463,7 @@
 </g>
 <g transform='translate(250.24052,76.8736)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g1-67'/>
 <use x='-68.16978' y='118.698755' xlink:href='#g1-108'/>
@@ -477,14 +477,14 @@
 </g>
 </g>
 </g>
-<g fill='#f9f9f9'>
-<g stroke='#000'>
+<g fill='#0d1927'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <path d='M224.77692 32.72047V68.2864H310.13515V32.72047ZM310.13515 68.2864'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -493,7 +493,7 @@
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -504,13 +504,13 @@
 </g>
 </g>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M226.47691 68.2864C226.47691 69.2253 225.7158 69.9864 224.77692 69.9864C223.83803 69.9864 223.07692 69.2253 223.07692 68.2864C223.07692 67.34752 223.83803 66.58641 224.77692 66.58641C225.7158 66.58641 226.47691 67.34752 226.47691 68.2864ZM224.77692 68.2864' stroke='none'/>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M311.83514 32.72047C311.83514 33.65936 311.07404 34.42047 310.13515 34.42047S308.43515 33.65936 308.43515 32.72047C308.43515 31.78159 309.19626 31.02048 310.13515 31.02048S311.83514 31.78159 311.83514 32.72047ZM310.13515 32.72047' stroke='none'/>
 </g>
-<g fill='#ffd900' stroke='#ffd900'>
+<g fill='#e6c063' stroke='#e6c063'>
 <path d='M294.29416 44.95538C294.29416 45.94951 293.48828 46.75539 292.49416 46.75539C291.50003 46.75539 290.69415 45.94951 290.69415 44.95538C290.69415 43.96126 291.50003 43.15538 292.49416 43.15538C293.48828 43.15538 294.29416 43.96126 294.29416 44.95538ZM292.49416 44.95538' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -523,9 +523,9 @@
  </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
-<g fill='#fff9d7'>
+<g fill='#2a2e2a'>
 <g stroke-width='0.55'>
 <path d='M239.00328 14.79555V22.1931H290.2183V14.79555ZM290.2183 22.1931'/>
 </g>
@@ -544,7 +544,7 @@
 </g>
 <g transform='translate(350.95715,76.3431)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g0-76'/>
 <use x='-69.536814' y='118.698755' xlink:href='#g0-111'/>
@@ -565,14 +565,14 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='0.45'>
-<g fill='#f9f9f9'>
+<g fill='#0d1927'>
 <path d='M354.23656 29.02191V71.70103H396.91568V29.02191ZM396.91568 71.70103'/>
 </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -581,10 +581,10 @@
 </g>
 </g>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M355.93655 71.70103C355.93655 72.63992 355.17545 73.40103 354.23656 73.40103S352.53656 72.63992 352.53656 71.70103C352.53656 70.76215 353.29767 70.00104 354.23656 70.00104S355.93655 70.76215 355.93655 71.70103ZM354.23656 71.70103' stroke='none'/>
 </g>
-<g fill='#ffd900' stroke='#ffd900'>
+<g fill='#e6c063' stroke='#e6c063'>
 <path d='M384.4893 42.67911C384.4893 43.67323 383.68343 44.47911 382.6893 44.47911C381.69518 44.47911 380.8893 43.67323 380.8893 42.67911C380.8893 41.68498 381.69518 40.8791 382.6893 40.8791C383.68343 40.8791 384.4893 41.68498 384.4893 42.67911ZM382.6893 42.67911' stroke='none'/>
 </g>
 <g stroke-width='0.55'>
@@ -597,9 +597,9 @@
  </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-dasharray='3.0,3.0' stroke-dashoffset='0.0'>
-<g fill='#fff9d7'>
+<g fill='#2a2e2a'>
 <g stroke-width='0.55'>
 <path d='M332.897 14.79555V22.1931H382.6893V14.79555ZM382.6893 22.1931'/>
 </g>
@@ -616,7 +616,7 @@
  </g>
 </g>
 </g>
-<g stroke='#ffd900'>
+<g stroke='#e6c063'>
 <g stroke-width='1.15'>
 <g stroke-linecap='round'>
 <g stroke-linejoin='round'>
@@ -627,7 +627,7 @@
 </g>
 <g transform='translate(27.43317,-7.66818)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g0-97'/>
 <use x='-70.591194' y='118.698755' xlink:href='#g0-108'/>
@@ -646,12 +646,12 @@
 </g>
 </g>
 </g>
-<g fill='#000' stroke='#000'>
+<g fill='#cbd8e4' stroke='#cbd8e4'>
 <path d='M106.97505-5.69046C106.97505-4.75157 106.21394-3.99046 105.27505-3.99046C104.33617-3.99046 103.57506-4.75157 103.57506-5.69046S104.33617-7.39046 105.27505-7.39046C106.21394-7.39046 106.97505-6.62935 106.97505-5.69046ZM105.27505-5.69046' stroke='none'/>
 </g>
 <g transform='translate(112.22266,-7.66821)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g0-28'/>
 <use x='-70.120623' y='118.698755' xlink:href='#g0-120'/>
@@ -669,12 +669,12 @@
 </g>
 </g>
 </g>
-<g fill='#ffd900' stroke='#ffd900'>
+<g fill='#e6c063' stroke='#e6c063'>
 <path d='M193.85602-5.69046C193.85602-4.69633 193.05014-3.89046 192.05602-3.89046C191.06189-3.89046 190.25601-4.69633 190.25601-5.69046S191.06189-7.49046 192.05602-7.49046C193.05014-7.49046 193.85602-6.68459 193.85602-5.69046ZM192.05602-5.69046' stroke='none'/>
 </g>
 <g transform='translate(199.28798,-7.66821)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g0-115'/>
 <use x='-71.484846' y='118.698755' xlink:href='#g0-101'/>
@@ -700,7 +700,7 @@
 </g>
 </g>
 </g>
-<g stroke='#000'>
+<g stroke='#cbd8e4'>
 <g stroke-width='1.35'>
 <g stroke-linecap='round'>
 <path d='M301.59924-5.69046H313.54935' fill='none'/>
@@ -709,7 +709,7 @@
 </g>
 <g transform='translate(319.92734,-7.66821)'>
 <g stroke='none' transform='scale(-1.00375,1.00375)translate(-74.825316,118.698755)scale(-1,-1)'>
-<g fill='#000'>
+<g fill='#cbd8e4'>
 <g stroke='none'>
 <use x='-74.825316' y='118.698755' xlink:href='#g0-112'/>
 <use x='-69.885391' y='118.698755' xlink:href='#g0-101'/>
