@@ -64,6 +64,12 @@ struct [[bioseq_sql::type({
     std::uint8_t alphabet_code;
     std::uint8_t rank;
 
+    /**
+     * @brief Test whether the left letter precedes the right by alphabet code, then rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when left is less than right under this ordering.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -88,6 +94,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) < 0;
     }
 
+    /**
+     * @brief Test whether the left letter precedes or equals the right by alphabet code, then rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when left is less than or equal to right under this ordering.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -112,6 +124,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) <= 0;
     }
 
+    /**
+     * @brief Test whether two letters have the same alphabet code and rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when both alphabet codes and ranks are equal.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -138,6 +156,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) == 0;
     }
 
+    /**
+     * @brief Test whether two letters differ in alphabet code or rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when either the alphabet codes or the ranks differ.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -162,6 +186,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) != 0;
     }
 
+    /**
+     * @brief Test whether the left letter follows or equals the right by alphabet code, then rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when left is greater than or equal to right under this ordering.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -186,6 +216,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) >= 0;
     }
 
+    /**
+     * @brief Test whether the left letter follows the right by alphabet code, then rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return True when left is greater than right under this ordering.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -210,6 +246,12 @@ struct [[bioseq_sql::type({
         return ::compare_letters(left, right) > 0;
     }
 
+    /**
+     * @brief Compare letters by alphabet code, then rank.
+     * @param left Left letter.
+     * @param right Right letter.
+     * @return -1 when left precedes right, 0 when equal, or 1 when left follows right.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -228,6 +270,11 @@ struct [[bioseq_sql::type({
             ::compare_letters(left, right));
     }
 
+    /**
+     * @brief Hash the alphabet and rank bytes with PostgreSQL's 32-bit hash function.
+     * @param value Letter to hash.
+     * @return The hash as a SQL integer.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -243,6 +290,12 @@ struct [[bioseq_sql::type({
             hash_bytes(bytes.data(), bytes.size()));
     }
 
+    /**
+     * @brief Hash the alphabet and rank bytes with PostgreSQL's seeded 64-bit hash function.
+     * @param value Letter to hash.
+     * @param seed Seed passed to the extended hash function.
+     * @return The hash as a SQL bigint.
+     */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
         .volatility = bioseq::sql::volatility::immutable,
@@ -660,6 +713,10 @@ export void install_letter_literal_validation_hook() noexcept
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Report entries into Bioseq's letter-validation parser hook in this backend.
+ * @return The hook entry count, capped at the maximum signed 64-bit value.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -825,6 +882,11 @@ letter_hash_bytes(bioseq::pg_types::letter value) noexcept
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Parse the single alphabet modifier accepted by bioseq.letter.
+ * @param array One-dimensional array containing one non-NULL alphabet name.
+ * @return The encoded PostgreSQL type modifier for that alphabet.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -860,6 +922,11 @@ std::int32_t letter_typmod_in(
     return encode_letter_typmod(alphabet);
 }
 
+/**
+ * @brief Format a letter type modifier as its alphabet name in parentheses.
+ * @param typmod Encoded alphabet modifier, or a negative value for no modifier.
+ * @return The alphabet modifier text, or an empty string when no modifier is set.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -884,6 +951,13 @@ char* letter_typmod_out(std::int32_t typmod)
     return result;
 }
 
+/**
+ * @brief Read one symbol and resolve it against the requested letter alphabet.
+ * @param input Text containing exactly one symbol.
+ * @param type_oid PostgreSQL type OID; unused.
+ * @param typmod Alphabet modifier, or a negative value to defer alphabet resolution.
+ * @return A letter with its alphabet and rank, or an unresolved symbol when no alphabet is supplied.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -920,6 +994,11 @@ bioseq::pg_types::letter letter_in(
     return {.alphabet_code = alphabet, .rank = rank};
 }
 
+/**
+ * @brief Format a letter as its alphabet symbol.
+ * @param value Letter to format.
+ * @return A null-terminated string containing one symbol.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -1008,6 +1087,13 @@ namespace {
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Decode and validate a letter's versioned binary representation.
+ * @param buffer Binary input containing the version, alphabet code and rank bytes.
+ * @param type_oid PostgreSQL type OID; unused.
+ * @param typmod Required alphabet modifier, or a negative value to accept the encoded alphabet.
+ * @return The decoded letter after validating its version, alphabet, rank and optional modifier.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -1028,6 +1114,11 @@ bioseq::pg_types::letter letter_recv(
   return decode_letter_wire(buffer, typmod);
 }
 
+/**
+ * @brief Encode a letter as binary version 1 followed by its alphabet code and rank.
+ * @param value Letter to encode.
+ * @return The three-byte PostgreSQL binary payload.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -1050,6 +1141,10 @@ text* letter_send(
   return pq_endtypsend(&buffer);
 }
 
+/**
+ * @brief Run the internal rejection checks for invalid letter binary input.
+ * @return True when all enabled version, rank and alphabet-mismatch checks pass.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -1077,6 +1172,13 @@ bool letter_wire_self_test() {
   return unknown_version && bad_rank && typmod_mismatch;
 }
 
+/**
+ * @brief Resolve a letter's alphabet modifier without relabeling an already resolved letter.
+ * @param input Resolved letter or unresolved input symbol.
+ * @param target_typmod Destination alphabet modifier; required for an unresolved symbol.
+ * @param explicit_cast PostgreSQL explicit-cast flag; unused.
+ * @return The resolved letter; a conflicting destination alphabet raises an error.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -1115,6 +1217,11 @@ bioseq::pg_types::letter letter(
   return input.value;
 }
 
+/**
+ * @brief Convert a letter to its single alphabet symbol as PostgreSQL text.
+ * @param value Letter to convert.
+ * @return A text value containing one symbol.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,

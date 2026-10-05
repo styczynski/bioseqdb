@@ -37,6 +37,8 @@
 .benchmark-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:12px;padding:12px 26px;border-bottom:1px solid rgba(255,255,255,.08)}
 .benchmark-toolbar>a{margin-right:auto;color:#7fcbe8;font-size:14px}
 .benchmark-methodology{max-width:1400px;margin:0 auto;padding:32px clamp(20px,4vw,56px);scroll-margin-top:calc(var(--site-header-height) + 16px)}
+.benchmark-methodology>p,.benchmark-methodology>ul,.benchmark-methodology>ol{max-width:80ch}
+.benchmark-methodology>h2:first-child{margin-top:0}
 @media(max-width:1100px){.site-header .site-version-wrap,.site-header .site-github{display:none}}
 @media(max-width:759px){
   :root{--site-header-height:112px}

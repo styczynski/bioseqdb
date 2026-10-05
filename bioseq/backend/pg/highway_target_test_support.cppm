@@ -67,6 +67,11 @@ struct highway_target_test_state_record {
 
 export namespace bioseq::pg::sql_routines {
 
+/**
+ * @brief Run internal checks for clearing and preparing the same CPU target again.
+ * @return True if moves, query validation, memory cleanup, and reuse checks pass;
+ * false otherwise.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -79,6 +84,13 @@ bool cpu_prepared_target_same_object_reprepare_probe() {
 	return bioseq::simd::cpu_prepared_target_same_object_reprepare_probe();
 }
 
+/**
+ * @brief Return the unforced Highway CPU target mask for internal tests.
+ * Requires BIOSEQ_TEST_INDEXES; an unavailable or inconsistent inventory raises
+ * a SQL error.
+ * @return The saved bit mask of registered targets that are both compiled and
+ * supported by the CPU, captured before these helpers force a target.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -101,6 +113,13 @@ std::int64_t highway_baseline_runnable_targets_for_test() {
 #endif
 }
 
+/**
+ * @brief Select a Highway CPU target in this PostgreSQL process for internal tests.
+ * Requires BIOSEQ_TEST_INDEXES; invalid or unavailable targets raise a SQL error.
+ * @param[in] target One positive bit from the baseline runnable mask, or zero to
+ * restore automatic target selection.
+ * @return The canonical target name, or "default" when target is zero.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,

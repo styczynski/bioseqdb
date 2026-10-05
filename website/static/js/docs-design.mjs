@@ -436,7 +436,7 @@ function popovers() {
     if (Array.isArray(record.fields) && record.fields.length) {
       const fields = document.createElement("div");
       fields.className = "entity-pop-params";
-      record.fields.forEach((field) => {
+      record.fields.slice(0, 6).forEach((field) => {
         const row = document.createElement("div");
         row.className = "entity-pop-param";
         const name = document.createElement("code");
@@ -449,6 +449,12 @@ function popovers() {
         fields.appendChild(row);
       });
       body.appendChild(fields);
+      if (record.fields.length > 6) {
+        const more = document.createElement("p");
+        more.className = "entity-pop-return";
+        more.textContent = `${record.fields.length} fields · Open the reference for the full list.`;
+        body.appendChild(more);
+      }
     }
     if (Array.isArray(record.enum_values) && record.enum_values.length) {
       const values = document.createElement("p");

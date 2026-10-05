@@ -36,9 +36,12 @@ def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dic
             rendered = by_id[identity]
             assert rendered["summary"], f"empty SQL summary: {identity}"
             assert rendered["attributes"]["installed_identity"] == source["installed_identity"]
-            if source["brief"]:
+            authored_summary = source["brief"] or source["details"].split("\n\n", 1)[0]
+            if source["kind"] in {"function", "sql_function", "procedure"}:
+                assert authored_summary, f"SQL routine lacks an in-code description: {identity}"
+            if authored_summary:
                 authored += 1
-                assert rendered["summary"] == source["brief"], f"rewritten authored brief: {identity}"
+                assert rendered["summary"] == authored_summary, f"rewritten authored summary: {identity}"
             if source["public_documentation"]:
                 public += 1
             if source.get("source_path"):
@@ -47,6 +50,7 @@ def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dic
             if source["kind"] == "type" and source["columns"]:
                 assert len(rendered["fields"]) == len(source["columns"]), f"missing type fields: {identity}"
                 assert all(field["type"] for field in rendered["fields"]), f"missing field SQL types: {identity}"
+                assert all(field["description"] for field in rendered["fields"]), f"missing field descriptions: {identity}"
     catalog = json.loads(catalog_path.read_text())
     catalog_entities = catalog["entities"]
     installed = {entity.get("attributes", {}).get("installed_identity", entity["canonical_id"])

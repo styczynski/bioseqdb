@@ -2374,6 +2374,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             const sql_manifest_public_projection& projection) {
         if (!source.name.empty()) entity.display_name = source.name;
         if (!source.brief.empty()) entity.summary_text = source.brief;
+        else if (!source.details.empty())
+            entity.summary_text = source.details.substr(0, source.details.find("\n\n"));
         if (!source.details.empty()) entity.detail_content = {content_node{
             .kind = content_node_kind::paragraph,
             .children = {content_node{.kind = content_node_kind::text, .text = source.details}},

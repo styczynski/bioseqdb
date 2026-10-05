@@ -222,6 +222,16 @@ inline void read_unbound_chunk(
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Compare two sequences by alphabet binding, alphabet code, and content.
+ * Unbound values sort before bound values and compare by text bytes. Bound
+ * values sort by alphabet code, then lexicographically by letter rank. A
+ * shorter equal prefix sorts first. Packing width and piece-tree layout do
+ * not affect the result; unresolved table locators are rejected.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return -1 when left sorts first, 0 when equal, or 1 when right sorts first.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -242,6 +252,13 @@ std::int32_t seq_cmp(
         seq_compare_internal(left, right));
 }
 
+/**
+ * @brief Test whether the left sequence sorts before the right sequence.
+ * Use seq_cmp ordering: unbound values first, then alphabet code and content.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when seq_cmp(left, right) is negative.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -268,6 +285,13 @@ bool seq_lt(
     return seq_compare_internal(left, right) < 0;
 }
 
+/**
+ * @brief Test whether the left sequence sorts before or equals the right sequence.
+ * Use seq_cmp ordering: unbound values first, then alphabet code and content.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when seq_cmp(left, right) is negative or zero.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -294,6 +318,14 @@ bool seq_le(
     return seq_compare_internal(left, right) <= 0;
 }
 
+/**
+ * @brief Test equality of sequence alphabet binding and content.
+ * Bound values must have matching alphabet codes and letter ranks. Unbound
+ * values compare byte-for-byte. Packing width and piece-tree layout are ignored.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when both values have the same alphabet binding and content.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -322,6 +354,13 @@ bool seq_eq(
     return seq_compare_internal(left, right) == 0;
 }
 
+/**
+ * @brief Test whether sequence alphabet binding or content differs.
+ * Use the same alphabet and content rules as seq_eq.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when the values differ in binding, alphabet code, or content.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -348,6 +387,13 @@ bool seq_ne(
     return seq_compare_internal(left, right) != 0;
 }
 
+/**
+ * @brief Test whether the left sequence sorts after or equals the right sequence.
+ * Use seq_cmp ordering: unbound values first, then alphabet code and content.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when seq_cmp(left, right) is positive or zero.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -374,6 +420,13 @@ bool seq_ge(
     return seq_compare_internal(left, right) >= 0;
 }
 
+/**
+ * @brief Test whether the left sequence sorts after the right sequence.
+ * Use seq_cmp ordering: unbound values first, then alphabet code and content.
+ * @param left First sequence to compare.
+ * @param right Second sequence to compare.
+ * @return True when seq_cmp(left, right) is positive.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -426,6 +479,14 @@ bool seq_gt(
     return result;
 }
 
+/**
+ * @brief Return a 32-bit hash of sequence alphabet binding and logical content.
+ * Hash the binding state, alphabet code when bound, letter ranks or unbound
+ * text bytes, and sequence length. Packing width and piece-tree layout are
+ * ignored. This uses seed zero and XOR-folds the 64-bit hash into 32 bits.
+ * @param input Sequence to hash; unresolved table locators are rejected.
+ * @return A signed 32-bit hash consistent with seq_eq.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -442,6 +503,14 @@ std::int32_t seq_hash(
         static_cast<std::uint32_t>(hash ^ (hash >> 32u)));
 }
 
+/**
+ * @brief Return a seeded 64-bit hash of sequence alphabet binding and logical content.
+ * Hash the binding state, alphabet code when bound, letter ranks or unbound
+ * text bytes, and sequence length. Packing width and piece-tree layout are ignored.
+ * @param input Sequence to hash; unresolved table locators are rejected.
+ * @param seed Initial seed, interpreted as a 64-bit bit pattern.
+ * @return A signed 64-bit hash; equal sequences have equal hashes for the same seed.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
