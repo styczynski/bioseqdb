@@ -69,7 +69,7 @@
 .algorithm-line { display: flex; min-height: 1.9em; }
 .algorithm-line::before { content: attr(data-line); flex: 0 0 3.5rem; box-sizing: border-box; padding-right: 1rem; margin-right: 1rem; border-right: 1px solid #20364a; text-align: right; color: #68839b; user-select: none; }
 .algorithm-line-body { display: block; white-space: pre; padding-right: 1.25rem; overflow-wrap: normal; }
-.algorithm-line-body code { color: #8fd6ba; background: transparent; padding: 0; font-size: inherit; }
+.docs-content .algorithm-line-body code { color: #8fd6ba; background: transparent; padding: 0; font-size: inherit; }
 .algorithm-keyword { color: #f4894f; font-weight: 600; }
 .algorithm-comment { color: #809bb2; font-style: italic; }
 .algorithm-line-body .project-math { color: #94d5ed; }

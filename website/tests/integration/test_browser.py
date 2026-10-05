@@ -1432,6 +1432,11 @@ def _exercise_algorithms(page, source: str, slug: str) -> None:
         _check(keywords.evaluate_all(
             "nodes => nodes.every(node => getComputedStyle(node).color === 'rgb(244, 137, 79)')"),
             f"{slug}: algorithm {index + 1} lost its website keyword palette")
+        _check(panel.locator(".algorithm-line-body code").evaluate_all("""nodes => nodes.every(node => {
+            const style = getComputedStyle(node);
+            const line = getComputedStyle(node.closest('.algorithm-line-body'));
+            return style.color === 'rgb(143, 214, 186)' && style.fontSize === line.fontSize;
+        })"""), f"{slug}: algorithm {index + 1} call names lost their palette or inherited size")
 
 
 def _exercise_figure_viewer(page) -> None:
