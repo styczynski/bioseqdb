@@ -1,53 +1,10 @@
 // Search and version navigation shared by the home, docs and benchmark pages.
 import { normalizeSearchText } from "./search_tokens.mjs";
+import { rankedSearch, searchDomain, searchType } from "./search-ranking.mjs";
 
 const root = document.querySelector("[data-site-header]");
-const MAX_SEARCH_RESULTS = 40;
-
-const SEARCH_TYPES = ["Tutorial", "Function", "Class", "Type", "SQL"];
-const SEARCH_LABELS = {
-  Tutorial: "Tutorials",
-  Function: "Functions",
-  Class: "Classes",
-  Type: "Types",
-  SQL: "SQL objects",
-};
-const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T", SQL: "S" };
-
-function searchType(record) {
-  const kind = String(record.kind || "").toLowerCase();
-  const group = String(record.group || "").toLowerCase();
-  if (kind === "sql_object") return "SQL";
-  if (group === "tutorials" || group === "pages" ||
-      kind === "tutorial" || kind === "page") return "Tutorial";
-  if (kind.includes("function") || kind === "overload_group") return "Function";
-  if (kind.includes("type") || kind.includes("alias") ||
-      kind.includes("enum") || kind === "sql_schema") return "Type";
-  return "Class";
-}
-
-function rankedSearch(records, query) {
-  const normalized = normalizeSearchText(query);
-  if (!normalized) return records.slice(0, MAX_SEARCH_RESULTS);
-  const tokens = normalized.split(" ").filter(Boolean);
-  const scored = [];
-  records.forEach((record) => {
-    const title = normalizeSearchText(record.title || "");
-    const qualified = normalizeSearchText(record.qualified_name || "");
-    const names = String(record.name_tokens || `${title} ${qualified}`);
-    const text = String(record.text_tokens || normalizeSearchText(record.summary || ""));
-    let tier = -1;
-    if (title === normalized || qualified === normalized) tier = 0;
-    else if (title.startsWith(normalized) || qualified.startsWith(normalized) ||
-             names.split(" ").some((token) => token.startsWith(normalized))) tier = 1;
-    else if (tokens.every((token) => names.includes(token))) tier = 2;
-    else if (tokens.every((token) => `${names} ${text}`.includes(token))) tier = 3;
-    if (tier >= 0) scored.push({ record, tier });
-  });
-  scored.sort((left, right) => left.tier - right.tier ||
-    String(left.record.title || "").localeCompare(String(right.record.title || "")));
-  return scored.slice(0, MAX_SEARCH_RESULTS).map((entry) => entry.record);
-}
+const SEARCH_LABELS = { Tutorial: "Tutorial", Function: "Function", Class: "Class", Type: "Type", Setting: "Setting", SQL: "SQL object" };
+const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T", Setting: "S", SQL: "S" };
 
 function appendHighlight(target, text, query) {
   const display = String(text || "");
@@ -177,46 +134,57 @@ function search() {
       renderMessage("No matches for ", query);
       return;
     }
-    SEARCH_TYPES.forEach((type) => {
-      const items = matches.filter((record) => searchType(record) === type);
-      if (!items.length) return;
-      const heading = document.createElement("div");
-      heading.className = "doc-search-group";
-      heading.textContent = SEARCH_LABELS[type];
-      dropdown.appendChild(heading);
-      items.forEach((record) => {
-        const link = document.createElement("a");
-        link.className = "doc-search-result";
-        link.href = record.route;
-        link.id = `doc-search-option-${options.length}`;
-        link.dataset.searchResult = "";
-        link.setAttribute("role", "option");
-        link.setAttribute("aria-selected", "false");
-        link.tabIndex = -1;
-        const badge = document.createElement("span");
-        badge.className = `doc-search-badge doc-search-${type.toLowerCase()}`;
-        badge.setAttribute("aria-hidden", "true");
-        badge.textContent = SEARCH_GLYPHS[type];
-        const text = document.createElement("span");
-        text.className = "doc-search-text";
-        const title = document.createElement("span");
-        title.className = "doc-search-title";
-        appendHighlight(title, record.title || record.qualified_name || record.route, query);
-        text.appendChild(title);
-        if (record.summary) {
-          const summary = document.createElement("span");
-          summary.className = "doc-search-summary";
-          summary.textContent = record.summary;
-          text.appendChild(summary);
-        }
-        link.append(badge, text);
-        const index = options.length;
-        link.addEventListener("mouseenter", () => setSelected(index));
-        link.addEventListener("focus", () => setSelected(index));
-        link.addEventListener("click", () => setOpen(false));
-        dropdown.appendChild(link);
-        options.push(link);
-      });
+    let previousDomain = "";
+    matches.forEach((record) => {
+      const domain = searchDomain(record);
+      const type = searchType(record);
+      if (domain !== previousDomain) {
+        const heading = document.createElement("div");
+        heading.className = "doc-search-group";
+        heading.textContent = domain;
+        dropdown.appendChild(heading);
+        previousDomain = domain;
+      }
+      const link = document.createElement("a");
+      link.className = "doc-search-result";
+      link.href = record.route;
+      link.id = `doc-search-option-${options.length}`;
+      link.dataset.searchResult = "";
+      link.dataset.searchId = record.id;
+      link.dataset.searchKind = record.kind;
+      link.dataset.searchDomain = domain;
+      link.setAttribute("role", "option");
+      link.setAttribute("aria-selected", "false");
+      link.tabIndex = -1;
+      const badge = document.createElement("span");
+      badge.className = `doc-search-badge doc-search-${type.toLowerCase()}`;
+      badge.setAttribute("aria-hidden", "true");
+      badge.textContent = SEARCH_GLYPHS[type];
+      const text = document.createElement("span");
+      text.className = "doc-search-text";
+      const title = document.createElement("span");
+      title.className = "doc-search-title";
+      appendHighlight(title, record.title || record.qualified_name || record.route, query);
+      const titleRow = document.createElement("span");
+      titleRow.className = "doc-search-title-row";
+      const kindLabel = document.createElement("span");
+      kindLabel.className = "doc-search-kind";
+      kindLabel.textContent = SEARCH_LABELS[type];
+      titleRow.append(title, kindLabel);
+      text.appendChild(titleRow);
+      if (record.summary) {
+        const summary = document.createElement("span");
+        summary.className = "doc-search-summary";
+        summary.textContent = record.summary;
+        text.appendChild(summary);
+      }
+      link.append(badge, text);
+      const index = options.length;
+      link.addEventListener("mouseenter", () => setSelected(index));
+      link.addEventListener("focus", () => setSelected(index));
+      link.addEventListener("click", () => setOpen(false));
+      dropdown.appendChild(link);
+      options.push(link);
     });
     setOpen(true);
   };

@@ -65,8 +65,13 @@
 .site-header .doc-search-class{color:#f4894f;background:rgba(242,101,34,.1);border:1px solid rgba(242,101,34,.28)}
 .site-header .doc-search-type{color:#8fd6ba;background:rgba(116,200,168,.1);border:1px solid rgba(116,200,168,.28)}
 .site-header .doc-search-sql{color:#8fd6ba;background:rgba(116,200,168,.1);border:1px solid rgba(116,200,168,.28)}
-.site-header .doc-search-text{min-width:0}
+.site-header .doc-search-setting{color:#f6c664;background:rgba(246,198,100,.1);border:1px solid rgba(246,198,100,.28)}
+.site-header .doc-search-text{flex:1;min-width:0}
+.site-header .doc-search-title-row{display:flex;align-items:baseline;gap:8px}
+.site-header .doc-search-title-row>.doc-search-title{flex:1;min-width:0}
+.site-header .doc-search-kind{flex:none;color:#8ea3b5;font-size:10.5px;white-space:nowrap}
 .site-header .doc-search-title{display:block;color:#eef4f9;font-family:'IBM Plex Mono';font-size:13.5px}
 .site-header .doc-search-highlight{color:#f4894f;font-weight:600;background:rgba(242,101,34,.14);border-radius:3px}
 .site-header .doc-search-summary{display:block;margin-top:2px;color:#8ea3b5;font-size:12px;line-height:1.45}
 .site-header .doc-search-title,.site-header .doc-search-summary{overflow-wrap:anywhere}
+@media(max-width:480px){.site-header .doc-search-title-row{flex-wrap:wrap;row-gap:2px}.site-header .doc-search-title-row>.doc-search-title{flex-basis:100%}}

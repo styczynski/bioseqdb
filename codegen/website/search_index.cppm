@@ -171,9 +171,20 @@ struct search_index_entry {
     entry.kind = std::string(kind_label(entity.kind));
     entry.title = entity.display_name;
     entry.qualified_name = entity.qualified_name;
+    const auto sql_kind = entity.attributes.find("sql_kind");
+    const bool setting = entity.domain == entity_domain::sql
+        && ((sql_kind != entity.attributes.end() && sql_kind->second == "guc")
+            || entity.canonical_id.starts_with("sql:guc:"));
+    if (setting) {
+        entry.kind = "setting";
+        entry.title = entity.qualified_name;
+        if (entry.title.starts_with("bioseq.")) {
+            entry.title.erase(0, std::string_view{"bioseq."}.size());
+        }
+    }
     entry.route = entity.route_path;
     entry.summary = entity.summary_text;
-    std::string names = entity.display_name;
+    std::string names = entry.title;
     names += ' ';
     names += entity.qualified_name;
     for (const parameter_description& parameter : entity.parameters) {
