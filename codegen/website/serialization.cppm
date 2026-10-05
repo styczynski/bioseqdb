@@ -20,6 +20,7 @@ module bioseq.codegen.website:serialization;
 
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
+import bioseq.codegen.sql.signature;
 
 // Writes website JSON with Boost.JSON. Callers insert object keys in a fixed
 // order Artifact serialization adds a final newline and escapes characters
@@ -609,7 +610,10 @@ parse_sql_manifest_public_projection(
             documented.catalog_identity = "sql:function:" + std::string(installed_body);
         }
         documented.qualified_name = std::string(installed_name);
-        if (kind == "access_method") documented.qualified_name = documented.name;
+        if (kind == "access_method") {
+            documented.qualified_name = documented.name;
+            documented.catalog_identity = "sql:access_method:" + documented.name;
+        }
         if (kind == "index") {
             // Index annotations inherit a C++ owner's spelling in stable IDs;
             // their installed SQL schema is the owning table's schema.
@@ -636,13 +640,19 @@ parse_sql_manifest_public_projection(
                 const auto* declaration = candidate.if_contains("cpp_declaration");
                 if (!transition || !transition->is_string() || !declaration
                     || *declaration != *transition) continue;
-                const auto& arguments = candidate.at("parameters").as_array();
+                // The installed identity has already rendered annotation aliases
+                // such as quoted_any to the actual PostgreSQL spelling ("any").
+                const std::string transition_identity = require_string(candidate, "installed_identity");
+                const auto argument_begin = transition_identity.find('(');
+                if (argument_begin == std::string::npos || !transition_identity.ends_with(')')) continue;
+                const auto arguments = bioseq::codegen::sql::parse_routine_argument_declarations(
+                    std::string_view(transition_identity).substr(argument_begin + 1,
+                        transition_identity.size() - argument_begin - 2));
                 std::string signature = documented.qualified_name.substr(
                     0, documented.qualified_name.find(':')) + "(";
                 for (std::size_t index = 1; index < arguments.size(); ++index) {
                     if (index != 1) signature += ',';
-                    signature += resolve_extension_identity(
-                        require_string(arguments[index].as_object(), "sql_type"));
+                    signature += arguments[index].sql_type;
                 }
                 signature += ')';
                 documented.catalog_identity = "sql:aggregate:" + signature;

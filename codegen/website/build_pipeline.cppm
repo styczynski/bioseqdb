@@ -74,10 +74,19 @@ namespace {
     const auto canonical_scalar = [](std::string_view scalar) {
         std::string canonical =
             bioseq::codegen::sql::canonical_routine_sql_type(scalar);
-        if (canonical == "timestamptz") return std::string{"timestampwithtimezone"};
-        if (canonical == "varchar") return std::string{"charactervarying"};
-        if (canonical == "bpchar") return std::string{"character"};
-        return canonical;
+        std::string array_suffix;
+        while (canonical.ends_with("[]")) {
+            canonical.resize(canonical.size() - 2);
+            array_suffix += "[]";
+        }
+        canonical = bioseq::codegen::sql::canonical_routine_sql_type(canonical);
+        if (canonical == "timestamptz") canonical = "timestampwithtimezone";
+        else if (canonical == "timestamp") canonical = "timestampwithouttimezone";
+        else if (canonical == "timetz") canonical = "timewithtimezone";
+        else if (canonical == "time") canonical = "timewithouttimezone";
+        else if (canonical == "varchar") canonical = "charactervarying";
+        else if (canonical == "bpchar" || canonical == "char") canonical = "character";
+        return canonical + array_suffix;
     };
     const std::vector<bioseq::codegen::sql::parsed_routine_argument> columns =
         bioseq::codegen::sql::parse_table_result_columns(value);
@@ -469,6 +478,25 @@ void verify_website_pipeline() {
                   "public_documentation": false
                 },
                 {
+                  "identity": "sql:function:$extension.count_transition(bigint,\"any\")",
+                  "installed_identity": "sql:function:public.count_transition(bigint,\"any\")",
+                  "kind": "function",
+                  "cpp_declaration": "fixture::count_transition",
+                  "public_documentation": false,
+                  "parameters": [
+                    {"name":"state","sql_type":"bigint","has_default":false},
+                    {"name":"value","sql_type":"quoted_any","has_default":false}
+                  ]
+                },
+                {
+                  "identity": "sql:aggregate:$extension.vcount:transition=fixture::count_transition",
+                  "installed_identity": "sql:aggregate:public.vcount:transition=fixture::count_transition",
+                  "kind": "aggregate",
+                  "name": "vcount",
+                  "public_documentation": false,
+                  "options": {"transition":"fixture::count_transition"}
+                },
+                {
                   "identity": "sql:guc-value:bioseq.external.enabled",
                   "installed_identity": "sql:guc-value:bioseq.external.enabled",
                   "kind": "guc_value",
@@ -493,12 +521,16 @@ void verify_website_pipeline() {
                     "sql:guc-value:bioseq.external.enabled")
                     != sql_manifest.stable_identities.end(),
            "SQL manifest derives public catalog and internal ACL identities");
-    expect(sql_manifest.documentation_entities.size() == 2
+    expect(sql_manifest.documentation_entities.size() == 4
                && sql_manifest.documentation_schemas
                     == std::vector<std::string>{"bioseq_internal", "public"}
                && sql_manifest.entities.front().parameters.front().description.front().text
                     == "Query sequence.",
            "automatic documentation preserves source parameters without expanding runnable ACL grants");
+    expect(std::ranges::any_of(sql_manifest.documentation_entities, [](const auto& entity) {
+               return entity.kind == "aggregate"
+                   && entity.catalog_identity == "sql:aggregate:public.vcount(\"any\")";
+           }), "aggregate catalog identities use emitted SQL types rather than annotation aliases");
     reference_entity typed_entity;
     typed_entity.domain = entity_domain::sql;
     typed_entity.kind = entity_kind::sql_type;
@@ -847,6 +879,15 @@ void verify_website_pipeline() {
                && canonical_table_result != canonical_result_type_key(
                    "TABLE(created_at timestamp without time zone, n bigint)"),
            "SQL TABLE result parity preserves names, order, count, and types");
+    expect(canonical_result_type_key("char") == canonical_result_type_key("character")
+               && canonical_result_type_key("time") == canonical_result_type_key("time without time zone")
+               && canonical_result_type_key("timestamp") == canonical_result_type_key("timestamp without time zone")
+               && canonical_result_type_key("timetz[]") == canonical_result_type_key("time with time zone[]")
+               && canonical_result_type_key("varchar[][]") == canonical_result_type_key("character varying[][]")
+               && canonical_result_type_key("int4[]") == canonical_result_type_key("integer[]")
+               && canonical_result_type_key("char") != canonical_result_type_key("\"char\"")
+               && canonical_result_type_key("timestamp[]") != canonical_result_type_key("timestamptz[]"),
+           "SQL catalog matching resolves character/time aliases and arrays without merging distinct types");
     expect(canonical_result_type_key("float8")
                    == canonical_result_type_key("double precision")
                && canonical_result_type_key("int")
