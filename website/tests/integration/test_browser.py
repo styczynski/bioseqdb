@@ -1077,6 +1077,35 @@ def _exercise_settings_and_operator_references(
         page.keyboard.press("Escape")
         expect(tip).to_have_attribute("aria-hidden", "true")
 
+    long_setting = settings["bioseq.index.sequence_minimizer_sort.algorithm"]
+    long_trigger = cells.locator(
+        f'a.entity-ref[data-entity-id="{long_setting["canonical_id"]}"]').first
+    for width, height in ((1440, 900), (360, 900), (360, 520)):
+        page.set_viewport_size({"width": width, "height": height})
+        page.mouse.move(0, 0)
+        page.locator("#doc-search").focus()
+        long_trigger.scroll_into_view_if_needed()
+        long_trigger.hover()
+        expect(tip).to_have_attribute("aria-hidden", "false")
+        expect(tip).to_have_css("opacity", "1")
+        heading = tip.locator(".entity-pop-head pre")
+        expect(heading).to_contain_text(long_setting["qualified_name"])
+        heading_width = heading.evaluate(
+            "node => ({scroll: node.scrollWidth, client: node.clientWidth})")
+        _check(heading_width["client"] > 0
+               and heading_width["scroll"] <= heading_width["client"],
+               f"long setting tooltip header clips at {width}x{height}: {heading_width}")
+        rect = tip.bounding_box()
+        _check(rect is not None and rect["x"] >= 0 and rect["y"] >= 0
+               and rect["x"] + rect["width"] <= width + 1
+               and rect["y"] + rect["height"] <= height + 1,
+               f"long setting tooltip extends outside {width}x{height}: {rect}")
+        page.screenshot(path=str(
+            artifact_dir / f"long-setting-tooltip-{width}x{height}.png"))
+        page.keyboard.press("Escape")
+        expect(tip).to_have_attribute("aria-hidden", "true")
+    page.set_viewport_size({"width": 360, "height": 900})
+
     for entity in (boolean, enumeration):
         identity = entity["canonical_id"]
         page.goto(server.url_for(contract["tooltip_records"][identity]["route"]),
