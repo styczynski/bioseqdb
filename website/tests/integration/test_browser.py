@@ -743,6 +743,19 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     search = json.loads(search_path.read_text(encoding="utf-8"))
     _check_current_schema(search, "bioseq.website.search", 2, "search index")
     records = search.get("records", [])
+    settings = {entity["canonical_id"]: entity for entity in model.get("sql_entities", [])
+                if entity.get("attributes", {}).get("sql_kind") == "guc"
+                or entity["canonical_id"].startswith("sql:guc:")}
+    settings_records = {record["id"]: record for record in records
+                        if record.get("kind") == "setting"}
+    _check(bool(settings) and settings_records.keys() == settings.keys(),
+           "search must publish every GUC as a Setting")
+    for identity, entity in settings.items():
+        record = settings_records[identity]
+        _check(record.get("group") == "SQL"
+               and record.get("qualified_name") == entity["qualified_name"]
+               and record.get("title") == entity["qualified_name"].removeprefix("bioseq."),
+               f"setting search lost its full label: {identity}")
     tutorial_records = [record for record in records if record.get("group") == "Tutorials"]
     _check({record.get("id") for record in tutorial_records}
            == {f"tutorial:{slug}" for slug in _EXPECTED_TUTORIALS},
@@ -1000,6 +1013,133 @@ def _exercise_tooltip(page, request_urls: list[str], contract: dict) -> None:
     page.locator("#entity-pop").wait_for(state="hidden", timeout=3000)
 
 
+def _exercise_settings_and_operator_references(
+        page, contract: dict, server: StaticFixtureServer,
+        artifact_dir: Path, base_path: str, version: str) -> None:
+    """Source-named settings retain links, metadata, examples and operator aliases."""
+    from playwright.sync_api import expect
+
+    entities = {entity["canonical_id"]: entity
+                for entity in contract["model"].get("sql_entities", [])}
+    settings = {entity["qualified_name"]: entity for entity in entities.values()
+                if entity.get("attributes", {}).get("sql_kind") == "guc"}
+    source = (_WEBSITE_ROOT / version / "tutorials" /
+              "project_configuration_reference.md").read_text(encoding="utf-8")
+    source_names = re.findall(
+        r'<code>(bioseq\.[a-z_][a-z0-9_.]*)</code>', source)
+    _check(len(set(source_names)) == 76,
+           "configuration source inventory must retain all 76 setting names")
+    page.goto(server.url_for(_public_route(
+        base_path, f"{version}/tutorials/project_configuration_reference/")),
+        wait_until="networkidle")
+    cells = page.locator(".tutorial-body table td")
+    refs = cells.locator('a.entity-ref[data-entity-id^="sql:guc:"]')
+    _check(sorted(refs.all_text_contents()) == sorted(source_names),
+           "configuration tables did not link every authored setting occurrence")
+    for name in sorted(set(source_names)):
+        _check(name in settings, f"authored setting absent from model: {name}")
+        identity = settings[name]["canonical_id"]
+        reference = cells.locator(f'a.entity-ref[data-entity-id="{identity}"]')
+        _check(reference.count() == source_names.count(name)
+               and all(href == contract["tooltip_records"][identity]["route"]
+                       for href in reference.evaluate_all("refs => refs.map(ref => ref.getAttribute('href'))")),
+               f"configuration link does not resolve to its generated setting page: {name}")
+
+    boolean = settings["bioseq.index.insert_maintenance.enabled"]
+    enumeration = settings["bioseq.aligner.minimizer.algorithm"]
+    _check(boolean["attributes"]["Type"] == "bool"
+           and enumeration["attributes"]["Type"] == "enum",
+           "representative setting types changed without updating the browser contract")
+    trigger = cells.locator(
+        f'a.entity-ref[data-entity-id="{boolean["canonical_id"]}"]').first
+    tip = page.locator("#entity-pop")
+    for width in (1440, 360):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.mouse.move(0, 0)
+        page.locator("#doc-search").focus()
+        trigger.scroll_into_view_if_needed()
+        trigger.hover()
+        expect(tip).to_have_attribute("aria-hidden", "false")
+        expect(tip).to_have_css("opacity", "1")
+        expect(tip.locator(".entity-pop-kind")).to_have_text("Setting")
+        expect(tip.locator(".entity-pop-head pre")).to_contain_text(boolean["qualified_name"])
+        for name in ("Type", "Default"):
+            metadata = tip.locator(".entity-pop-param").filter(
+                has=page.locator(".entity-pop-param-name", has_text=re.compile(f"^{name}$")))
+            expect(metadata.locator(".entity-pop-param-detail")).to_have_text(
+                boolean["attributes"][name] or "''")
+        rect = tip.bounding_box()
+        _check(rect is not None and rect["x"] >= 0 and rect["y"] >= 0
+               and rect["x"] + rect["width"] <= width + 1
+               and rect["y"] + rect["height"] <= 901,
+               f"setting tooltip extends outside {width}px viewport: {rect}")
+        page.screenshot(path=str(artifact_dir / f"setting-tooltip-{width}.png"))
+        page.keyboard.press("Escape")
+        expect(tip).to_have_attribute("aria-hidden", "true")
+
+    for entity in (boolean, enumeration):
+        identity = entity["canonical_id"]
+        page.goto(server.url_for(contract["tooltip_records"][identity]["route"]),
+                  wait_until="networkidle")
+        expect(page.locator("h1")).to_have_text(entity["qualified_name"])
+        expect(page.locator(".design-kind-badge")).to_contain_text("setting")
+        metadata = {row.locator("dt").inner_text(): row.locator("dd").inner_text()
+                    for row in page.locator(".design-definition-list > div").all()}
+        for key in ("Type", "Default", "Minimum", "Maximum", "Possible values"):
+            _check(key in entity["attributes"]
+                   and metadata.get(key) == (entity["attributes"][key] or "''"),
+                   f"{entity['qualified_name']}: reference lost authoritative {key}")
+        documentation = entity.get("documentation", [])
+        tables = [node for node in _nodes_of_kind(documentation, "table")
+                  if node.get("attributes", {}).get("class") == "reference-values-table"]
+        _check(len(tables) == 1, f"{identity}: model lacks source-owned value meanings")
+        expected_rows = [[_node_text(cell) for cell in row.get("children", [])]
+                         for row in tables[0].get("children", [])]
+        _check(len(expected_rows) >= 3
+               and all(len(row) == 2 and all(row) for row in expected_rows),
+               f"{identity}: setting values must have nonempty source meanings")
+        meanings = page.locator("#possible-values").locator("xpath=following::table[1]")
+        actual_rows = meanings.locator("tr").evaluate_all(
+            "rows => rows.map(row => [...row.querySelectorAll('th,td')].map(cell => cell.textContent))")
+        _check(actual_rows == expected_rows,
+               f"{identity}: visible value meanings differ from the model")
+        expect(page.locator("#examples")).to_contain_text("Examples")
+        examples = _nodes_of_kind(documentation, "code_block")
+        _check(bool(examples), f"{identity}: no explained source examples")
+        actual_examples = page.locator(".entity-detail pre code.language-sql").all_text_contents()
+        _check(actual_examples == [node.get("text", "") for node in examples],
+               f"{identity}: visible examples differ from source documentation")
+        _check(page.evaluate(
+            "() => document.documentElement.scrollWidth - document.documentElement.clientWidth") <= 1,
+            f"{identity}: setting reference overflows mobile viewport")
+
+    function = next(entity for entity in entities.values()
+                    if entity["qualified_name"] == "bioseq.letter_ne"
+                    and entity.get("attributes", {}).get("sql_kind") == "function")
+    links = _nodes_of_kind(function.get("documentation", []), "entity_link")
+    operator_ids = {node.get("target", "") for node in links
+                    if node.get("target", "").startswith("sql:operator:")}
+    _check(len(operator_ids) == 1, "letter_ne must identify its SQL operator alias")
+    operator_id = next(iter(operator_ids))
+    _check(entities[operator_id]["qualified_name"].endswith(".<>"),
+           "letter_ne does not link its <> operator")
+    function_id = function["canonical_id"]
+    for identity, peer in ((function_id, operator_id), (operator_id, function_id)):
+        page.goto(server.url_for(contract["tooltip_records"][identity]["route"]),
+                  wait_until="networkidle")
+        syntax = page.locator(".entity-detail pre code.language-sql").filter(
+            has_text=re.compile(r"^bioseq\.letter <> bioseq\.letter$"))
+        _check(syntax.count() == 1, f"{identity}: infix operator syntax is missing")
+        expect(syntax.locator(".token.operator").filter(has_text="<>")).to_have_text("<>")
+        alias = page.locator(f'.entity-detail a.entity-ref[data-entity-id="{peer}"]')
+        _check(alias.count() >= 1 and alias.first.get_attribute("href")
+               == contract["tooltip_records"][peer]["route"],
+               f"{identity}: linked operator/function alias is missing")
+        alias.first.click()
+        expect(page.locator("h1")).to_have_text(entities[peer]["qualified_name"])
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+
 def _exercise_copy(page) -> None:
     """If a fenced code block is present (§10.5), verify every Copy button is
     keyboard-focusable and targets a real code element by id (§20.7)."""
@@ -1161,13 +1301,51 @@ def _exercise_docs_search(page, request_urls: list[str], contract: dict,
         dropdown.wait_for(state="visible", timeout=3000)
     except Exception as error:  # noqa: BLE001
         raise AssertionFail(f"docs search did not reopen for focusout test: {error}")
-    page.locator("#ver-btn").focus()
+    page.locator("#dnav nav").get_by_role("link", name="Docs", exact=True).focus()
     try:
         dropdown.wait_for(state="hidden", timeout=3000)
     except Exception as error:  # noqa: BLE001
         raise AssertionFail(f"docs search remained expanded after focus left: {error}")
     _check(inp.get_attribute("aria-expanded") == "false",
            "docs search combobox remained aria-expanded after focus left")
+    _exercise_sql_search_order(page)
+
+
+def _exercise_sql_search_order(page) -> None:
+    """Settings retain useful labels and the dropdown preserves SQL-first rank."""
+    from playwright.sync_api import expect
+
+    inp = page.locator("#doc-search")
+    results = page.locator("#search-dd a[data-search-result]")
+    setting_id = "sql:guc:bioseq.index.insert_maintenance.enabled"
+    setting_title = "index.insert_maintenance.enabled"
+    inp.focus()
+    for query in ("insert_maintenance", setting_title, f"bioseq.{setting_title}"):
+        inp.fill(query)
+        expect(results.first).to_have_attribute("data-search-id", setting_id)
+        expect(results.first.locator(".doc-search-title")).to_have_text(setting_title)
+        expect(results.first.locator(".doc-search-kind")).to_have_text("Setting")
+        expect(results.first).to_have_attribute("data-search-domain", "SQL")
+    # SQL and C++ both match this query in the real generated catalog. Compare
+    # the display order with the ranking output so type grouping cannot undo it.
+    inp.fill("provider")
+    expected = page.evaluate("""async () => {
+        const header = document.querySelector('script[src$="/site-header.mjs"]');
+        const {rankedSearch} = await import(new URL('./search-ranking.mjs', header.src).href);
+        const index = await fetch(document.getElementById('doc-search').dataset.searchIndex).then(r => r.json());
+        return rankedSearch(index.records, 'provider').map(record => record.id);
+    }""")
+    _check(results.evaluate_all("nodes => nodes.map(node => node.dataset.searchId)") == expected,
+           "search presentation changed the ranked result order")
+    domains = results.evaluate_all("nodes => nodes.map(node => node.dataset.searchDomain)")
+    _check("SQL" in domains and "C++" in domains,
+           "provider search no longer exercises both SQL and C++ results")
+    priorities = {"SQL": 0, "Documentation": 1, "C++": 2}
+    _check([priorities[domain] for domain in domains]
+           == sorted(priorities[domain] for domain in domains),
+           "SQL results must appear before C++ results")
+    page.keyboard.press("Escape")
+    expect(page.locator("#search-dd")).to_be_hidden()
 
 
 def _exercise_nav(page) -> None:
@@ -2444,6 +2622,9 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_prism_pixel_contract(page, contract["design"], artifact_dir)
             if label == "benchmarks":
                 _exercise_benchmark_failure(page, remote_state)
+
+        _exercise_settings_and_operator_references(
+            page, contract, server, artifact_dir, base_path, version)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))
