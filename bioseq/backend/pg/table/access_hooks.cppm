@@ -735,7 +735,12 @@ export namespace bioseq::table {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** Return this backend's extension-lock fallback and missing-relation counts. */
+/** Return this backend's extension-lock fallback and missing-relation counts.
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.teardown_diagnostics();
+ * ```
+ */
 [[nodiscard]] bioseq::postgres::support::named_output<teardown_diagnostics_row>
     teardown_diagnostics() noexcept {
     const auto clamp_counter = [](std::uint64_t value) noexcept {

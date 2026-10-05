@@ -19,7 +19,16 @@ export namespace bioseq::storage::sql_entities {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** Assign a distinct version number to each stored sequence. Never cycle. */
+/** Assign a distinct version number to each stored sequence. Never cycle.
+ *
+ * ```sql
+ * -- Inspect sequence bounds and the last allocated value without consuming an identifier.
+ * SELECT sequencename, start_value, min_value, max_value, last_value
+ * FROM pg_catalog.pg_sequences
+ * WHERE schemaname = 'bioseq_internal'
+ *   AND sequencename = 'sequence_source_epoch_seq';
+ * ```
+ */
 inline constexpr std::int64_t sequence_source_epoch_seq = 1;
 
 } // namespace bioseq::storage::sql_entities

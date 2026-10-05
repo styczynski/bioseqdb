@@ -115,7 +115,15 @@ namespace bioseq::storage {
  *
  * @return Events for deleted rows, dropped tables and recoverable drop failures.
  * @throws PostgreSQL or C++ exceptions when cleanup cannot continue.
- */
+ *
+ * ```sql
+ * -- Remove orphaned sequence-storage tables as the extension owner, and report the cleanup result.
+ * SELECT * FROM bioseq.reap_orphan_seq_sub_tables();
+ * ```
+
+ * @remark website.field action: Cleanup result: delete-catalog-row, drop-relation, or drop-relation-failed followed by the PostgreSQL error.
+ * @remark website.field target: Deleted catalog key as database/relfilenode/column/bucket/shard, or the qualified name of the relation being dropped.
+*/
 export [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -697,6 +705,13 @@ struct vacuum_target_pair {
  *
  * @param rel Parent table OID. SQL NULL does nothing.
  * @throws PostgreSQL or C++ exceptions if transaction control, SPI or vacuum fails.
+ *
+ * ```sql
+ * -- Vacuum the physical sequence storage belonging to a Bioseq table. Run the CALL as a top-level statement after creating and using the table.
+ * CREATE TABLE doc_vacuum (seq bioseq.seq('dna4', 64)) USING bioseq;
+ * CALL bioseq.vacuum_seq_storage('doc_vacuum'::regclass);
+ * DROP TABLE doc_vacuum;
+ * ```
  */
 export [[bioseq_sql::procedure({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

@@ -512,6 +512,11 @@ export namespace bioseq::pg_types::sql_routines {
  * @brief Parse the alphabet and width in a type such as bioseq.seq('dna4', 64).
  * @param array One-dimensional cstring array containing the alphabet name and width in bits.
  * @return The encoded PostgreSQL type modifier.
+ *
+ * ```sql
+ * -- A sequence cast invokes seq_typmod_in through PostgreSQL's input and type-modifier machinery. This value uses the dna4 alphabet and 64-bit packing.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -577,6 +582,15 @@ std::int32_t seq_typmod_in(
  * @brief Format the alphabet and width  as a SQL type suffix such as ('dna4',64).
  * @param typmod Type modifier, or negative when none was specified.
  * @return An allocated C string, empty when no modifier was specified.
+ *
+ * ```sql
+ * -- Read the formatted alphabet and packing width of a sequence column from the PostgreSQL catalog.
+ * BEGIN;
+ * CREATE TEMP TABLE doc_types (seq bioseq.seq('dna4', 64));
+ * SELECT format_type(atttypid, atttypmod)
+ * FROM pg_attribute WHERE attrelid = 'doc_types'::regclass AND attname = 'seq';
+ * ROLLBACK;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -612,6 +626,11 @@ char* seq_typmod_out(std::int32_t typmod)
  * @param type_oid Declared type OID, nused.
  * @param typmod Destination type modifier, or negative to leave the alphabet unset.
  * @return A flat sequence allocated in the current memory context.
+ *
+ * ```sql
+ * -- A sequence cast invokes seq_in through PostgreSQL's input and type-modifier machinery. This value uses the dna4 alphabet and 64-bit packing.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -644,6 +663,11 @@ bioseq::pg_types::seq* seq_in(
  * @brief Write a sequence's letters as a C string for PostgreSQL text output.
  * @param input Inline, expanded, or toasted sequence.
  * @return Null-terminated ASCII allocated in  the current memory context.
+ *
+ * ```sql
+ * -- Return the canonical text spelling of a bound sequence.
+ * SELECT bioseq.seq_out('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -791,6 +815,11 @@ char* seq_out(
  * @param target_typmod Destination modifier, or, negative to keep  the input.
  * @param explicit_cast Whether SQL used an explicit cast, unused.
  * @return The result, which may be the unchanged input.
+ *
+ * ```sql
+ * -- A sequence cast invokes seq_cast through PostgreSQL's input and type-modifier machinery. This value uses the dna4 alphabet and 64-bit packing.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -870,6 +899,11 @@ Datum seq_cast(
  * intermediate flat sequence.
  * @param input Inline, expanded, or toasted sequence.
  * @return An allocated bytea containing the sequence's binary representation.
+ *
+ * ```sql
+ * -- Inspect the binary wire representation of a bound sequence.
+ * SELECT encode(bioseq.seq_send('ACGT'::bioseq.seq('dna4', 64)), 'hex');
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1061,6 +1095,16 @@ text* seq_send(
  * @param typmod Destination modifier. Bound input must match it, while unbound
  * text is packed using it when present.
  * @return A flat sequence allocated in the current memory  context.
+ *
+ * ```sql
+ * -- Use PostgreSQL binary COPY to round-trip sequences. PostgreSQL calls seq_recv while reading the file; run these psql commands in the same session.
+ * CREATE TABLE doc_sequences (seq bioseq.seq('dna4', 64));
+ * INSERT INTO doc_sequences VALUES ('ACGT');
+ * \copy doc_sequences TO '/tmp/bioseq-sequences.bin' WITH (FORMAT binary)
+ * TRUNCATE doc_sequences;
+ * \copy doc_sequences FROM '/tmp/bioseq-sequences.bin' WITH (FORMAT binary)
+ * SELECT * FROM doc_sequences;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1188,6 +1232,11 @@ bioseq::pg_types::seq* seq_recv(
 /**
  * @brief Count sequence letters using the stored length.
  * @ingroup bioseq_sql_public_api
+ *
+ * ```sql
+ * -- Read the number of biological letters in a sequence.
+ * SELECT bioseq.len('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 std::int64_t len(
     [[bioseq_sql::param({
@@ -1210,6 +1259,11 @@ std::int64_t len(
  * @param input Sequence whose header may be fetched from TOAST storage.
  * @return Packed unit count rounded up to hold every letter, or the letter
  * count when the alphabet is unset
+ *
+ * ```sql
+ * -- Read the number of packed storage units in a sequence.
+ * SELECT bioseq.unit_len('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

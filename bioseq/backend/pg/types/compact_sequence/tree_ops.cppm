@@ -40,6 +40,13 @@ export namespace bioseq::pg_types::sql_routines {
 
 /// @brief Check piece-tree construction, balancing, and cleanup after failures.
 /// @return `true` when all checks pass and no arenas or cleanup failures remain.
+
+/**
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.piece_tree_self_test();
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]

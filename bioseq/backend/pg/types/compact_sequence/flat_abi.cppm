@@ -64,6 +64,12 @@ export namespace bioseq::pg_types {
  * @brief PostgreSQL sequence value with packed letters and an alphabet tag.
  * PostgreSQL can compress or move large values into TOAST storage.
  * @ingroup bioseq_sql_public_api
+ *
+ * ```sql
+ * -- Bind a DNA string to the dna4 alphabet with 64-bit packing, then read its length and one-based slice.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) AS sequence, bioseq.len('ACGT'::bioseq.seq('dna4', 64)) AS length,
+ *   ('ACGT'::bioseq.seq('dna4', 64))[2:3] AS slice;
+ * ```
  */
 using seq [[bioseq_sql::type({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

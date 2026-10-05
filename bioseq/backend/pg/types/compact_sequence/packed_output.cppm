@@ -49,6 +49,13 @@ export import :packed_output_test_contracts;
 export namespace bioseq::pg_types::sql_routines {
 
 /// Test sequence-copy tracing  and ownership during asynchronous work.
+
+/**
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.slice_trace_self_test();
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -61,6 +68,13 @@ bool slice_trace_self_test() noexcept {
 }
 
 /// Read or reset test-only payload-allocation counters.
+
+/**
+ * ```sql
+ * -- Read the packed-full payload allocation counter in a BIOSEQ_TEST_INDEXES build as the extension owner; action 1 leaves counters unchanged.
+ * SELECT bioseq_internal.slice_payload_allocation_probe(1);
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .parallel = bioseq::sql::parallel_safety::restricted,
@@ -114,6 +128,13 @@ std::int64_t slice_payload_allocation_probe(std::int32_t action) {
 }
 
 /// Raise a test error in a parallel worker to check that cleanup preserves it.
+
+/**
+ * ```sql
+ * -- In a BIOSEQ_TEST_INDEXES build, the probe returns true in the backend and raises its injected error if PostgreSQL executes it in a parallel worker.
+ * SELECT bioseq_internal.slice_trace_worker_failure_probe(1);
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -150,6 +171,13 @@ bool slice_trace_worker_failure_probe(std::int32_t action) {
 export namespace bioseq::pg_types::sql_routines {
 
 /// Create a test sequence of the requested length whose letters are all DNA4 A.
+
+/**
+ * ```sql
+ * -- Create a large lazy test sequence and inspect its logical length without displaying all letters. This is an internal diagnostic.
+ * SELECT bioseq.len(bioseq_internal.synthetic_lazy_sequence(1000000));
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -189,6 +217,13 @@ Datum synthetic_lazy_sequence(std::int64_t requested) {
 }
 
 /// Test flat sequence sizes and llocation limits.
+
+/**
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.materialization_size_self_test();
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -201,6 +236,13 @@ bool materialization_size_self_test() {
 }
 
 /// Count the leaf pieces in a sequence's tree.
+
+/**
+ * ```sql
+ * -- Inspect how many pieces a lazily concatenated sequence contains.
+ * SELECT bioseq_internal.sequence_piece_count('ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) 'TG'::text);
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -225,6 +267,13 @@ std::int64_t sequence_piece_count(
  * context. datumCopy copies a read-only value into independent flat storage.
  * Both results must survive a reset of their original memory context. */
 /// Test that transferred and copied sequences survive resets of their original contexts.
+
+/**
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.expanded_ownership_self_test();
+ * ```
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]

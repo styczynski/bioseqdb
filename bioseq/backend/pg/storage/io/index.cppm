@@ -103,6 +103,16 @@ export namespace bioseq::storage::load_pg::sql_routines {
  * @param[in] columns Optional header-to-column mappings.
  * @return Number of complete records inserted, as SQL BIGINT.
  * @throws postgres_error For invalid input, unsupported tables, read/write errors or index failures.
+ *
+ * ```sql
+ * -- Load a FASTA file into a Bioseq table. With one text column and one sequence column, auto mode places the full FASTA header in the text column. The file path is on the PostgreSQL server.
+ * BEGIN;
+ * SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+ * CREATE TABLE doc_imported (header text, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT bioseq.load('doc_imported'::regclass, '/data/reads.fasta');
+ * SELECT header, bioseq.len(seq) FROM doc_imported;
+ * ROLLBACK;
+ * ```
  */
 [[nodiscard]] std::int64_t load([[bioseq_sql::param({
                                     .sql_type = bioseq::sql::pg::regclass,

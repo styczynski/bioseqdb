@@ -231,6 +231,11 @@ export namespace bioseq::pg_types::sql_routines {
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return -1 when left sorts first, 0 when equal, or 1 when right sorts first.
+ *
+ * ```sql
+ * -- Compare sequences directly: the longer value sorts after its equal prefix.
+ * SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 64), 'ACG'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -258,6 +263,12 @@ std::int32_t seq_cmp(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when seq_cmp(left, right) is negative.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the < operator and its implementing function seq_lt. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.<) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_lt('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -291,6 +302,12 @@ bool seq_lt(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when seq_cmp(left, right) is negative or zero.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the <= operator and its implementing function seq_le. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.<=) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_le('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -325,6 +342,12 @@ bool seq_le(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when both values have the same alphabet binding and content.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the = operator and its implementing function seq_eq. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.=) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_eq('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -360,6 +383,12 @@ bool seq_eq(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when the values differ in binding, alphabet code, or content.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the <> operator and its implementing function seq_ne. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.<>) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_ne('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -393,6 +422,12 @@ bool seq_ne(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when seq_cmp(left, right) is positive or zero.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the >= operator and its implementing function seq_ge. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.>=) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_ge('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -426,6 +461,12 @@ bool seq_ge(
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
  * @return True when seq_cmp(left, right) is positive.
+ *
+ * ```sql
+ * -- Compare two DNA sequences with the > operator and its implementing function seq_gt. Both expressions use alphabet and content ordering.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.>) 'ACGA'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_gt('ACGT'::bioseq.seq('dna4', 64), 'ACGA'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -486,6 +527,12 @@ bool seq_gt(
  * ignored. This uses seed zero and XOR-folds the 64-bit hash into 32 bits.
  * @param input Sequence to hash; unresolved table locators are rejected.
  * @return A signed 32-bit hash consistent with seq_eq.
+ *
+ * ```sql
+ * -- Hash the same sequence twice; equal contents have equal hashes regardless of the expression that constructed them.
+ * SELECT bioseq.seq_hash('ACGT'::bioseq.seq('dna4', 64)) =
+ *   bioseq.seq_hash(('AC'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) 'GT'::text));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -510,6 +557,11 @@ std::int32_t seq_hash(
  * @param input Sequence to hash; unresolved table locators are rejected.
  * @param seed Initial seed, interpreted as a 64-bit bit pattern.
  * @return A signed 64-bit hash; equal sequences have equal hashes for the same seed.
+ *
+ * ```sql
+ * -- Hash a DNA sequence with an explicit seed. Reusing the seed and sequence reproduces the same 64-bit hash.
+ * SELECT bioseq.seq_hash_extended('ACGT'::bioseq.seq('dna4', 64), 42::bigint);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

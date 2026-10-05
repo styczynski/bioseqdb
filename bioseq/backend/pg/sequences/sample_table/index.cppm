@@ -428,6 +428,15 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
  * @param alphabet Must be dna4.
  * @param seed Random seed, defaulting to 42.
  * @return Created table OID.
+ *
+ * ```sql
+ * -- Generate a small reproducible DNA dataset with seed 42, inspect its rows, then roll back the example table.
+ * BEGIN;
+ * SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+ * SELECT bioseq.create_sample_table('doc_generated', 3, 512, 'dna4', 42);
+ * SELECT * FROM doc_generated LIMIT 3;
+ * ROLLBACK;
+ * ```
  */
 [[nodiscard]] Oid create_sample_table(
         std::optional<std::string> table_name,
@@ -675,6 +684,16 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
  * @param reverse_complement_rate Probability of reverse-complementing a query.
  * @param seed Random seed.
  * @return Created table OID after publishing each query and target source.
+ *
+ * ```sql
+ * -- Generate a small reproducible DNA dataset with seed 42, inspect its rows, then roll back the example table.
+ * BEGIN;
+ * SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+ * SELECT bioseq.create_query_target_sample_table('doc_generated', 3, 512, 0.0, 4096,
+ *   0.01, 0.0, 0.0, 1.0, 1.0, 0.0, 42);
+ * SELECT * FROM doc_generated LIMIT 3;
+ * ROLLBACK;
+ * ```
  */
 [[nodiscard]] Oid create_query_target_sample_table(
         std::optional<std::string> table_name,
@@ -954,7 +973,36 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
  * Return one row describing the sequence's stored locator and padding.
  * For an inline sequence, return its length and padding with  zero locator
  * fields. Detoast the input only for this call.
- */
+ *
+ * ```sql
+ * -- Inspect the physical sequence locator supplied by a Bioseq table scan.
+ * BEGIN;
+ * SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+ * CREATE TABLE doc_sequences (
+ *   id integer, seq bioseq.seq('dna4', 64)
+ * ) USING bioseq;
+ * WITH dna AS (
+ *   SELECT string_agg(translate(md5(i::text),
+ *     '0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS s
+ *   FROM generate_series(1, 64) AS g(i)
+ * )
+ * INSERT INTO doc_sequences
+ * SELECT 1, s::bioseq.seq('dna4', 64) FROM dna
+ * UNION ALL
+ * SELECT 2, substring(s FROM 257 FOR 512)::bioseq.seq('dna4', 64) FROM dna;
+ * SELECT id, bioseq.inspect_locator(seq) FROM doc_sequences;
+ * ROLLBACK;
+ * ```
+
+ * @remark website.field version: Locator payload format version; zero for an inline sequence.
+ * @remark website.field bucket_idx: Storage bucket containing the sequence fragments; zero for an inline sequence.
+ * @remark website.field shard_idx: Shard number within the storage bucket; zero for an inline sequence.
+ * @remark website.field num_fragments: Number of stored sequence fragments; zero for an inline sequence.
+ * @remark website.field total_bp_size: Logical length of the sequence in letters, excluding padding.
+ * @remark website.field first_sub_row_no: Logical row number of the first sequence fragment; zero for an inline sequence.
+ * @remark website.field source_epoch: Positive source-content revision used to detect stale locators; zero for an inline sequence.
+ * @remark website.field total_padding: Number of padding letters stored in the sequence header.
+*/
 [[nodiscard]]
 bioseq::postgres::support::table_rows<
     bioseq::sequences::generation::pg::result_rows::locator_metadata>

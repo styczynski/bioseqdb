@@ -69,6 +69,12 @@ export namespace bioseq::pg_types::sql_routines {
  * @param[in] left Sequence prefix.
  * @param[in] right Sequence suffix.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Join sequence and text operands with the concatenation operator or its implementing function. Operand order determines the order of the result.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) 'ACGT'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.seq_concat('ACGT'::bioseq.seq('dna4', 64), 'ACGT'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -99,6 +105,12 @@ Datum seq_concat(
  * @param[in] sequence Sequence prefix.
  * @param[in] value ASCII suffix, checked against the sequence alphabet when bound.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Join sequence and text operands with the concatenation operator or its implementing function. Operand order determines the order of the result.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) 'TG'::text AS operator_result,
+ *   bioseq.seq_concat_text('ACGT'::bioseq.seq('dna4', 64), 'TG'::text) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -126,6 +138,12 @@ Datum seq_concat_text(
  * @param[in] value ASCII prefix, checked against the sequence alphabet when bound.
  * @param[in] sequence Sequence suffix.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Join sequence and text operands with the concatenation operator or its implementing function. Operand order determines the order of the result.
+ * SELECT 'TG'::text OPERATOR(bioseq.||) 'ACGT'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.text_concat_seq('TG'::text, 'ACGT'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -153,6 +171,12 @@ Datum text_concat_seq(
  * @param[in] sequence Sequence  prefix.
  * @param[in] value ASCII suffix, checked against the sequence alphabet when bound.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Join sequence and text operands with the concatenation operator or its implementing function. Operand order determines the order of the result.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) 'TG'::varchar AS operator_result,
+ *   bioseq.seq_concat_varchar('ACGT'::bioseq.seq('dna4', 64), 'TG'::varchar) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -183,6 +207,12 @@ Datum seq_concat_varchar(
  * @param[in] value ASCII prefix, checked against, the sequence alphabet when bound.
  * @param[in] sequence Sequence suffix.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Join sequence and text operands with the concatenation operator or its implementing function. Operand order determines the order of the result.
+ * SELECT 'TG'::varchar OPERATOR(bioseq.||) 'ACGT'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.varchar_concat_seq('TG'::varchar, 'ACGT'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -214,6 +244,11 @@ Datum varchar_concat_seq(
  * order when needed.
  * @param[in] input Sequence to reverse.
  * @return The reversed sequence.
+ *
+ * ```sql
+ * -- Reverse the sequence without complementing its letters.
+ * SELECT bioseq.reverse('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -239,6 +274,11 @@ Datum reverse(
  * @param[in] input Sequence with a known alphabet and a complement for every letter.
  * @return The reverse-complement sequence.
  * @throws PostgreSQL ERROR if the alphabet is unknown or lacks a complete complement map.
+ *
+ * ```sql
+ * -- Reverse the sequence and complement each DNA letter.
+ * SELECT bioseq.reverse_complement('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -285,6 +325,11 @@ Datum reverse_complement(
  * @param[in] left Sequence prefix.
  * @param[in] right Sequence suffix.
  * @return The joined sequence.
+ *
+ * ```sql
+ * -- Concatenate two sequences using the array-compatible function spelling.
+ * SELECT bioseq.array_cat('ACGT'::bioseq.seq('dna4', 64), 'TG'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

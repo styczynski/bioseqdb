@@ -16,6 +16,14 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::storage::load_pg::composite_rows {
 
 /// A destination column and the input field used to fill it.
+
+/**
+ * ```sql
+ * -- A column mapping stores the destination column first and the parsed FASTA header field second.
+ * SELECT (mapping).column_name, (mapping).data_source
+ * FROM (SELECT ROW('protein_id', 'accession')::bioseq.column_mapping AS mapping) AS sample;
+ * ```
+ */
 struct [[bioseq_sql::type({
             .schema = bioseq::sql::fixed_schema<"bioseq">,
         })]] column_mapping {

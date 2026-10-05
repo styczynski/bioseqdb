@@ -315,6 +315,11 @@ export namespace bioseq::pg_types::sql_routines {
  * @brief Return the callback table PostgreSQL uses for `bioseq.seq` subscripts.
  * @param[in] input Unused PostgreSQL internal handler argment.
  * @return Static, read-only callback table, valid until the process exits.
+ *
+ * ```sql
+ * -- PostgreSQL invokes this handler for sequence element and slice subscripts. SQL subscripts are one-based.
+ * SELECT ('ACGT'::bioseq.seq('dna4', 64))[2] AS base, ('ACGT'::bioseq.seq('dna4', 64))[2:3] AS slice;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

@@ -55,6 +55,13 @@ struct letter;
 export namespace bioseq::pg_types {
 
 /// A two-byte letter containing its alphabet and rank, passed by value in SQL.
+
+/**
+ * ```sql
+ * -- Represent one alphabet-bound DNA letter and convert it to text.
+ * SELECT 'A'::bioseq.letter('dna4') AS base, bioseq.letter_to_text('A'::bioseq.letter('dna4')) AS symbol;
+ * ```
+ */
 struct [[bioseq_sql::type({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .internal_length = 2,
@@ -69,6 +76,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when left is less than right under this ordering.
+     *
+     * ```sql
+     * -- Compare DNA letters with < and with its implementing function letter_lt. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.<) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_lt('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -99,6 +112,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when left is less than or equal to right under this ordering.
+     *
+     * ```sql
+     * -- Compare DNA letters with <= and with its implementing function letter_le. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.<=) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_le('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -129,6 +148,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when both alphabet codes and ranks are equal.
+     *
+     * ```sql
+     * -- Compare DNA letters with = and with its implementing function letter_eq. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.=) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_eq('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -161,6 +186,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when either the alphabet codes or the ranks differ.
+     *
+     * ```sql
+     * -- Compare DNA letters with <> and with its implementing function letter_ne. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.<>) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_ne('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -191,6 +222,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when left is greater than or equal to right under this ordering.
+     *
+     * ```sql
+     * -- Compare DNA letters with >= and with its implementing function letter_ge. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.>=) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_ge('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -221,6 +258,12 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return True when left is greater than right under this ordering.
+     *
+     * ```sql
+     * -- Compare DNA letters with > and with its implementing function letter_gt. Both compare the alphabet code and letter rank.
+     * SELECT 'A'::bioseq.letter('dna4') OPERATOR(bioseq.>) 'C'::bioseq.letter('dna4') AS operator_result,
+     *   bioseq.letter_gt('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')) AS function_result;
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -251,6 +294,11 @@ struct [[bioseq_sql::type({
      * @param left Left letter.
      * @param right Right letter.
      * @return -1 when left precedes right, 0 when equal, or 1 when left follows right.
+     *
+     * ```sql
+     * -- Compare the ranks of two letters in the same DNA alphabet.
+     * SELECT bioseq.letter_cmp('A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4'));
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -274,6 +322,11 @@ struct [[bioseq_sql::type({
      * @brief Hash the alphabet and rank bytes with PostgreSQL's 32-bit hash function.
      * @param value Letter to hash.
      * @return The hash as a SQL integer.
+     *
+     * ```sql
+     * -- Hash a DNA letter; the alphabet tag is part of the hashed value.
+     * SELECT bioseq.letter_hash('A'::bioseq.letter('dna4'));
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -295,6 +348,11 @@ struct [[bioseq_sql::type({
      * @param value Letter to hash.
      * @param seed Seed passed to the extended hash function.
      * @return The hash as a SQL bigint.
+     *
+     * ```sql
+     * -- Hash a DNA letter; the alphabet tag is part of the hashed value.
+     * SELECT bioseq.letter_hash_extended('A'::bioseq.letter('dna4'), 42::bigint);
+     * ```
      */
     [[bioseq_sql::function({
         .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -716,6 +774,11 @@ export namespace bioseq::pg_types::sql_routines {
 /**
  * @brief Report entries into Bioseq's letter-validation parser hook in this backend.
  * @return The hook entry count, capped at the maximum signed 64-bit value.
+ *
+ * ```sql
+ * -- Run the internal letter diagnostic as the extension owner; it checks the current backend or wire-format contract.
+ * SELECT bioseq_internal.letter_hook_chain_calls();
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -886,6 +949,11 @@ export namespace bioseq::pg_types::sql_routines {
  * @brief Parse the single alphabet modifier accepted by bioseq.letter.
  * @param array One-dimensional array containing one non-NULL alphabet name.
  * @return The encoded PostgreSQL type modifier for that alphabet.
+ *
+ * ```sql
+ * -- Casting text to a DNA letter invokes PostgreSQL's letter input and type-modifier conversion routines, including letter_typmod_in.
+ * SELECT 'A'::bioseq.letter('dna4');
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -926,6 +994,15 @@ std::int32_t letter_typmod_in(
  * @brief Format a letter type modifier as its alphabet name in parentheses.
  * @param typmod Encoded alphabet modifier, or a negative value for no modifier.
  * @return The alphabet modifier text, or an empty string when no modifier is set.
+ *
+ * ```sql
+ * -- PostgreSQL formats the stored type modifier when reporting this column type.
+ * BEGIN;
+ * CREATE TEMP TABLE doc_letters (base bioseq.letter('dna4'));
+ * SELECT format_type(atttypid, atttypmod)
+ * FROM pg_attribute WHERE attrelid = 'doc_letters'::regclass AND attname = 'base';
+ * ROLLBACK;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -957,6 +1034,11 @@ char* letter_typmod_out(std::int32_t typmod)
  * @param type_oid PostgreSQL type OID; unused.
  * @param typmod Alphabet modifier, or a negative value to defer alphabet resolution.
  * @return A letter with its alphabet and rank, or an unresolved symbol when no alphabet is supplied.
+ *
+ * ```sql
+ * -- Casting text to a DNA letter invokes PostgreSQL's letter input and type-modifier conversion routines, including letter_in.
+ * SELECT 'A'::bioseq.letter('dna4');
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -998,6 +1080,11 @@ bioseq::pg_types::letter letter_in(
  * @brief Format a letter as its alphabet symbol.
  * @param value Letter to format.
  * @return A null-terminated string containing one symbol.
+ *
+ * ```sql
+ * -- Convert a bound DNA letter back to its canonical text spelling.
+ * SELECT bioseq.letter_out('A'::bioseq.letter('dna4'));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1093,6 +1180,16 @@ export namespace bioseq::pg_types::sql_routines {
  * @param type_oid PostgreSQL type OID; unused.
  * @param typmod Required alphabet modifier, or a negative value to accept the encoded alphabet.
  * @return The decoded letter after validating its version, alphabet, rank and optional modifier.
+ *
+ * ```sql
+ * -- Use PostgreSQL binary COPY to round-trip letters. PostgreSQL invokes letter_recv while reading the binary file; run these psql commands in the same session.
+ * CREATE TEMP TABLE doc_letters (base bioseq.letter('dna4'));
+ * INSERT INTO doc_letters VALUES ('A'), ('C');
+ * \copy doc_letters TO '/tmp/bioseq-letters.bin' WITH (FORMAT binary)
+ * TRUNCATE doc_letters;
+ * \copy doc_letters FROM '/tmp/bioseq-letters.bin' WITH (FORMAT binary)
+ * SELECT * FROM doc_letters;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1118,6 +1215,11 @@ bioseq::pg_types::letter letter_recv(
  * @brief Encode a letter as binary version 1 followed by its alphabet code and rank.
  * @param value Letter to encode.
  * @return The three-byte PostgreSQL binary payload.
+ *
+ * ```sql
+ * -- Inspect the binary wire representation of a DNA letter.
+ * SELECT encode(bioseq.letter_send('A'::bioseq.letter('dna4')), 'hex');
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1144,6 +1246,11 @@ text* letter_send(
 /**
  * @brief Run the internal rejection checks for invalid letter binary input.
  * @return True when all enabled version, rank and alphabet-mismatch checks pass.
+ *
+ * ```sql
+ * -- Run the internal letter diagnostic as the extension owner; it checks the current backend or wire-format contract.
+ * SELECT bioseq_internal.letter_wire_self_test();
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -1178,6 +1285,11 @@ bool letter_wire_self_test() {
  * @param target_typmod Destination alphabet modifier; required for an unresolved symbol.
  * @param explicit_cast PostgreSQL explicit-cast flag; unused.
  * @return The resolved letter; a conflicting destination alphabet raises an error.
+ *
+ * ```sql
+ * -- Casting text to a DNA letter invokes PostgreSQL's letter input and type-modifier conversion routines, including letter.
+ * SELECT 'A'::bioseq.letter('dna4');
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1221,6 +1333,11 @@ bioseq::pg_types::letter letter(
  * @brief Convert a letter to its single alphabet symbol as PostgreSQL text.
  * @param value Letter to convert.
  * @return A text value containing one symbol.
+ *
+ * ```sql
+ * -- Convert a bound DNA letter back to its canonical text spelling.
+ * SELECT bioseq.letter_to_text('A'::bioseq.letter('dna4'));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

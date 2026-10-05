@@ -20,7 +20,35 @@ export namespace bioseq::sql_functions {
 /**
  * List a table's sequence shards and sidecar tables in column, bucket, and  shard order.
  * @return SQL body used to generate the set-returning function.
- */
+ *
+ * ```sql
+ * -- List the physical sequence shards belonging to a Bioseq table.
+ * BEGIN;
+ * SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+ * CREATE TABLE doc_sequences (
+ *   id integer, seq bioseq.seq('dna4', 64)
+ * ) USING bioseq;
+ * WITH dna AS (
+ *   SELECT string_agg(translate(md5(i::text),
+ *     '0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS s
+ *   FROM generate_series(1, 64) AS g(i)
+ * )
+ * INSERT INTO doc_sequences
+ * SELECT 1, s::bioseq.seq('dna4', 64) FROM dna
+ * UNION ALL
+ * SELECT 2, substring(s FROM 257 FOR 512)::bioseq.seq('dna4', 64) FROM dna;
+ * SELECT * FROM bioseq.list_seq_storage_shards('doc_sequences'::regclass);
+ * ROLLBACK;
+ * ```
+
+ * @remark website.field sub_relation: Registered sequence-fragment storage relation, returned as regclass.
+ * @remark website.field sidecar_relation: Registered companion relation for the storage shard, returned as regclass.
+ * @remark website.field column_attno: One-based PostgreSQL attribute number of the source sequence column.
+ * @remark website.field bucket_idx: Storage bucket containing the source sequence fragments.
+ * @remark website.field shard_idx: Shard number within the sequence storage bucket.
+ * @remark website.field bytes_written: Number of bytes recorded as written to this storage shard.
+ * @remark website.field is_full: Whether the shard has been marked full and should no longer receive new fragments.
+*/
 [[bioseq_sql::sql_function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -71,6 +99,12 @@ ORDER BY s.column_attno, s.bucket_idx, s.shard_idx;
 /**
  * Build an aligner-options SQL value, preserving NULL for unset settings.
  * @return SQL body used to generate the composite-value constructor.
+ *
+ * ```sql
+ * -- The codes choose bounded ntHash SIMD minimizers (4), SIMD minimap2 chaining (1), and BlockAligner (1). Each minimizer window contains ten consecutive 15-mers.
+ * SELECT aligner_options(kmer_size => 15, window_size => 10,
+ *   minimizer_algorithm => 4, chaining_algorithm => 1, base_alignment_algorithm => 1);
+ * ```
  */
 [[bioseq_sql::sql_function({
     .create = bioseq::sql::create_mode::or_replace,

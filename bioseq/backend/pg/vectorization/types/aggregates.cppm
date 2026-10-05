@@ -147,7 +147,17 @@ numeric_average(const int128_aggregate_state_storage& state) {
 
 export namespace bioseq::vector::aggregate_sql_routines {
 
-/** Keep the COUNT(*) state unchanged here. The vector executor adds the batch's row count. */
+/** Keep the COUNT(*) state unchanged here. The vector executor adds the batch's row count.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vemptycount while computing COUNT over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT count(*) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t> vemptycount(std::optional<std::int64_t> running_count) {
@@ -157,7 +167,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return running_count;
 }
 
-/** Add the batch's non-NULL row count to an initialized COUNT state. */
+/** Add the batch's non-NULL row count to an initialized COUNT state.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vanycount while computing COUNT over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT count(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -175,7 +195,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return running_count;
 }
 
-/** Add non-NULL SMALLINT values to an initialized bigint sum. */
+/** Add non-NULL SMALLINT values to an initialized bigint sum.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint2sum while computing SUM over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -192,7 +222,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Add non-NULL SMALLINT values to the count and sum used by AVG. */
+/** Add non-NULL SMALLINT values to the count and sum used by AVG.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint2acc while computing AVG over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -211,7 +251,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return accumulate_integer_average_state(std::move(state), input);
 }
 
-/** Update  an initialized SMALLINT maximum with the batch's non-NULL values. */
+/** Update  an initialized SMALLINT maximum with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint2larger while computing MAX over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int16_t>
@@ -230,7 +280,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Update an initialized SMALLINT minimum with the batch's non-NULL values. */
+/** Update an initialized SMALLINT minimum with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint2smaller while computing MIN over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int16_t>
@@ -249,7 +309,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Add non-NULL INTEGER values to an initialized bigint sum. */
+/** Add non-NULL INTEGER values to an initialized bigint sum.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint4sum while computing SUM over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -266,7 +336,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Add non-NULL INTEGER values to the count and sum used by AVG. */
+/** Add non-NULL INTEGER values to the count and sum used by AVG.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint4acc while computing AVG over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -285,7 +365,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return accumulate_integer_average_state(std::move(state), input);
 }
 
-/** Update an initialized INTEGER maximum with the batch's non-NULL values. */
+/** Update an initialized INTEGER maximum with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint4larger while computing MAX over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int32_t>
@@ -304,7 +394,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Update an initialized INTEGER minimum, with the batch's non-NULL values. */
+/** Update an initialized INTEGER minimum, with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint4smaller while computing MIN over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int32_t>
@@ -323,7 +423,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Return a SMALLINT or INTEGER average as numeric, or NULL when no values were counted. */
+/** Return a SMALLINT or INTEGER average as numeric, or NULL when no values were counted.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint2int4avg while computing AVG over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -341,7 +451,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
 }
 
 /** Accumulate BIGINT values in a 128-bit sum and count them for SUM or AVG.
- * Allocate missing state in the aggregate memory context and skip NULL rows. */
+ * Allocate missing state in the aggregate memory context and skip NULL rows.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint8acc while computing AVG over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -381,7 +501,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return state;
 }
 
-/** Return the BIGINT sum as numeric, or NULL when no values were counted. */
+/** Return the BIGINT sum as numeric, or NULL when no values were counted.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint8sum while computing SUM over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -400,7 +530,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return bioseq::postgres::support::numeric_result::from_numeric(sum_numeric);
 }
 
-/** Return the BIGINT average  as numeric, or NULL when no values were counted. */
+/** Return the BIGINT average  as numeric, or NULL when no values were counted.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint8avg while computing AVG over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -417,7 +557,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     return numeric_average(state->value());
 }
 
-/** Update an initialized BIGINT maximum with the batch's non-NULL values. */
+/** Update an initialized BIGINT maximum with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint8larger while computing MAX over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -435,7 +585,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Update an initialized BIGINT minimum with the batch's non-NULL values. */
+/** Update an initialized BIGINT minimum with the batch's non-NULL values.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vint8smaller while computing MIN over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] std::optional<std::int64_t>
@@ -454,7 +614,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
         });
 }
 
-/** Update an initialized latest date with the batch's non-NULL dates. */
+/** Update an initialized latest date with the batch's non-NULL dates.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vdatelarger while computing MAX over a date column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value date) USING bioseq;
+ * INSERT INTO doc_values VALUES (DATE '2026-01-01'), (DATE '2026-01-03'), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -476,7 +646,17 @@ export namespace bioseq::vector::aggregate_sql_routines {
     });
 }
 
-/** Update an initialized earliest date with the batch's non-NULL dates. */
+/** Update an initialized earliest date with the batch's non-NULL dates.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vdatesmaller while computing MIN over a date column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value date) USING bioseq;
+ * INSERT INTO doc_values VALUES (DATE '2026-01-01'), (DATE '2026-01-03'), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 [[bioseq_sql::function({
     .volatility = bioseq::sql::volatility::immutable,
 })]] [[bioseq_sql::result({
@@ -626,7 +806,17 @@ namespace count_all {
     .transition = bioseq::vector::aggregate_sql_routines::vemptycount,
     .initial_condition = std::int64_t{0},
 })]]
-/** Register vector COUNT(*), witz row counting performed by the executor */
+/** Register vector COUNT(*), witz row counting performed by the executor
+ * ```sql
+ * -- A Bioseq vectorized scan uses vcount while computing COUNT over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT count(*) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
@@ -635,7 +825,17 @@ namespace count_any {
     .transition = bioseq::vector::aggregate_sql_routines::vanycount,
     .initial_condition = std::int64_t{0},
 })]]
-/** Register vector COUNT(value), counting only non-NULL rows. */
+/** Register vector COUNT(value), counting only non-NULL rows.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vcount while computing COUNT over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT count(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
@@ -644,7 +844,17 @@ namespace smallint_sum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2sum,
     .initial_condition = std::int64_t{0},
 })]]
-/** Register vector SMALLINT SUM with  a bigint state initialized to zero. */
+/** Register vector SMALLINT SUM with  a bigint state initialized to zero.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vsum while computing SUM over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -654,7 +864,17 @@ namespace smallint_average {
     .final = bioseq::vector::aggregate_sql_routines::vint2int4avg,
     .initial_condition = bioseq::sql::pg_input_text{"{0,0}"},
 })]]
-/** Register vector SMALLINT AVG using a count and sum, then numeric division. */
+/** Register vector SMALLINT AVG using a count and sum, then numeric division.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vavg while computing AVG over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -663,7 +883,17 @@ namespace smallint_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2larger,
     .initial_condition = std::int64_t{-32768},
 })]]
-/** Register vector SMALLINT MAX with the smallest representable initial value. */
+/** Register vector SMALLINT MAX with the smallest representable initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmax while computing MAX over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -672,7 +902,17 @@ namespace smallint_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint2smaller,
     .initial_condition = std::int64_t{32767},
 })]]
-/** Register vector SMALLINT MIN with the largest representable initial value. */
+/** Register vector SMALLINT MIN with the largest representable initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmin while computing MIN over a smallint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value smallint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -681,7 +921,17 @@ namespace integer_sum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4sum,
     .initial_condition = std::int64_t{0},
 })]]
-/** Register vector INTEGER SUM with a bigint state initialized to zero. */
+/** Register vector INTEGER SUM with a bigint state initialized to zero.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vsum while computing SUM over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -691,7 +941,17 @@ namespace integer_average {
     .final = bioseq::vector::aggregate_sql_routines::vint2int4avg,
     .initial_condition = bioseq::sql::pg_input_text{"{0,0}"},
 })]]
-/** Register vector INTEGER AVG using a count and sum, then numeric division. */
+/** Register vector INTEGER AVG using a count and sum, then numeric division.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vavg while computing AVG over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -700,7 +960,17 @@ namespace integer_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4larger,
     .initial_condition = std::int64_t{-2147483648},
 })]]
-/** Register vector INTEGER MAX with the smallest representable initial value. */
+/** Register vector INTEGER MAX with the smallest representable initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmax while computing MAX over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -709,7 +979,17 @@ namespace integer_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint4smaller,
     .initial_condition = std::int64_t{2147483647},
 })]]
-/** Register vector INTEGER MIN with the largest representable initial value. */
+/** Register vector INTEGER MIN with the largest representable initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmin while computing MIN over a integer column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value integer) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -720,7 +1000,17 @@ namespace bigint_sum {
     .serial = bioseq::sql::pg_catalog_reference::int8_avg_serialize,
     .deserial = bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
 })]]
-/** Register  vector BIGINT SUM with 128-bit accumulation and PostgreSQL state serialization. */
+/** Register  vector BIGINT SUM with 128-bit accumulation and PostgreSQL state serialization.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vsum while computing SUM over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT sum(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
@@ -731,7 +1021,17 @@ namespace bigint_average {
     .serial = bioseq::sql::pg_catalog_reference::int8_avg_serialize,
     .deserial = bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
 })]]
-/** Register vector BIGINT AVG with 128-bit accumulation and PostgreSQL state serialization. */
+/** Register vector BIGINT AVG with 128-bit accumulation and PostgreSQL state serialization.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vavg while computing AVG over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT avg(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
@@ -740,7 +1040,17 @@ namespace bigint_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vint8larger,
     .initial_condition = std::int64_t{-9223372036854775807LL - 1},
 })]]
-/** Register vector BIGINT MAX wita the smallest representable, initial value. */
+/** Register vector BIGINT MAX wita the smallest representable, initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmax while computing MAX over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -749,7 +1059,17 @@ namespace bigint_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vint8smaller,
     .initial_condition = std::int64_t{9223372036854775807LL},
 })]]
-/** Register vector BIGINT MIN with the largest representable initial value. */
+/** Register vector BIGINT MIN with the largest representable initial value.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmin while computing MIN over a bigint column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value bigint) USING bioseq;
+ * INSERT INTO doc_values VALUES (1), (3), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
@@ -758,7 +1078,17 @@ namespace date_maximum {
     .transition = bioseq::vector::aggregate_sql_routines::vdatelarger,
     .initial_condition = bioseq::sql::pg_infinity::negative,
 })]]
-/** Register vector DATE MAX starting from negative infinity. */
+/** Register vector DATE MAX starting from negative infinity.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmax while computing MAX over a date column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value date) USING bioseq;
+ * INSERT INTO doc_values VALUES (DATE '2026-01-01'), (DATE '2026-01-03'), (NULL);
+ * SELECT max(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
@@ -767,7 +1097,17 @@ namespace date_minimum {
     .transition = bioseq::vector::aggregate_sql_routines::vdatesmaller,
     .initial_condition = bioseq::sql::pg_infinity::positive,
 })]]
-/** Register vector DATE MIN starting from positive infinity. */
+/** Register vector DATE MIN starting from positive infinity.
+ * ```sql
+ * -- A Bioseq vectorized scan uses vmin while computing MIN over a date column. PostgreSQL supplies the vector and aggregate state; do not pass scalar values to the internal transition function.
+ * BEGIN;
+ * SET LOCAL bioseq.vectorization.enabled = on;
+ * CREATE TABLE doc_values (value date) USING bioseq;
+ * INSERT INTO doc_values VALUES (DATE '2026-01-01'), (DATE '2026-01-03'), (NULL);
+ * SELECT min(value) FROM doc_values;
+ * ROLLBACK;
+ * ```
+ */
 inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 

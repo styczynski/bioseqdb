@@ -16,6 +16,14 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::storage::indexing::catalog_rows {
 
 /// @brief Saved settings for one index on a sequence colmn.
+///
+/// ```sql
+/// -- Inspect which saved sequence indexes are enabled and selected for reads.
+/// SELECT user_relid::regclass AS relation, column_attno, index_name,
+///        enabled, is_active_read
+/// FROM bioseq_internal.index_policy
+/// ORDER BY user_relid, column_attno, index_name;
+/// ```
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -53,10 +61,18 @@ struct [[bioseq_sql::table({
     /// Whether inserts trigger maintenance.
     bool update_on_insert = false;
     /// Whether queries should use this index for the sequence column
+    /// @brief Selects this index for reads of the sequence column.
     bool is_active_read = false;
 };
 
 /// @brief Last recorded refresh time for an index on a sequence column.
+///
+/// ```sql
+/// -- Inspect the most recently recorded index metadata refreshes.
+/// SELECT user_relid::regclass AS relation, column_attno, index_name, last_updated
+/// FROM bioseq_internal.metadata_age_log
+/// ORDER BY last_updated DESC;
+/// ```
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -89,6 +105,13 @@ struct [[bioseq_sql::table({
 };
 
 /// @brief Location and size of one shard of a table index.
+///
+/// ```sql
+/// -- Inspect physical index shard sizes and whether they accept more writes.
+/// SELECT index_relid::regclass AS shard, index_name, bytes_written, is_full
+/// FROM bioseq_internal.index_table_shard
+/// ORDER BY bytes_written DESC;
+/// ```
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,

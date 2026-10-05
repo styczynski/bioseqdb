@@ -483,6 +483,12 @@ export namespace bioseq::pg_types::sql_routines {
  * @param sequence Sequence prefix.
  * @param array Text elements in order, with no NULL elements.
  * @return The joined sequence. An empty array leaves sequence unchanged.
+ *
+ * ```sql
+ * -- Concatenate an array and a sequence in operand order. Text array elements are checked against the bound sequence alphabet.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) ARRAY['T', 'G']::text[] AS operator_result,
+ *   bioseq.seq_concat_text_array('ACGT'::bioseq.seq('dna4', 64), ARRAY['T', 'G']::text[]) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -515,6 +521,12 @@ Datum seq_concat_text_array(
  * @param array Text elements in order, with no NULL elements.
  * @param sequence Sequence suffix.
  * @return The joined sequence. An empny array leaves sequence unchanged.
+ *
+ * ```sql
+ * -- Concatenate an array and a sequence in operand order. Text array elements are checked against the bound sequence alphabet.
+ * SELECT ARRAY['T', 'G']::text[] OPERATOR(bioseq.||) 'ACGT'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.text_array_concat_seq(ARRAY['T', 'G']::text[], 'ACGT'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -547,6 +559,12 @@ Datum text_array_concat_seq(
  * @param sequence Sequence with a known alphabet.
  * @param array Non-NULL letters using the sequence's alphabet.
  * @return The joined sequence. An empty array leaves sequence unchanged.
+ *
+ * ```sql
+ * -- Concatenate an array and a sequence in operand order. Text array elements are checked against the bound sequence alphabet.
+ * SELECT 'ACGT'::bioseq.seq('dna4', 64) OPERATOR(bioseq.||) ARRAY['T'::bioseq.letter('dna4'), 'G'::bioseq.letter('dna4')] AS operator_result,
+ *   bioseq.seq_concat_letter_array('ACGT'::bioseq.seq('dna4', 64), ARRAY['T'::bioseq.letter('dna4'), 'G'::bioseq.letter('dna4')]) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -579,6 +597,12 @@ Datum seq_concat_letter_array(
  * @param array Non-NULL letters using the sequence's alphabet.
  * @param sequence Sequence with a known alphabet.
  * @return The joined sequence. An empty array leaves sequence unchanged.
+ *
+ * ```sql
+ * -- Concatenate an array and a sequence in operand order. Text array elements are checked against the bound sequence alphabet.
+ * SELECT ARRAY['T'::bioseq.letter('dna4'), 'G'::bioseq.letter('dna4')] OPERATOR(bioseq.||) 'ACGT'::bioseq.seq('dna4', 64) AS operator_result,
+ *   bioseq.letter_array_concat_seq(ARRAY['T'::bioseq.letter('dna4'), 'G'::bioseq.letter('dna4')], 'ACGT'::bioseq.seq('dna4', 64)) AS function_result;
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -611,6 +635,11 @@ Datum letter_array_concat_seq(
  * @param input Sequence  to measure.
  * @param dimension Requested dimension.
  * @return Letter count for dimension 1, or SQL NULL for any other dimension.
+ *
+ * ```sql
+ * -- Count sequence letters through the array-compatible length interface.
+ * SELECT bioseq.array_length('ACGT'::bioseq.seq('dna4', 64), 1);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -635,6 +664,11 @@ std::optional<std::int64_t> array_length(
  * @brief Count letters using sequence metadata without reading their contents.
  * @param input Sequence to measure.
  * @return Letter count as a signed 64-bit integer
+ *
+ * ```sql
+ * -- Count sequence letters through the array-compatible length interface.
+ * SELECT bioseq.cardinality('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -655,6 +689,11 @@ std::int64_t cardinality(
  * @brief Convert a sequence to PostgreSQL text for an assignment cast.
  * @param input Sequence, whose letters are written as text.
  * @return Text allocated in the current memory context.
+ *
+ * ```sql
+ * -- Convert a packed DNA sequence to text.
+ * SELECT bioseq.to_text('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -681,6 +720,11 @@ text* to_text(
  * @brief Convert a sequence to PostgreSQL varchar for an assignment cast.
  * @param input Sequence  whose letters are written as text.
  * @return A varchar value allocated in the current memory context.
+ *
+ * ```sql
+ * -- Convert a packed DNA sequence to varchar.
+ * SELECT bioseq.to_varchar('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -708,6 +752,11 @@ text* to_varchar(
  * @param input Sequence with a known alphabet.
  * @return An allocated one-dimensional array, or an empty PostgreSQL array for
  * a sequence of length zero.
+ *
+ * ```sql
+ * -- Convert a packed DNA sequence to an array of alphabet-bound letters.
+ * SELECT bioseq.to_array('ACGT'::bioseq.seq('dna4', 64));
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -812,6 +861,11 @@ ArrayType* to_array(
  * @param array Nonempty one-dimensional array of non-NULL letters sharing an alphabet.
  * @param width_bits Bits per storage unit: 8, 16, 32, or 64.
  * @return A flat sequence allocated in the current memory context.
+ *
+ * ```sql
+ * -- Build a packed sequence from DNA letters and explicitly select 64-bit packing.
+ * SELECT bioseq.from_array(ARRAY['A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')], 64);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -838,6 +892,11 @@ Datum from_array(
  * @param alphabet_name Supported alphabet name.
  * @param width_bits Bits per storage unit: 8, 16, 32, or 64.
  * @return A flat sequence allocated in the current memory context.
+ *
+ * ```sql
+ * -- Build a packed sequence from DNA letters and explicitly select 64-bit packing.
+ * SELECT bioseq.from_array(ARRAY['A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')], 'dna4', 64);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

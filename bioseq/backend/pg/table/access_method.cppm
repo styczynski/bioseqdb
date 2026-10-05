@@ -134,7 +134,15 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::create,
 })]]
-/** Return the physical storage identifier for a Bioseq relation. */
+/** Return the physical storage identifier for a Bioseq relation.
+ * ```sql
+ * -- Read the internal storage identifier assigned to a Bioseq table.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT bioseq.get_storage_id('doc_storage'::regclass);
+ * ROLLBACK;
+ * ```
+ */
 std::int64_t get_storage_id([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::regclass,
 })]] Oid relation_id) {
@@ -242,7 +250,14 @@ export namespace bioseq::table::sql_routines {
 })]] [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::table_am_handler,
 })]]
-/** Return Bioseq's table-access callbacks to PostgreSQL. */
+/** Return Bioseq's table-access callbacks to PostgreSQL.
+ * ```sql
+ * -- Creating a table with USING bioseq invokes the table access-method handler; PostgreSQL supplies its internal argument.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * ROLLBACK;
+ * ```
+ */
 const TableAmRoutine* bioseq_handler([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::internal,
 })]] std::optional<bioseq::postgres::support::table_access_method_handler> handler_context) {
@@ -291,7 +306,15 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::pg_catalog,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** @brief Sets selected storage options on a Bioseq table. Null options are unchanged. */
+/** @brief Sets selected storage options on a Bioseq table. Null options are unchanged.
+ * ```sql
+ * -- Override the stripe row limit for one table; unspecified options retain their values.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT pg_catalog.alter_bioseq_table_set('doc_storage'::regclass, stripe_row_limit => 1024);
+ * ROLLBACK;
+ * ```
+ */
 void alter_bioseq_table_set([[bioseq_sql::param({
                                 .sql_type = bioseq::sql::pg::regclass,
                             })]] std::optional<Oid> table_name,
@@ -402,7 +425,15 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::pg_catalog,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** Reset selected table options to the, current session's Bioseq settings. */
+/** Reset selected table options to the, current session's Bioseq settings.
+ * ```sql
+ * -- Reset this table option to the current session default.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT pg_catalog.alter_bioseq_table_reset('doc_storage'::regclass, stripe_row_limit => true);
+ * ROLLBACK;
+ * ```
+ */
 void alter_bioseq_table_reset([[bioseq_sql::param({
                                   .sql_type = bioseq::sql::pg::regclass,
                               })]] std::optional<Oid> table_name,
@@ -468,7 +499,15 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** Update an older storage metapage to this library's format and rebuild its allocation counters. */
+/** Update an older storage metapage to this library's format and rebuild its allocation counters.
+ * ```sql
+ * -- Migrate a Bioseq table to its current physical storage format. This internal administrative operation requires the table owner.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT bioseq_internal.upgrade_bioseq_storage('doc_storage'::regclass);
+ * ROLLBACK;
+ * ```
+ */
 void upgrade_bioseq_storage([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::regclass,
 })]] Oid rel) {
@@ -484,7 +523,15 @@ void upgrade_bioseq_storage([[bioseq_sql::param({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** Update a newer storage metapage to this library's format and rebuild its allocation counters. */
+/** Update a newer storage metapage to this library's format and rebuild its allocation counters.
+ * ```sql
+ * -- Exercise the internal storage downgrade on an isolated Bioseq table as its owner.
+ * BEGIN;
+ * CREATE TABLE doc_storage (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+ * SELECT bioseq_internal.downgrade_bioseq_storage('doc_storage'::regclass);
+ * ROLLBACK;
+ * ```
+ */
 void downgrade_bioseq_storage([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::regclass,
 })]] Oid rel) {

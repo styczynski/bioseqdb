@@ -11,6 +11,16 @@ import :letter;
 namespace bioseq::pg_types::sql_catalog {
 
 /// @brief Registers default B-tree ordering for alphabet letters.
+///
+/// ```sql
+/// -- Build an explicit BTREE index and query values using this operator class.
+/// BEGIN;
+/// CREATE TEMP TABLE example_letter_btree_ops (value bioseq.letter('dna4'));
+/// INSERT INTO example_letter_btree_ops VALUES ('G'), ('A'), ('C');
+/// CREATE INDEX ON example_letter_btree_ops USING btree (value bioseq.letter_btree_ops);
+/// SELECT value FROM example_letter_btree_ops ORDER BY value;
+/// ROLLBACK;
+/// ```
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::btree,
     .is_default = true,
@@ -34,6 +44,17 @@ namespace bioseq::pg_types::sql_catalog {
 inline constexpr bioseq::sql::opclass_tag letter_btree_ops{};
 
 /// @brief Registers default hash indexing for alphabet letters.
+///
+/// ```sql
+/// -- Build an explicit HASH index and query values using this operator class.
+/// BEGIN;
+/// CREATE TEMP TABLE example_letter_hash_ops (value bioseq.letter('dna4'));
+/// INSERT INTO example_letter_hash_ops VALUES ('G'), ('A'), ('C');
+/// CREATE INDEX ON example_letter_hash_ops USING hash (value bioseq.letter_hash_ops);
+/// SELECT value FROM example_letter_hash_ops
+/// WHERE value OPERATOR(bioseq.=) 'A'::bioseq.letter('dna4');
+/// ROLLBACK;
+/// ```
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::hash,
     .is_default = true,
@@ -51,6 +72,16 @@ inline constexpr bioseq::sql::opclass_tag letter_btree_ops{};
 inline constexpr bioseq::sql::opclass_tag letter_hash_ops{};
 
 /// @brief Registers default B-tree ordering for compact sequences.
+///
+/// ```sql
+/// -- Build an explicit BTREE index and query values using this operator class.
+/// BEGIN;
+/// CREATE TEMP TABLE example_seq_ops (value bioseq.seq('dna4', 64));
+/// INSERT INTO example_seq_ops VALUES ('ACGT'), ('ACGA'), ('TTTT');
+/// CREATE INDEX ON example_seq_ops USING btree (value bioseq.seq_ops);
+/// SELECT value FROM example_seq_ops ORDER BY value;
+/// ROLLBACK;
+/// ```
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::btree,
     .is_default = true,
@@ -74,6 +105,17 @@ inline constexpr bioseq::sql::opclass_tag letter_hash_ops{};
 inline constexpr bioseq::sql::opclass_tag seq_ops{};
 
 /// @brief Registers default hash indexing for compact sequences.
+///
+/// ```sql
+/// -- Build an explicit HASH index and query values using this operator class.
+/// BEGIN;
+/// CREATE TEMP TABLE example_seq_hash_ops (value bioseq.seq('dna4', 64));
+/// INSERT INTO example_seq_hash_ops VALUES ('ACGT'), ('ACGA'), ('TTTT');
+/// CREATE INDEX ON example_seq_hash_ops USING hash (value bioseq.seq_hash_ops);
+/// SELECT value FROM example_seq_hash_ops
+/// WHERE value OPERATOR(bioseq.=) 'ACGT'::bioseq.seq('dna4', 64);
+/// ROLLBACK;
+/// ```
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::hash,
     .is_default = true,

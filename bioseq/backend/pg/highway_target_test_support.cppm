@@ -71,6 +71,11 @@ export namespace bioseq::pg::sql_routines {
  * @brief Run internal checks for clearing and preparing the same CPU target again.
  * @return True if moves, query validation, memory cleanup, and reuse checks pass;
  * false otherwise.
+ *
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.cpu_prepared_target_same_object_reprepare_probe();
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -90,6 +95,11 @@ bool cpu_prepared_target_same_object_reprepare_probe() {
  * a SQL error.
  * @return The saved bit mask of registered targets that are both compiled and
  * supported by the CPU, captured before these helpers force a target.
+ *
+ * ```sql
+ * -- Run this internal diagnostic as the extension owner in a disposable test session.
+ * SELECT bioseq_internal.highway_baseline_runnable_targets_for_test();
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -119,6 +129,11 @@ std::int64_t highway_baseline_runnable_targets_for_test() {
  * @param[in] target One positive bit from the baseline runnable mask, or zero to
  * restore automatic target selection.
  * @return The canonical target name, or "default" when target is zero.
+ *
+ * ```sql
+ * -- Restore automatic SIMD target selection in a test build by passing zero. This hook requires the extension owner and BIOSEQ_TEST_INDEXES.
+ * SELECT bioseq_internal.set_highway_target_for_test(0);
+ * ```
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,

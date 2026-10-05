@@ -19,6 +19,11 @@ export namespace bioseq::table::composite_rows {
  * NULL fields use the corresponding session setting.
  *
  * @ingroup bioseq_sql_public_api
+ *
+ * ```sql
+ * -- Create per-call aligner options with explicit minimizer dimensions; unspecified fields remain NULL and use session defaults.
+ * SELECT (aligner_options(kmer_size => 15, window_size => 10)).*;
+ * ```
  */
 struct [[bioseq_sql::type({
     .schema = bioseq::sql::extension_schema,
