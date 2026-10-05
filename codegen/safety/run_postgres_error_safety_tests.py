@@ -395,6 +395,7 @@ GUC_REGISTRATION_FIELDS = frozenset(
         "enum_default",
         "enum_rows_name_wire_condition_alias_hidden_compiled",
         "generated_live_authority",
+        "documentation",
     }
 )
 GUC_GENERATED_LIVE_FIELDS = frozenset(
@@ -4343,6 +4344,69 @@ def _run_case(
     }
 
 
+def validate_guc_documentation(registration: Any, label: str) -> None:
+    """Validate source documentation without changing runtime GUC authority."""
+    def exact(value: Any, keys: set[str], context: str) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != keys:
+            raise RuntimeError(f"{context}: documentation schema differs")
+        return value
+
+    def nonempty(value: Any, context: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"{context}: documentation text is empty or malformed")
+
+    doc = exact(registration["documentation"],
+                {"description", "display_unit", "possible_values", "examples"},
+                label + ".documentation")
+    nonempty(doc["description"], label + ".documentation.description")
+    if doc["display_unit"] is not None:
+        nonempty(doc["display_unit"], label + ".documentation.display_unit")
+    if not isinstance(doc["possible_values"], list):
+        raise RuntimeError(f"{label}: documented possible values are not an array")
+    names: set[str] = set()
+    enum_rows = registration["enum_rows_name_wire_condition_alias_hidden_compiled"]
+    enum_by_name = {row[0]: row for row in enum_rows
+                    if isinstance(row, list) and len(row) == 6}
+    for index, raw_value in enumerate(doc["possible_values"]):
+        context = f"{label}.documentation.possible_values[{index}]"
+        value = exact(raw_value,
+                      {"value", "description", "compiled", "hidden", "condition", "alias_of"},
+                      context)
+        nonempty(value["value"], context + ".value")
+        nonempty(value["description"], context + ".description")
+        if value["value"] in names:
+            raise RuntimeError(f"{context}: duplicate documented value")
+        names.add(value["value"])
+        if (type(value["compiled"]) is not bool
+                or type(value["hidden"]) is not bool
+                or not isinstance(value["condition"], str)):
+            raise RuntimeError(f"{context}: malformed documented availability")
+        if value["alias_of"] is not None:
+            nonempty(value["alias_of"], context + ".alias_of")
+        if registration["kind"] == "enum":
+            row = enum_by_name.get(value["value"])
+            if row is None or [value["condition"], value["alias_of"],
+                               value["hidden"], value["compiled"]] != row[2:]:
+                raise RuntimeError(f"{context}: documented availability differs from enum authority")
+        elif (value["compiled"] is not True or value["hidden"] is not False
+              or value["condition"] != "" or value["alias_of"] is not None):
+            raise RuntimeError(f"{context}: non-enum value has enum availability")
+    expected_names = (set(enum_by_name) if registration["kind"] == "enum"
+                      else {"true", "false"} if registration["kind"] == "bool" else set())
+    if names != expected_names:
+        raise RuntimeError(f"{label}: documented possible values differ from registered kind")
+    if not isinstance(doc["examples"], list) or not doc["examples"]:
+        raise RuntimeError(f"{label}: explained GUC examples are missing")
+    for index, raw_example in enumerate(doc["examples"]):
+        context = f"{label}.documentation.examples[{index}]"
+        example = exact(raw_example, {"description", "sql"}, context)
+        nonempty(example["description"], context + ".description")
+        nonempty(example["sql"], context + ".sql")
+    if not any(example["sql"] == "SHOW " + registration["name"] + ";"
+               for example in doc["examples"]):
+        raise RuntimeError(f"{label}: current-value example does not name the registered setting")
+
+
 def _validate_generated_live_authority(
     registration: Mapping[str, Any],
     value: Any,
@@ -4725,6 +4789,10 @@ def _validate_guc_manifest_generation(
             GUC_REGISTRATION_FIELDS,
             registration_context,
         )
+        try:
+            validate_guc_documentation(registration, registration_context)
+        except RuntimeError as error:
+            _fail(registration_context, str(error))
         generated_live_authority = _validate_generated_live_authority(
             registration,
             _field(

@@ -103,6 +103,7 @@ GUC_REGISTRATION_KEYS = frozenset(
         "enum_default",
         "enum_rows_name_wire_condition_alias_hidden_compiled",
         "generated_live_authority",
+        "documentation",
     }
 )
 GUC_GENERATED_LIVE_KEYS = frozenset(
@@ -2613,6 +2614,69 @@ def profile_core_records(manifest: dict[str, Any], label: str) -> list[dict[str,
     )
 
 
+def validate_guc_documentation(registration: Any, label: str) -> None:
+    """Validate source documentation without changing runtime GUC authority."""
+    def exact(value: Any, keys: set[str], context: str) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != keys:
+            raise RuntimeError(f"{context}: documentation schema differs")
+        return value
+
+    def nonempty(value: Any, context: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"{context}: documentation text is empty or malformed")
+
+    doc = exact(registration["documentation"],
+                {"description", "display_unit", "possible_values", "examples"},
+                label + ".documentation")
+    nonempty(doc["description"], label + ".documentation.description")
+    if doc["display_unit"] is not None:
+        nonempty(doc["display_unit"], label + ".documentation.display_unit")
+    if not isinstance(doc["possible_values"], list):
+        raise RuntimeError(f"{label}: documented possible values are not an array")
+    names: set[str] = set()
+    enum_rows = registration["enum_rows_name_wire_condition_alias_hidden_compiled"]
+    enum_by_name = {row[0]: row for row in enum_rows
+                    if isinstance(row, list) and len(row) == 6}
+    for index, raw_value in enumerate(doc["possible_values"]):
+        context = f"{label}.documentation.possible_values[{index}]"
+        value = exact(raw_value,
+                      {"value", "description", "compiled", "hidden", "condition", "alias_of"},
+                      context)
+        nonempty(value["value"], context + ".value")
+        nonempty(value["description"], context + ".description")
+        if value["value"] in names:
+            raise RuntimeError(f"{context}: duplicate documented value")
+        names.add(value["value"])
+        if (type(value["compiled"]) is not bool
+                or type(value["hidden"]) is not bool
+                or not isinstance(value["condition"], str)):
+            raise RuntimeError(f"{context}: malformed documented availability")
+        if value["alias_of"] is not None:
+            nonempty(value["alias_of"], context + ".alias_of")
+        if registration["kind"] == "enum":
+            row = enum_by_name.get(value["value"])
+            if row is None or [value["condition"], value["alias_of"],
+                               value["hidden"], value["compiled"]] != row[2:]:
+                raise RuntimeError(f"{context}: documented availability differs from enum authority")
+        elif (value["compiled"] is not True or value["hidden"] is not False
+              or value["condition"] != "" or value["alias_of"] is not None):
+            raise RuntimeError(f"{context}: non-enum value has enum availability")
+    expected_names = (set(enum_by_name) if registration["kind"] == "enum"
+                      else {"true", "false"} if registration["kind"] == "bool" else set())
+    if names != expected_names:
+        raise RuntimeError(f"{label}: documented possible values differ from registered kind")
+    if not isinstance(doc["examples"], list) or not doc["examples"]:
+        raise RuntimeError(f"{label}: explained GUC examples are missing")
+    for index, raw_example in enumerate(doc["examples"]):
+        context = f"{label}.documentation.examples[{index}]"
+        example = exact(raw_example, {"description", "sql"}, context)
+        nonempty(example["description"], context + ".description")
+        nonempty(example["sql"], context + ".sql")
+    if not any(example["sql"] == "SHOW " + registration["name"] + ";"
+               for example in doc["examples"]):
+        raise RuntimeError(f"{label}: current-value example does not name the registered setting")
+
+
 def validate_guc_registration(
     registration: Any,
     profile: str,
@@ -2869,6 +2933,8 @@ def validate_guc_registration(
         or visible_enum_values != visible_enum_names
     ):
         fail(f"{label} visible enum authority differs from its rows")
+
+    validate_guc_documentation(record, label)
 
     source_sha256 = record["source_sha256"]
     if not isinstance(source_sha256, str):
@@ -3804,6 +3870,20 @@ def run_tamper_self_test() -> None:
                         if enum_setting
                         else []
                     ),
+                    "documentation": {
+                        "description": "Fixture setting documentation.",
+                        "display_unit": None,
+                        "possible_values": [
+                            {"value": value, "description": "Meaning of " + value + ".",
+                             "compiled": True, "hidden": False,
+                             "condition": "defined(BIOSEQ_TEST_INDEXES)" if enum_setting else "",
+                             "alias_of": None}
+                            for value in (["none", "unsupported_vector_shape"] if enum_setting
+                                          else ["true", "false"])
+                        ],
+                        "examples": [{"description": "Inspect the current fixture value.",
+                                      "sql": "SHOW " + name + ";"}],
+                    },
                     "generated_live_authority": {
                         "vartype": kind,
                         "context": "superuser" if test_only else "user",
@@ -4147,6 +4227,36 @@ def run_tamper_self_test() -> None:
         production_path.write_bytes(render_json(malformed_registration))
         expect_failure(verify, "unknown GUC registration field")
         production_path.write_bytes(render_json(production_manifest))
+
+        documentation_fixture = production_manifest["guc_generation"]["registrations"][0]
+        for mutation, description in (
+            (lambda doc: doc.pop("description"), "missing GUC documentation description"),
+            (lambda doc: doc.update(description="  "), "empty GUC documentation description"),
+            (lambda doc: doc.update(display_unit=42), "invalid GUC display unit"),
+            (lambda doc: doc["possible_values"][0].update(compiled="true"), "invalid GUC documented availability"),
+            (lambda doc: doc["possible_values"][0].update(description=""), "missing GUC value meaning"),
+            (lambda doc: doc.update(possible_values=[]), "incomplete GUC value coverage"),
+            (lambda doc: doc.update(examples=[]), "missing GUC usage examples"),
+            (lambda doc: doc["examples"][0].update(sql="SHOW bioseq.unrelated;"), "wrong GUC usage identity"),
+            (lambda doc: doc["examples"][0].update(unexpected=True), "unknown GUC example field"),
+        ):
+            candidate = copy.deepcopy(documentation_fixture)
+            mutation(candidate["documentation"])
+            expect_failure(
+                lambda: validate_guc_documentation(candidate, "documentation mutation"),
+                description,
+            )
+        enum_fixture = next(registration for registration in
+                            test_manifest["guc_generation"]["registrations"]
+                            if registration["kind"] == "enum")
+        for key, value in (("compiled", False), ("hidden", True),
+                           ("condition", "false"), ("alias_of", "unrelated")):
+            candidate = copy.deepcopy(enum_fixture)
+            candidate["documentation"]["possible_values"][0][key] = value
+            expect_failure(
+                lambda: validate_guc_documentation(candidate, "enum documentation mutation"),
+                "GUC documented enum availability differs: " + key,
+            )
 
         malformed_source_hash = copy.deepcopy(production_manifest)
         malformed_source_hash["guc_generation"]["registrations"][0][
