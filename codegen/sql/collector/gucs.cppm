@@ -87,6 +87,10 @@ struct collected_guc {
     std::optional<std::string> unit;
     std::string short_description;
     std::string long_description;
+    std::string documentation_description;
+    std::optional<std::string> documentation_unit;
+    std::vector<std::pair<std::string, std::string>> documentation_values;
+    std::vector<std::pair<std::string, std::string>> documentation_examples;
     std::string enum_cpp_name;
     std::string enum_default_name;
     std::vector<collected_guc_enum_value> enum_values;
@@ -980,6 +984,48 @@ inline void validate_documentation(const collected_entity& entity) {
                 + "' documentation describes project history instead of "
                   "current behavior");
         }
+    }
+}
+
+// Keep website descriptions separate from the short strings registered with
+// PostgreSQL. The remarks live beside each declaration, including enum meanings
+// whose availability is resolved independently by the compiler below.
+inline void collect_documentation(
+    const structural_analysis::documentation_record& source,
+    collected_guc& guc) {
+    for (const std::string& remark : source.remarks) {
+        if (remark.starts_with("Configuration: ")) {
+            guc.documentation_description = remark.substr(15);
+        } else if (remark.starts_with("Display unit: ")) {
+            guc.documentation_unit = remark.substr(14);
+        } else if (remark.starts_with("Value `")) {
+            const auto end = remark.find("`: ", 7);
+            if (end == std::string::npos || end == 7
+                || end + 3 == remark.size()) {
+                throw std::runtime_error("malformed value documentation for GUC '"
+                    + guc.name + "'");
+            }
+            guc.documentation_values.emplace_back(
+                remark.substr(7, end - 7), remark.substr(end + 3));
+        }
+    }
+    if (guc.documentation_description.empty()) {
+        guc.documentation_description = source.brief;
+        if (!source.details.empty()) guc.documentation_description += " " + source.details;
+    }
+    for (const std::string& example : source.runnable_examples) {
+        const auto newline = example.find('\n');
+        if (!example.starts_with("-- ") || newline == std::string::npos) {
+            throw std::runtime_error("GUC usage example requires a leading SQL explanation for '"
+                + guc.name + "'");
+        }
+        guc.documentation_examples.emplace_back(
+            example.substr(3, newline - 3), example.substr(newline + 1));
+    }
+    if (guc.documentation_examples.empty()) {
+        guc.documentation_examples.emplace_back(
+            "Inspect the current value without changing the session.",
+            "SHOW " + guc.name + ";");
     }
 }
 
@@ -2020,6 +2066,7 @@ make_generated_live_authority(
             .reset_plan_cache =
                 guc_detail::resets_plan_cache(entity),
         };
+        guc_detail::collect_documentation(entity.documentation, guc);
         if (guc.reset_plan_cache) {
             guc.hooks[1] =
                 "assign_" + guc.member

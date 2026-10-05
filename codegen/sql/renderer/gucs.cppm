@@ -1427,7 +1427,49 @@ make_guc_profile_delta_evidence(
                    << ", " << (value.compiled ? "true" : "false")
                    << "]";
         }
-        output << "], \"generated_live_authority\": ";
+        output << "], \"documentation\": {\"description\": "
+               << guc_render_detail::json_string(guc.documentation_description)
+               << ", \"display_unit\": ";
+        guc_render_detail::render_json_optional_string(output, guc.documentation_unit);
+        output << ", \"possible_values\": [";
+        auto described_values = guc.documentation_values;
+        for (const auto& value : guc.enum_values) {
+            if (!value.alias_of || std::ranges::any_of(described_values,
+                    [&value](const auto& item) { return item.first == value.name; })) continue;
+            const auto target = std::ranges::find_if(described_values,
+                [&value](const auto& item) { return item.first == *value.alias_of; });
+            if (target != described_values.end())
+                described_values.emplace_back(value.name, target->second);
+        }
+        for (std::size_t value_index = 0; value_index < described_values.size(); ++value_index) {
+            const auto& [name, description] = described_values[value_index];
+            const auto value = std::ranges::find(guc.enum_values, name,
+                &collected_guc_enum_value::name);
+            const bool enumeration = guc.kind == guc_kind::enumeration;
+            if (enumeration && value == guc.enum_values.end()) {
+                throw std::runtime_error("documented enum value '" + name
+                    + "' has no declaration for GUC '" + guc.name + "'");
+            }
+            if (value_index != 0) output << ", ";
+            output << "{\"value\": " << guc_render_detail::json_string(name)
+                   << ", \"description\": " << guc_render_detail::json_string(description)
+                   << ", \"compiled\": " << (!enumeration || value->compiled ? "true" : "false")
+                   << ", \"hidden\": " << (enumeration && value->hidden ? "true" : "false")
+                   << ", \"condition\": " << guc_render_detail::json_string(
+                        enumeration ? value->active_condition : std::string{})
+                   << ", \"alias_of\": ";
+            guc_render_detail::render_json_optional_string(output,
+                enumeration ? value->alias_of : std::optional<std::string>{});
+            output << "}";
+        }
+        output << "], \"examples\": [";
+        for (std::size_t example_index = 0; example_index < guc.documentation_examples.size(); ++example_index) {
+            if (example_index != 0) output << ", ";
+            const auto& [description, sql] = guc.documentation_examples[example_index];
+            output << "{\"description\": " << guc_render_detail::json_string(description)
+                   << ", \"sql\": " << guc_render_detail::json_string(sql) << "}";
+        }
+        output << "]}, \"generated_live_authority\": ";
         guc_render_detail::render_generated_live_authority(
             output, guc);
         output << "}"

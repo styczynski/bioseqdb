@@ -230,6 +230,25 @@ inline void run_guc_generator_contract_self_tests() {
         production.gucs.size() == 73
             && test_indexes.gucs.size() == 76,
         "annotation-derived profile cardinality changed");
+    for (const collected_guc& setting : test_indexes.gucs) {
+        require(!setting.documentation_description.empty(),
+            "setting lost its source-owned configuration description");
+        require(setting.documentation_examples.size()
+                == (setting.context == "sighup" ? 1U : 2U),
+            "setting lost its explained SHOW or transaction-local usage example");
+        require(setting.documentation_examples.front().second == "SHOW " + setting.name + ";",
+            "setting SHOW example does not use its complete registered name");
+        if (setting.kind == guc_kind::boolean) {
+            require(setting.documentation_values.size() == 2,
+                "boolean setting must explain both values");
+        }
+        for (const auto& value : setting.enum_values) {
+            require(std::ranges::any_of(setting.documentation_values,
+                    [&value](const auto& meaning) {
+                        return meaning.first == value.name && !meaning.second.empty();
+                    }), "enum setting lost an authored value meaning");
+        }
+    }
 
     static constexpr std::array<std::string_view, 3>
         typed_maximum_gucs{
@@ -1371,6 +1390,12 @@ inline void run_guc_generator_contract_self_tests() {
                 "\"bioseq.testing.in_memory_scanner.enabled\", "
                 "\"bioseq.testing.persisted_index.failure_mode\"]"),
         "manifest lost current annotation/source provenance");
+    require(manifest.contains("\"documentation\": {\"description\":")
+            && manifest.contains("\"possible_values\": [{\"value\":")
+            && manifest.contains("\"examples\": [{\"description\":")
+            && manifest.contains("SHOW bioseq.aligner.minimizer.algorithm;")
+            && manifest.contains("Store column chunks without compression."),
+        "manifest lost source-owned setting descriptions, value meanings or explained examples");
 }
 
 }  // namespace bioseq::codegen::sql
