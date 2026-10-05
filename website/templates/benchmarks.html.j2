@@ -63,6 +63,58 @@
 <h2 id="benchmark-methodology-title">Methodology &amp; machines</h2>
 {{ page.benchmark_methodology_html }}
 </section>{% endif %}
+<footer class="bd-s0111">
+    <div aria-hidden="true" class="bd-s0112">BioseqDB</div>
+    <div class="bd-s0113">
+      <div data-footcols class="bd-s0114">
+        <div>
+          <div class="bd-s0115">
+            <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="bd-s0005">
+            <span class="bd-s0116">Bioseq<span class="bd-s0117">DB</span></span>
+            <span class="bd-s0118">BENCH</span>
+          </div>
+          <p class="bd-s0119">Benchmarking and performance evaluation</p>
+        </div>
+        <div>
+          <div class="bd-s0120">Documentation</div>
+          <div class="bd-s0121">
+            <a href="{{ nav.documentation }}" class="bd-s0122 bd-h005">Installation</a>
+            <a href="{{ nav.tutorials }}" class="bd-s0122 bd-h005">Quick start</a>
+            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">SQL reference</a>
+            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">C++ core types</a>
+          </div>
+        </div>
+        <div>
+          <div class="bd-s0120">Explore</div>
+          <div class="bd-s0121">
+            <a href="{{ site.base_path }}" class="bd-s0122 bd-h005">Product home</a>
+            <a href="{{ site.base_path }}#workflow" class="bd-s0122 bd-h005">Workflow</a>
+            <a href="{{ site.base_path }}#examples" class="bd-s0122 bd-h005">Examples</a>
+            <a href="{{ site.base_path }}#scale" class="bd-s0122 bd-h005">Scale</a>
+          </div>
+        </div>
+        <div>
+          <div class="bd-s0120">Project</div>
+          <div class="bd-s0121">
+            <a href="{{ site.base_path }}{{ site.version }}/" class="bd-s0122 bd-h005">Documentation</a>
+            <a href="{{ site.repository_url }}" rel="noreferrer" class="bd-s0123">GitHub</a>
+            <span class="bd-s0124">{{ site.status_label }} &middot; {{ site.version }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="bd-s0125">
+      <div class="bd-s0126"></div>
+      <div class="bd-s0127">
+        <span class="bd-s0128">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>
+        <nav class="bd-s0129">
+          <a href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer" class="bd-s0130 bd-h006">License (MIT)</a>
+          <a href="{{ site.versions_page_url }}" class="bd-s0130 bd-h006">Versions</a>
+          <a href="#page-top" class="bd-s0130 bd-h006">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
 <template id="benchmarks-app-template">
 <div data-screen-label="BioseqDB benchmarks" class="bd-s0001">
 
@@ -319,58 +371,7 @@
     </main>
   </div>
 
-  <footer class="bd-s0111">
-    <div aria-hidden="true" class="bd-s0112">BioseqDB</div>
-    <div class="bd-s0113">
-      <div data-footcols class="bd-s0114">
-        <div>
-          <div class="bd-s0115">
-            <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="bd-s0005">
-            <span class="bd-s0116">Bioseq<span class="bd-s0117">DB</span></span>
-            <span class="bd-s0118">BENCH</span>
-          </div>
-          <p class="bd-s0119">Benchmarking and performance evaluation</p>
-        </div>
-        <div>
-          <div class="bd-s0120">Documentation</div>
-          <div class="bd-s0121">
-            <a href="{{ nav.documentation }}" class="bd-s0122 bd-h005">Installation</a>
-            <a href="{{ nav.tutorials }}" class="bd-s0122 bd-h005">Quick start</a>
-            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">SQL reference</a>
-            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">C++ core types</a>
-          </div>
-        </div>
-        <div>
-          <div class="bd-s0120">Explore</div>
-          <div class="bd-s0121">
-            <a href="{{ site.base_path }}" class="bd-s0122 bd-h005">Product home</a>
-            <a href="{{ site.base_path }}#workflow" class="bd-s0122 bd-h005">Workflow</a>
-            <a href="{{ site.base_path }}#examples" class="bd-s0122 bd-h005">Examples</a>
-            <a href="{{ site.base_path }}#scale" class="bd-s0122 bd-h005">Scale</a>
-          </div>
-        </div>
-        <div>
-          <div class="bd-s0120">Project</div>
-          <div class="bd-s0121">
-            <a href="{{ site.base_path }}{{ site.version }}/" class="bd-s0122 bd-h005">Documentation</a>
-            <a href="{{ site.repository_url }}" rel="noreferrer" class="bd-s0123">GitHub</a>
-            <span class="bd-s0124">{{ site.status_label }} &middot; {{ site.version }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="bd-s0125">
-      <div class="bd-s0126"></div>
-      <div class="bd-s0127">
-        <span class="bd-s0128">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>
-        <nav class="bd-s0129">
-          <a href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer" class="bd-s0130 bd-h006">License (MIT)</a>
-          <a href="{{ site.versions_page_url }}" class="bd-s0130 bd-h006">Versions</a>
-          <a data-bench-click="onTop" href="#page-top" class="bd-s0130 bd-h006">Back to top ↑</a>
-        </nav>
-      </div>
-    </div>
-  </footer>
+
 
   <div data-benchmark-tip role="tooltip" class="bd-s0131" data-bench-style="left:[[ tipX ]]px;top:[[ tipY ]]px;opacity:[[ tipOpacity ]]">
 

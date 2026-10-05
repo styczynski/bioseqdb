@@ -958,6 +958,13 @@ def benchmarks_template(markup: str) -> str:
                + header[status_begin:status_end].replace(' data-hidesm', '')
                + header[button_begin:button_end] + '</div>')
     markup = replace_header(markup, "bhead", toolbar)
+    # Methodology belongs between the explorer and the original footer. Keep
+    # both outside the rerendered app so its controls do not rebuild static
+    # author content. The footer's existing anchor handles Back to top.
+    footer_at = markup.index('<footer')
+    _, footer_end = element_span(markup, footer_at, "footer")
+    footer = markup[footer_at:footer_end].replace(' data-bench-click="onTop"', '')
+    markup = markup[:footer_at] + markup[footer_end:]
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -995,6 +1002,7 @@ def benchmarks_template(markup: str) -> str:
 <h2 id="benchmark-methodology-title">Methodology &amp; machines</h2>
 {{{{ page.benchmark_methodology_html }}}}
 </section>{{% endif %}}
+{footer}
 <template id="benchmarks-app-template">
 {markup}
 </template>

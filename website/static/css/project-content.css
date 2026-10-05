@@ -55,6 +55,13 @@
 .tutorial-body [data-math] { color: inherit; }
 .tutorial-body .project-color-brickred { color: #f2897f; }
 
+.design-entity-page .design-entity-title code,
+.design-entity-page .design-link-list code { overflow-wrap: anywhere; white-space: normal; }
+.design-entity-page .design-page-header > p.dd-s0046 { font-size: 18px; font-weight: 400; line-height: 1.6; color: #a9bccb; }
+@media (max-width: 600px) {
+  .design-entity-page .design-page-header > p.dd-s0046 { font-size: 16px; }
+}
+
 .result-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
 .result-scroll:focus-visible, .algorithm-scroll:focus-visible { outline: 2px solid #46b8de; outline-offset: -2px; }
 .result-table th, .result-table td { min-width: 7rem; overflow-wrap: normal; word-break: normal; }

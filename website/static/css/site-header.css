@@ -1,5 +1,7 @@
 /* Shared navigation follows the supplied docs header's typography and palette. */
 :root{--site-header-height:64px}
+.skip-link{position:fixed;left:12px;top:-80px;z-index:260;padding:10px 14px;border-radius:8px;background:#f26522;color:#071320;font-family:'IBM Plex Mono',monospace;transition:top .15s}
+.skip-link:focus{top:10px}
 [data-screen-label="BioseqDB documentation"],[data-screen-label="BioseqDB landing"]{overflow-x:clip!important;overflow-y:visible!important}
 .site-header{position:sticky;top:0;z-index:80;background:rgba(7,19,32,.86);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid rgba(255,255,255,.08);font-family:'IBM Plex Sans',system-ui,sans-serif}
 .site-header-inner{max-width:1500px;min-height:63px;margin:0 auto;padding:0 26px;display:flex;align-items:center;gap:22px}

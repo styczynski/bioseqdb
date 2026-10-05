@@ -1043,6 +1043,8 @@ def _exercise_copy(page) -> None:
 
 def _exercise_code_entities(page, expected_ids: set[str]) -> None:
     """Every catalog range survives syntax highlighting as one exact hover link."""
+    from playwright.sync_api import expect
+
     blocks = page.locator("code[data-entity-ranges]")
     _check(blocks.count() > 0, f"{page.url}: SQL samples have no entity ranges")
     ids = set()
@@ -1067,15 +1069,12 @@ def _exercise_code_entities(page, expected_ids: set[str]) -> None:
         refs = page.locator("code a.entity-ref").filter(has_text=spelling)
         _check(refs.count() > 0, f"automatic SQL references missing {spelling}")
         refs.first.focus()
-        page.wait_for_function("""spelling => {
-            const pop = document.getElementById('entity-pop');
-            return pop.getAttribute('aria-hidden') === 'false' &&
-                pop.querySelector('.entity-pop-head pre')?.textContent.includes(spelling);
-        }""", arg=spelling)
+        expect(page.locator("#entity-pop")).to_have_attribute("aria-hidden", "false")
+        expect(page.locator("#entity-pop .entity-pop-head pre")).to_contain_text(spelling)
         _check(bool(page.locator("#entity-pop .entity-pop-body").inner_text().strip()),
                f"empty SQL tooltip for {spelling}")
         page.keyboard.press("Escape")
-        page.wait_for_function("document.getElementById('entity-pop').getAttribute('aria-hidden') === 'true'")
+        expect(page.locator("#entity-pop")).to_have_attribute("aria-hidden", "true")
 
 
 _GOLDEN_TOKENS = _TESTS_ROOT / "fixtures" / "search_tokens_golden.json"
@@ -1441,6 +1440,8 @@ def _exercise_algorithms(page, source: str, slug: str) -> None:
 
 def _exercise_figure_viewer(page) -> None:
     """Transparent SVGs remain readable and zoomable on a dark modal surface."""
+    from playwright.sync_api import expect
+
     original_viewport = page.viewport_size
     original_url = page.url
     link = page.locator("main#doc-main a.project-figure-link").first
@@ -1483,8 +1484,7 @@ def _exercise_figure_viewer(page) -> None:
                    "mobile full-size diagram cannot scroll horizontally")
         page.keyboard.press("Escape")
         dialog.wait_for(state="hidden", timeout=3000)
-        page.wait_for_function(
-            "link => document.activeElement === link", arg=link.element_handle(), timeout=3000)
+        expect(link).to_be_focused(timeout=3000)
         _check(page.locator("dialog.figure-viewer").count() == 0,
                "closing the diagram left an orphaned modal")
     if original_viewport:
@@ -1929,8 +1929,9 @@ def _exercise_capability_tracer(page) -> None:
            and third.evaluate("element => element === document.activeElement")
            and tracer.locator("[data-cap-select][aria-pressed='true']").count() == 1,
            "ArrowRight did not move the single capability selection and focus")
-    tracer.locator('[data-architecture-click] [data-click="simd"]').first.click(
-        force=True)
+    # Use the diagram's hit area with normal actionability checks: the previous
+    # keyboard selection may leave this node behind the shared sticky header.
+    tracer.locator('[data-architecture-click] [data-click="simd"] > rect').first.click()
     _check(tracer.locator('[data-cap="simd"][aria-pressed="true"]').count() == 1,
            "clicking the architecture diagram did not select its capability card")
 
@@ -2066,7 +2067,13 @@ def _release_benchmark_fetches(page) -> None:
 def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
                          base_path: str, version: str) -> None:
     """Check same-column A/B ratios, controls and accessible design tooltips."""
+    from playwright.sync_api import expect
+
     benchmark = contract["benchmarks"]
+    _check(page.locator("#benchmark-methodology").evaluate("""node => {
+        const footer = document.querySelector('body.benchmarks-design-page > footer');
+        return footer && Boolean(node.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }"""), "benchmark methodology must precede the original footer")
     panel = benchmark["tables"][benchmark["key"]]
     _check(page.locator("h1").inner_text().strip() == benchmark["title"],
            "benchmark heading differs from the published panel")
@@ -2095,17 +2102,22 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     cell = row.locator(".bd-s0072").nth(column_index)
     cell.hover()
     tooltip = page.locator("[data-benchmark-tip]")
-    page.wait_for_function("() => Number(getComputedStyle(document.querySelector('[data-benchmark-tip]')).opacity) > 0")
+    expect(tooltip).to_have_css("opacity", "1")
     expected_ratio = baseline["cells"][column]["a_ns"] / preferred["cells"][column]["a_ns"]
     _check(f"{expected_ratio:.3f}×" in tooltip.inner_text(),
            "hover tooltip compares A against the wrong baseline/workload")
     _check(preferred["cells"][column]["source"] in tooltip.inner_text(),
            "benchmark tooltip lost source provenance")
+    page.mouse.move(0, 0)
+    page.keyboard.press("Escape")
+    expect(tooltip).to_have_css("opacity", "0")
+    cell.blur()
     cell.focus()
+    expect(tooltip).to_have_css("opacity", "1")
     _check("baseline value" in tooltip.inner_text(),
            "keyboard focus did not reveal the comparison tooltip")
     page.keyboard.press("Escape")
-    page.wait_for_function("() => getComputedStyle(document.querySelector('[data-benchmark-tip]')).opacity === '0'")
+    expect(tooltip).to_have_css("opacity", "0")
     controls.nth(3).select_option(preferred["id"])
     _check(row.locator(".bd-s0070").inner_text() == "BASE",
            "baseline selection did not move the baseline marker")
@@ -2187,6 +2199,12 @@ def _exercise_responsive(page, label: str) -> None:
                    f"{label}: {text} navigation hidden at {width}px")
         _check(header.locator("#doc-search").is_visible(),
                f"{label}: common search hidden at {width}px")
+        skip_link = page.locator(".skip-link,.benchmark-skip-link")
+        _check(skip_link.count() == 1 and skip_link.evaluate("""node => {
+            const style = getComputedStyle(node);
+            return style.position === 'fixed' &&
+                (node === document.activeElement || node.getBoundingClientRect().bottom < 0);
+        }"""), f"{label}: unfocused skip link is visible in the page layout")
         geometry = header.locator(".site-header-inner > *").evaluate_all("""nodes => {
           const boxes = nodes.map(node => ({name: node.className,
             rect: node.getBoundingClientRect()})).filter(x => x.rect.width && x.rect.height);
@@ -2233,7 +2251,7 @@ def _exercise_responsive(page, label: str) -> None:
     _check(page.locator(
         "footer.site-footer, main#main footer, "
         "footer[data-screen-label='Docs · Footer'], "
-        "[data-screen-label='BioseqDB benchmarks'] > footer").count() == 1,
+        "body.benchmarks-design-page > footer").count() == 1,
            f"{label}: missing footer landmark")
     page.set_viewport_size({"width": 1280, "height": 900})
 
