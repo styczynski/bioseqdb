@@ -1484,9 +1484,10 @@ def _exercise_figure_viewer(page) -> None:
                    "mobile full-size diagram cannot scroll horizontally")
         page.keyboard.press("Escape")
         dialog.wait_for(state="hidden", timeout=3000)
+        # Native dialog dismissal restores focus before its queued close event
+        # runs; wait for that handler's removal before checking final focus.
+        expect(page.locator("dialog.figure-viewer")).to_have_count(0, timeout=3000)
         expect(link).to_be_focused(timeout=3000)
-        _check(page.locator("dialog.figure-viewer").count() == 0,
-               "closing the diagram left an orphaned modal")
     if original_viewport:
         page.set_viewport_size(original_viewport)
 
@@ -2398,7 +2399,13 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])
                 _assert_tutorial_sidebar(page, base_path, version)
-                if _nodes_of_kind(tutorial.get("content", []), "code_block"):
+                copy_blocks = [node for node in _nodes_of_kind(
+                    tutorial.get("content", []), "code_block")
+                    if node.get("attributes", {}).get("language") != "pseudocode"]
+                _check(page.locator("button.copy-button[data-copy-target]").count()
+                       == len(copy_blocks),
+                       f"{slug}: copy controls differ from ordinary model code blocks")
+                if copy_blocks:
                     _exercise_copy(page)
                 _exercise_tutorial_results(page, tutorial)
                 _exercise_project_content(page, tutorial, base_path, version)
