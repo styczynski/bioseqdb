@@ -11,20 +11,20 @@
 <meta property="og:description" content="Describe  exact and reusable cache generations. The caller&#39;s role determines which identifying fields and SQL text are shown.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_cache.entries">
 <meta name="twitter:description" content="Describe  exact and reusable cache generations. The caller&#39;s role determines which identifying fields and SQL text are shown.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -107,13 +107,22 @@
   
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">bioseq_cache.entries()</code></pre>
+    <pre data-code><code id="entity-signature-code" class="language-sql">bioseq_cache.entries()</code></pre>
   </figure>
   
 
   
+  <div class="docs-content entity-detail"><h2 class="hx" id="examples" data-toc data-title="Examples">Examples<a data-hash href="#examples" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">A monitoring role can inspect cache generations ordered by stored payload size.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-f92af9b558009f5f-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-f92af9b558009f5f-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:56,&quot;len&quot;:20,&quot;id&quot;:&quot;sql:function:bioseq_cache.entries()&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">SELECT kind, state, generation, rows, stored_bytes
+FROM bioseq_cache.entries()
+ORDER BY stored_bytes DESC;</code></pre></figure></div>
 
   
+  
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    <tr><td><code>entry_key</code></td><td><code>text</code></td><td>Printable key identifying the cached result or reusable coverage.</td></tr><tr><td><code>generation</code></td><td><code>bigint</code></td><td>Generation number associated with the cache key.</td></tr><tr><td><code>kind</code></td><td><code>text</code></td><td>Cache entry kind: ExactFinalResult or ReusableCoverage.</td></tr><tr><td><code>state</code></td><td><code>text</code></td><td>Current lifecycle state of the cache generation.</td></tr><tr><td><code>database_oid</code></td><td><code>oid</code></td><td>Database containing the cached work, or NULL when unavailable.</td></tr><tr><td><code>owner_role</code></td><td><code>oid</code></td><td>Role that owns the generation; hidden when the caller lacks full disclosure.</td></tr><tr><td><code>producer_pid</code></td><td><code>integer</code></td><td>Producer backend PID; hidden when unavailable or disclosure is restricted.</td></tr><tr><td><code>created_at</code></td><td><code>timestamp with time zone</code></td><td>Time the generation started, or NULL when unavailable.</td></tr><tr><td><code>completed_at</code></td><td><code>timestamp with time zone</code></td><td>Time production completed, or NULL while incomplete or unavailable.</td></tr><tr><td><code>age</code></td><td><code>interval</code></td><td>Elapsed time since the generation started.</td></tr><tr><td><code>ttl</code></td><td><code>interval</code></td><td>Configured lifetime of the generation after completion.</td></tr><tr><td><code>rows</code></td><td><code>bigint</code></td><td>Number of rows stored in the generation.</td></tr><tr><td><code>logical_bytes</code></td><td><code>bigint</code></td><td>Logical uncompressed payload size of the generation, in bytes.</td></tr><tr><td><code>stored_bytes</code></td><td><code>bigint</code></td><td>Physical payload size recorded for the generation, in bytes.</td></tr><tr><td><code>waiters</code></td><td><code>integer</code></td><td>Number of callers waiting for the generation.</td></tr><tr><td><code>readers</code></td><td><code>integer</code></td><td>Number of active reader pins on the generation.</td></tr><tr><td><code>hits</code></td><td><code>bigint</code></td><td>Recorded exact-result hit count; reusable-coverage rows currently report 0.</td></tr><tr><td><code>sql</code></td><td><code>text</code></td><td>Producer SQL text, or NULL when unavailable or disclosure is restricted.</td></tr><tr><td><code>producer_plan</code></td><td><code>text</code></td><td>Producer plan text, or NULL when unavailable or disclosure is restricted.</td></tr><tr><td><code>dependencies</code></td><td><code>jsonb</code></td><td>JSONB dependency information, or NULL when disclosure is restricted.</td></tr>
+    </tbody></table></div>
+  </section>
   
   
   <p class="design-return"><span>Returns</span><code>TABLE(entry_key text, generation bigint, kind text, state text, database_oid oid, owner_role oid, producer_pid integer, created_at timestamp with time zone, completed_at timestamp with time zone, age interval, ttl interval, rows bigint, logical_bytes bigint, stored_bytes bigint, waiters integer, readers integer, hits bigint, sql text, producer_plan text, dependencies jsonb)</code></p>
@@ -124,7 +133,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq_caching/pg/sql/diagnostics.cppm#L73" rel="noreferrer">bioseq.cache.pg.sql:diagnostics</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq_caching/pg/sql/diagnostics.cppm#L122" rel="noreferrer">bioseq.cache.pg.sql:diagnostics</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_cache · PostgreSQL 17.10</p>
   
 </article>
@@ -135,7 +144,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#examples">Examples</a><a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -149,7 +158,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -209,16 +218,16 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_cache.entries","description":"Describe  exact and reusable cache generations. The caller&#39;s role determines which identifying fields and SQL text are shown.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_cache.entries","item":"/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_cache.entries","description":"Describe  exact and reusable cache generations. The caller&#39;s role determines which identifying fields and SQL text are shown.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_cache.entries","item":"/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>

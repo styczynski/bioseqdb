@@ -11,20 +11,20 @@
 <meta property="og:description" content="SQL test entry point for checking a minimizer generation and its source. Return payload checksums, lookup results, read counts and cache counts. The layout checks currently prevent a successful call: this wrapper accepts layouts 3 and 4, but the reader requires layout 5.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_internal.read_minimizer_fixture">
 <meta name="twitter:description" content="SQL test entry point for checking a minimizer generation and its source. Return payload checksums, lookup results, read counts and cache counts. The layout checks currently prevent a successful call: this wrapper accepts layouts 3 and 4, but the reader requires layout 5.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -107,11 +107,28 @@
   
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)</code></pre>
+    <pre data-code><code id="entity-signature-code" class="language-sql">bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)</code></pre>
   </figure>
   
 
   
+  <div class="docs-content entity-detail"><h2 class="hx" id="examples" data-toc data-title="Examples">Examples<a data-hash href="#examples" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Run this internal fixture in a disposable database as superuser. Exercise the legacy reader wrapper with its accepted layout code 3. The current reader requires layout 5, so this call is expected to fail.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-e1c87b167dd01a50-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-e1c87b167dd01a50-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:17,&quot;len&quot;:39,&quot;id&quot;:&quot;sql:guc:bioseq.index.insert_maintenance.enabled&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/insert-maintenance-enabled-d1b9ecb5352dbdbb/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:109,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:342,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:425,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:472,&quot;len&quot;:38,&quot;id&quot;:&quot;sql:function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:573,&quot;len&quot;:24,&quot;id&quot;:&quot;sql:function:bioseq.column_row_number(regclass,tid)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-column-row-number-cefe97ab622e0185/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">BEGIN;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+CREATE TABLE doc_sequences (
+id integer, seq bioseq.seq('dna4', 64)
+) USING bioseq;
+WITH dna AS (
+SELECT string_agg(translate(md5(i::text),
+'0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS s
+FROM generate_series(1, 64) AS g(i)
+)
+INSERT INTO doc_sequences
+SELECT 1, s::bioseq.seq('dna4', 64) FROM dna
+UNION ALL
+SELECT 2, substring(s FROM 257 FOR 512)::bioseq.seq('dna4', 64) FROM dna;
+SELECT * FROM bioseq_internal.read_minimizer_fixture('doc_sequences'::regclass, 'minimizers_per_fragment',
+(SELECT bioseq.column_row_number('doc_sequences'::regclass, ctid) FROM doc_sequences WHERE id = 1), 15::smallint, 10::smallint, 3::smallint, 'scalar');
+ROLLBACK;</code></pre></figure></div>
 
   
   <section class="design-entity-section"><h2 class="hx design-section-heading" id="parameters" data-toc data-title="Parameters">Parameters<a data-hash href="#parameters" class="dd-s0052">#</a></h2>
@@ -120,6 +137,12 @@
     </tbody></table></div>
   </section>
   
+  
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    <tr><td><code>sidecar_table</code></td><td><code>text</code></td><td>Unqualified name of the minimizer storage relation in the bioseq_internal schema.</td></tr><tr><td><code>layout</code></td><td><code>smallint</code></td><td>Numeric minimizer payload-layout identifier.</td></tr><tr><td><code>generation_id</code></td><td><code>bigint</code></td><td>Identifier of the published minimizer generation.</td></tr><tr><td><code>source_identity</code></td><td><code>text</code></td><td>Source identity encoded as 16 lowercase hexadecimal digits.</td></tr><tr><td><code>source_content_checksum</code></td><td><code>text</code></td><td>Source-content checksum encoded as 16 lowercase hexadecimal digits.</td></tr><tr><td><code>compatibility_checksum</code></td><td><code>text</code></td><td>Storage-contract checksum encoded as 16 lowercase hexadecimal digits.</td></tr><tr><td><code>source_num_fragments</code></td><td><code>bigint</code></td><td>Number of fragments in the source sequence used by this generation.</td></tr><tr><td><code>source_total_bp</code></td><td><code>bigint</code></td><td>Logical source-sequence length in letters, excluding padding.</td></tr><tr><td><code>source_padding_letters</code></td><td><code>bigint</code></td><td>Number of padding letters in the source sequence.</td></tr><tr><td><code>validated_control_bytes</code></td><td><code>bigint</code></td><td>Number of control-payload bytes validated against the stored generation.</td></tr><tr><td><code>validated_position_bytes</code></td><td><code>bigint</code></td><td>Number of position-payload bytes validated against the stored generation.</td></tr><tr><td><code>validated_control_checksum</code></td><td><code>text</code></td><td>Checksum of validated control payload, encoded as 16 lowercase hexadecimal digits.</td></tr><tr><td><code>validated_position_checksum</code></td><td><code>text</code></td><td>Checksum of validated position payload, encoded as 16 lowercase hexadecimal digits.</td></tr><tr><td><code>lookup_count</code></td><td><code>bigint</code></td><td>Total occurrence count for the minimizer hash selected by the fixture lookup.</td></tr><tr><td><code>lookup_bp</code></td><td><code>bigint</code></td><td>Base position of the first returned occurrence; zero when the lookup returned no positions.</td></tr><tr><td><code>is_lookup_reverse</code></td><td><code>boolean</code></td><td>Whether the first returned occurrence is on the reverse strand; false when no position was returned.</td></tr><tr><td><code>are_lookup_positions_complete</code></td><td><code>boolean</code></td><td>Whether the lookup returned the complete positions for the selected hash.</td></tr><tr><td><code>relation_opens</code></td><td><code>bigint</code></td><td>Number of storage-relation opens performed by this read.</td></tr><tr><td><code>index_scans</code></td><td><code>bigint</code></td><td>Number of index scans performed by this read.</td></tr><tr><td><code>head_scans</code></td><td><code>bigint</code></td><td>Number of scans used to read generation headers.</td></tr><tr><td><code>manifest_directory_scans</code></td><td><code>bigint</code></td><td>Number of scans used to read generation manifests and directories.</td></tr><tr><td><code>planned_request_groups</code></td><td><code>bigint</code></td><td>Number of payload request groups planned by the read session.</td></tr><tr><td><code>executed_request_groups</code></td><td><code>bigint</code></td><td>Number of planned payload request groups actually executed.</td></tr><tr><td><code>bulk_read_calls</code></td><td><code>bigint</code></td><td>Number of bulk payload read calls issued by the read session.</td></tr><tr><td><code>range_scan_calls</code></td><td><code>bigint</code></td><td>Number of range-scan calls used to read minimizer payload.</td></tr><tr><td><code>payload_wanted_extents</code></td><td><code>bigint</code></td><td>Number of payload extents requested by the read plan.</td></tr><tr><td><code>payload_read_extents</code></td><td><code>bigint</code></td><td>Number of requested payload extents read.</td></tr><tr><td><code>payload_wanted_chunks</code></td><td><code>bigint</code></td><td>Number of payload chunks requested by the read plan.</td></tr><tr><td><code>payload_delivered_chunks</code></td><td><code>bigint</code></td><td>Number of payload chunks delivered to the reader.</td></tr><tr><td><code>payload_delivered_bytes</code></td><td><code>bigint</code></td><td>Number of payload bytes delivered to the reader.</td></tr><tr><td><code>payload_heap_rows_read</code></td><td><code>bigint</code></td><td>Number of heap rows read while retrieving payload chunks.</td></tr><tr><td><code>payload_skipped_rows</code></td><td><code>bigint</code></td><td>Number of scanned payload rows skipped instead of being delivered.</td></tr><tr><td><code>toast_values_read</code></td><td><code>bigint</code></td><td>Number of out-of-line TOAST values read by the session.</td></tr><tr><td><code>detoast_bytes</code></td><td><code>bigint</code></td><td>Number of bytes materialized while detoasting stored values.</td></tr><tr><td><code>cache_lookups</code></td><td><code>bigint</code></td><td>Number of cache lookups performed by the read session.</td></tr><tr><td><code>selective_cold_index_preparation</code></td><td><code>jsonb</code></td><td>JSON object containing the selective cold-index preparation counters for this fixture.</td></tr>
+    </tbody></table></div>
+  </section>
   
   
   <p class="design-return"><span>Returns</span><code>TABLE(sidecar_table text, layout smallint, generation_id bigint, source_identity text, source_content_checksum text, compatibility_checksum text, source_num_fragments bigint, source_total_bp bigint, source_padding_letters bigint, validated_control_bytes bigint, validated_position_bytes bigint, validated_control_checksum text, validated_position_checksum text, lookup_count bigint, lookup_bp bigint, is_lookup_reverse boolean, are_lookup_positions_complete boolean, relation_opens bigint, index_scans bigint, head_scans bigint, manifest_directory_scans bigint, planned_request_groups bigint, executed_request_groups bigint, bulk_read_calls bigint, range_scan_calls bigint, payload_wanted_extents bigint, payload_read_extents bigint, payload_wanted_chunks bigint, payload_delivered_chunks bigint, payload_delivered_bytes bigint, payload_heap_rows_read bigint, payload_skipped_rows bigint, toast_values_read bigint, detoast_bytes bigint, cache_lookups bigint, selective_cold_index_preparation jsonb)</code></p>
@@ -130,7 +153,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/backend/pg/extension/index.cppm#L820" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq/backend/pg/extension/index.cppm#L2075" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
   
 </article>
@@ -141,7 +164,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#examples">Examples</a><a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -155,7 +178,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -215,16 +238,16 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.read_minimizer_fixture","description":"SQL test entry point for checking a minimizer generation and its source. Return payload checksums, lookup results, read counts and cache counts. The layout checks currently prevent a successful call: this wrapper accepts layouts 3 and 4, but the reader requires layout 5.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.read_minimizer_fixture","item":"/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.read_minimizer_fixture","description":"SQL test entry point for checking a minimizer generation and its source. Return payload checksums, lookup results, read counts and cache counts. The layout checks currently prevent a successful call: this wrapper accepts layouts 3 and 4, but the reader requires layout 5.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.read_minimizer_fixture","item":"/v0.1/reference/sql/function/bioseq-internal-read-minimizer-fixture-6da6afda3e0039f9/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>

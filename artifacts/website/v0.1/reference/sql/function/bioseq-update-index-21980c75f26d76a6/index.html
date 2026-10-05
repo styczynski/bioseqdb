@@ -11,20 +11,20 @@
 <meta property="og:description" content="Rebuilds a named sequence index and returns the number of indexed sequences.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq.update_index">
 <meta name="twitter:description" content="Rebuilds a named sequence index and returns the number of indexed sequences.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -107,11 +107,27 @@
   
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">bioseq.update_index(regclass,text)</code></pre>
+    <pre data-code><code id="entity-signature-code" class="language-sql">bioseq.update_index(regclass,text)</code></pre>
   </figure>
   
 
   
+  <div class="docs-content entity-detail"><h2 class="hx" id="examples" data-toc data-title="Examples">Examples<a data-hash href="#examples" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Build the minimizer index for the two stored sequences and return the indexed sequence count.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-5ead23ca64139d9b-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-5ead23ca64139d9b-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:17,&quot;len&quot;:39,&quot;id&quot;:&quot;sql:guc:bioseq.index.insert_maintenance.enabled&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/insert-maintenance-enabled-d1b9ecb5352dbdbb/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:109,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:342,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:425,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:472,&quot;len&quot;:19,&quot;id&quot;:&quot;sql:function:bioseq.update_index(regclass,text)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">BEGIN;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+CREATE TABLE doc_sequences (
+id integer, seq bioseq.seq('dna4', 64)
+) USING bioseq;
+WITH dna AS (
+SELECT string_agg(translate(md5(i::text),
+'0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS s
+FROM generate_series(1, 64) AS g(i)
+)
+INSERT INTO doc_sequences
+SELECT 1, s::bioseq.seq('dna4', 64) FROM dna
+UNION ALL
+SELECT 2, substring(s FROM 257 FOR 512)::bioseq.seq('dna4', 64) FROM dna;
+SELECT * FROM bioseq.update_index('doc_sequences'::regclass, 'minimizers_per_fragment');
+ROLLBACK;</code></pre></figure></div>
 
   
   <section class="design-entity-section"><h2 class="hx design-section-heading" id="parameters" data-toc data-title="Parameters">Parameters<a data-hash href="#parameters" class="dd-s0052">#</a></h2>
@@ -130,7 +146,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/backend/pg/extension/index.cppm#L557" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq/backend/pg/extension/index.cppm#L1431" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq · PostgreSQL 17.10</p>
   
 </article>
@@ -141,7 +157,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#examples">Examples</a><a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -155,7 +171,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -215,16 +231,16 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq.update_index","description":"Rebuilds a named sequence index and returns the number of indexed sequences.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq.update_index","item":"/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq.update_index","description":"Rebuilds a named sequence index and returns the number of indexed sequences.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq.update_index","item":"/v0.1/reference/sql/function/bioseq-update-index-21980c75f26d76a6/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>

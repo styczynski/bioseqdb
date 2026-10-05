@@ -11,20 +11,20 @@
 <meta property="og:description" content="Configuration reference (settings available in BioseqDB)">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/tutorials/project_configuration_reference/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Configuration reference (settings available in BioseqDB)">
 <meta name="twitter:description" content="Configuration reference (settings available in BioseqDB)">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -105,7 +105,7 @@
     
   </header>
 
-  <div class="docs-content tutorial-body"><p class="doc-paragraph"><a id="sec-appendix-configuration"></a> <a id="sec-configuration-reference"></a> <a id="app-configuration-reference"></a></p><p class="doc-paragraph">This appendix lists all runtime settings registered by BioseqDB (GUCs - GUC stands for Grand Unified Configuration in Postgres and refers to runtime parameters) - their types, defaults, possible values and descriptions. Each setting can be viewed and set with the <code>SHOW</code> and <code>SET</code> commands [<a href="../bibliography/#ref-postgresql17_pg_settings">118</a>, <a href="../bibliography/#ref-postgresql17_guc_functions">119</a>]. Some settings are hidden so they’re not visible with <code>SHOW ALL</code>.</p><p class="doc-paragraph"><a id="lst-configuration-inspect"></a></p><figure class="doc-code" data-term data-sql-example="project_lst-configuration-inspect"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-f7138ad958df6f1f-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-f7138ad958df6f1f-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:5,&quot;len&quot;:34,&quot;id&quot;:&quot;sql:guc:bioseq.aligner.minimizer.algorithm&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;},{&quot;start&quot;:210,&quot;len&quot;:34,&quot;id&quot;:&quot;sql:guc:bioseq.aligner.minimizer.algorithm&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;}]">SHOW bioseq.aligner.minimizer.algorithm;
+  <div class="docs-content tutorial-body"><p class="doc-paragraph"><a id="sec-appendix-configuration"></a> <a id="sec-configuration-reference"></a> <a id="app-configuration-reference"></a></p><p class="doc-paragraph">This appendix lists all runtime settings registered by BioseqDB (GUCs - GUC stands for Grand Unified Configuration in Postgres and refers to runtime parameters) - their types, defaults, possible values and descriptions. Each setting can be viewed and set with the <code>SHOW</code> and <code>SET</code> commands [<a href="../bibliography/#ref-postgresql17_pg_settings">118</a>, <a href="../bibliography/#ref-postgresql17_guc_functions">119</a>]. Some settings are hidden so they’re not visible with <code>SHOW ALL</code>.</p><p class="doc-paragraph"><a id="lst-configuration-inspect"></a></p><figure class="doc-code" data-term data-sql-example="project_lst-configuration-inspect"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-f7138ad958df6f1f-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-f7138ad958df6f1f-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:5,&quot;len&quot;:34,&quot;id&quot;:&quot;sql:guc:bioseq.aligner.minimizer.algorithm&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:210,&quot;len&quot;:34,&quot;id&quot;:&quot;sql:guc:bioseq.aligner.minimizer.algorithm&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">SHOW bioseq.aligner.minimizer.algorithm;
 
 SELECT name, setting, boot_val, reset_val,
        vartype, context, min_val, max_val, enumvals
@@ -123,7 +123,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.storage.compression.algorithm</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/compression-algorithm-a36f31b890be137f/" data-entity="sql:guc:bioseq.storage.compression.algorithm" data-entity-id="sql:guc:bioseq.storage.compression.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.compression.algorithm</a></code></td>
 <td>enum</td>
 <td><p><span><strong><code>zstd</code></strong></span></p>
 <p>(default)</p></td>
@@ -148,7 +148,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Use LZ4 when compiled in. This becomes the default when Zstandard is unavailable.</td>
 </tr>
 <tr>
-<td><code>bioseq.storage.compression.level</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/compression-level-ad57d71d43930810/" data-entity="sql:guc:bioseq.storage.compression.level" data-entity-id="sql:guc:bioseq.storage.compression.level" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.compression.level</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>3</code></strong></span></p>
 <p>(default)</p>
@@ -156,7 +156,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Set the zstd compression level if zstd is used.</td>
 </tr>
 <tr>
-<td><code>bioseq.storage.stripe.row_limit</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/stripe-row-limit-48c288001cbe2d59/" data-entity="sql:guc:bioseq.storage.stripe.row_limit" data-entity-id="sql:guc:bioseq.storage.stripe.row_limit" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.stripe.row_limit</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>150000</code></strong></span></p>
 <p>(default)</p>
@@ -165,7 +165,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the maximum rows in a new table’s column stripe, when writing rows. Existing table options and stored stripes are unchanged.</td>
 </tr>
 <tr>
-<td><code>bioseq.storage.chunk_group.row_limit</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chunk-group-row-limit-08dc23ec7133b2c1/" data-entity="sql:guc:bioseq.storage.chunk_group.row_limit" data-entity-id="sql:guc:bioseq.storage.chunk_group.row_limit" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.chunk_group.row_limit</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>10000</code></strong></span></p>
 <p>(default)</p>
@@ -174,7 +174,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the maximum rows in a new table’s chunk group, when writing rows. Chunk groups divide a stripe into smaller column-reading units.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.storage.dml.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/dml-enabled-879378e0a88c38f8/" data-entity="sql:guc:bioseq.storage.dml.enabled" data-entity-id="sql:guc:bioseq.storage.dml.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.dml.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -188,7 +188,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Bypass any deletion filtering. Useful for debugging, the queries will return all rows including deleted ones. Note that if the table is rewritten using VACCUM FULL, then deleted rows will physically dissapear!</td>
 </tr>
 <tr>
-<td><code>bioseq.column_cache.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/column-cache-enabled-9982b316d0b958ab/" data-entity="sql:guc:bioseq.column_cache.enabled" data-entity-id="sql:guc:bioseq.column_cache.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.column_cache.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
 <p>(default)</p></td>
@@ -201,7 +201,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Read and decompress but do not save buffers in cache.</td>
 </tr>
 <tr>
-<td><code>bioseq.column_cache.capacity_mb</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/column-cache-capacity-mb-96007fc3c2b20264/" data-entity="sql:guc:bioseq.column_cache.capacity_mb" data-entity-id="sql:guc:bioseq.column_cache.capacity_mb" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.column_cache.capacity_mb</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>200</code></strong></span></p>
 <p>(default)</p>
@@ -210,7 +210,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limits the decompressed column-chunk cache BioseqDB will still allocate buffers for decompression, so this setting does not control the total memory used during decompression</td>
 </tr>
 <tr>
-<td><code>bioseq.load.write_overlap.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/write-overlap-enabled-ebd1fc984c4a5db9/" data-entity="sql:guc:bioseq.load.write_overlap.enabled" data-entity-id="sql:guc:bioseq.load.write_overlap.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.load.write_overlap.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -223,7 +223,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Enable parallelized writing and decoding of data chunks through queue.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.storage.sequence_shard.max_size_gib</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/sequence-shard-max-size-gib-1109d7fffff02225/" data-entity="sql:guc:bioseq.storage.sequence_shard.max_size_gib" data-entity-id="sql:guc:bioseq.storage.sequence_shard.max_size_gib" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.storage.sequence_shard.max_size_gib</a></code></p>
 <p><em>superuser</em></p></td>
 <td>int</td>
 <td><p><span><strong><code>1024</code></strong></span></p>
@@ -245,7 +245,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><p><code>bioseq.execution.parallel.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/parallel-enabled-1611fe0a3570b8bb/" data-entity="sql:guc:bioseq.execution.parallel.enabled" data-entity-id="sql:guc:bioseq.execution.parallel.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.execution.parallel.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -259,7 +259,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Disable all parallel scans on BioseqDB tables.</td>
 </tr>
 <tr>
-<td><code>bioseq.execution.parallel.minimum_processes</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/parallel-minimum-processes-cc01f697e8c9b180/" data-entity="sql:guc:bioseq.execution.parallel.minimum_processes" data-entity-id="sql:guc:bioseq.execution.parallel.minimum_processes" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.execution.parallel.minimum_processes</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>8</code></strong></span></p>
 <p>(default)</p>
@@ -267,7 +267,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Requests the PostgreSQL worker count for possbible Bioseq parallel scan paths. This is soft minimum and the actual worker count is determined by the PostgreSQL planner.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.vectorization.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/vectorization-enabled-d0771cec63520a6b/" data-entity="sql:guc:bioseq.vectorization.enabled" data-entity-id="sql:guc:bioseq.vectorization.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.vectorization.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -281,7 +281,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Use normal SQL processing for those operations.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.index_scan.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-scan-enabled-935ebd535b66e506/" data-entity="sql:guc:bioseq.planner.index_scan.enabled" data-entity-id="sql:guc:bioseq.planner.index_scan.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.index_scan.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -295,7 +295,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Do not allow using any non-BioseqDB indices on BioseqDB tables. This can heavily degrade performance as Postgres will select plan that ignores existing B-trees, hash indexes etc.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.custom_scan.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/custom-scan-enabled-1ca2c4a3edfab409/" data-entity="sql:guc:bioseq.planner.custom_scan.enabled" data-entity-id="sql:guc:bioseq.planner.custom_scan.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.custom_scan.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -309,7 +309,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Disable custom scans. This means that it won’t be possible to use ’mmsearch’ function anymore as it requires custom scan path. All other metadata queries still will be possible.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.custom_scan.max_paths</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/custom-scan-max-paths-f3037d73f75839bd/" data-entity="sql:guc:bioseq.planner.custom_scan.max_paths" data-entity-id="sql:guc:bioseq.planner.custom_scan.max_paths" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.custom_scan.max_paths</a></code></p>
 <p><em>hidden</em></p></td>
 <td>int</td>
 <td><p><span><strong><code>64</code></strong></span></p>
@@ -318,7 +318,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limit paths explored by GQO for BioseqDB custom scans. Increasing the number may yield better plans, but increase planning time.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.qual_pushdown.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/qual-pushdown-enabled-96ccf0c85fdf5d48/" data-entity="sql:guc:bioseq.planner.qual_pushdown.enabled" data-entity-id="sql:guc:bioseq.planner.qual_pushdown.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.qual_pushdown.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
@@ -332,7 +332,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Leave predicates outside the scan, which may severely degrade performance.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.qual_pushdown.correlation_threshold</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/qual-pushdown-correlation-threshold-3f005716b304da6d/" data-entity="sql:guc:bioseq.planner.qual_pushdown.correlation_threshold" data-entity-id="sql:guc:bioseq.planner.qual_pushdown.correlation_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.qual_pushdown.correlation_threshold</a></code></p>
 <p><em>hidden</em></p></td>
 <td>real</td>
 <td><p><span><strong><code>0.4</code></strong></span></p>
@@ -341,7 +341,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the minimum absolute column correlation value (reported by Postgres table statistics) used by chunk prunning logic described for bioseq.planner.qual_pushdown.enabled. Values closer to one, mean stronger correlation.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.planner.sequence_sort_scan.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/sequence-sort-scan-enabled-b339c617d3ef1ed4/" data-entity="sql:guc:bioseq.planner.sequence_sort_scan.enabled" data-entity-id="sql:guc:bioseq.planner.sequence_sort_scan.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.sequence_sort_scan.enabled</a></code></p>
 <p><em>hidden</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
@@ -367,7 +367,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><p><code>bioseq.scheduler.backend.max_concurrency</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/backend-max-concurrency-2ecc600da1a7c936/" data-entity="sql:guc:bioseq.scheduler.backend.max_concurrency" data-entity-id="sql:guc:bioseq.scheduler.backend.max_concurrency" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.scheduler.backend.max_concurrency</a></code></p>
 <p><em>reload</em></p></td>
 <td>int</td>
 <td><p><span><strong><code>0</code></strong></span></p>
@@ -376,7 +376,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limits maximum number of workers in TBB worker pool (this is separate to Postgres max workers setting)</td>
 </tr>
 <tr>
-<td><code>bioseq.scheduler.pipeline.mode</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/pipeline-mode-8f25a70720807bd9/" data-entity="sql:guc:bioseq.scheduler.pipeline.mode" data-entity-id="sql:guc:bioseq.scheduler.pipeline.mode" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.scheduler.pipeline.mode</a></code></td>
 <td>enum</td>
 <td><p><span><strong><code>task_parallel</code></strong></span></p>
 <p>(default)</p></td>
@@ -395,7 +395,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td></td>
 </tr>
 <tr>
-<td><code>bioseq.scheduler.postgres_parallel.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/postgres-parallel-enabled-ecb2dc363651c532/" data-entity="sql:guc:bioseq.scheduler.postgres_parallel.enabled" data-entity-id="sql:guc:bioseq.scheduler.postgres_parallel.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.scheduler.postgres_parallel.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -420,7 +420,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.index.insert_maintenance.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/insert-maintenance-enabled-d1b9ecb5352dbdbb/" data-entity="sql:guc:bioseq.index.insert_maintenance.enabled" data-entity-id="sql:guc:bioseq.index.insert_maintenance.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.insert_maintenance.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -433,7 +433,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Currently grouped MPF index (the default one) does not support this function and reports an error.</td>
 </tr>
 <tr>
-<td><code>bioseq.index.sequence_read.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/sequence-read-enabled-4e48978a182bed0e/" data-entity="sql:guc:bioseq.index.sequence_read.enabled" data-entity-id="sql:guc:bioseq.index.sequence_read.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.sequence_read.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
 <p>(default)</p></td>
@@ -446,7 +446,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Force pipeline to always recompute all seeds from scratch.</td>
 </tr>
 <tr>
-<td><code>bioseq.index.async_persistence.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/async-persistence-enabled-e0df9c7b944bf974/" data-entity="sql:guc:bioseq.index.async_persistence.enabled" data-entity-id="sql:guc:bioseq.index.async_persistence.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.async_persistence.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -459,7 +459,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Allow the limited ordinary-MPS submission path when its other requirements are met.</td>
 </tr>
 <tr>
-<td><code>bioseq.index.recompute_async_persistence.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/recompute-async-persistence-enabled-558d95a439221475/" data-entity="sql:guc:bioseq.index.recompute_async_persistence.enabled" data-entity-id="sql:guc:bioseq.index.recompute_async_persistence.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.recompute_async_persistence.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -472,7 +472,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Same as bioseq.index.async_persistence.enabled</td>
 </tr>
 <tr>
-<td><code>bioseq.index.memory_cap_mb</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-memory-cap-mb-d34abddf3da33b89/" data-entity="sql:guc:bioseq.index.memory_cap_mb" data-entity-id="sql:guc:bioseq.index.memory_cap_mb" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.memory_cap_mb</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>0</code></strong></span></p>
 <p>(default)</p>
@@ -481,7 +481,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Specialized limit on the memory allocated by index builders/readers in MB. Using 0 means that they share the same memory budget as other query buffers.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.index.sequence_minimizer_sort.algorithm</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/sequence-minimizer-sort-algorithm-c0cde4e176fa02f1/" data-entity="sql:guc:bioseq.index.sequence_minimizer_sort.algorithm" data-entity-id="sql:guc:bioseq.index.sequence_minimizer_sort.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index.sequence_minimizer_sort.algorithm</a></code></p>
 <p><em>hidden</em></p></td>
 <td>enum</td>
 <td><p><span><strong><code>std_sort</code></strong></span></p>
@@ -513,7 +513,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Use the custom SIMD sorter with four vector streams.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.index_build.run_buffer_bytes</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-build-run-buffer-bytes-adb935ed801ea17c/" data-entity="sql:guc:bioseq.index_build.run_buffer_bytes" data-entity-id="sql:guc:bioseq.index_build.run_buffer_bytes" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.index_build.run_buffer_bytes</a></code></p>
 <p><em>hidden, superuser</em></p></td>
 <td>int</td>
 <td><p><span><strong><code>0</code></strong></span></p>
@@ -523,7 +523,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>For MPS overrides the external-sort run buffer size. Zero computes a size from the common BioseqDB memory budget.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.fragment_minimizer.lookup_route</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/fragment-minimizer-lookup-route-ac33c8b5fe96fea8/" data-entity="sql:guc:bioseq.aligner.fragment_minimizer.lookup_route" data-entity-id="sql:guc:bioseq.aligner.fragment_minimizer.lookup_route" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.fragment_minimizer.lookup_route</a></code></td>
 <td>enum</td>
 <td><p><span><strong><code>direct_compact_hash_lookup</code></strong></span></p>
 <p>(default)</p></td>
@@ -536,7 +536,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Search the directory row for the hash bucket first</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.grouped_soa_generation.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/grouped-soa-generation-enabled-87b171993876f1b3/" data-entity="sql:guc:bioseq.aligner.grouped_soa_generation.enabled" data-entity-id="sql:guc:bioseq.aligner.grouped_soa_generation.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.grouped_soa_generation.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
 <p>(default)</p></td>
@@ -561,7 +561,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.aligner.minimizer.kmer_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-kmer-size-69c8c6e50494d460/" data-entity="sql:guc:bioseq.aligner.minimizer.kmer_size" data-entity-id="sql:guc:bioseq.aligner.minimizer.kmer_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.kmer_size</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>15</code></strong></span></p>
 <p>(default)</p>
@@ -570,7 +570,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the number of sequence symbols in each k-mer Per search: <code>kmer_size</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.minimizer.window_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-window-size-6fed0a3452234af5/" data-entity="sql:guc:bioseq.aligner.minimizer.window_size" data-entity-id="sql:guc:bioseq.aligner.minimizer.window_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.window_size</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>10</code></strong></span></p>
 <p>(default)</p>
@@ -579,7 +579,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the number of consecutive k-mers in one minimizer window Per search: <code>window_size</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.minimizer.algorithm</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/" data-entity="sql:guc:bioseq.aligner.minimizer.algorithm" data-entity-id="sql:guc:bioseq.aligner.minimizer.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.algorithm</a></code></td>
 <td>enum</td>
 <td><p><strong><code>bounded_nthash_simd</code></strong></p>
 <p>code 4</p>
@@ -615,7 +615,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Use BioseqDB GPU algorithm</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.seeding.maximum_occurrence</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seeding-maximum-occurrence-da6fcf18eab25562/" data-entity="sql:guc:bioseq.aligner.seeding.maximum_occurrence" data-entity-id="sql:guc:bioseq.aligner.seeding.maximum_occurrence" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.seeding.maximum_occurrence</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>500</code></strong></span></p>
 <p>(default)</p>
@@ -624,7 +624,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Excludes minimizer keys with more target occurrences than this limit. Per search: <code>max_occ</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.seeding.intermediate_occurrence_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seeding-intermediate-occurrence-threshold-1b7abb16ea7727c3/" data-entity="sql:guc:bioseq.aligner.seeding.intermediate_occurrence_threshold" data-entity-id="sql:guc:bioseq.aligner.seeding.intermediate_occurrence_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.seeding.intermediate_occurrence_threshold</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>500</code></strong></span></p>
 <p>(default)</p>
@@ -645,7 +645,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.aligner.chaining.maximum_gap</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-gap-e9ae2254c184b5f7/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_gap" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_gap" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_gap</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>5000</code></strong></span></p>
 <p>(default)</p>
@@ -654,7 +654,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the requested maximum anchor gap used by chaining. Scalar (minimap2)chaining raises this limit to at least the bandwidth value. Per search: <code>max_gap</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.maximum_reference_gap</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-reference-gap-75c510b6bc6c23c9/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_reference_gap" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_reference_gap" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_reference_gap</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>-1</code></strong></span></p>
 <p>(default)</p>
@@ -663,7 +663,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Currently unused Per search: <code>max_gap_ref</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.bandwidth</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-bandwidth-4586367a2fe7c807/" data-entity="sql:guc:bioseq.aligner.chaining.bandwidth" data-entity-id="sql:guc:bioseq.aligner.chaining.bandwidth" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.bandwidth</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>500</code></strong></span></p>
 <p>(default)</p>
@@ -672,7 +672,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Despite the name it’s also used by aligner stage, limits maximum distane to diagonal. Per search: <code>bandwidth</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.long_join_bandwidth</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-long-join-bandwidth-91b363c795890eeb/" data-entity="sql:guc:bioseq.aligner.chaining.long_join_bandwidth" data-entity-id="sql:guc:bioseq.aligner.chaining.long_join_bandwidth" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.long_join_bandwidth</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>0</code></strong></span></p>
 <p>(default)</p>
@@ -681,7 +681,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Currently unused. Per search: <code>bandwidth_long</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.maximum_skipped_anchors</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-skipped-anchors-1623087e70deed26/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_skipped_anchors" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_skipped_anchors" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_skipped_anchors</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>25</code></strong></span></p>
 <p>(default)</p>
@@ -689,7 +689,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limit of consecutive updates for anchors that do not improve score (only for supported algorithms like scalar) Per search: <code>max_chain_skip</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.maximum_predecessors</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-predecessors-9bfbb8751173a9a7/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_predecessors" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_predecessors" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_predecessors</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>5000</code></strong></span></p>
 <p>(default)</p>
@@ -697,7 +697,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limits how many predecessors chainer can consider, but scalar chaining (depending on the actual algorithm) can examine one additional candidate. RMQ does not use this field. Per search: <code>max_chain_iter</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.minimum_seed_count</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-minimum-seed-count-64e6127201037c8e/" data-entity="sql:guc:bioseq.aligner.chaining.minimum_seed_count" data-entity-id="sql:guc:bioseq.aligner.chaining.minimum_seed_count" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.minimum_seed_count</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>3</code></strong></span></p>
 <p>(default)</p>
@@ -705,7 +705,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the minimum seed count for an accepted chain. Per search: <code>min_seed_count</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.minimum_score</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-minimum-score-159f1f7937593193/" data-entity="sql:guc:bioseq.aligner.chaining.minimum_score" data-entity-id="sql:guc:bioseq.aligner.chaining.minimum_score" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.minimum_score</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>40</code></strong></span></p>
 <p>(default)</p>
@@ -713,7 +713,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the minimum accepted chain score (the score is computed by the selected chaining algorithm) Per search: <code>min_chain_score</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.gap_penalty_scale</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-gap-penalty-scale-40d92698132003b9/" data-entity="sql:guc:bioseq.aligner.chaining.gap_penalty_scale" data-entity-id="sql:guc:bioseq.aligner.chaining.gap_penalty_scale" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.gap_penalty_scale</a></code></td>
 <td>real</td>
 <td><p><span><strong><code>0.8</code></strong></span></p>
 <p>(default)</p>
@@ -721,7 +721,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Scales the gap penalty used by chaining (larger values penalize that contribution more strongly) Per search: <code>chain_gap_scale</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.skip_penalty_scale</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-skip-penalty-scale-128604db0af0ebb6/" data-entity="sql:guc:bioseq.aligner.chaining.skip_penalty_scale" data-entity-id="sql:guc:bioseq.aligner.chaining.skip_penalty_scale" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.skip_penalty_scale</a></code></td>
 <td>real</td>
 <td><p><span><strong><code>0.0</code></strong></span></p>
 <p>(default)</p>
@@ -729,7 +729,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Scales the chaining skip-distance penalty. Per search: <code>chain_skip_scale</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.chaining.algorithm</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-algorithm-a70e4176a38ecce3/" data-entity="sql:guc:bioseq.aligner.chaining.algorithm" data-entity-id="sql:guc:bioseq.aligner.chaining.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.algorithm</a></code></td>
 <td>enum</td>
 <td><p><strong><code>simd_minimap2</code></strong></p>
 <p>code 1</p>
@@ -770,7 +770,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.aligner.secondary.overlap_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-overlap-threshold-11bbc15e427ceaa2/" data-entity="sql:guc:bioseq.aligner.secondary.overlap_threshold" data-entity-id="sql:guc:bioseq.aligner.secondary.overlap_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.overlap_threshold</a></code></td>
 <td>real</td>
 <td><p><span><strong><code>0.5</code></strong></span></p>
 <p>(default)</p>
@@ -778,7 +778,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the primary/secondary classification thresholds Per search: <code>mask_level</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.secondary.uncovered_length_limit</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-uncovered-length-limit-24a343a597b63fbb/" data-entity="sql:guc:bioseq.aligner.secondary.uncovered_length_limit" data-entity-id="sql:guc:bioseq.aligner.secondary.uncovered_length_limit" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.uncovered_length_limit</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>2147483647</code></strong></span></p>
 <p>(default)</p>
@@ -787,7 +787,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Limits the uncovered query length used when classifying an alignment as secondary to an existing primary. Per search: <code>mask_len</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.secondary.score_ratio_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-score-ratio-threshold-9400999ba1fff59b/" data-entity="sql:guc:bioseq.aligner.secondary.score_ratio_threshold" data-entity-id="sql:guc:bioseq.aligner.secondary.score_ratio_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.score_ratio_threshold</a></code></td>
 <td>real</td>
 <td><p><span><strong><code>0.8</code></strong></span></p>
 <p>(default)</p>
@@ -795,7 +795,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the secondary-to-primary score-ratio threshold. Zero bypasses this filtering step, including its secondary-count limit. Per search: <code>pri_ratio</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.secondary.maximum_count</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-maximum-count-f0ae27c2751d9a5f/" data-entity="sql:guc:bioseq.aligner.secondary.maximum_count" data-entity-id="sql:guc:bioseq.aligner.secondary.maximum_count" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.maximum_count</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>5</code></strong></span></p>
 <p>(default)</p>
@@ -815,7 +815,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.aligner.scoring.match_score</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-match-score-c81b38a571bf8012/" data-entity="sql:guc:bioseq.aligner.scoring.match_score" data-entity-id="sql:guc:bioseq.aligner.scoring.match_score" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.match_score</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>2</code></strong></span></p>
 <p>(default)</p>
@@ -823,7 +823,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the score added for an aligned matching symbol. Per search: <code>match_score</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.mismatch_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-mismatch-penalty-583155fc6afbd468/" data-entity="sql:guc:bioseq.aligner.scoring.mismatch_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.mismatch_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.mismatch_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>4</code></strong></span></p>
 <p>(default)</p>
@@ -831,7 +831,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the score penalty for an aligned mismatch. Per search: <code>mismatch_pen</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.short_gap_open_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-short-gap-open-penalty-feddbe1e6494a2ce/" data-entity="sql:guc:bioseq.aligner.scoring.short_gap_open_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.short_gap_open_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.short_gap_open_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>4</code></strong></span></p>
 <p>(default)</p>
@@ -839,7 +839,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the first gap-opening penalty. KSW2 and BlockAligner use this pair. BlockAligner requires positive opening and extension penalties whose sum is at most 128. Per search: <code>gap_open1</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.short_gap_extension_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-short-gap-extension-penalty-85dc9a6446e91633/" data-entity="sql:guc:bioseq.aligner.scoring.short_gap_extension_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.short_gap_extension_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.short_gap_extension_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>2</code></strong></span></p>
 <p>(default)</p>
@@ -847,7 +847,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the first gap-extension penalty. BlockAligner requires it to be positive and its sum with the first opening penalty to be at most 128. Per search: <code>gap_ext1</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.long_gap_open_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-long-gap-open-penalty-65434ecc59459d6e/" data-entity="sql:guc:bioseq.aligner.scoring.long_gap_open_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.long_gap_open_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.long_gap_open_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>24</code></strong></span></p>
 <p>(default)</p>
@@ -855,7 +855,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets KSW2’s second gap-opening penalty. Native BlockAligner uses only the first gap-penalty pair. Per search: <code>gap_open2</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.long_gap_extension_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-long-gap-extension-penalty-54382229e3b17ad3/" data-entity="sql:guc:bioseq.aligner.scoring.long_gap_extension_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.long_gap_extension_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.long_gap_extension_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>1</code></strong></span></p>
 <p>(default)</p>
@@ -863,7 +863,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets KSW2’s second gap-extension penalty. Native BlockAligner does not use this second pair. Per search: <code>gap_ext2</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.ambiguous_base_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-ambiguous-base-penalty-b78fcd32e7f0abf8/" data-entity="sql:guc:bioseq.aligner.scoring.ambiguous_base_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.ambiguous_base_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.ambiguous_base_penalty</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>1</code></strong></span></p>
 <p>(default)</p>
@@ -871,7 +871,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets the alignment penalty for ambiguous symbols on paths that support them. Per search: <code>sc_ambi</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.z_drop_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-z-drop-threshold-5f0339c00193afe8/" data-entity="sql:guc:bioseq.aligner.scoring.z_drop_threshold" data-entity-id="sql:guc:bioseq.aligner.scoring.z_drop_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.z_drop_threshold</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>400</code></strong></span></p>
 <p>(default)</p>
@@ -879,7 +879,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets KSW2’s Z-drop threshold or BlockAligner’s X-drop threshold for end extensions. BlockAligner extensions require a nonnegative value. Per search: <code>zdrop</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.scoring.end_bonus</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-end-bonus-b06bcd10ac75566b/" data-entity="sql:guc:bioseq.aligner.scoring.end_bonus" data-entity-id="sql:guc:bioseq.aligner.scoring.end_bonus" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.end_bonus</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>-1</code></strong></span></p>
 <p>(default)</p>
@@ -887,7 +887,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets KSW2’s sequence-end bonus. Negative one disables the bonus. Native BlockAligner does not use it. Per search: <code>end_bonus</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.block_alignment.minimum_block_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/block-alignment-minimum-block-size-cd17d511b09fd302/" data-entity="sql:guc:bioseq.aligner.block_alignment.minimum_block_size" data-entity-id="sql:guc:bioseq.aligner.block_alignment.minimum_block_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.block_alignment.minimum_block_size</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>32</code></strong></span></p>
 <p>(default)</p>
@@ -895,7 +895,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets BlockAligner’s minimum adaptive block size. (block sizes must be powers of two and the minimum cannot exceed the maximum) Per search: <code>block_min_size</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.block_alignment.maximum_block_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/block-alignment-maximum-block-size-c34965a569143058/" data-entity="sql:guc:bioseq.aligner.block_alignment.maximum_block_size" data-entity-id="sql:guc:bioseq.aligner.block_alignment.maximum_block_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.block_alignment.maximum_block_size</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>256</code></strong></span></p>
 <p>(default)</p>
@@ -903,7 +903,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Sets BlockAligner’s maximum adaptive block size. (block sizes must be powers of two and the minimum cannot exceed the maximum) Per search: <code>block_max_size</code>.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.base_alignment.algorithm</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/base-alignment-algorithm-941a0e3136fb7a7f/" data-entity="sql:guc:bioseq.aligner.base_alignment.algorithm" data-entity-id="sql:guc:bioseq.aligner.base_alignment.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.base_alignment.algorithm</a></code></td>
 <td>enum</td>
 <td><p><strong><code>block_aligner</code></strong></p>
 <p>code 1</p>
@@ -930,7 +930,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><code>bioseq.aligner.vulkan.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/vulkan-enabled-abcada87cf4aa0df/" data-entity="sql:guc:bioseq.aligner.vulkan.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
 <p>(default)</p></td>
@@ -943,7 +943,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Setting aligner/chaining algorithms (or other) to Vulkan will immediately fail.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.seed_lookup.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seed-lookup-enabled-2d45d6b45590babd/" data-entity="sql:guc:bioseq.aligner.vulkan.seed_lookup.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.seed_lookup.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.seed_lookup.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -956,7 +956,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Enable GPU minimizer lookup (but other GPU settings apply)</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.index_cache.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-cache-enabled-a0340faab2c12908/" data-entity="sql:guc:bioseq.aligner.vulkan.index_cache.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.index_cache.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.index_cache.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>on</code></strong></span></p>
 <p>(default)</p></td>
@@ -969,7 +969,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>GPU doesn’t reuse minimizers during computation</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.fused_frontend.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/fused-frontend-enabled-77c698b087517edd/" data-entity="sql:guc:bioseq.aligner.vulkan.fused_frontend.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.fused_frontend.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.fused_frontend.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -982,7 +982,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Enable special optimisation for GPU kernels</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.index_build.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-build-enabled-637de19b0baa5c56/" data-entity="sql:guc:bioseq.aligner.vulkan.index_build.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.index_build.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.index_build.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -995,7 +995,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Enable GPU minimizer index building (but other GPU settings apply)</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.alignment_extension.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/alignment-extension-enabled-f7a71eb180dddeea/" data-entity="sql:guc:bioseq.aligner.vulkan.alignment_extension.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.alignment_extension.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.alignment_extension.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -1008,7 +1008,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Allow computing CIGAR on GPU (but other GPU settings apply)</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.ordered_sketch_tile_bp</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/vulkan-ordered-sketch-tile-bp-574b00440753e720/" data-entity="sql:guc:bioseq.aligner.vulkan.ordered_sketch_tile_bp" data-entity-id="sql:guc:bioseq.aligner.vulkan.ordered_sketch_tile_bp" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.ordered_sketch_tile_bp</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>2048</code></strong></span></p>
 <p>(default)</p>
@@ -1017,7 +1017,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Currently unused</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.vulkan.radix_sort_digit_bits</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/vulkan-radix-sort-digit-bits-425fb1802631d714/" data-entity="sql:guc:bioseq.aligner.vulkan.radix_sort_digit_bits" data-entity-id="sql:guc:bioseq.aligner.vulkan.radix_sort_digit_bits" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.radix_sort_digit_bits</a></code></td>
 <td>int</td>
 <td><p><span><strong><code>8</code></strong></span></p>
 <p>(default)</p>
@@ -1038,7 +1038,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><p><code>bioseq.diagnostics.logging.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/logging-enabled-abed34887ea73185/" data-entity="sql:guc:bioseq.diagnostics.logging.enabled" data-entity-id="sql:guc:bioseq.diagnostics.logging.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.diagnostics.logging.enabled</a></code></p>
 <p><em>superuser</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
@@ -1052,7 +1052,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Enable internal logger.</td>
 </tr>
 <tr>
-<td><code>bioseq.planner.diagnostics.log_level</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/diagnostics-log-level-12daf5c4d05a23fe/" data-entity="sql:guc:bioseq.planner.diagnostics.log_level" data-entity-id="sql:guc:bioseq.planner.diagnostics.log_level" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.planner.diagnostics.log_level</a></code></td>
 <td>enum</td>
 <td><p><span><strong><code>debug3</code></strong></span></p>
 <p>(default)</p></td>
@@ -1107,7 +1107,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Emit them at WARNING severity.</td>
 </tr>
 <tr>
-<td><code>bioseq.aligner.profiling.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/profiling-enabled-0444a6c68b5f5d3c/" data-entity="sql:guc:bioseq.aligner.profiling.enabled" data-entity-id="sql:guc:bioseq.aligner.profiling.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.profiling.enabled</a></code></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
 <p>(default)</p></td>
@@ -1172,7 +1172,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </thead>
 <tbody>
 <tr>
-<td><p><code>bioseq.testing.chunked_scanner.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/chunked-scanner-enabled-9c2b267baaed51b9/" data-entity="sql:guc:bioseq.testing.chunked_scanner.enabled" data-entity-id="sql:guc:bioseq.testing.chunked_scanner.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.testing.chunked_scanner.enabled</a></code></p>
 <p><em>hidden, superuser</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
@@ -1186,7 +1186,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Force load entire sequence into memory and create lazy-loader interface for that RAM sequence.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.testing.in_memory_scanner.enabled</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/in-memory-scanner-enabled-32528d3984f9bb5a/" data-entity="sql:guc:bioseq.testing.in_memory_scanner.enabled" data-entity-id="sql:guc:bioseq.testing.in_memory_scanner.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.testing.in_memory_scanner.enabled</a></code></p>
 <p><em>hidden, superuser</em></p></td>
 <td>bool</td>
 <td><p><span><strong><code>off</code></strong></span></p>
@@ -1200,7 +1200,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <td>Force load entire sequence into memory and pass it directly to the pipeline.</td>
 </tr>
 <tr>
-<td><p><code>bioseq.testing.persisted_index.failure_mode</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/persisted-index-failure-mode-f9d32362edfc61b1/" data-entity="sql:guc:bioseq.testing.persisted_index.failure_mode" data-entity-id="sql:guc:bioseq.testing.persisted_index.failure_mode" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.testing.persisted_index.failure_mode</a></code></p>
 <p><em>hidden, superuser</em></p></td>
 <td>enum</td>
 <td><p><span><strong><code>none</code></strong></span></p>
@@ -1215,9 +1215,9 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </tr>
 </tbody>
 </table>
-<h2 class="hx" id="per-search-options" data-toc data-title="Per-search options">Per-search options<a data-hash href="#per-search-options" aria-label="Link to this section">#</a></h2><p class="doc-paragraph"><a id="sec-appendix-search-options"></a> <a id="sec-appendix-options-precedence"></a></p><p class="doc-paragraph">Additionally instead of operating on global settings, user can also provide single object as third parameter to the <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:8,&quot;id&quot;:&quot;sql:overload_group:$extension.mmsearch&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;}]">mmsearch</code> function call.</p><aside class="admonition admonition-note" data-callout="note"><span class="admonition-icon" aria-hidden="true"></span><div class="admonition-body"><p class="admonition-label">Note</p><p class="doc-paragraph"><strong>Parameter encoding</strong></p><p class="doc-paragraph">Currently the enum options are encoded by integers - they correspond to the global GUCs, but you can use only numbers. This is just unimplemented feature - the types of the options should be changed to strings and encoded to internal enum int values. It was requiring less effort to expose internal representation, so it was left as is, see listing below <a href="../project_configuration_reference/#lst-configuration-options">configuration options</a>.</p></div></aside><p class="doc-paragraph">Encoding of parameters as integer values:</p><p class="doc-paragraph"><a id="lst-configuration-options"></a></p><figure class="doc-code" data-term data-sql-example="project_lst-configuration-options"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-ca307e05f3aac862-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-ca307e05f3aac862-1" class="language-sql" data-entity-ranges="[{&quot;start&quot;:8,&quot;len&quot;:22,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;}]">SELECT (public.aligner_options(
+<h2 class="hx" id="per-search-options" data-toc data-title="Per-search options">Per-search options<a data-hash href="#per-search-options" aria-label="Link to this section">#</a></h2><p class="doc-paragraph"><a id="sec-appendix-search-options"></a> <a id="sec-appendix-options-precedence"></a></p><p class="doc-paragraph">Additionally instead of operating on global settings, user can also provide single object as third parameter to the <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:8,&quot;id&quot;:&quot;sql:overload_group:$extension.mmsearch&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">mmsearch</code> function call.</p><aside class="admonition admonition-note" data-callout="note"><span class="admonition-icon" aria-hidden="true"></span><div class="admonition-body"><p class="admonition-label">Note</p><p class="doc-paragraph"><strong>Parameter encoding</strong></p><p class="doc-paragraph">Currently the enum options are encoded by integers - they correspond to the global GUCs, but you can use only numbers. This is just unimplemented feature - the types of the options should be changed to strings and encoded to internal enum int values. It was requiring less effort to expose internal representation, so it was left as is, see listing below <a href="../project_configuration_reference/#lst-configuration-options">configuration options</a>.</p></div></aside><p class="doc-paragraph">Encoding of parameters as integer values:</p><p class="doc-paragraph"><a id="lst-configuration-options"></a></p><figure class="doc-code" data-term data-sql-example="project_lst-configuration-options"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-ca307e05f3aac862-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-ca307e05f3aac862-1" class="language-sql" data-entity-ranges="[{&quot;start&quot;:8,&quot;len&quot;:22,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">SELECT (public.aligner_options(
   minimizer_algorithm =&gt; 0,
-  index_read_requirement =&gt; 1)).*;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 1 row</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table result-table-wide" aria-label="Executed SQL result"><thead><tr><th scope="col">kmer_size<br><code>integer</code></th><th scope="col">window_size<br><code>integer</code></th><th scope="col">max_gap<br><code>integer</code></th><th scope="col">max_gap_ref<br><code>integer</code></th><th scope="col">bandwidth<br><code>integer</code></th><th scope="col">bandwidth_long<br><code>integer</code></th><th scope="col">max_chain_skip<br><code>integer</code></th><th scope="col">max_chain_iter<br><code>integer</code></th><th scope="col">min_seed_count<br><code>integer</code></th><th scope="col">min_chain_score<br><code>integer</code></th><th scope="col">chain_gap_scale<br><code>double precision</code></th><th scope="col">chain_skip_scale<br><code>double precision</code></th><th scope="col">mask_level<br><code>double precision</code></th><th scope="col">mask_len<br><code>integer</code></th><th scope="col">pri_ratio<br><code>double precision</code></th><th scope="col">best_n<br><code>integer</code></th><th scope="col">match_score<br><code>integer</code></th><th scope="col">mismatch_pen<br><code>integer</code></th><th scope="col">gap_open1<br><code>integer</code></th><th scope="col">gap_ext1<br><code>integer</code></th><th scope="col">gap_open2<br><code>integer</code></th><th scope="col">gap_ext2<br><code>integer</code></th><th scope="col">sc_ambi<br><code>integer</code></th><th scope="col">zdrop<br><code>integer</code></th><th scope="col">end_bonus<br><code>integer</code></th><th scope="col">max_occ<br><code>integer</code></th><th scope="col">mid_occ<br><code>integer</code></th><th scope="col">block_min_size<br><code>integer</code></th><th scope="col">block_max_size<br><code>integer</code></th><th scope="col">chaining_algorithm<br><code>integer</code></th><th scope="col">base_alignment_algorithm<br><code>integer</code></th><th scope="col">minimizer_algorithm<br><code>integer</code></th><th scope="col">vulkan_enabled<br><code>boolean</code></th><th scope="col">vulkan_seed_hits_enabled<br><code>boolean</code></th><th scope="col">vulkan_index_cache_enabled<br><code>boolean</code></th><th scope="col">index_read_requirement<br><code>integer</code></th></tr></thead><tbody><tr><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td>0</td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td>1</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">Passing options by 3rd argument of mmsearch</p><p class="doc-paragraph">Every options is available below, for meaning and usage check the GUC tables:</p><p class="doc-paragraph"><em>All nullable alignment options (for <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;}]">aligner_options</code> call) in the order as specified in the SQL API</em><a id="tab-configuration-options"></a></p><table>
+  index_read_requirement =&gt; 1)).*;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 1 row</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table result-table-wide" aria-label="Executed SQL result"><thead><tr><th scope="col">kmer_size<br><code>integer</code></th><th scope="col">window_size<br><code>integer</code></th><th scope="col">max_gap<br><code>integer</code></th><th scope="col">max_gap_ref<br><code>integer</code></th><th scope="col">bandwidth<br><code>integer</code></th><th scope="col">bandwidth_long<br><code>integer</code></th><th scope="col">max_chain_skip<br><code>integer</code></th><th scope="col">max_chain_iter<br><code>integer</code></th><th scope="col">min_seed_count<br><code>integer</code></th><th scope="col">min_chain_score<br><code>integer</code></th><th scope="col">chain_gap_scale<br><code>double precision</code></th><th scope="col">chain_skip_scale<br><code>double precision</code></th><th scope="col">mask_level<br><code>double precision</code></th><th scope="col">mask_len<br><code>integer</code></th><th scope="col">pri_ratio<br><code>double precision</code></th><th scope="col">best_n<br><code>integer</code></th><th scope="col">match_score<br><code>integer</code></th><th scope="col">mismatch_pen<br><code>integer</code></th><th scope="col">gap_open1<br><code>integer</code></th><th scope="col">gap_ext1<br><code>integer</code></th><th scope="col">gap_open2<br><code>integer</code></th><th scope="col">gap_ext2<br><code>integer</code></th><th scope="col">sc_ambi<br><code>integer</code></th><th scope="col">zdrop<br><code>integer</code></th><th scope="col">end_bonus<br><code>integer</code></th><th scope="col">max_occ<br><code>integer</code></th><th scope="col">mid_occ<br><code>integer</code></th><th scope="col">block_min_size<br><code>integer</code></th><th scope="col">block_max_size<br><code>integer</code></th><th scope="col">chaining_algorithm<br><code>integer</code></th><th scope="col">base_alignment_algorithm<br><code>integer</code></th><th scope="col">minimizer_algorithm<br><code>integer</code></th><th scope="col">vulkan_enabled<br><code>boolean</code></th><th scope="col">vulkan_seed_hits_enabled<br><code>boolean</code></th><th scope="col">vulkan_index_cache_enabled<br><code>boolean</code></th><th scope="col">index_read_requirement<br><code>integer</code></th></tr></thead><tbody><tr><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td>0</td><td><em>NULL</em></td><td><em>NULL</em></td><td><em>NULL</em></td><td>1</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">Passing options by 3rd argument of mmsearch</p><p class="doc-paragraph">Every options is available below, for meaning and usage check the GUC tables:</p><p class="doc-paragraph"><em>All nullable alignment options (for <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">aligner_options</code> call) in the order as specified in the SQL API</em><a id="tab-configuration-options"></a></p><table>
 <thead>
 <tr>
 <th><strong>Options field</strong></th>
@@ -1229,180 +1229,180 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 <tr>
 <td><code>kmer_size</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.minimizer.kmer_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-kmer-size-69c8c6e50494d460/" data-entity="sql:guc:bioseq.aligner.minimizer.kmer_size" data-entity-id="sql:guc:bioseq.aligner.minimizer.kmer_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.kmer_size</a></code></td>
 </tr>
 <tr>
 <td><code>window_size</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.minimizer.window_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-window-size-6fed0a3452234af5/" data-entity="sql:guc:bioseq.aligner.minimizer.window_size" data-entity-id="sql:guc:bioseq.aligner.minimizer.window_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.window_size</a></code></td>
 </tr>
 <tr>
 <td><code>max_gap</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.maximum_gap</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-gap-e9ae2254c184b5f7/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_gap" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_gap" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_gap</a></code></td>
 </tr>
 <tr>
 <td><code>max_gap_ref</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.maximum_reference_gap</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-reference-gap-75c510b6bc6c23c9/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_reference_gap" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_reference_gap" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_reference_gap</a></code></td>
 </tr>
 <tr>
 <td><code>bandwidth</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.bandwidth</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-bandwidth-4586367a2fe7c807/" data-entity="sql:guc:bioseq.aligner.chaining.bandwidth" data-entity-id="sql:guc:bioseq.aligner.chaining.bandwidth" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.bandwidth</a></code></td>
 </tr>
 <tr>
 <td><code>bandwidth_long</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.long_join_bandwidth</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-long-join-bandwidth-91b363c795890eeb/" data-entity="sql:guc:bioseq.aligner.chaining.long_join_bandwidth" data-entity-id="sql:guc:bioseq.aligner.chaining.long_join_bandwidth" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.long_join_bandwidth</a></code></td>
 </tr>
 <tr>
 <td><code>max_chain_skip</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.maximum_skipped_anchors</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-skipped-anchors-1623087e70deed26/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_skipped_anchors" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_skipped_anchors" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_skipped_anchors</a></code></td>
 </tr>
 <tr>
 <td><code>max_chain_iter</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.maximum_predecessors</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-maximum-predecessors-9bfbb8751173a9a7/" data-entity="sql:guc:bioseq.aligner.chaining.maximum_predecessors" data-entity-id="sql:guc:bioseq.aligner.chaining.maximum_predecessors" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.maximum_predecessors</a></code></td>
 </tr>
 <tr>
 <td><code>min_seed_count</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.minimum_seed_count</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-minimum-seed-count-64e6127201037c8e/" data-entity="sql:guc:bioseq.aligner.chaining.minimum_seed_count" data-entity-id="sql:guc:bioseq.aligner.chaining.minimum_seed_count" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.minimum_seed_count</a></code></td>
 </tr>
 <tr>
 <td><code>min_chain_score</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.chaining.minimum_score</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-minimum-score-159f1f7937593193/" data-entity="sql:guc:bioseq.aligner.chaining.minimum_score" data-entity-id="sql:guc:bioseq.aligner.chaining.minimum_score" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.minimum_score</a></code></td>
 </tr>
 <tr>
 <td><code>chain_gap_scale</code></td>
 <td>double</td>
-<td><code>bioseq.aligner.chaining.gap_penalty_scale</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-gap-penalty-scale-40d92698132003b9/" data-entity="sql:guc:bioseq.aligner.chaining.gap_penalty_scale" data-entity-id="sql:guc:bioseq.aligner.chaining.gap_penalty_scale" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.gap_penalty_scale</a></code></td>
 </tr>
 <tr>
 <td><code>chain_skip_scale</code></td>
 <td>double</td>
-<td><code>bioseq.aligner.chaining.skip_penalty_scale</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-skip-penalty-scale-128604db0af0ebb6/" data-entity="sql:guc:bioseq.aligner.chaining.skip_penalty_scale" data-entity-id="sql:guc:bioseq.aligner.chaining.skip_penalty_scale" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.skip_penalty_scale</a></code></td>
 </tr>
 <tr>
 <td><code>mask_level</code></td>
 <td>double</td>
-<td><code>bioseq.aligner.secondary.overlap_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-overlap-threshold-11bbc15e427ceaa2/" data-entity="sql:guc:bioseq.aligner.secondary.overlap_threshold" data-entity-id="sql:guc:bioseq.aligner.secondary.overlap_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.overlap_threshold</a></code></td>
 </tr>
 <tr>
 <td><code>mask_len</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.secondary.uncovered_length_limit</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-uncovered-length-limit-24a343a597b63fbb/" data-entity="sql:guc:bioseq.aligner.secondary.uncovered_length_limit" data-entity-id="sql:guc:bioseq.aligner.secondary.uncovered_length_limit" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.uncovered_length_limit</a></code></td>
 </tr>
 <tr>
 <td><code>pri_ratio</code></td>
 <td>double</td>
-<td><code>bioseq.aligner.secondary.score_ratio_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-score-ratio-threshold-9400999ba1fff59b/" data-entity="sql:guc:bioseq.aligner.secondary.score_ratio_threshold" data-entity-id="sql:guc:bioseq.aligner.secondary.score_ratio_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.score_ratio_threshold</a></code></td>
 </tr>
 <tr>
 <td><code>best_n</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.secondary.maximum_count</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/secondary-maximum-count-f0ae27c2751d9a5f/" data-entity="sql:guc:bioseq.aligner.secondary.maximum_count" data-entity-id="sql:guc:bioseq.aligner.secondary.maximum_count" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.secondary.maximum_count</a></code></td>
 </tr>
 <tr>
 <td><code>match_score</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.match_score</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-match-score-c81b38a571bf8012/" data-entity="sql:guc:bioseq.aligner.scoring.match_score" data-entity-id="sql:guc:bioseq.aligner.scoring.match_score" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.match_score</a></code></td>
 </tr>
 <tr>
 <td><code>mismatch_pen</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.mismatch_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-mismatch-penalty-583155fc6afbd468/" data-entity="sql:guc:bioseq.aligner.scoring.mismatch_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.mismatch_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.mismatch_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>gap_open1</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.short_gap_open_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-short-gap-open-penalty-feddbe1e6494a2ce/" data-entity="sql:guc:bioseq.aligner.scoring.short_gap_open_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.short_gap_open_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.short_gap_open_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>gap_ext1</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.short_gap_extension_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-short-gap-extension-penalty-85dc9a6446e91633/" data-entity="sql:guc:bioseq.aligner.scoring.short_gap_extension_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.short_gap_extension_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.short_gap_extension_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>gap_open2</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.long_gap_open_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-long-gap-open-penalty-65434ecc59459d6e/" data-entity="sql:guc:bioseq.aligner.scoring.long_gap_open_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.long_gap_open_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.long_gap_open_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>gap_ext2</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.long_gap_extension_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-long-gap-extension-penalty-54382229e3b17ad3/" data-entity="sql:guc:bioseq.aligner.scoring.long_gap_extension_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.long_gap_extension_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.long_gap_extension_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>sc_ambi</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.ambiguous_base_penalty</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-ambiguous-base-penalty-b78fcd32e7f0abf8/" data-entity="sql:guc:bioseq.aligner.scoring.ambiguous_base_penalty" data-entity-id="sql:guc:bioseq.aligner.scoring.ambiguous_base_penalty" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.ambiguous_base_penalty</a></code></td>
 </tr>
 <tr>
 <td><code>zdrop</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.z_drop_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-z-drop-threshold-5f0339c00193afe8/" data-entity="sql:guc:bioseq.aligner.scoring.z_drop_threshold" data-entity-id="sql:guc:bioseq.aligner.scoring.z_drop_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.z_drop_threshold</a></code></td>
 </tr>
 <tr>
 <td><code>end_bonus</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.scoring.end_bonus</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/scoring-end-bonus-b06bcd10ac75566b/" data-entity="sql:guc:bioseq.aligner.scoring.end_bonus" data-entity-id="sql:guc:bioseq.aligner.scoring.end_bonus" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.scoring.end_bonus</a></code></td>
 </tr>
 <tr>
 <td><code>max_occ</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.seeding.maximum_occurrence</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seeding-maximum-occurrence-da6fcf18eab25562/" data-entity="sql:guc:bioseq.aligner.seeding.maximum_occurrence" data-entity-id="sql:guc:bioseq.aligner.seeding.maximum_occurrence" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.seeding.maximum_occurrence</a></code></td>
 </tr>
 <tr>
 <td><code>mid_occ</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.seeding.intermediate_occurrence_threshold</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seeding-intermediate-occurrence-threshold-1b7abb16ea7727c3/" data-entity="sql:guc:bioseq.aligner.seeding.intermediate_occurrence_threshold" data-entity-id="sql:guc:bioseq.aligner.seeding.intermediate_occurrence_threshold" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.seeding.intermediate_occurrence_threshold</a></code></td>
 </tr>
 <tr>
 <td><code>block_min_size</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.block_alignment.minimum_block_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/block-alignment-minimum-block-size-cd17d511b09fd302/" data-entity="sql:guc:bioseq.aligner.block_alignment.minimum_block_size" data-entity-id="sql:guc:bioseq.aligner.block_alignment.minimum_block_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.block_alignment.minimum_block_size</a></code></td>
 </tr>
 <tr>
 <td><code>block_max_size</code></td>
 <td>int</td>
-<td><code>bioseq.aligner.block_alignment.maximum_block_size</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/block-alignment-maximum-block-size-c34965a569143058/" data-entity="sql:guc:bioseq.aligner.block_alignment.maximum_block_size" data-entity-id="sql:guc:bioseq.aligner.block_alignment.maximum_block_size" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.block_alignment.maximum_block_size</a></code></td>
 </tr>
 <tr>
 <td><code>chaining_algorithm</code></td>
 <td>int</td>
-<td><p><code>bioseq.aligner.chaining.algorithm</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/chaining-algorithm-a70e4176a38ecce3/" data-entity="sql:guc:bioseq.aligner.chaining.algorithm" data-entity-id="sql:guc:bioseq.aligner.chaining.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.chaining.algorithm</a></code></p>
 <p>Integer codes should be checked in the GUC table.</p></td>
 </tr>
 <tr>
 <td><code>base_alignment_algorithm</code></td>
 <td>int</td>
-<td><p><code>bioseq.aligner.base_alignment.algorithm</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/base-alignment-algorithm-941a0e3136fb7a7f/" data-entity="sql:guc:bioseq.aligner.base_alignment.algorithm" data-entity-id="sql:guc:bioseq.aligner.base_alignment.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.base_alignment.algorithm</a></code></p>
 <p>Integer codes should be checked in the GUC table.</p></td>
 </tr>
 <tr>
 <td><code>minimizer_algorithm</code></td>
 <td>int</td>
-<td><p><code>bioseq.aligner.minimizer.algorithm</code></p>
+<td><p><code><a class="entity-ref" href="/v0.1/reference/sql/object/minimizer-algorithm-2c63abc6f604e010/" data-entity="sql:guc:bioseq.aligner.minimizer.algorithm" data-entity-id="sql:guc:bioseq.aligner.minimizer.algorithm" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.minimizer.algorithm</a></code></p>
 <p>Integer codes should be checked in the GUC table.</p></td>
 </tr>
 <tr>
 <td><code>vulkan_enabled</code></td>
 <td>bool</td>
-<td><code>bioseq.aligner.vulkan.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/vulkan-enabled-abcada87cf4aa0df/" data-entity="sql:guc:bioseq.aligner.vulkan.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.enabled</a></code></td>
 </tr>
 <tr>
 <td><code>vulkan_seed_hits_enabled</code></td>
 <td>bool</td>
-<td><code>bioseq.aligner.vulkan.seed_lookup.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/seed-lookup-enabled-2d45d6b45590babd/" data-entity="sql:guc:bioseq.aligner.vulkan.seed_lookup.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.seed_lookup.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.seed_lookup.enabled</a></code></td>
 </tr>
 <tr>
 <td><code>vulkan_index_cache_enabled</code></td>
 <td>bool</td>
-<td><code>bioseq.aligner.vulkan.index_cache.enabled</code></td>
+<td><code><a class="entity-ref" href="/v0.1/reference/sql/object/index-cache-enabled-a0340faab2c12908/" data-entity="sql:guc:bioseq.aligner.vulkan.index_cache.enabled" data-entity-id="sql:guc:bioseq.aligner.vulkan.index_cache.enabled" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq.aligner.vulkan.index_cache.enabled</a></code></td>
 </tr>
 <tr>
 <td><code>index_read_requirement</code></td>
@@ -1411,7 +1411,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </tr>
 </tbody>
 </table>
-<h3 class="hx" id="the-index-read-requirement" data-toc-sub data-title="The index-read requirement">The index-read requirement<a data-hash href="#the-index-read-requirement" aria-label="Link to this section">#</a></h3><p class="doc-paragraph"><a id="sec-appendix-options-index-policy"></a></p><p class="doc-paragraph">This is special field that has no GUC equivalent, that is only available via <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1c82b22b8da2bca458f566d9131034e1d24320cb3233091711f732df9a06102e.json&quot;}]">aligner_options</code>. This is special flag very useful during testing and controls how index reader behaves.</p><p class="doc-paragraph"><em>Special option controling index reader</em><a id="tab-configuration-index-requirement"></a></p><table>
+<h3 class="hx" id="the-index-read-requirement" data-toc-sub data-title="The index-read requirement">The index-read requirement<a data-hash href="#the-index-read-requirement" aria-label="Link to this section">#</a></h3><p class="doc-paragraph"><a id="sec-appendix-options-index-policy"></a></p><p class="doc-paragraph">This is special field that has no GUC equivalent, that is only available via <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">aligner_options</code>. This is special flag very useful during testing and controls how index reader behaves.</p><p class="doc-paragraph"><em>Special option controling index reader</em><a id="tab-configuration-index-requirement"></a></p><table>
 <thead>
 <tr>
 <th><strong>Options field</strong></th>
@@ -1474,7 +1474,7 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -1534,16 +1534,16 @@ SET bioseq.aligner.minimizer.algorithm = 'scalar';</code></pre></figure><p class
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"Configuration reference (settings available in BioseqDB)","description":"Configuration reference (settings available in BioseqDB)","url":"https://bioseqdb.com/v0.1/tutorials/project_configuration_reference/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Configuration reference (settings available in BioseqDB)","item":"/v0.1/tutorials/project_configuration_reference/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"Configuration reference (settings available in BioseqDB)","description":"Configuration reference (settings available in BioseqDB)","url":"https://bioseqdb.com/v0.1/tutorials/project_configuration_reference/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Configuration reference (settings available in BioseqDB)","item":"/v0.1/tutorials/project_configuration_reference/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>

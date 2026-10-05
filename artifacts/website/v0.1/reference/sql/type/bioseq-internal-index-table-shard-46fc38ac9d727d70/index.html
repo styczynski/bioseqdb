@@ -4,27 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bioseq_internal.index_table_shard</title>
-<meta name="description" content="Composite SQL type bioseq_internal.index_table_shard.">
+<meta name="description" content="Composite row type for bioseq_internal.index_table_shard. Location and size of one shard of a table index.">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
 <meta property="og:title" content="bioseq_internal.index_table_shard">
-<meta property="og:description" content="Composite SQL type bioseq_internal.index_table_shard.">
+<meta property="og:description" content="Composite row type for bioseq_internal.index_table_shard. Location and size of one shard of a table index.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_internal.index_table_shard">
-<meta name="twitter:description" content="Composite SQL type bioseq_internal.index_table_shard.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:description" content="Composite row type for bioseq_internal.index_table_shard. Location and size of one shard of a table index.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -101,23 +101,24 @@
     <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb"><a href="/">Home</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/">v0.1</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/">Reference</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/">SQL</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/">bioseq_internal.index_table_shard</a><span class="dd-s0043" aria-hidden="true">/</span></nav>
     <p class="design-kind-line"><span class="design-kind-badge">sql &#183; type</span></p>
     <h1 class="dd-s0045 design-entity-title"><code>bioseq_internal.index_table_shard</code></h1>
-    <p class="dd-s0046">Composite SQL type bioseq_internal.index_table_shard.</p>
+    <p class="dd-s0046">Composite row type for bioseq_internal.index_table_shard. Location and size of one shard of a table index.</p>
   </header>
 
   
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">bioseq_internal.index_table_shard</code></pre>
+    <pre data-code><code id="entity-signature-code" class="language-sql">bioseq_internal.index_table_shard</code></pre>
   </figure>
   
 
   
+  <div class="docs-content entity-detail"><p class="doc-paragraph">Defined by <a class="entity-ref" href="/v0.1/reference/sql/object/bioseq-internal-index-table-shard-99bf2ec8b0627216/" data-entity="sql:table:bioseq_internal.index_table_shard" data-entity-id="sql:table:bioseq_internal.index_table_shard" data-entity-data-url="/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json">bioseq_internal.index_table_shard</a>.</p><h2 class="hx" id="examples" data-toc data-title="Examples">Examples<a data-hash href="#examples" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Read whole rows as values of this composite type.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-202a80f7bb8d8669-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-202a80f7bb8d8669-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:22,&quot;len&quot;:33,&quot;id&quot;:&quot;sql:type:bioseq_internal.index_table_shard&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">SELECT row_value FROM bioseq_internal.index_table_shard AS row_value LIMIT 5;</code></pre></figure></div>
 
   
   
   <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
     <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
-    <tr><td><code>database_oid</code></td><td><code>oid</code></td><td> NOT NULL.</td></tr><tr><td><code>tablespace_oid</code></td><td><code>oid</code></td><td> NOT NULL.</td></tr><tr><td><code>main_relfilenode</code></td><td><code>oid</code></td><td> NOT NULL.</td></tr><tr><td><code>column_attno</code></td><td><code>smallint</code></td><td> NOT NULL.</td></tr><tr><td><code>index_name</code></td><td><code>text</code></td><td> NOT NULL.</td></tr><tr><td><code>shard_idx</code></td><td><code>integer</code></td><td> NOT NULL.</td></tr><tr><td><code>index_relid</code></td><td><code>oid</code></td><td> NOT NULL.</td></tr><tr><td><code>bytes_written</code></td><td><code>bigint</code> = <code>0</code></td><td> NOT NULL.</td></tr><tr><td><code>is_full</code></td><td><code>boolean</code> = <code>false</code></td><td> NOT NULL.</td></tr>
+    <tr><td><code>database_oid</code></td><td><code>oid</code></td><td>Database containing the indexed table.</td></tr><tr><td><code>tablespace_oid</code></td><td><code>oid</code></td><td>Tablespace containing the indexed table.</td></tr><tr><td><code>main_relfilenode</code></td><td><code>oid</code></td><td>File number of the indexed table.</td></tr><tr><td><code>column_attno</code></td><td><code>smallint</code></td><td>Indexed column number, starting at one.</td></tr><tr><td><code>index_name</code></td><td><code>text</code></td><td>Index name stored as PostgreSQL text.</td></tr><tr><td><code>shard_idx</code></td><td><code>integer</code></td><td>Zero-based physical shard number.</td></tr><tr><td><code>index_relid</code></td><td><code>oid</code></td><td>OID of the table holding this shard&#39;s index data.</td></tr><tr><td><code>bytes_written</code></td><td><code>bigint</code> = <code>0</code></td><td>Number of payload bytes written to this shamd.</td></tr><tr><td><code>is_full</code></td><td><code>boolean</code> = <code>false</code></td><td>Whether new writes must use a later shard.</td></tr>
     </tbody></table></div>
   </section>
   
@@ -130,7 +131,7 @@
   
   
   
-  
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq/backend/pg/storage/indexing/sql_rows.cppm#L115" rel="noreferrer">bioseq.postgres.storage.indexing.sql_rows</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
   
 </article>
@@ -141,7 +142,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#examples">Examples</a><a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -155,7 +156,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -215,16 +216,16 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.index_table_shard","description":"Composite SQL type bioseq_internal.index_table_shard.","url":"https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.index_table_shard","item":"/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.index_table_shard","description":"Composite row type for bioseq_internal.index_table_shard. Location and size of one shard of a table index.","url":"https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.index_table_shard","item":"/v0.1/reference/sql/type/bioseq-internal-index-table-shard-46fc38ac9d727d70/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>

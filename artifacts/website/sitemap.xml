@@ -514,6 +514,7 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/chaining-minimum-seed-count-64e6127201037c8e/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/chaining-skip-penalty-scale-128604db0af0ebb6/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/chunk-group-row-limit-08dc23ec7133b2c1/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/chunked-scanner-enabled-9c2b267baaed51b9/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/column-cache-capacity-mb-96007fc3c2b20264/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/column-cache-enabled-9982b316d0b958ab/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/compression-algorithm-a36f31b890be137f/</loc></url>
@@ -525,6 +526,7 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/fragment-minimizer-lookup-route-ac33c8b5fe96fea8/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/fused-frontend-enabled-77c698b087517edd/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/grouped-soa-generation-enabled-87b171993876f1b3/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/in-memory-scanner-enabled-32528d3984f9bb5a/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/index-build-enabled-637de19b0baa5c56/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/index-build-run-buffer-bytes-adb935ed801ea17c/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/index-cache-enabled-a0340faab2c12908/</loc></url>
@@ -537,6 +539,7 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/minimizer-window-size-6fed0a3452234af5/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/parallel-enabled-1611fe0a3570b8bb/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/parallel-minimum-processes-cc01f697e8c9b180/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/persisted-index-failure-mode-f9d32362edfc61b1/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/pipeline-mode-8f25a70720807bd9/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/postgres-parallel-enabled-ecb2dc363651c532/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/profiling-enabled-0444a6c68b5f5d3c/</loc></url>

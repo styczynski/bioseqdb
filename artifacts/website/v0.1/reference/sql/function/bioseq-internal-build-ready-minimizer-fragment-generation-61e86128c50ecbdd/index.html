@@ -11,20 +11,20 @@
 <meta property="og:description" content="Build a stored minimizer-fragment index for one sequence in a SQL test. Publish and verdfy the generation, then return build and backend counters. Keep the active index choice and last-update timestamp unchanged.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/">
-<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_internal.build_ready_minimizer_fragment_generation">
 <meta name="twitter:description" content="Build a stored minimizer-fragment index for one sequence in a SQL test. Publish and verdfy the generation, then return build and backend counters. Keep the active index choice and last-update timestamp unchanged.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
-<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -36,7 +36,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -107,11 +107,28 @@
   
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">bioseq_internal.build_ready_minimizer_fragment_generation(regclass,text,bigint,text)</code></pre>
+    <pre data-code><code id="entity-signature-code" class="language-sql">bioseq_internal.build_ready_minimizer_fragment_generation(regclass,text,bigint,text)</code></pre>
   </figure>
   
 
   
+  <div class="docs-content entity-detail"><h2 class="hx" id="examples" data-toc data-title="Examples">Examples<a data-hash href="#examples" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Run this internal fixture in a disposable database as superuser. Build and verify a scalar-produced fragment generation for one stored sequence without changing the active read policy.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-e7bf5cf4742a6cea-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-e7bf5cf4742a6cea-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:17,&quot;len&quot;:39,&quot;id&quot;:&quot;sql:guc:bioseq.index.insert_maintenance.enabled&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/insert-maintenance-enabled-d1b9ecb5352dbdbb/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:109,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:342,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:425,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:472,&quot;len&quot;:57,&quot;id&quot;:&quot;sql:function:bioseq_internal.build_ready_minimizer_fragment_generation(regclass,text,bigint,text)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;},{&quot;start&quot;:592,&quot;len&quot;:24,&quot;id&quot;:&quot;sql:function:bioseq.column_row_number(regclass,tid)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-column-row-number-cefe97ab622e0185/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.ed951d08cf294c5b5f7e8975a3c1cded0c371381cf3f2a28ffb307889fe28e6e.json&quot;}]">BEGIN;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+CREATE TABLE doc_sequences (
+id integer, seq bioseq.seq('dna4', 64)
+) USING bioseq;
+WITH dna AS (
+SELECT string_agg(translate(md5(i::text),
+'0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS s
+FROM generate_series(1, 64) AS g(i)
+)
+INSERT INTO doc_sequences
+SELECT 1, s::bioseq.seq('dna4', 64) FROM dna
+UNION ALL
+SELECT 2, substring(s FROM 257 FOR 512)::bioseq.seq('dna4', 64) FROM dna;
+SELECT * FROM bioseq_internal.build_ready_minimizer_fragment_generation('doc_sequences'::regclass, 'minimizers_per_fragment',
+(SELECT bioseq.column_row_number('doc_sequences'::regclass, ctid) FROM doc_sequences WHERE id = 1), 'scalar');
+ROLLBACK;</code></pre></figure></div>
 
   
   <section class="design-entity-section"><h2 class="hx design-section-heading" id="parameters" data-toc data-title="Parameters">Parameters<a data-hash href="#parameters" class="dd-s0052">#</a></h2>
@@ -120,6 +137,12 @@
     </tbody></table></div>
   </section>
   
+  
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    <tr><td><code>sidecar_table</code></td><td><code>text</code></td><td>Name of the sidecar relation used to store the minimizer index.</td></tr><tr><td><code>column_attno</code></td><td><code>smallint</code></td><td>Attribute number of the sequence column in the source table.</td></tr><tr><td><code>source_sequence_rowno</code></td><td><code>bigint</code></td><td>Columnar row number of the source sequence selected for the test build.</td></tr><tr><td><code>source_epoch</code></td><td><code>text</code></td><td>Source-version epoch encoded as a fixed-width hexadecimal string.</td></tr><tr><td><code>source_num_fragments</code></td><td><code>bigint</code></td><td>Number of stored fragments in the source sequence.</td></tr><tr><td><code>source_total_bp</code></td><td><code>bigint</code></td><td>Logical length of the source sequence in bases.</td></tr><tr><td><code>selected_backend</code></td><td><code>text</code></td><td>Name of the minimizer-producing backend selected for the build.</td></tr><tr><td><code>layout</code></td><td><code>smallint</code></td><td>Persisted minimizer layout identifier; 5 denotes the segment-local grouped-SoA layout.</td></tr><tr><td><code>is_published</code></td><td><code>boolean</code></td><td>Whether the completed generation was published.</td></tr><tr><td><code>is_head_manifest_verified</code></td><td><code>boolean</code></td><td>Whether the fixture verified the published head and manifest against the completed generation.</td></tr><tr><td><code>generation_id</code></td><td><code>bigint</code></td><td>Identifier of the published minimizer generation.</td></tr><tr><td><code>source_identity</code></td><td><code>text</code></td><td>Source identity bound to the published generation, encoded as a fixed-width hexadecimal string.</td></tr><tr><td><code>source_content_checksum</code></td><td><code>text</code></td><td>Source-content checksum bound to the published generation, encoded as a fixed-width hexadecimal string.</td></tr><tr><td><code>compatibility_checksum</code></td><td><code>text</code></td><td>Checksum of the persisted storage contract, encoded as a fixed-width hexadecimal string.</td></tr><tr><td><code>manifest_target_length</code></td><td><code>bigint</code></td><td>Sequence length in bases recorded in the generation manifest.</td></tr><tr><td><code>kmer_size</code></td><td><code>smallint</code></td><td>Number of bases per k-mer recorded in the manifest.</td></tr><tr><td><code>window_size</code></td><td><code>smallint</code></td><td>Number of consecutive k-mers per minimizer window recorded in the manifest.</td></tr><tr><td><code>minimizer_scheme_id</code></td><td><code>integer</code></td><td>Identifier of the hashing and minimizer-selection scheme recorded in the manifest.</td></tr><tr><td><code>minimizer_scheme_revision</code></td><td><code>integer</code></td><td>Revision of the hashing and minimizer-selection scheme recorded in the manifest.</td></tr><tr><td><code>gpu_abi_revision</code></td><td><code>integer</code></td><td>GPU data-interface revision recorded in the persisted manifest.</td></tr><tr><td><code>position_segment_span_bp</code></td><td><code>bigint</code></td><td>Number of bases covered by each position segment in the manifest.</td></tr><tr><td><code>position_segment_count</code></td><td><code>integer</code></td><td>Number of position segments recorded in the manifest.</td></tr><tr><td><code>writer_rows</code></td><td><code>bigint</code></td><td>Number of encoded index rows recorded by the generation writer.</td></tr><tr><td><code>writer_batches</code></td><td><code>bigint</code></td><td>Number of catalog multi-insert batches performed by the generation writer.</td></tr><tr><td><code>control_count</code></td><td><code>bigint</code></td><td>Number of control entries recorded in the published generation manifest.</td></tr><tr><td><code>position_count</code></td><td><code>bigint</code></td><td>Number of minimizer positions recorded in the published generation manifest.</td></tr><tr><td><code>producer_scan_count</code></td><td><code>bigint</code></td><td>Total producer scan attempts, including geometry retries.</td></tr><tr><td><code>geometry_retry_count</code></td><td><code>bigint</code></td><td>Extra producer scans recorded when the persisted position-segment span changes between replays.</td></tr><tr><td><code>short_core_runs</code></td><td><code>bigint</code></td><td>Number of core collection runs whose available sequence context was too short for a minimizer window.</td></tr><tr><td><code>scalar_core_runs</code></td><td><code>bigint</code></td><td>Number of core collection runs handled by the scalar backend.</td></tr><tr><td><code>exact_simd_core_runs</code></td><td><code>bigint</code></td><td>Number of core collection runs handled by the exact SIMD backend.</td></tr><tr><td><code>bounded_nthash_core_runs</code></td><td><code>bigint</code></td><td>Number of core collection runs handled by the bounded ntHash SIMD backend.</td></tr><tr><td><code>vulkan_core_runs</code></td><td><code>bigint</code></td><td>Number of core collection runs handled by the Vulkan backend.</td></tr><tr><td><code>is_execution_accepted</code></td><td><code>boolean</code></td><td>Whether the fragment execution receipt accepts the selected backend, layout, work counters, and required producer scan count.</td></tr><tr><td><code>are_exact_simd_stats_available</code></td><td><code>boolean</code></td><td>Whether the execution receipt contains exact SIMD statistics.</td></tr><tr><td><code>are_exact_simd_stats_consistent</code></td><td><code>boolean</code></td><td>Whether exact SIMD statistics are present and pass consistency checks requiring nonempty vector work.</td></tr><tr><td><code>exact_simd_vector_batches</code></td><td><code>bigint</code></td><td>Number of vector batches recorded by the exact SIMD backend.</td></tr><tr><td><code>exact_simd_scalar_backend_branches</code></td><td><code>bigint</code></td><td>Number of scalar-backend branches recorded during exact SIMD execution.</td></tr><tr><td><code>are_bounded_nthash_stats_available</code></td><td><code>boolean</code></td><td>Whether the execution receipt contains bounded ntHash SIMD statistics.</td></tr><tr><td><code>bounded_nthash_status</code></td><td><code>text</code></td><td>Diagnostic status of bounded ntHash execution; ok denotes success, while invalid_state is the initial value when that backend did not run.</td></tr><tr><td><code>are_bounded_nthash_stats_consistent</code></td><td><code>boolean</code></td><td>Whether bounded ntHash statistics are present, have status ok, and pass consistency checks requiring nonempty vector work.</td></tr><tr><td><code>bounded_nthash_packed_decode_batches</code></td><td><code>bigint</code></td><td>Number of packed-symbol decoding batches recorded by the bounded ntHash SIMD backend.</td></tr><tr><td><code>bounded_nthash_fallback_calls</code></td><td><code>bigint</code></td><td>Number of fallback calls recorded by the bounded ntHash SIMD backend.</td></tr><tr><td><code>vulkan_completed_roundtrips</code></td><td><code>bigint</code></td><td>Number of completed Vulkan dispatch and result-download round trips.</td></tr><tr><td><code>vulkan_downloaded_minimizers</code></td><td><code>bigint</code></td><td>Number of minimizers downloaded from completed Vulkan work.</td></tr>
+    </tbody></table></div>
+  </section>
   
   
   <p class="design-return"><span>Returns</span><code>TABLE(sidecar_table text, column_attno smallint, source_sequence_rowno bigint, source_epoch text, source_num_fragments bigint, source_total_bp bigint, selected_backend text, layout smallint, is_published boolean, is_head_manifest_verified boolean, generation_id bigint, source_identity text, source_content_checksum text, compatibility_checksum text, manifest_target_length bigint, kmer_size smallint, window_size smallint, minimizer_scheme_id integer, minimizer_scheme_revision integer, gpu_abi_revision integer, position_segment_span_bp bigint, position_segment_count integer, writer_rows bigint, writer_batches bigint, control_count bigint, position_count bigint, producer_scan_count bigint, geometry_retry_count bigint, short_core_runs bigint, scalar_core_runs bigint, exact_simd_core_runs bigint, bounded_nthash_core_runs bigint, vulkan_core_runs bigint, is_execution_accepted boolean, are_exact_simd_stats_available boolean, are_exact_simd_stats_consistent boolean, exact_simd_vector_batches bigint, exact_simd_scalar_backend_branches bigint, are_bounded_nthash_stats_available boolean, bounded_nthash_status text, are_bounded_nthash_stats_consistent boolean, bounded_nthash_packed_decode_batches bigint, bounded_nthash_fallback_calls bigint, vulkan_completed_roundtrips bigint, vulkan_downloaded_minimizers bigint)</code></p>
@@ -130,7 +153,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/backend/pg/extension/index.cppm#L990" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq/backend/pg/extension/index.cppm#L2477" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
   
 </article>
@@ -141,7 +164,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#examples">Examples</a><a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -155,7 +178,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -215,16 +238,16 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.build_ready_minimizer_fragment_generation","description":"Build a stored minimizer-fragment index for one sequence in a SQL test. Publish and verdfy the generation, then return build and backend counters. Keep the active index choice and last-update timestamp unchanged.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.build_ready_minimizer_fragment_generation","item":"/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/"}]}]}</script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
-<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
-<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.build_ready_minimizer_fragment_generation","description":"Build a stored minimizer-fragment index for one sequence in a SQL test. Publish and verdfy the generation, then return build and backend counters. Keep the active index choice and last-update timestamp unchanged.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.build_ready_minimizer_fragment_generation","item":"/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-fragment-generation-61e86128c50ecbdd/"}]}]}</script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
+<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
+<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
 
 </body>
 </html>
