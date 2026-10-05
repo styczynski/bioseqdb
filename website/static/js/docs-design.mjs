@@ -327,6 +327,10 @@ function loadEntityDataset(url) {
 
 function entityKind(kind) {
   const value = String(kind || "").toLowerCase();
+  if (value === "setting") {
+    return { label: "Setting", tone: "type", color: "#8fd6ba",
+      background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)" };
+  }
   if (value === "sql_object") {
     return { label: "SQL object", tone: "type", color: "#8fd6ba",
       background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)" };
@@ -351,7 +355,7 @@ function entityKind(kind) {
 
 function entityLocation(kind) {
   const value = String(kind || "").toLowerCase();
-  return value.startsWith("sql_") || value === "overload_group" ? "bioseq — SQL" : "bioseq — C++ reference";
+  return value.startsWith("sql_") || value === "overload_group" || value === "setting" ? "bioseq — SQL" : "bioseq — C++ reference";
 }
 
 function popovers() {
@@ -400,6 +404,25 @@ function popovers() {
     const summary = document.createElement("p");
     summary.textContent = record.summary || "View the generated reference for details.";
     body.appendChild(summary);
+    if (record.setting) {
+      const settings = document.createElement("div");
+      settings.className = "entity-pop-params";
+      for (const key of ["Type", "Default", "Minimum", "Maximum", "Unit", "Possible values"]) {
+        const value = record.setting[key];
+        if (value == null || value === "Not applicable") continue;
+        const row = document.createElement("div");
+        row.className = "entity-pop-param";
+        const label = document.createElement("span");
+        label.className = "entity-pop-param-name";
+        label.textContent = key;
+        const detail = document.createElement("span");
+        detail.className = "entity-pop-param-detail";
+        detail.textContent = value === "" ? "''" : value;
+        row.append(label, detail);
+        settings.appendChild(row);
+      }
+      body.appendChild(settings);
+    }
     if (Array.isArray(record.parameters) && record.parameters.length) {
       const parameters = document.createElement("div");
       parameters.className = "entity-pop-params";

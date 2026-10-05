@@ -316,6 +316,8 @@ struct sql_manifest_public_entity {
     std::size_t source_line{};
     std::string brief;
     std::string details;
+    // Source-owned examples, setting values, return documentation and SQL aliases.
+    std::vector<content_node> additional_documentation;
     std::string result_sql_type;
     std::vector<parameter_description> parameters;
     std::vector<parameter_description> fields;
@@ -324,6 +326,30 @@ struct sql_manifest_public_entity {
     std::string qualified_name;
     bool public_documentation{};
 };
+
+[[nodiscard]] content_node reference_heading(std::string text, std::string anchor) {
+    return content_node{.kind = content_node_kind::heading,
+        .attributes = {{"level", "2"}, {"anchor", std::move(anchor)}},
+        .children = {content_node{.kind = content_node_kind::text, .text = std::move(text)}}};
+}
+
+[[nodiscard]] content_node reference_paragraph(std::string text) {
+    return content_node{.kind = content_node_kind::paragraph,
+        .children = {content_node{.kind = content_node_kind::text, .text = std::move(text)}}};
+}
+
+void append_documentation_examples(std::vector<content_node>& nodes,
+                                  const boost::json::value* examples) {
+    if (!examples || !examples->is_array() || examples->as_array().empty()) return;
+    nodes.push_back(reference_heading("Examples", "examples"));
+    for (const auto& example : examples->as_array()) {
+        const auto& item = example.as_object();
+        nodes.push_back(reference_paragraph(std::string(item.at("description").as_string())));
+        nodes.push_back(content_node{.kind = content_node_kind::code_block,
+            .text = std::string(item.at("sql").as_string()),
+            .attributes = {{"language", "sql"}}});
+    }
+}
 
 /// @brief SQL manifest data needed for catalog checks and website documentation.
 struct sql_manifest_public_projection {
@@ -661,6 +687,7 @@ parse_sql_manifest_public_projection(
             }
         }
         for (const auto key : {"options", "routine_properties"}) {
+            if (kind == "guc") continue; // Show typed setting metadata, not C++ option expressions.
             const auto* options = entity.if_contains(key);
             if (!options || !options->is_object()) continue;
             for (const auto& option : options->as_object()) {
@@ -686,6 +713,124 @@ parse_sql_manifest_public_projection(
                     documented.fields.push_back(std::move(field));
                     break;
                 }
+            }
+        }
+        if (const auto* result = entity.if_contains("result"); result && result->is_object()) {
+            const auto* description = result->as_object().if_contains("documentation");
+            if (description && description->is_string() && !description->as_string().empty()) {
+                documented.additional_documentation.push_back(reference_heading("Return value", "return-value"));
+                documented.additional_documentation.push_back(reference_paragraph(std::string(description->as_string())));
+            }
+        }
+        if (const auto* fields = entity.if_contains("documentation_fields"); fields && fields->is_array()) {
+            for (const auto& field : fields->as_array()) {
+                const auto& item = field.as_object();
+                parameter_description described{.name = require_string(item, "name"),
+                    .description = {content_node{.kind = content_node_kind::text,
+                        .text = require_string(item, "description")}}};
+                bool replaced = false;
+                for (auto& existing : documented.fields) if (existing.name == described.name) {
+                    existing.description = described.description;
+                    replaced = true;
+                    break;
+                }
+                if (!replaced) documented.fields.push_back(std::move(described));
+            }
+        }
+        const auto append_operator = [&](const boost::json::object& binding, bool implementation) {
+            const auto get = [&](std::string_view key) { return require_string(binding, key); };
+            documented.additional_documentation.push_back(content_node{
+                .kind = content_node_kind::code_block,
+                .text = get("left_type") + " " + get("symbol") + " " + get("right_type"),
+                .attributes = {{"language", "sql"}}});
+            const auto id = get(implementation ? "function_identity" : "operator_identity");
+            const auto label = resolve_extension_identity(id.substr(id.find(':', 4) + 1));
+            documented.additional_documentation.push_back(content_node{
+                .kind = content_node_kind::paragraph,
+                .children = {
+                    content_node{.kind = content_node_kind::text,
+                        .text = implementation ? "Implemented by " : "SQL operator alias: "},
+                    content_node{.kind = content_node_kind::entity_link,
+                        .text = label, .target = id, .attributes = {{"entity_id", id}}},
+                    content_node{.kind = content_node_kind::text,
+                        .text = implementation ? ". The operator and this function invoke the same implementation."
+                            : ". The function and this operator invoke the same implementation."}
+                }});
+        };
+        if (const auto* binding = entity.if_contains("operator_binding"); binding && binding->is_object()) {
+            documented.additional_documentation.push_back(reference_heading("Operator", "operator"));
+            append_operator(binding->as_object(), true);
+        }
+        if (const auto* aliases = entity.if_contains("operator_aliases"); aliases && aliases->is_array()
+            && !aliases->as_array().empty()) {
+            documented.additional_documentation.push_back(reference_heading("Operator aliases", "operator-aliases"));
+            for (const auto& alias : aliases->as_array()) append_operator(alias.as_object(), false);
+        }
+        if (kind != "guc") append_documentation_examples(documented.additional_documentation,
+                                      entity.if_contains("documentation_examples"));
+        if (kind == "guc") {
+            const auto* generation = root.if_contains("guc_generation");
+            const auto* registrations = generation && generation->is_object()
+                ? generation->as_object().if_contains("registrations") : nullptr;
+            if (registrations && registrations->is_array()) for (const auto& item : registrations->as_array()) {
+                const auto& registration = item.as_object();
+                if (require_string(registration, "name") != documented.qualified_name) continue;
+                const auto& authority = registration.at("generated_live_authority").as_object();
+                const auto property = [&](std::string_view key, std::string_view title) {
+                    const auto* value = authority.if_contains(key);
+                    if (value && value->is_string()) documented.attributes[std::string(title)] = std::string(value->as_string());
+                };
+                property("vartype", "Type");
+                property("boot_value", "Default");
+                property("minimum", "Minimum");
+                property("maximum", "Maximum");
+                property("unit", "Unit");
+                property("context", "Context");
+                if (documented.attributes["Type"] == "bool") documented.attributes["Possible values"] = "on, off";
+                if (const auto* values = authority.if_contains("visible_enum_values"); values && values->is_array()) {
+                    std::string choices;
+                    for (const auto& value : values->as_array()) {
+                        if (!choices.empty()) choices += ", ";
+                        choices += std::string(value.as_string());
+                    }
+                    if (!choices.empty()) documented.attributes["Possible values"] = std::move(choices);
+                }
+                if (!documented.attributes.contains("Minimum")) documented.attributes["Minimum"] = "Not applicable";
+                if (!documented.attributes.contains("Maximum")) documented.attributes["Maximum"] = "Not applicable";
+                documented.attributes["Visible in SHOW ALL"] = authority.at("visible_in_show_all").as_bool() ? "Yes" : "No";
+                if (const auto* documentation = registration.if_contains("documentation"); documentation && documentation->is_object()) {
+                    const auto& doc = documentation->as_object();
+                    if (!documented.attributes.contains("Unit")) {
+                        if (const auto* unit = doc.if_contains("display_unit"); unit && unit->is_string() && !unit->as_string().empty())
+                            documented.attributes["Unit"] = std::string(unit->as_string());
+                    }
+                    if (const auto* description = doc.if_contains("description"); description && description->is_string())
+                        documented.details = std::string(description->as_string());
+                    if (const auto* values = doc.if_contains("possible_values"); values && values->is_array() && !values->as_array().empty()) {
+                        documented.additional_documentation.push_back(reference_heading("Possible values", "possible-values"));
+                        content_node table{.kind = content_node_kind::table,
+                            .attributes = {{"class", "reference-values-table"}}};
+                        table.children.push_back(content_node{.kind = content_node_kind::table_row,
+                            .children = {
+                                content_node{.kind = content_node_kind::table_cell, .attributes = {{"scope", "col"}}, .children = {content_node{.kind = content_node_kind::text, .text = "Value"}}},
+                                content_node{.kind = content_node_kind::table_cell, .attributes = {{"scope", "col"}}, .children = {content_node{.kind = content_node_kind::text, .text = "Meaning"}}}}});
+                        for (const auto& value : values->as_array()) {
+                            const auto& row = value.as_object();
+                            std::string description = require_string(row, "description");
+                            if (const auto* compiled = row.if_contains("compiled"); compiled && compiled->is_bool() && !compiled->as_bool())
+                                description += " Not available in this build.";
+                            if (const auto* hidden = row.if_contains("hidden"); hidden && hidden->is_bool() && hidden->as_bool())
+                                description += " Hidden value.";
+                            table.children.push_back(content_node{.kind = content_node_kind::table_row,
+                                .children = {
+                                    content_node{.kind = content_node_kind::table_cell, .children = {content_node{.kind = content_node_kind::code_span, .text = require_string(row, "value")}}},
+                                    content_node{.kind = content_node_kind::table_cell, .children = {content_node{.kind = content_node_kind::text, .text = std::move(description)}}}}});
+                        }
+                        documented.additional_documentation.push_back(std::move(table));
+                    }
+                    append_documentation_examples(documented.additional_documentation, doc.if_contains("examples"));
+                }
+                break;
             }
         }
         // Keep the security projection byte-for-byte equivalent in membership.
@@ -1073,6 +1218,7 @@ namespace {
 [[nodiscard]] bool reference_attribute_visible(std::string_view name) {
     return name != "refid" && name != "stable_identity" && name != "installed_identity"
         && name != "documentation_authority" && name != "sql_manifest_script_sha256"
+        && name != "documentation_owner"
         && name != "public_documentation" && name != "catalog_comment"
         && name != "declaration" && name != "sql_kind";
 }
@@ -1110,7 +1256,7 @@ namespace {
     std::string display_kind(entity_kind_name(entity.kind));
     if (entity.domain == entity_domain::sql) {
         if (const auto kind = entity.attributes.find("sql_kind"); kind != entity.attributes.end())
-            display_kind = kind->second;
+            display_kind = kind->second == "guc" ? "setting" : kind->second;
         else if (display_kind.starts_with("sql_")) display_kind.erase(0,4);
     }
     object["kind"] = html_escape(display_kind);
@@ -2103,6 +2249,15 @@ namespace {
         record["title"] = entity.display_name;
         record["qualified_name"] = entity.qualified_name;
         record["kind"] = std::string(entity_kind_name(entity.kind));
+        if (entity.canonical_id.starts_with("sql:guc:")) {
+            record["kind"] = "setting";
+            boost::json::object setting;
+            for (const auto& key : {"Type", "Default", "Minimum", "Maximum", "Unit", "Context", "Possible values"}) {
+                if (const auto field = entity.attributes.find(key); field != entity.attributes.end())
+                    setting[key] = field->second;
+            }
+            record["setting"] = std::move(setting);
+        }
         record["signature"] = entity.normalized_signature;
         record["summary"] = entity.summary_text;
         record["route"] = entity.route_path;

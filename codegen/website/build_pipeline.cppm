@@ -269,6 +269,18 @@ void verify_website_pipeline() {
     expect(ranges.size() == 4 && ranges[0].as_object().at("start").as_int64() == 33
         && render_content_html(linked_sql).contains("sql:type:bioseq.seq"),
         "automatic SQL links repeat names, resolve bare functions, skip comments/literals, and count UTF-16 offsets");
+    auto settings_table = parse_markdown_content(
+        "<table><tr><td><code>bioseq.index.insert_maintenance.enabled</code></td>"
+        "<td>Original description.</td></tr></table>\n").children;
+    decorate_code_entity_ranges(settings_table,
+        {{"sql:guc:bioseq.index.insert_maintenance.enabled", "/setting/"}},
+        {{"sql:guc:bioseq.index.insert_maintenance.enabled", "bioseq.index.insert_maintenance.enabled"}},
+        "/entities.json", "setting-table-test");
+    const auto settings_html = render_content_html(settings_table);
+    expect(settings_html.contains("<code><a class=\"entity-ref\" href=\"/setting/\"")
+        && settings_html.contains("data-entity-data-url=\"/entities.json\"")
+        && settings_html.contains("<td>Original description.</td>"),
+        "authored configuration table code cells link to setting documentation without changing prose");
     // MD4C.
     const content_node document =
         parse_markdown_content("# Sequence type\n\nThe `bioseq.seq` column stores DNA.\n");
@@ -1498,6 +1510,7 @@ struct loaded_sql_manifest_projection {
     std::string path;
     std::string text;
     sql_manifest_public_projection projection;
+    bool documentation_only{};
 };
 
 [[nodiscard]] std::vector<loaded_sql_manifest_projection>
@@ -2379,8 +2392,32 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     if (!options.contains("sql-manifest")) {
         throw std::runtime_error("website SQL projection requires the generated --sql-manifest");
     }
-    const std::vector<loaded_sql_manifest_projection> manifests =
-        load_sql_manifest_projections(options);
+    std::vector<loaded_sql_manifest_projection> manifests = load_sql_manifest_projections(options);
+    // The configuration appendix also describes settings compiled only into
+    // test builds. Import those declarations as documentation without adding
+    // catalog schemas, executable routines, or grants to the runtime projection.
+    if (const auto extra = options.find("sql-documentation-manifest"); extra != options.end()) {
+        std::set<std::string, std::less<>> documented_ids;
+        for (const auto& manifest : manifests)
+            for (const auto& entity : manifest.projection.documentation_entities)
+                documented_ids.insert(entity.stable_identity);
+        auto text = read_artifact_bytes(extra->second);
+        auto projection = parse_sql_manifest_public_projection(text, extra->second);
+        std::erase_if(projection.documentation_entities, [&](const auto& entity) {
+            return entity.kind != "guc" || documented_ids.contains(entity.stable_identity);
+        });
+        for (auto& entity : projection.documentation_entities) {
+            entity.public_documentation = false;
+            entity.attributes["Availability"] = "Test builds only";
+        }
+        projection.entities.clear();
+        projection.catalog_schemas.clear();
+        projection.documentation_schemas.clear();
+        projection.restricted_sequence_names.clear();
+        manifests.push_back(loaded_sql_manifest_projection{
+            .path = extra->second, .text = std::move(text), .projection = std::move(projection),
+            .documentation_only = true});
+    }
     struct manifest_binding {
         const sql_manifest_public_entity* entity;
         const sql_manifest_public_projection* projection;
@@ -2401,7 +2438,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     };
     for (const loaded_sql_manifest_projection& manifest : manifests) {
         model.inputs.push_back(source_input{
-            .path = "generated/" + manifest.projection.extension_name + "-sql-manifest.json",
+            .path = "generated/" + manifest.projection.extension_name
+                + (manifest.documentation_only ? "-additional-settings-manifest.json" : "-sql-manifest.json"),
             .content_hash = bioseq::common::sha256_hex(manifest.text),
         });
         for (const sql_manifest_public_entity& entity : manifest.projection.documentation_entities) {
@@ -2421,6 +2459,15 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             .kind = content_node_kind::paragraph,
             .children = {content_node{.kind = content_node_kind::text, .text = source.details}},
         }};
+        entity.detail_content.insert(entity.detail_content.end(),
+            source.additional_documentation.begin(), source.additional_documentation.end());
+        if (entity.fields.empty() && entity.return_type
+            && entity.return_type->starts_with("TABLE(") && entity.return_type->ends_with(')')) {
+            const auto columns = bioseq::codegen::sql::parse_routine_argument_declarations(
+                std::string_view(*entity.return_type).substr(6, entity.return_type->size() - 7));
+            for (const auto& column : columns) entity.fields.push_back(parameter_description{
+                .name = column.name, .type = column.sql_type});
+        }
         // Preserve catalog argument types/defaults while attaching authored names and docs.
         if (entity.parameters.empty()) entity.parameters = source.parameters;
         else for (std::size_t index = 0; index < entity.parameters.size()
@@ -2499,6 +2546,52 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     }
     model.omitted_sql_entities.clear();
 
+    // PostgreSQL creates a composite row type for each annotated relation and
+    // indexes for its declared constraints. Their reference pages inherit the
+    // source declaration and field meanings instead of becoming empty pages.
+    std::map<std::string, const reference_entity*, std::less<>> relations;
+    for (const auto& entity : model.sql_entities) {
+        const auto kind = entity.attributes.find("sql_kind");
+        if (kind != entity.attributes.end() && (kind->second == "table" || kind->second == "view"))
+            relations.emplace(entity.qualified_name, &entity);
+    }
+    for (auto& entity : model.sql_entities) {
+        if (entity.attributes.contains("documentation_authority")
+            && entity.attributes.at("documentation_authority") == "generated_sql_manifest") continue;
+        std::string owner_name;
+        if (entity.kind == entity_kind::sql_type && relations.contains(entity.qualified_name))
+            owner_name = entity.qualified_name;
+        else if (const auto table = entity.attributes.find("table"); table != entity.attributes.end())
+            owner_name = table->second;
+        const auto owner = relations.find(owner_name);
+        if (owner == relations.end()) continue;
+        const auto& source = *owner->second;
+        entity.declaration = source.declaration;
+        entity.module_name = source.module_name;
+        entity.attributes["documentation_authority"] = "generated_sql_manifest_relation";
+        entity.attributes["documentation_owner"] = source.canonical_id;
+        for (auto& field : entity.fields) {
+            const auto found = std::ranges::find(source.fields, field.name, &parameter_description::name);
+            if (found != source.fields.end()) field.description = found->description;
+        }
+        const bool row_type = entity.kind == entity_kind::sql_type;
+        entity.summary_text = (row_type ? "Composite row type for " : "Index on ") + owner_name + ". " + source.summary_text;
+        entity.detail_content.push_back(content_node{.kind = content_node_kind::paragraph,
+            .children = {
+                content_node{.kind = content_node_kind::text, .text = "Defined by "},
+                content_node{.kind = content_node_kind::entity_link, .text = owner_name,
+                    .target = source.canonical_id, .attributes = {{"entity_id", source.canonical_id}}},
+                content_node{.kind = content_node_kind::text, .text = "."}}});
+        entity.detail_content.push_back(reference_heading("Examples", "examples"));
+        entity.detail_content.push_back(reference_paragraph(row_type
+            ? "Read whole rows as values of this composite type."
+            : "Inspect the index definition installed by the extension."));
+        entity.detail_content.push_back(content_node{.kind = content_node_kind::code_block,
+            .text = row_type ? "SELECT row_value FROM " + owner_name + " AS row_value LIMIT 5;"
+                : "SELECT pg_get_indexdef('" + entity.qualified_name + "'::regclass);",
+            .attributes = {{"language", "sql"}}});
+    }
+
     // Group every overloaded SQL function under its shared qualified name.
     {
         std::map<std::string, std::vector<const reference_entity*>, std::less<>> by_name;
@@ -2535,6 +2628,9 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             group.summary_text = members.front()->summary_text.empty()
                 ? "Overloaded SQL function with " + std::to_string(members.size()) + " signatures."
                 : members.front()->summary_text;
+            // The first overload's source example is an actual invocation of
+            // this function family; keep it visible on its search landing page.
+            group.detail_content = members.front()->detail_content;
             for (const reference_entity* member : members) {
                 group.overload_ids.push_back(member->canonical_id);
             }
@@ -3605,7 +3701,9 @@ void decorate_code_entity_ranges(
                 ids[spelling] = id;
         };
         add(qualified);
-        if (const auto dot = qualified.rfind('.'); dot != std::string::npos)
+        if (id.starts_with("sql:guc:")) {
+            if (qualified.starts_with("bioseq.")) add(qualified.substr(7));
+        } else if (const auto dot = qualified.rfind('.'); dot != std::string::npos)
             add(qualified.substr(dot + 1));
     }
     const auto identifier = [](unsigned char c) {
@@ -3622,6 +3720,42 @@ void decorate_code_entity_ranges(
     };
     const auto walk = [&](std::vector<content_node>& list, auto&& self) -> void {
         for (content_node& node : list) {
+            if (node.kind == content_node_kind::raw_html && node.text.contains("<code>")) {
+                // Imported configuration tables retain authored HTML. Split
+                // only plain code-cell text into a typed link node, leaving
+                // table markup and wording untouched by the linker.
+                std::vector<content_node> fragments;
+                std::size_t consumed = 0;
+                std::size_t cursor = 0;
+                while ((cursor = node.text.find("<code>", cursor)) != std::string::npos) {
+                    const auto begin = cursor + 6;
+                    const auto end = node.text.find("</code>", begin);
+                    if (end == std::string::npos) break;
+                    const auto spelling = node.text.substr(begin, end - begin);
+                    const auto found = ids.find(spelling);
+                    const auto last_anchor = node.text.rfind("<a ", cursor);
+                    const auto last_close = node.text.rfind("</a>", cursor);
+                    const bool inside_link = last_anchor != std::string::npos
+                        && (last_close == std::string::npos || last_anchor > last_close);
+                    if (found != ids.end() && found->second.starts_with("sql:guc:")
+                        && !inside_link && route_by_id.contains(found->second)) {
+                        fragments.push_back(content_node{.kind = content_node_kind::raw_html,
+                            .text = node.text.substr(consumed, begin - consumed)});
+                        fragments.push_back(content_node{.kind = content_node_kind::entity_link,
+                            .text = spelling, .target = route_by_id.at(found->second),
+                            .attributes = {{"entity_id", found->second}, {"tooltip_url", tooltip_url}}});
+                        consumed = end;
+                    }
+                    cursor = end + 7;
+                }
+                if (!fragments.empty()) {
+                    fragments.push_back(content_node{.kind = content_node_kind::raw_html,
+                        .text = node.text.substr(consumed)});
+                    node.kind = content_node_kind::root;
+                    node.text.clear();
+                    node.children = std::move(fragments);
+                }
+            }
             const bool inline_code = node.kind == content_node_kind::code_span;
             const auto language = node.attributes.find("language");
             if (inline_code || (node.kind == content_node_kind::code_block
@@ -4274,6 +4408,7 @@ void decorate_code_entity_ranges(
                                    &identity_by_reference,
                                    &qualified_by_id,
                                    &model,
+                                   &node_plain_text,
                                    &render,
                                    &revision,
                                    &route_by_id,
@@ -4331,6 +4466,16 @@ void decorate_code_entity_ranges(
                 entity_toc += "{\"level\":2,\"text\":" + json_text(std::string(text))
                     + ",\"anchor\":" + json_text(std::string(anchor)) + "}";
             };
+            const bool is_setting = entity.canonical_id.starts_with("sql:guc:");
+            if (is_setting) add_toc("Setting", "setting");
+            const auto detail_toc = [&](const content_node& node, auto&& self) -> void {
+                if (node.kind == content_node_kind::heading) {
+                    const auto anchor = node.attributes.find("anchor");
+                    if (anchor != node.attributes.end()) add_toc(node_plain_text(node, node_plain_text), anchor->second);
+                }
+                for (const auto& child : node.children) self(child, self);
+            };
+            for (const auto& node : entity.detail_content) detail_toc(node, detail_toc);
             if (!entity.parameters.empty()) {
                 add_toc("Parameters", "parameters");
             }
@@ -4340,7 +4485,7 @@ void decorate_code_entity_ranges(
                 entity.attributes, [](const auto& attribute) {
                     return reference_attribute_visible(attribute.first);
                 });
-            if (has_visible_attributes) {
+            if (has_visible_attributes && !is_setting) {
                 add_toc(entity.domain == entity_domain::sql ? "Attributes" : "Qualifiers",
                         "attributes");
             }
@@ -4641,7 +4786,7 @@ void decorate_code_entity_ranges(
         "source", "version", "site-config", "cpp-entities", "sql-entities",
         "templates", "static", "output", "base-path", "source-revision",
         "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
-        "staged-extension-sha256", "cpp-signature", "sql-manifest",
+        "staged-extension-sha256", "cpp-signature", "sql-manifest", "sql-documentation-manifest",
         "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"});
     static constexpr auto flag_keys = std::to_array<std::string_view>({"include-drafts", "isolated"});
     static constexpr auto repeatable_value_keys = std::to_array<std::string_view>({
@@ -4886,7 +5031,7 @@ void decorate_code_entity_ranges(
 [[nodiscard]] int execute_site_model_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "sql-manifest", "base-path", "source-revision", "output-model", "cpp-signature",
+        "sql-manifest", "sql-documentation-manifest", "base-path", "source-revision", "output-model", "cpp-signature",
         "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
         "port", "template-db", "report-dir"});
     static constexpr auto flag_keys = std::to_array<std::string_view>({"include-drafts", "isolated"});

@@ -55,3 +55,21 @@ The `bioseq_sql_public_api` documentation group continues to control the existin
 runnable-example grants. Adding a reference page does not grant an example access
 to that SQL entity. SQL code blocks and inline SQL names use the same generated
 reference records for links and hover descriptions.
+
+Keep reference examples in the declaration's Doxygen comment as fenced `sql`
+blocks. Begin each block with a `--` comment explaining its use; the generator
+renders that comment as the example description. Document annotated composite
+and table fields with `@brief` on each field. For view columns or `RETURNS TABLE`
+columns, use `@remark website.field column_name: Description.` on the declaration.
+Operator aliases and links to their implementation functions come from the SQL
+annotations, so they do not need a second manually maintained list.
+
+Setting declarations retain their type, default, limits, units and context in
+the `bioseq_sql::guc` annotation and C++ initializer. Their Doxygen comments add
+`@remark Configuration: ...`, ``@remark Value `value`: ...`` and, where the native
+setting has no unit, `@remark Display unit: ...`. The generated SQL manifest
+combines those comments with the registration metadata. Test-only settings are
+also documented and labeled; importing their documentation does not install
+their SQL objects or expand runnable-example grants. The website build checks
+setting metadata, examples, operator links and field descriptions against the
+source manifests, including links in the imported configuration tables.

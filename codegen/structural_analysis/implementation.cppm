@@ -1344,6 +1344,8 @@ struct scope_region {
                 ? after_command("returns")
                 : after_command("return");
             current = section::returns;
+        } else if (line.empty()) {
+            current = section::details;
         } else if (!line.empty() && line != "/" && line != "*/") {
             auto append = [&line](std::string& destination) {
                 if (!destination.empty()) destination += ' ';
@@ -6489,6 +6491,22 @@ class structural_consumer final : public clang::ASTConsumer {
                 if (candidate != lexical_candidates.end()) {
                     declaration.documentation = *candidate;
                 }
+            }
+            // Clang's comment AST folds Markdown SQL fences into prose (and
+            // sometimes into the preceding @remark). The lexical view retains
+            // the fence and its line breaks, so use it for documented examples.
+            // Existing native briefs remain authoritative when the raw comment
+            // relies on Doxygen's implicit first-sentence brief.
+            const auto fenced = std::ranges::find_if(lexical_candidates,
+                [](const documentation_record& candidate) {
+                    return !candidate.runnable_examples.empty();
+                });
+            if (fenced != lexical_candidates.end()) {
+                auto native = declaration.documentation;
+                declaration.documentation = *fenced;
+                if (declaration.documentation.brief.empty())
+                    declaration.documentation.brief = native.brief;
+                detail::merge_documentation_groups(declaration.documentation, native);
             }
             for (const documentation_record& candidate :
                  lexical_candidates) {

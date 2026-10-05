@@ -11,10 +11,13 @@
   {% if entity.normalized_signature %}
   <figure data-term class="doc-code design-signature">
     <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
-    <pre data-code><code id="entity-signature-code">{{ entity.normalized_signature }}</code></pre>
+    <pre data-code><code id="entity-signature-code"{% if entity.domain == "sql" %} class="language-sql"{% endif %}>{{ entity.normalized_signature }}</code></pre>
   </figure>
   {% endif %}
 
+  {% if entity.kind == "setting" and entity.attributes %}
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="setting" data-toc data-title="Setting">Setting<a data-hash href="#setting" class="dd-s0052">#</a></h2><dl class="design-definition-list">{% for attribute in entity.attributes %}<div><dt>{{ attribute.name }}</dt><dd><code>{% if attribute.name == "Default" and attribute.value == "" %}''{% else %}{{ attribute.value }}{% endif %}</code></dd></div>{% endfor %}</dl></section>
+  {% endif %}
   {% if page.detail_html %}<div class="docs-content entity-detail">{{ page.detail_html }}</div>{% endif %}
 
   {% if entity.parameters %}
@@ -36,7 +39,7 @@
   {% endif %}
   {% if entity.return_type %}<p class="design-return"><span>Returns</span><code>{{ entity.return_type }}</code></p>{% endif %}
 
-  {% if entity.attributes %}
+  {% if entity.attributes and entity.kind != "setting" %}
   <section class="design-entity-section"><h2 class="hx design-section-heading" id="attributes" data-toc data-title="Attributes">{% if entity.domain == "sql" %}Attributes{% else %}Qualifiers{% endif %}<a data-hash href="#attributes" class="dd-s0052">#</a></h2><dl class="design-definition-list">{% for attribute in entity.attributes %}<div><dt><code>{{ attribute.name }}</code></dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl></section>
   {% endif %}
   {% if entity.overloads %}

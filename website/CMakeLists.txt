@@ -745,6 +745,12 @@ get_target_property(_bioseq_extension_install_sql
   postgresql_bioseq BIOSEQ_EXTENSION_INSTALL_SQL)
 get_target_property(_bioseq_extension_sql_manifest
   postgresql_bioseq BIOSEQ_EXTENSION_SQL_MANIFEST)
+get_directory_property(_bioseq_settings_documentation_manifest
+  DIRECTORY "${CMAKE_SOURCE_DIR}/bioseq"
+  DEFINITION BIOSEQ_SQL_TEST_INDEXES_GENERATED_MANIFEST)
+if(NOT _bioseq_settings_documentation_manifest)
+  message(FATAL_ERROR "website: test-profile setting documentation manifest is unavailable")
+endif()
 get_target_property(_bioseq_extension_dso_property
   postgresql_bioseq BIOSEQ_EXTENSION_DSO)
 foreach(_extension_artifact_variable IN ITEMS
@@ -1006,6 +1012,7 @@ file(WRITE "${_cluster_child}"
 "  --site-config '${_site_config}' \\\n"
 "  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
 "  --sql-manifest '${_bioseq_extension_sql_manifest}' \\\n"
+"  --sql-documentation-manifest '${_bioseq_settings_documentation_manifest}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --staged-extension-sha256 \"$STAGED_EXTENSION_SHA256\" \\\n"
@@ -1043,12 +1050,19 @@ add_custom_command(
           --manifest "${_cache_extension_sql_manifest}"
           --manifest "${_bioseq_extension_sql_manifest}"
           --catalog "${_sql_entities}"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
+          --model "${_site_model}"
+          --manifest "${_bioseq_extension_sql_manifest}"
+          --documentation-manifest "${_bioseq_settings_documentation_manifest}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}" "${_cluster_child}"
           "${_cpp_entities}" "${_plan_json}"
           "${_cache_extension_sql_manifest}"
           "${_bioseq_extension_sql_manifest}"
+          "${_bioseq_settings_documentation_manifest}"
           "${_landing_fasta}" "${_readme_fasta}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
@@ -1087,8 +1101,14 @@ add_custom_command(
           --site "${_staging_dir}"
           --stamp "${_html_validation_stamp}"
           --asset-lock "${_static_dir}/third_party.lock.yaml"
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
+          --model "${_site_model}" --site "${_staging_dir}"
+          --manifest "${_bioseq_extension_sql_manifest}"
+          --documentation-manifest "${_bioseq_settings_documentation_manifest}"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -1220,10 +1240,16 @@ if(_website_node_executable)
   set(_website_benchmark_contract_command
     "${_website_node_executable}"
     "${_source_dir}/tests/contract/test_project_benchmarks.mjs")
+  set(_website_search_contract_command
+    "${_website_node_executable}" --test
+    "${_source_dir}/tests/contract/test_search_ranking.mjs")
 else()
   set(_website_benchmark_contract_command
     "${CMAKE_COMMAND}" -E echo
     "website: Node.js unavailable - skipping the benchmark interaction contract")
+  set(_website_search_contract_command
+    "${CMAKE_COMMAND}" -E echo
+    "website: Node.js unavailable - skipping the search ranking contract")
 endif()
 add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
@@ -1231,6 +1257,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tests/contract/test_project_bibliography.py"
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_project_benchmarks.py" --check
   COMMAND ${_website_benchmark_contract_command}
+  COMMAND ${_website_search_contract_command}
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "website: check imported author content and benchmark observations"
   VERBATIM)

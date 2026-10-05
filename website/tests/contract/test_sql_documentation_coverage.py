@@ -16,6 +16,16 @@ DOCUMENTED_KINDS = {
 }
 
 
+def walk(nodes):
+    for node in nodes:
+        yield node
+        yield from walk(node.get("children", []))
+
+
+def node_text(node):
+    return node.get("text", "") + "".join(node_text(child) for child in node.get("children", []))
+
+
 def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dict:
     model = json.loads(model_path.read_text())
     entities = model["sql_entities"]
@@ -51,6 +61,21 @@ def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dic
                 assert len(rendered["fields"]) == len(source["columns"]), f"missing type fields: {identity}"
                 assert all(field["type"] for field in rendered["fields"]), f"missing field SQL types: {identity}"
                 assert all(field["description"] for field in rendered["fields"]), f"missing field descriptions: {identity}"
+            nodes = list(walk(rendered["documentation"]))
+            for example in source.get("documentation_examples", []) if source["kind"] != "guc" else []:
+                assert any(node["kind"] == "paragraph" and node_text(node) == example["description"]
+                           for node in nodes), f"lost source example description: {identity}"
+                assert any(node["kind"] == "code_block" and node.get("text") == example["sql"]
+                           for node in nodes), f"lost source SQL example: {identity}"
+            bindings = ([source["operator_binding"]] if source.get("operator_binding") else []) + source.get("operator_aliases", [])
+            for binding in bindings:
+                target = binding["function_identity"] if source["kind"] == "operator" else binding["operator_identity"]
+                assert target in by_id, f"operator alias target missing: {identity}/{target}"
+                assert any(node["kind"] == "entity_link" and node.get("attributes", {}).get("entity_id") == target
+                           for node in nodes), f"operator/function cross-link missing: {identity}/{target}"
+                syntax = f"{binding['left_type']} {binding['symbol']} {binding['right_type']}"
+                assert any(node["kind"] == "code_block" and node.get("text") == syntax
+                           and node.get("attributes", {}).get("language") == "sql" for node in nodes), f"operator syntax missing: {identity}"
     catalog = json.loads(catalog_path.read_text())
     catalog_entities = catalog["entities"]
     installed = {entity.get("attributes", {}).get("installed_identity", entity["canonical_id"])
@@ -73,6 +98,13 @@ def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dic
             assert [(field["name"], field["type"]) for field in current["fields"]] == [
                 (field["name"], field["type"]) for field in source["fields"]
             ], f"catalog field names/types changed: {identity}"
+    for entity in entities:
+        nodes = list(walk(entity["documentation"]))
+        assert any(node["kind"] == "heading" and node_text(node) == "Examples" for node in nodes), f"SQL entity lacks examples section: {entity['canonical_id']}"
+        assert any(node["kind"] == "code_block" and node.get("attributes", {}).get("language") == "sql"
+                   and node.get("text", "").strip() for node in nodes), f"SQL entity lacks SQL example: {entity['canonical_id']}"
+        for field in entity.get("fields", []):
+            assert field["description"], f"SQL field lacks source description: {entity['canonical_id']}/{field['name']}"
     return {"declared_entities": declared, "authored_summaries": authored,
             "runnable_public_entities": public, "live_catalog_entities": len(catalog_entities),
             "documented_entities_with_overload_groups": len(entities)}

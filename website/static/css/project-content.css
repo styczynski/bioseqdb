@@ -58,6 +58,13 @@
 .design-entity-page .design-entity-title code,
 .design-entity-page .design-link-list code { overflow-wrap: anywhere; white-space: normal; }
 .design-entity-page .design-page-header > p.dd-s0046 { font-size: 18px; font-weight: 400; line-height: 1.6; color: #a9bccb; }
+.entity-detail .reference-values-table { display: block; max-width: 100%; overflow-x: auto; border: 1px solid #20364a; border-radius: 12px; border-collapse: collapse; background: #0a1929; }
+.entity-detail .reference-values-table th, .entity-detail .reference-values-table td { padding: .8rem 1rem; border-bottom: 1px solid #20364a; vertical-align: top; text-align: left; }
+.entity-detail .reference-values-table th { color: #7fcbe8; font-size: .8rem; }
+.entity-detail .reference-values-table td:first-child { min-width: 7rem; }
+.entity-detail .reference-values-table td:last-child { min-width: 16rem; color: #a9bccb; line-height: 1.6; }
+.design-entity-page .design-definition-list dd { min-width: 0; overflow-wrap: anywhere; }
+.entity-pop-param-detail { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .design-entity-page .design-page-header > p.dd-s0046 { font-size: 16px; }
 }

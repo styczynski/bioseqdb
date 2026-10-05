@@ -604,8 +604,16 @@ inline void run_preparation_contract_self_tests() {
         "annotation_documentation_contract.cpp",
         R"CPP(
 /** @brief Reverse a sequence without changing its letters.
+ *
+ * The input remains unchanged.
  * @param[in] input The sequence to reverse.
  * @return The reversed sequence.
+ * @remark website.field output: Reversed sequence value.
+ *
+ * ```sql
+ * -- Reverse a sequence value.
+ * SELECT bioseq.reverse('ACGT'::bioseq.seq);
+ * ```
  */
 [[bioseq_sql::function]]
 [[bioseq_sql::result]]
@@ -620,6 +628,12 @@ int reverse(int input) { return input; }
                 && documented_routine->documentation.parameters.size() == 1
                 && documented_routine->documentation.parameters.front().name == "input",
             "comments before stacked SQL attribute blocks retain authored documentation");
+    contract_detail::require(documented_routine->documentation.runnable_examples
+                == std::vector<std::string>{"-- Reverse a sequence value.\nSELECT bioseq.reverse('ACGT'::bioseq.seq);"}
+                && documented_routine->documentation.details == "The input remains unchanged."
+                && documented_routine->documentation.remarks
+                    == std::vector<std::string>{"website.field output: Reversed sequence value."},
+            "SQL fences retain newlines without leaking into prose, fields, or briefs");
 
     using namespace contract_detail;
 

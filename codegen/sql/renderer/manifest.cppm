@@ -683,6 +683,78 @@ build_fmgr_ownership_inventory(
     return result;
 }
 
+struct manifest_documentation_example {
+    std::string description;
+    std::string sql;
+};
+
+[[nodiscard]] inline manifest_documentation_example documentation_example(
+    std::string_view source) {
+    manifest_documentation_example result;
+    bool description = true;
+    std::istringstream input{std::string{source}};
+    for (std::string line; std::getline(input, line);) {
+        const std::size_t begin = line.find_first_not_of(" \t\r");
+        const std::string_view trimmed = begin == std::string::npos
+            ? std::string_view{} : std::string_view{line}.substr(begin);
+        if (description && trimmed.starts_with("--")) {
+            std::string_view sentence = trimmed.substr(2);
+            const std::size_t first = sentence.find_first_not_of(" \t");
+            if (first != std::string_view::npos) {
+                if (!result.description.empty()) result.description += ' ';
+                result.description += sentence.substr(first);
+            }
+        } else if (!trimmed.empty() || !description) {
+            description = false;
+            if (!result.sql.empty()) result.sql += '\n';
+            result.sql += line;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline const normalized_entity* operator_implementation(
+    const sql_graph& graph, const normalized_entity& operation) {
+    const auto operands = sql_parameters(operation.source);
+    const normalized_entity* implementation = nullptr;
+    for (const normalized_entity& candidate : graph.entities) {
+        if (candidate.source.kind != entity_kind::function
+            || candidate.source.cpp_qualified_name
+                != operation.source.cpp_qualified_name) continue;
+        const auto parameters = sql_parameters(candidate.source);
+        if (parameters.size() != operands.size()) continue;
+        bool same_signature = true;
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            same_signature = same_signature
+                && parameters[index]->sql_type == operands[index]->sql_type;
+        }
+        if (!same_signature) continue;
+        if (implementation != nullptr) {
+            throw std::runtime_error("ambiguous operator implementation for "
+                + operation.stable_identity);
+        }
+        implementation = &candidate;
+    }
+    return implementation;
+}
+
+inline void write_operator_binding(std::ostringstream& output,
+    const normalized_entity& operation,
+    const normalized_entity& implementation) {
+    const auto operands = sql_parameters(operation.source);
+    output << "{\"function_identity\": ";
+    write_json_string(output, implementation.stable_identity);
+    output << ", \"operator_identity\": ";
+    write_json_string(output, operation.stable_identity);
+    output << ", \"symbol\": ";
+    write_json_string(output, operation.source.name);
+    output << ", \"left_type\": ";
+    write_json_string(output, operands.size() == 2 ? operands[0]->sql_type : "");
+    output << ", \"right_type\": ";
+    write_json_string(output, operands.empty() ? "" : operands.back()->sql_type);
+    output << '}';
+}
+
 inline void write_string_array(
     std::ostringstream& output,
     const std::vector<std::string>& values,
@@ -1827,6 +1899,67 @@ manifest_statement_owner(
             detail::write_json_string(
                 output,
                 entity.source.documentation.runnable_examples[example]);
+        }
+        output << "],\n      \"documentation_examples\": [";
+        bool first_example = true;
+        for (const std::string& source_example :
+             entity.source.documentation.runnable_examples) {
+            const auto example = detail::documentation_example(source_example);
+            if (example.sql.empty()) continue;
+            if (!first_example) output << ", ";
+            first_example = false;
+            output << "{\"description\": ";
+            detail::write_json_string(output, example.description);
+            output << ", \"sql\": ";
+            detail::write_json_string(output, example.sql);
+            output << '}';
+        }
+        output << "],\n      \"documentation_fields\": [";
+        bool first_field_documentation = true;
+        for (const std::string& remark : entity.source.documentation.remarks) {
+            constexpr std::string_view prefix = "website.field ";
+            if (!std::string_view{remark}.starts_with(prefix)) continue;
+            const std::string_view field = std::string_view{remark}.substr(prefix.size());
+            const std::size_t separator = field.find(':');
+            if (separator == std::string_view::npos || separator == 0) {
+                throw std::runtime_error("malformed website.field documentation for "
+                    + entity.stable_identity);
+            }
+            const std::string_view description = field.substr(separator + 1);
+            const std::size_t first = description.find_first_not_of(" \t");
+            if (first == std::string_view::npos) {
+                throw std::runtime_error("empty website.field description for "
+                    + entity.stable_identity);
+            }
+            if (!first_field_documentation) output << ", ";
+            first_field_documentation = false;
+            output << "{\"name\": ";
+            detail::write_json_string(output, field.substr(0, separator));
+            output << ", \"description\": ";
+            detail::write_json_string(output, description.substr(first));
+            output << '}';
+        }
+        output << "],\n      \"operator_binding\": ";
+        if (entity.source.kind == entity_kind::operator_) {
+            const auto* implementation = detail::operator_implementation(graph, entity);
+            if (implementation == nullptr) {
+                throw std::runtime_error("operator has no implementation: "
+                    + entity.stable_identity);
+            }
+            detail::write_operator_binding(output, entity, *implementation);
+        } else {
+            output << "null";
+        }
+        output << ",\n      \"operator_aliases\": [";
+        bool first_operator = true;
+        if (entity.source.kind == entity_kind::function) {
+            for (const normalized_entity& operation : graph.entities) {
+                if (operation.source.kind != entity_kind::operator_
+                    || detail::operator_implementation(graph, operation) != &entity) continue;
+                if (!first_operator) output << ", ";
+                first_operator = false;
+                detail::write_operator_binding(output, operation, entity);
+            }
         }
         output << "],\n      \"options\": {";
         for (std::size_t option = 0;
