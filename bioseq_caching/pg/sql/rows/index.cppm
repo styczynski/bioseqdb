@@ -19,68 +19,97 @@ export namespace bioseq::cache::pg::sql_rows {
 
 /** One row returned by bioseq_cache.stats(). */
 struct stats_row final {
+    /// @brief Number of cache generations successfully published since counters were reset.
     std::int64_t produced;
+    /// @brief Number of hits on completed exact-result generations.
     std::int64_t completed_hits;
+    /// @brief Number of waits for a cache producer that was still running.
     std::int64_t inflight_waits;
+    /// @brief Number of reusable-coverage cache hits.
     std::int64_t reuse_hits;
+    /// @brief Number of cache fallbacks to ordinary execution.
     std::int64_t fallbacks;
+    /// @brief Number of cache invalidations recorded since counters were reset.
     std::int64_t invalidations;
+    /// @brief Number of cache evictions recorded since counters were reset.
     std::int64_t evictions;
+    /// @brief Cumulative logical payload bytes recorded by cache producers.
     std::int64_t logical_bytes;
+    /// @brief Cumulative stored payload bytes recorded by cache producers.
     std::int64_t stored_bytes;
 };
 
 /** One exact or reusable generation returned by bioseq_cache.entries(). */
 struct cache_entry_row final {
+    /// @brief Printable key identifying the cached result or reusable coverage.
     std::string entry_key;
+    /// @brief Generation number associated with the cache key.
     std::int64_t generation;
+    /// @brief Cache entry kind: ExactFinalResult or ReusableCoverage.
     std::string kind;
+    /// @brief Current lifecycle state of the cache generation.
     std::string state;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::oid,
     })]]
+    /// @brief Database containing the cached work, or NULL when unavailable.
     std::optional<std::uint32_t> database_oid;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::oid,
     })]]
+    /// @brief Role that owns the generation; hidden when the caller lacks full disclosure.
     std::optional<std::uint32_t> owner_role;
 
+    /// @brief Producer backend PID; hidden when unavailable or disclosure is restricted.
     std::optional<std::int32_t> producer_pid;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::timestamptz,
     })]]
+    /// @brief Time the generation started, or NULL when unavailable.
     std::optional<bioseq::postgres::support::timestamp_with_time_zone> created_at;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::timestamptz,
     })]]
+    /// @brief Time production completed, or NULL while incomplete or unavailable.
     std::optional<bioseq::postgres::support::timestamp_with_time_zone> completed_at;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::interval,
     })]]
+    /// @brief Elapsed time since the generation started.
     bioseq::postgres::support::interval_value age;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::interval,
     })]]
+    /// @brief Configured lifetime of the generation after completion.
     bioseq::postgres::support::interval_value ttl;
 
+    /// @brief Number of rows stored in the generation.
     std::int64_t rows;
+    /// @brief Logical uncompressed payload size of the generation, in bytes.
     std::int64_t logical_bytes;
+    /// @brief Physical payload size recorded for the generation, in bytes.
     std::int64_t stored_bytes;
+    /// @brief Number of callers waiting for the generation.
     std::int32_t waiters;
+    /// @brief Number of active reader pins on the generation.
     std::int32_t readers;
+    /// @brief Recorded exact-result hit count; reusable-coverage rows currently report 0.
     std::int64_t hits;
+    /// @brief Producer SQL text, or NULL when unavailable or disclosure is restricted.
     std::optional<std::string> sql;
+    /// @brief Producer plan text, or NULL when unavailable or disclosure is restricted.
     std::optional<std::string> producer_plan;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::jsonb,
     })]]
+    /// @brief JSONB dependency information, or NULL when disclosure is restricted.
     std::optional<bioseq::postgres::support::jsonb_value> dependencies;
 };
 

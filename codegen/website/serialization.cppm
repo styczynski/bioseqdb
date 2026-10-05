@@ -804,8 +804,13 @@ parse_sql_manifest_public_projection(
                         if (const auto* unit = doc.if_contains("display_unit"); unit && unit->is_string() && !unit->as_string().empty())
                             documented.attributes["Unit"] = std::string(unit->as_string());
                     }
-                    if (const auto* description = doc.if_contains("description"); description && description->is_string())
-                        documented.details = std::string(description->as_string());
+                    if (const auto* description = doc.if_contains("description"); description && description->is_string()) {
+                        const std::string configuration_description(description->as_string());
+                        if (!documented.details.empty() && documented.details != configuration_description)
+                            documented.additional_documentation.insert(documented.additional_documentation.begin(),
+                                reference_paragraph(documented.details));
+                        documented.details = configuration_description;
+                    }
                     if (const auto* values = doc.if_contains("possible_values"); values && values->is_array() && !values->as_array().empty()) {
                         documented.additional_documentation.push_back(reference_heading("Possible values", "possible-values"));
                         content_node table{.kind = content_node_kind::table,

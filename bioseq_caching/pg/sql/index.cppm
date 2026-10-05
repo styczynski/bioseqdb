@@ -17,7 +17,16 @@ export import :test_controls;
 
 export namespace bioseq::cache::pg::sql_catalog {
 
-/** The fixed schema created from bioseq_cache.control. */
+/** The fixed schema created from bioseq_cache.control.
+ *
+ * ```sql
+ * -- List cache APIs visible to a role with access to the bioseq_cache schema.
+ * SELECT routine_name
+ * FROM information_schema.routines
+ * WHERE routine_schema = 'bioseq_cache'
+ * ORDER BY routine_name;
+ * ```
+ */
 [[bioseq_sql::schema({
     .provision = bioseq::sql::schema_provision::extension_control,
 })]]
