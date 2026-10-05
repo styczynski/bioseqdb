@@ -131,6 +131,7 @@ struct search_index_entry {
     case entity_kind::sql_schema: return "sql_schema";
     case entity_kind::sql_type: return "sql_type";
     case entity_kind::sql_function: return "sql_function";
+    case entity_kind::sql_object: return "sql_object";
     case entity_kind::overload_group: return "overload_group";
     }
     return "unknown";

@@ -4,18 +4,20 @@ import { normalizeSearchText } from "./search_tokens.mjs";
 const root = document.querySelector("[data-site-header]");
 const MAX_SEARCH_RESULTS = 40;
 
-const SEARCH_TYPES = ["Tutorial", "Function", "Class", "Type"];
+const SEARCH_TYPES = ["Tutorial", "Function", "Class", "Type", "SQL"];
 const SEARCH_LABELS = {
   Tutorial: "Tutorials",
   Function: "Functions",
   Class: "Classes",
   Type: "Types",
+  SQL: "SQL objects",
 };
-const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T" };
+const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T", SQL: "S" };
 
 function searchType(record) {
   const kind = String(record.kind || "").toLowerCase();
   const group = String(record.group || "").toLowerCase();
+  if (kind === "sql_object") return "SQL";
   if (group === "tutorials" || group === "pages" ||
       kind === "tutorial" || kind === "page") return "Tutorial";
   if (kind.includes("function") || kind === "overload_group") return "Function";
