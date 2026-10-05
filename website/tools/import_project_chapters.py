@@ -674,27 +674,38 @@ def reference(label: str) -> str:
 def bibliography() -> str:
     raw = read_source("main.bib")
     items = json.loads(pandoc(raw, "biblatex", "csljson"))
-    source_titles = {}
+    source_fields = {}
     for match in re.finditer(r"@\w+\s*\{\s*([^,]+),", raw):
         entry, _ = group(raw, raw.index("{", match.start()))
-        title_match = re.search(r"(?im)^\s*title\s*=\s*", entry)
-        if title_match:
-            title, _ = group(entry, title_match.end())
-            source_titles[match[1].strip()] = inline(title)
+        fields = {}
+        for name in ("title", "author", "note"):
+            field_match = re.search(r"(?im)^\s*" + name + r"\s*=\s*", entry)
+            if field_match:
+                value, _ = group(entry, field_match.end())
+                fields[name] = inline(value)
+        source_fields[match[1].strip()] = fields
     parts = []
     for index, item in enumerate(items, 1):
         key = item["id"]
         CITATIONS[key] = index
         CITATION_ITEMS[key] = item
-        authors = "; ".join(a.get("literal") or " ".join(filter(None, [a.get("given"), a.get("family")])) for a in item.get("author", []))
+        # Some authored lists use commas instead of BibTeX's "and" separator.
+        # CSL interprets these as suffixes/particles of one person. Keeping the
+        # original field also preserves correctly written particles and names.
+        fields = source_fields[key]
+        authors = fields.get("author", "")
         year = str(item.get("issued", {}).get("date-parts", [[""]])[0][0])
         # CSL normalizes unprotected BibTeX title capitalization. The website
         # keeps the exact title capitalization supplied by the author instead.
-        title = source_titles.get(key, item.get("title", key))
+        title = fields.get("title", item.get("title", key))
         # CSL title inline HTML is safe bibliographic markup.
         venue = item.get("container-title", item.get("publisher", ""))
         url = item.get("URL") or ("https://doi.org/" + item["DOI"] if item.get("DOI") else "")
-        line = ". ".join(filter(None, [authors, f'[{title}]({url})' if url else title, venue, year])) + "."
+        pieces = filter(None, [authors, f'[{title}]({url})' if url else title, venue, year])
+        line = " ".join(piece if piece.endswith((".", "!", "?")) else piece + "."
+                        for piece in pieces)
+        if note := fields.get("note"):
+            line += " " + note
         parts.append(f'<a id="ref-{anchor(key)}"></a>\n\n**[{index}]** {line}')
     return "\n\n".join(parts)
 

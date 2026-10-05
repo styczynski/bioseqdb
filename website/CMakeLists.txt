@@ -1228,6 +1228,7 @@ endif()
 add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_project_chapters.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tests/contract/test_project_bibliography.py"
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_project_benchmarks.py" --check
   COMMAND ${_website_benchmark_contract_command}
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
