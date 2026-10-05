@@ -11,19 +11,20 @@
 <meta property="og:description" content="Read files in declaration order and return their combined record count.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/">
-<meta property="og:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq::io::read_sequences_files">
 <meta name="twitter:description" content="Read files in declaration order and return their combined record count.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
-<link rel="icon" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/favicon.svg">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/site.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/docs-design.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/code-theme.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-content.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-benchmarks.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -31,49 +32,35 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="dd-s0002">
-    <div class="dd-s0003">
-      <button data-menu aria-label="Menu" class="dd-s0004">
-        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
-      </button>
-      <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0006">
-        <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
-        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
-        <span data-docsbadge class="dd-s0010">DOCS</span>
-      </a>
-
-      <nav data-topnav class="dd-s0011">
-        <a href="/v0.1/tutorials/getting_started/" data-nav class="dd-s0012">Docs</a>
-        <a href="/" class="dd-s0013">Product</a>
-        <a href="/benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
-        <a href="/versions/" class="dd-s0013">Versions</a>
-      </nav>
-
-      <!-- SEARCH -->
-      <div data-search-wrap class="dd-s0015">
-        <div data-search-box class="dd-s0016">
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
-          <kbd class="dd-s0019">/</kbd>
-        </div>
-        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+  <header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
       </div>
-
-      <!-- VERSION -->
-      <div data-ver-wrap class="dd-s0021">
-        <button id="ver-btn" class="dd-s0022">
-          <span class="dd-s0023"></span>v0.1 <span class="docs-version-status">Alpha</span>
-          <span data-caret class="dd-s0025"></span>
-        </button>
-        <div id="ver-menu" data-versions-url="/versions.json" class="dd-s0026">
-          <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="dd-s0027">v0.1 <span class="docs-version-current">current</span></a>
-          <a data-ver-all href="/versions/" class="dd-s0029">All versions</a>
-        </div>
-      </div>
-
-      <a data-ghbtn href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0031">GitHub</a>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
     </div>
-  </header>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+  </div>
+</header>
 
   <!-- ============ BODY GRID ============ -->
   <div data-bodygrid class="dd-s0032">
@@ -133,6 +120,8 @@
     </tbody></table></div>
   </section>
   
+  
+  
   <p class="design-return"><span>Returns</span><code>std::__1::expected&lt;std::__1::size_t, std::__1::string&gt;</code></p>
 
   
@@ -141,7 +130,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/6d6229d3bc38c12d497d4bf4752ecadb54d55ab4/bioseq/io/reader.cppm#L303" rel="noreferrer">bioseq.io.reader</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/io/reader.cppm#L303" rel="noreferrer">bioseq.io.reader</a></p>
   
   
 </article>
@@ -166,7 +155,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -221,18 +210,21 @@
   <div data-backdrop class="dd-s0259"></div>
 
   <!-- ===== ENTITY POPOVER ===== -->
-  <div id="entity-pop" class="dd-s0260"></div>
+
 
 </div>
 
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq::io::read_sequences_files","description":"Read files in declaration order and return their combined record count.","url":"https://bioseqdb.com/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"C++","item":"/v0.1/reference/cpp/"},{"@type":"ListItem","position":5,"name":"bioseq::io::read_sequences_files","item":"/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/"}]}]}</script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-init.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-languages.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-math.js"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/main.js"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/docs-design.mjs"></script>
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq::io::read_sequences_files","description":"Read files in declaration order and return their combined record count.","url":"https://bioseqdb.com/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"C++","item":"/v0.1/reference/cpp/"},{"@type":"ListItem","position":5,"name":"bioseq::io::read_sequences_files","item":"/v0.1/reference/cpp/function/io-read-sequences-files-40499b22ac0d31c8/"}]}]}</script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+
 </body>
 </html>

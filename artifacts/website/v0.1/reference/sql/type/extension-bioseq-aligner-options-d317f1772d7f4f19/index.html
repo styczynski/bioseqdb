@@ -11,19 +11,20 @@
 <meta property="og:description" content="Aligner settings for one mmsearch call. NULL fields use the corresponding session setting.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/">
-<meta property="og:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="public.bioseq_aligner_options">
 <meta name="twitter:description" content="Aligner settings for one mmsearch call. NULL fields use the corresponding session setting.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png">
-<link rel="icon" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/favicon.svg">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/site.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/docs-design.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/code-theme.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-content.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/css/project-benchmarks.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -31,49 +32,35 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="dd-s0002">
-    <div class="dd-s0003">
-      <button data-menu aria-label="Menu" class="dd-s0004">
-        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
-      </button>
-      <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0006">
-        <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
-        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
-        <span data-docsbadge class="dd-s0010">DOCS</span>
-      </a>
-
-      <nav data-topnav class="dd-s0011">
-        <a href="/v0.1/tutorials/getting_started/" data-nav class="dd-s0012">Docs</a>
-        <a href="/" class="dd-s0013">Product</a>
-        <a href="/benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
-        <a href="/versions/" class="dd-s0013">Versions</a>
-      </nav>
-
-      <!-- SEARCH -->
-      <div data-search-wrap class="dd-s0015">
-        <div data-search-box class="dd-s0016">
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
-          <kbd class="dd-s0019">/</kbd>
-        </div>
-        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+  <header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
       </div>
-
-      <!-- VERSION -->
-      <div data-ver-wrap class="dd-s0021">
-        <button id="ver-btn" class="dd-s0022">
-          <span class="dd-s0023"></span>v0.1 <span class="docs-version-status">Alpha</span>
-          <span data-caret class="dd-s0025"></span>
-        </button>
-        <div id="ver-menu" data-versions-url="/versions.json" class="dd-s0026">
-          <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="dd-s0027">v0.1 <span class="docs-version-current">current</span></a>
-          <a data-ver-all href="/versions/" class="dd-s0029">All versions</a>
-        </div>
-      </div>
-
-      <a data-ghbtn href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0031">GitHub</a>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
     </div>
-  </header>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+  </div>
+</header>
 
   <!-- ============ BODY GRID ============ -->
   <div data-bodygrid class="dd-s0032">
@@ -112,7 +99,7 @@
 <article data-page-panel data-screen-label="Docs · API entity" class="dd-s0040 design-page design-entity-page">
   <header data-reveal class="dd-s0041 design-page-header">
     <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb"><a href="/">Home</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/">v0.1</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/">Reference</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/">SQL</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/">public.bioseq_aligner_options</a><span class="dd-s0043" aria-hidden="true">/</span></nav>
-    <p class="design-kind-line"><span class="design-kind-badge">sql &#183; sql_type</span></p>
+    <p class="design-kind-line"><span class="design-kind-badge">sql &#183; type</span></p>
     <h1 class="dd-s0045 design-entity-title"><code>public.bioseq_aligner_options</code></h1>
     <p class="dd-s0046">Aligner settings for one mmsearch call. NULL fields use the corresponding session setting.</p>
   </header>
@@ -128,14 +115,22 @@
 
   
   
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="fields" data-toc data-title="Fields">Fields<a data-hash href="#fields" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    <tr><td><code>kmer_size</code></td><td><code>integer</code></td><td>Number of bases in each k-mer considered for a minimizer. NULL uses the session value of bioseq.aligner.minimizer.kmer_size.</td></tr><tr><td><code>window_size</code></td><td><code>integer</code></td><td>Number of consecutive, k-mers in a  minimizer window. NULL uses the session value of bioseq.aligner.minimizer.window_size.</td></tr><tr><td><code>max_gap</code></td><td><code>integer</code></td><td>Maximum diqtance between anchors that chaining can join. NULL uses the session value of bioseq.aligner.chaining.maximum_gap.</td></tr><tr><td><code>max_gap_ref</code></td><td><code>integer</code></td><td>Store a reference-gap override in the request. The current chaining code uses maximum_gap for both sequences. NULL uses the session value of bioseq.aligner.chaining.maximum_reference_gap.</td></tr><tr><td><code>bandwidth</code></td><td><code>integer</code></td><td>Sets the chaining and alignment bandwidth. NULL uses the session value of bioseq.aligner.chaining.bandwidth.</td></tr><tr><td><code>bandwidth_long</code></td><td><code>integer</code></td><td>Store a long-join bandwidth in the request. The current pipeline does not use this setting. NULL uses the session value of bioseq.aligner.chaining.long_join_bandwidth.</td></tr><tr><td><code>max_chain_skip</code></td><td><code>integer</code></td><td>Stop searching earlier anchors after this many unhelpful candidates. NULL uses the session value of bioseq.aligner.chaining.maximum_skipped_anchors.</td></tr><tr><td><code>max_chain_iter</code></td><td><code>integer</code></td><td>Limits predecessors examined for each anchor. NULL uses the session value of bioseq.aligner.chaining.maximum_predecessors.</td></tr><tr><td><code>min_seed_count</code></td><td><code>integer</code></td><td>Sets the minimum seed count accepted for a chain. NULL uses the session value of bioseq.aligner.chaining.minimum_seed_count.</td></tr><tr><td><code>min_chain_score</code></td><td><code>integer</code></td><td>Sets the minimum accepted chain score. NULL uses the session value of bioseq.aligner.chaining.minimum_score.</td></tr><tr><td><code>chain_gap_scale</code></td><td><code>double precision</code></td><td>Scales the chaining gap penalty. NULL uses the session value of bioseq.aligner.chaining.gap_penalty_scale.</td></tr><tr><td><code>chain_skip_scale</code></td><td><code>double precision</code></td><td>Scales the chaining skip penalty. NULL uses the session value of bioseq.aligner.chaining.skip_penalty_scale.</td></tr><tr><td><code>mask_level</code></td><td><code>double precision</code></td><td>Required query overlap for assigning an alignment to a primary. The  comparison also accounts for query bases left uncovered by primaries. NULL uses the session value of bioseq.aligner.secondary.overlap_threshold.</td></tr><tr><td><code>mask_len</code></td><td><code>integer</code></td><td>Maximum uncovered query length allowed for a secondary alignment. NULL uses the session value of bioseq.aligner.secondary.uncovered_length_limit.</td></tr><tr><td><code>pri_ratio</code></td><td><code>double precision</code></td><td>Score ratio used to keep a secondary relative to its primary. A secondary can also pass within the allowed absolute score difference. Zero disables the CPU secondary filter. NULL uses the session value of bioseq.aligner.secondary.score_ratio_threshold.</td></tr><tr><td><code>best_n</code></td><td><code>integer</code></td><td>Maximum secondary alignments kept across one query. NULL uses the session value of bioseq.aligner.secondary.maximum_count.</td></tr><tr><td><code>match_score</code></td><td><code>integer</code></td><td>Sets the alignment match score. NULL uses the session value of bioseq.aligner.scoring.match_score.</td></tr><tr><td><code>mismatch_pen</code></td><td><code>integer</code></td><td>Sets the alignment mismatch penalty. NULL uses the session value of bioseq.aligner.scoring.mismatch_penalty.</td></tr><tr><td><code>gap_open1</code></td><td><code>integer</code></td><td>Sets the short-gap opening penalty. NULL uses the session value of bioseq.aligner.scoring.short_gap_open_penalty.</td></tr><tr><td><code>gap_ext1</code></td><td><code>integer</code></td><td>Sets the short-gap extension penalty. NULL uses the session value of bioseq.aligner.scoring.short_gap_extension_penalty.</td></tr><tr><td><code>gap_open2</code></td><td><code>integer</code></td><td>Sets the long-gap opening penalty. NULL uses the session value of bioseq.aligner.scoring.long_gap_open_penalty.</td></tr><tr><td><code>gap_ext2</code></td><td><code>integer</code></td><td>Sets the long-gap extension penalty. NULL uses the session value of bioseq.aligner.scoring.long_gap_extension_penalty.</td></tr><tr><td><code>sc_ambi</code></td><td><code>integer</code></td><td>Sets the penalty for ambiguous bases. NULL uses the session value of bioseq.aligner.scoring.ambiguous_base_penalty.</td></tr><tr><td><code>zdrop</code></td><td><code>integer</code></td><td>Stop  extension when its score falls too far below the besw score. Z-drop adjusts the comparison for gaps. Negative one disables it. NULL uses the session value of bioseq.aligner.scoring.z_drop_threshold.</td></tr><tr><td><code>end_bonus</code></td><td><code>integer</code></td><td>Bonus for an alignment that reaches the query end. Negative one disables the bonus. NULL uses the session value of bioseq.aligner.scoring.end_bonus.</td></tr><tr><td><code>max_occ</code></td><td><code>integer</code></td><td>Ignore minimizers with more target occurrences than this limit. NULL uses the session value of bioseq.aligner.seeding.maximum_occurrence.</td></tr><tr><td><code>mid_occ</code></td><td><code>integer</code></td><td>Store an intermediate occurrence threshold in the request. The current seeding code uses maximum_occurrence instead. NULL uses the session value of bioseq.aligner.seeding.intermediate_occurrence_threshold.</td></tr><tr><td><code>block_min_size</code></td><td><code>integer</code></td><td>Sets the minimum block size used by the block aligner. NULL uses the session value of bioseq.aligner.block_alignment.minimum_block_size.</td></tr><tr><td><code>block_max_size</code></td><td><code>integer</code></td><td>Sets the maximum block size used by the block aligner. NULL uses the session value of bioseq.aligner.block_alignment.maximum_block_size.</td></tr><tr><td><code>chaining_algorithm</code></td><td><code>integer</code></td><td>Selects the seed-anchor chaining algorithm. Values: 0 scalar_minimap2, 1 simd_minimap2, 2 range_minimum_query, 3 vulkan_tiled_dynamic_programming. NULL uses the session value of bioseq.aligner.chaining.algorithm.</td></tr><tr><td><code>base_alignment_algorithm</code></td><td><code>integer</code></td><td>Selects the base-level alignment algorithm. Values: 0 ksw2, 1 block_aligner. NULL uses the session value of bioseq.aligner.base_alignment.algorithm.</td></tr><tr><td><code>minimizer_algorithm</code></td><td><code>integer</code></td><td>Selects the minimizer extraction algorithm. Values: 0 scalar, 1 simd_minimap2_reference, 2 two_stack_nthash, 3 vulkan_minimap_integer, 4 bounded_nthash_simd. NULL uses the session value of bioseq.aligner.minimizer.algorithm.</td></tr><tr><td><code>vulkan_enabled</code></td><td><code>boolean</code></td><td>Allows execution through Vulkan-backed algorithms. NULL uses the session value of bioseq.aligner.vulkan.enabled.</td></tr><tr><td><code>vulkan_seed_hits_enabled</code></td><td><code>boolean</code></td><td>Enables Vulkan seed-hit lookup. NULL uses the session value of bioseq.aligner.vulkan.seed_lookup.enabled.</td></tr><tr><td><code>vulkan_index_cache_enabled</code></td><td><code>boolean</code></td><td>Keep uploaded target indexes for later GPU lookups. NULL uses the session value of bioseq.aligner.vulkan.index_cache.enabled.</td></tr><tr><td><code>index_read_requirement</code></td><td><code>integer</code></td><td>Sets the requirement for using a stored minimizer index. Values: 0 allows a compatible stored index or an index built for the query; 1 requires the persisted index to be absent; 2 requires a compatible persisted index. NULL keeps the planner&#39;s default index-read requirement.</td></tr>
+    </tbody></table></div>
+  </section>
+  
+  
+  
 
   
-  <section class="design-entity-section"><h2 class="hx design-section-heading" id="attributes" data-toc data-title="Attributes">Attributes<a data-hash href="#attributes" class="dd-s0052">#</a></h2><dl class="design-definition-list"><div><dt><code>documentation_authority</code></dt><dd>generated_sql_manifest</dd></div><div><dt><code>installed_identity</code></dt><dd>sql:type:public.bioseq_aligner_options</dd></div><div><dt><code>sql_manifest_script_sha256</code></dt><dd>b12bacedbdec7d9260de607ef47e824f371ed14e43d8cca902519950bc5a923e</dd></div><div><dt><code>stable_identity</code></dt><dd>sql:type:$extension.bioseq_aligner_options</dd></div></dl></section>
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="attributes" data-toc data-title="Attributes">Attributes<a data-hash href="#attributes" class="dd-s0052">#</a></h2><dl class="design-definition-list"><div><dt><code>alignment</code></dt><dd>d</dd></div><div><dt><code>extension</code></dt><dd>bioseq</dd></div><div><dt><code>input_function</code></dt><dd>record_in</dd></div><div><dt><code>length</code></dt><dd>-1</dd></div><div><dt><code>output_function</code></dt><dd>record_out</dd></div><div><dt><code>passed_by_value</code></dt><dd>false</dd></div><div><dt><code>schema</code></dt><dd>public</dd></div><div><dt><code>storage</code></dt><dd>x</dd></div><div><dt><code>type_kind</code></dt><dd>Composite</dd></div></dl></section>
   
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/6d6229d3bc38c12d497d4bf4752ecadb54d55ab4/bioseq/backend/pg/table/sql_rows.cppm#L23" rel="noreferrer">bioseq.postgres.table.sql_rows</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/backend/pg/table/sql_rows.cppm#L23" rel="noreferrer">bioseq.postgres.table.sql_rows</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema public · PostgreSQL 17.10</p>
   
 </article>
@@ -146,7 +141,7 @@
     <aside data-rightrail class="dd-s0234">
       <div class="dd-s0235">On this page</div>
       <div id="toc-list" class="dd-s0236">
-        <a data-toc-link data-level="2" href="#attributes">Attributes</a>
+        <a data-toc-link data-level="2" href="#fields">Fields</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
       </div>
     </aside>
 
@@ -160,7 +155,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -215,18 +210,21 @@
   <div data-backdrop class="dd-s0259"></div>
 
   <!-- ===== ENTITY POPOVER ===== -->
-  <div id="entity-pop" class="dd-s0260"></div>
+
 
 </div>
 
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"public.bioseq_aligner_options","description":"Aligner settings for one mmsearch call. NULL fields use the corresponding session setting.","url":"https://bioseqdb.com/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"public.bioseq_aligner_options","item":"/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/"}]}]}</script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-init.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/prism/prism.min.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/prism-languages.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/vendor/katex/katex.min.js"></script>
-<script src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-math.js"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/main.js"></script>
-<script type="module" src="/assets/ca0ae473b436978ee2cab7424596666246ffffee9bd4b7569e0837e6d25e4d2b/js/docs-design.mjs"></script>
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"public.bioseq_aligner_options","description":"Aligner settings for one mmsearch call. NULL fields use the corresponding session setting.","url":"https://bioseqdb.com/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"public.bioseq_aligner_options","item":"/v0.1/reference/sql/type/extension-bioseq-aligner-options-d317f1772d7f4f19/"}]}]}</script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+
 </body>
 </html>

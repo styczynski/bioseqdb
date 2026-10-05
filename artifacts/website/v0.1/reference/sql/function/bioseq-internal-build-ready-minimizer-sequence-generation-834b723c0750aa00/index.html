@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bioseq_internal.build_ready_minimizer_sequence_generation</title>
+<meta name="description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
+<link rel="canonical" href="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="bioseq_internal.build_ready_minimizer_sequence_generation">
+<meta property="og:description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/">
+<meta property="og:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="bioseq_internal.build_ready_minimizer_sequence_generation">
+<meta name="twitter:description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png">
+<link rel="icon" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/favicon.svg">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/docs-design.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/code-theme.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-content.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/css/site-header.css">
+</head>
+<body id="page-top" class="docs-design-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB documentation" class="dd-s0001">
+
+  <!-- ============ TOP NAV ============ -->
+  <header id="dnav" class="site-header" data-site-header>
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+  </div>
+</header>
+
+  <!-- ============ BODY GRID ============ -->
+  <div data-bodygrid class="dd-s0032">
+
+    <!-- ===== LEFT SIDEBAR ===== -->
+    <aside id="sidebar" class="dd-s0033">
+      
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Tutorials
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/tutorials/getting_started/" class="dd-s0037">Getting started with BioseqDB</a><a data-doc-link href="/v0.1/tutorials/project_introduction/" class="dd-s0037">Introduction</a><a data-doc-link href="/v0.1/tutorials/project_biology/" class="dd-s0037">Biological foundations of sequence analysis</a><a data-doc-link href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0037">Sequence alignment and search strategies</a><a data-doc-link href="/v0.1/tutorials/project_minimizers/" class="dd-s0037">Minimizer extraction</a><a data-doc-link href="/v0.1/tutorials/project_chaining/" class="dd-s0037">Chaining seed anchors</a><a data-doc-link href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0037">Final alignment and postprocessing</a><a data-doc-link href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0037">Sequence representations and lazy evaluation</a><a data-doc-link href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0037">PostgreSQL API and custom scans</a><a data-doc-link href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0037">Physical sequence storage in PostgreSQL</a><a data-doc-link href="/v0.1/tutorials/project_index_storage/" class="dd-s0037">Persistent sequence indexes</a><a data-doc-link href="/v0.1/tutorials/project_benchmarking/" class="dd-s0037">Benchmarking and performance evaluation</a><a data-doc-link href="/v0.1/tutorials/project_conclusion/" class="dd-s0037">Conclusions</a><a data-doc-link href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0037">Configuration reference (settings available in BioseqDB)</a><a data-doc-link href="/v0.1/tutorials/bibliography/" class="dd-s0037">Bibliography</a>
+        </div>
+      </div>
+      
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>Reference
+        </button>
+        <div data-chap-list class="dd-s0036">
+          <a data-doc-link href="/v0.1/reference/cpp/" class="dd-s0037">C++</a><a data-doc-link href="/v0.1/reference/sql/" class="dd-s0037">SQL</a>
+        </div>
+      </div>
+      
+      
+      <div class="dd-s0038">
+        <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0039">Edit on GitHub</a>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="doc-main" class="dd-s0040">
+      
+<article data-page-panel data-screen-label="Docs · API entity" class="dd-s0040 design-page design-entity-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb"><a href="/">Home</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/">v0.1</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/">Reference</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/">SQL</a><span class="dd-s0043" aria-hidden="true">/</span><a href="/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/">bioseq_internal.build_ready_minimizer_sequence_generation</a><span class="dd-s0043" aria-hidden="true">/</span></nav>
+    <p class="design-kind-line"><span class="design-kind-badge">sql &#183; function</span></p>
+    <h1 class="dd-s0045 design-entity-title"><code>bioseq_internal.build_ready_minimizer_sequence_generation</code></h1>
+    <p class="dd-s0046">Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.</p>
+  </header>
+
+  
+  <figure data-term class="doc-code design-signature">
+    <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
+    <pre data-code><code id="entity-signature-code">bioseq_internal.build_ready_minimizer_sequence_generation(regclass,text,bigint,text)</code></pre>
+  </figure>
+  
+
+  
+
+  
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="parameters" data-toc data-title="Parameters">Parameters<a data-hash href="#parameters" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    <tr><td><code>source_table</code></td><td><code>regclass</code></td><td></td></tr><tr><td><code>index_name</code></td><td><code>text</code></td><td></td></tr><tr><td><code>sequence_rowno</code></td><td><code>bigint</code></td><td></td></tr><tr><td><code>backend</code></td><td><code>text</code></td><td></td></tr>
+    </tbody></table></div>
+  </section>
+  
+  
+  
+  <p class="design-return"><span>Returns</span><code>TABLE(sidecar_table text, column_attno smallint, source_sequence_rowno bigint, source_epoch text, source_num_fragments bigint, source_total_bp bigint, selected_backend text, layout smallint, is_published boolean, is_head_manifest_verified boolean, generation_id bigint, source_identity text, source_content_checksum text, compatibility_checksum text, manifest_target_length bigint, kmer_size smallint, window_size smallint, minimizer_scheme_id integer, minimizer_scheme_revision integer, gpu_abi_revision integer, position_segment_span_bp bigint, position_segment_count integer, writer_rows bigint, writer_batches bigint, control_count bigint, position_count bigint, spill_run_count bigint, spilled_event_count bigint, spill_operation_epoch bigint, spill_generation_token bigint, spill_mutation_revision bigint, spill_qualification_scan_count bigint, spill_qualification_merge_count bigint, configured_core_span_bp bigint, peak_core_span_bp bigint, peak_core_events bigint, short_core_runs bigint, scalar_core_runs bigint, exact_simd_core_runs bigint, bounded_nthash_core_runs bigint, vulkan_core_runs bigint, is_execution_accepted boolean, are_exact_simd_stats_available boolean, are_exact_simd_stats_consistent boolean, exact_simd_vector_batches bigint, exact_simd_scalar_backend_branches bigint, are_bounded_nthash_stats_available boolean, bounded_nthash_status text, are_bounded_nthash_stats_consistent boolean, bounded_nthash_packed_decode_batches bigint, bounded_nthash_fallback_calls bigint, vulkan_completed_roundtrips bigint, vulkan_downloaded_minimizers bigint, replay_scan_count bigint, replay_merge_pass_count bigint, replay_reroute_pass_count bigint, replay_completed_scan_count bigint, replay_failed_scan_count bigint, replay_binding_checked_failed_scan_count bigint, replay_illegal_span_transition_count bigint, replay_first_completed_event_count bigint, replay_last_completed_event_count bigint, replay_final_span_bp bigint, replay_final_generation_token bigint, replay_final_mutation_revision bigint, replay_visited_event_count bigint, manifest_position_count bigint, manifest_position_segment_span_bp bigint, release_generation_token bigint, release_mutation_before bigint, release_mutation_after bigint, are_spill_resources_released boolean)</code></p>
+
+  
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="attributes" data-toc data-title="Attributes">Attributes<a data-hash href="#attributes" class="dd-s0052">#</a></h2><dl class="design-definition-list"><div><dt><code>arguments</code></dt><dd>source_table regclass, index_name text, sequence_rowno bigint, backend text</dd></div><div><dt><code>c_symbol</code></dt><dd>build_ready_minimizer_sequence_generation</dd></div><div><dt><code>create</code></dt><dd>bioseq::sql::create_mode::or_replace</dd></div><div><dt><code>create_mode</code></dt><dd>or_replace</dd></div><div><dt><code>extension</code></dt><dd>bioseq</dd></div><div><dt><code>language</code></dt><dd>c</dd></div><div><dt><code>null_input</code></dt><dd>returns null on null input</dd></div><div><dt><code>parallel</code></dt><dd>unsafe</dd></div><div><dt><code>schema</code></dt><dd>bioseq_internal</dd></div><div><dt><code>security</code></dt><dd>invoker</dd></div><div><dt><code>visibility</code></dt><dd>Internal</dd></div><div><dt><code>volatility</code></dt><dd>volatile</dd></div></dl></section>
+  
+  
+  
+  
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/9e22b68ac151a647fda5dd9a1449c18437d1d581/bioseq/backend/pg/extension/index.cppm#L1014" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
+  
+</article>
+
+    </main>
+
+    <!-- ===== RIGHT TOC ===== -->
+    <aside data-rightrail class="dd-s0234">
+      <div class="dd-s0235">On this page</div>
+      <div id="toc-list" class="dd-s0236">
+        <a data-toc-link data-level="2" href="#parameters">Parameters</a><a data-toc-link data-level="2" href="#attributes">Attributes</a>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ============ SITE FOOTER ============ -->
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Getting started with BioseqDB</a><a href="/v0.1/tutorials/project_introduction/" class="dd-s0250 dd-h009">Introduction</a><a href="/v0.1/tutorials/project_biology/" class="dd-s0250 dd-h009">Biological foundations of sequence analysis</a><a href="/v0.1/tutorials/project_alignment_foundations/" class="dd-s0250 dd-h009">Sequence alignment and search strategies</a><a href="/v0.1/tutorials/project_minimizers/" class="dd-s0250 dd-h009">Minimizer extraction</a><a href="/v0.1/tutorials/project_chaining/" class="dd-s0250 dd-h009">Chaining seed anchors</a><a href="/v0.1/tutorials/project_final_alignment_postprocessing_and_preprocessing/" class="dd-s0250 dd-h009">Final alignment and postprocessing</a><a href="/v0.1/tutorials/project_sequence_abstractions/" class="dd-s0250 dd-h009">Sequence representations and lazy evaluation</a><a href="/v0.1/tutorials/project_postgres_custom_scan/" class="dd-s0250 dd-h009">PostgreSQL API and custom scans</a><a href="/v0.1/tutorials/project_postgres_storage/" class="dd-s0250 dd-h009">Physical sequence storage in PostgreSQL</a><a href="/v0.1/tutorials/project_index_storage/" class="dd-s0250 dd-h009">Persistent sequence indexes</a><a href="/v0.1/tutorials/project_benchmarking/" class="dd-s0250 dd-h009">Benchmarking and performance evaluation</a><a href="/v0.1/tutorials/project_conclusion/" class="dd-s0250 dd-h009">Conclusions</a><a href="/v0.1/tutorials/project_configuration_reference/" class="dd-s0250 dd-h009">Configuration reference (settings available in BioseqDB)</a><a href="/v0.1/tutorials/bibliography/" class="dd-s0250 dd-h009">Bibliography</a><a href="/v0.1/reference/cpp/" class="dd-s0250 dd-h009">C++</a><a href="/v0.1/reference/sql/" class="dd-s0250 dd-h009">SQL</a>
+            
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 Bioseq contributors &mdash; an independent open-source project.</span>
+        <nav class="dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div data-backdrop class="dd-s0259"></div>
+
+  <!-- ===== ENTITY POPOVER ===== -->
+
+
+</div>
+
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.build_ready_minimizer_sequence_generation","description":"Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.build_ready_minimizer_sequence_generation","item":"/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/"}]}]}</script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-init.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/prism/prism.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/prism-languages.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/vendor/katex/katex.min.js"></script>
+<script src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-math.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/main.js"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/site-header.mjs"></script>
+<script type="module" src="/assets/168cc961ef0e9d7559d664044c413419bf7cc89599abab4754d537916b17db5c/js/docs-design.mjs"></script>
+
+</body>
+</html>
