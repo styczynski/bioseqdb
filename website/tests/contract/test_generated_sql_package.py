@@ -442,6 +442,28 @@ def _verify_c_symbol_naming(manifest: dict[str, Any], source: Path) -> None:
                 )
 
 
+def _field_comment_without_runtime_terms(body: str) -> str:
+    """Keep development provenance checks separate from typed field semantics.
+
+    Source-owned field documentation describes execution stages and format or
+    storage revisions. Only those phrases are exempt; the website.field marker
+    does not permit project history or numbered development stages/revisions.
+    """
+    field = re.fullmatch(r"\s*website\.field\s+[a-z_][a-z0-9_]*:\s*(.*)", body)
+    if field is None:
+        return body
+    return re.sub(
+        r"\b(?:pipeline stage|stage represented by this row|stage row|"
+        r"(?:execute|executed|execution of) (?:the|this) stage|"
+        r"(?:ABI|payload format|data-interface|source-content|mutation) revision|"
+        r"revision of the (?:producer identity|position-segment geometry contract|"
+        r"hashing and minimizer-selection scheme))\b",
+        "runtime field",
+        field.group(1),
+        flags=re.IGNORECASE,
+    )
+
+
 def _verify_sql_text(name: str, source: Path, sql_bytes: bytes) -> str:
     sql_text = _decode_utf8(sql_bytes, source, "generated install SQL")
     if not sql_text.endswith("\n"):
@@ -504,11 +526,13 @@ def _verify_sql_text(name: str, source: Path, sql_bytes: bytes) -> str:
         r"tech spec|doc(?:ument)?\s*0*\d+)\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    if provenance_comment.search(sql_text):
-        raise RuntimeError(
-            f"{source}: generated install SQL contains a project/test "
-            "provenance comment"
-        )
+    for comment in re.finditer(r"^\s*--([^\n]*)", sql_text, re.MULTILINE):
+        body = _field_comment_without_runtime_terms(comment.group(1))
+        if provenance_comment.search("--" + body):
+            raise RuntimeError(
+                f"{source}: generated install SQL contains a project/test "
+                "provenance comment"
+            )
     comment_on_statement = re.compile(
         r"\bCOMMENT\s+ON\b.*?\bIS\s+'(?P<body>(?:''|[^'])*)'\s*;",
         re.IGNORECASE | re.DOTALL,
@@ -520,6 +544,44 @@ def _verify_sql_text(name: str, source: Path, sql_bytes: bytes) -> str:
                 "provenance in a COMMENT ON description"
             )
     return hashlib.sha256(sql_bytes).hexdigest()
+
+
+def _verify_sql_provenance_regressions() -> None:
+    """Exercise the field-documentation exception with real and hostile inputs."""
+    source = Path("generated-sql-provenance-regression.sql")
+    legitimate = (
+        "locator_revision: Source-locator payload format revision recorded in the published generation.",
+        "producer_identity_revision: Revision of the producer identity used in compatibility checks.",
+        "minimizer_scheme_revision: Revision of the hashing and minimizer-selection scheme recorded in the manifest.",
+        "release_mutation_after: Spill storage mutation revision immediately after releasing the temporary runs.",
+        "stage: Pipeline stage represented by this row, such as query_sketch, seed_lookup or chain_score.",
+        "eligible_jobs: Number of alignment jobs eligible to execute the stage represented by this row.",
+        "executed_scalar_cpu_jobs: Number of jobs that executed this stage through the scalar CPU engine.",
+        "fallback_jobs: Number of jobs whose execution of this stage used a fallback.",
+        "target_rows: Query total of target rows processed, repeated on every stage row.",
+    )
+    for field in legitimate:
+        sql = ("-- website.field " + field + "\nSELECT 1;\n").encode()
+        if _verify_sql_text("bioseq_cache", source, sql) != hashlib.sha256(sql).hexdigest():
+            raise RuntimeError("field documentation changed the install SQL digest")
+    for phrase in (
+        "integration test fixture", "project history", "stage 7", "phase 2",
+        "milestone", "prototype", "proof-of-concept", "revision 4",
+        "design document", "tech spec", "document 001",
+    ):
+        for sql in (
+            f"-- {phrase}\nSELECT 1;\n",
+            f"-- website.field revision: {phrase}\nSELECT 1;\n",
+            f"-- website.field stage: Pipeline stage; {phrase}\nSELECT 1;\n",
+            f"COMMENT ON FUNCTION x() IS '{phrase}';\n",
+        ):
+            try:
+                _verify_sql_text("bioseq_cache", source, sql.encode())
+            except RuntimeError as error:
+                if "provenance" not in str(error):
+                    raise
+            else:
+                raise RuntimeError(f"development provenance was accepted: {sql!r}")
 
 
 def _verify_public_golden(
@@ -717,6 +779,7 @@ def _verify_artifact(artifact: ArtifactInput) -> ArtifactReceipt:
 
 
 def verify(args: argparse.Namespace) -> tuple[list[ArtifactReceipt], str]:
+    _verify_sql_provenance_regressions()
     artifacts = [
         ArtifactInput(
             name=raw[0],
