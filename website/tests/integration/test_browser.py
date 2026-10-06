@@ -2441,6 +2441,20 @@ def _release_benchmark_fetches(page) -> None:
         raise AssertionFail(f"benchmark real-data model did not render: {error}")
 
 
+def _wait_for_benchmark_tooltip(page):
+    """Observe the visible tooltip after its scheduled viewport clamp."""
+    from playwright.sync_api import expect
+
+    tooltip = page.locator("[data-benchmark-tip]")
+    expect(tooltip).to_have_css("opacity", "1")
+    # renderTip() inserts the visible node first, then clamps its vertical
+    # position in requestAnimationFrame. Opacity alone does not await that work.
+    page.evaluate("""() => new Promise(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    })""")
+    return tooltip
+
+
 def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
                          base_path: str, version: str) -> None:
     """Check same-column A/B ratios, controls and accessible design tooltips."""
@@ -2478,8 +2492,7 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
         has=page.get_by_text(preferred["label"], exact=True))
     cell = row.locator(".bd-s0072").nth(column_index)
     cell.hover()
-    tooltip = page.locator("[data-benchmark-tip]")
-    expect(tooltip).to_have_css("opacity", "1")
+    tooltip = _wait_for_benchmark_tooltip(page)
     expected_ratio = baseline["cells"][column]["a_ns"] / preferred["cells"][column]["a_ns"]
     _check(f"{expected_ratio:.3f}×" in tooltip.inner_text(),
            "hover tooltip compares A against the wrong baseline/workload")
@@ -2490,7 +2503,7 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     expect(tooltip).to_have_css("opacity", "0")
     cell.blur()
     cell.focus()
-    expect(tooltip).to_have_css("opacity", "1")
+    tooltip = _wait_for_benchmark_tooltip(page)
     _check("baseline value" in tooltip.inner_text(),
            "keyboard focus did not reveal the comparison tooltip")
     page.keyboard.press("Escape")
@@ -2501,10 +2514,12 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     minimap_row = page.locator("tbody tr").filter(
         has=page.get_by_text("minimap2", exact=True))
     minimap_row.locator(".bd-s0072").nth(column_index).hover()
+    tooltip = _wait_for_benchmark_tooltip(page)
     _check(f"{1 / expected_ratio:.3f}×" in tooltip.inner_text(),
            "baseline selection did not recompute the inverse A ratio")
     controls.nth(0).select_option("without_cigar_mapq_ns")
     minimap_row.locator(".bd-s0072").nth(column_index).focus()
+    tooltip = _wait_for_benchmark_tooltip(page)
     expected_b = preferred["cells"][column]["b_ns"] / baseline["cells"][column]["b_ns"]
     _check(f"{expected_b:.3f}×" in tooltip.inner_text(),
            "B metric compares the wrong observations")
@@ -2654,8 +2669,7 @@ def _exercise_responsive(page, label: str) -> None:
             cell = page.locator('.bd-s0072[tabindex="0"]').first
             cell.blur()
             cell.focus()
-            tooltip = page.locator("[data-benchmark-tip]")
-            expect(tooltip).to_have_css("opacity", "1")
+            tooltip = _wait_for_benchmark_tooltip(page)
             rect = tooltip.bounding_box()
             _check(rect is not None and rect["x"] >= 0 and rect["y"] >= 0
                    and rect["x"] + rect["width"] <= width + 1
