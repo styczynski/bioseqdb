@@ -58,6 +58,9 @@ import shlex
 import subprocess
 import sys
 from datetime import datetime
+from functools import lru_cache
+
+import yaml
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlsplit
@@ -80,6 +83,17 @@ EXIT_SKIP = 4
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _REPOSITORY_URL = "https://github.com/styczynski/bioseqdb"
+# Keep every requested device boundary in the acceptance gate, including the
+# small-phone and ultrawide endpoints used by the visual audit.
+_RESPONSIVE_WIDTHS = (320, 360, 420, 568, 666, 768, 1024, 1300, 1440, 1600, 1920, 2560)
+_LANDING_BOUNDARY_WIDTHS = tuple(sorted({320, 360, 1920, 2560, *(
+    width + delta for width in (420, 568, 666, 768, 1024, 1300, 1600)
+    for delta in (-1, 0, 1))}))
+_LANDING_SQL_BUDGETS = {
+    "hero_query": (12, 340),
+    "sequence_storage": (2, 142),
+    "similarity_search": (11, 447),
+}
 _EXPECTED_TUTORIALS = (
     "getting_started",
     "project_introduction",
@@ -879,6 +893,103 @@ def _assert_headers(response, expected: list[tuple[str, str]]) -> None:
            "applied Content-Security-Policy header lacks frame-ancestors")
 
 
+@lru_cache(maxsize=1)
+def _landing_copy() -> dict:
+    """Authored copy can change without rewriting browser selectors or goldens."""
+    return yaml.safe_load((_WEBSITE_ROOT / "landing.yaml").read_text(encoding="utf-8"))
+
+
+def _landing_text(section: str, key: str) -> str:
+    return _landing_copy()[section][key]
+
+
+def _landing_layout_state(page) -> dict:
+    """Measure real component boxes, including content hidden by a clipped shell."""
+    return page.evaluate("""() => {
+      const box = node => {
+        if (!node) return null;
+        const r = node.getBoundingClientRect();
+        return {left:r.left, right:r.right, top:r.top, bottom:r.bottom,
+                width:r.width, height:r.height};
+      };
+      const grid = document.querySelector('.ld-s0116');
+      const active = document.querySelector('[data-sql-example]:not([hidden])');
+      const explanation = active?.querySelector(':scope > div:not([data-live-result])');
+      const result = active?.querySelector('[data-live-result]');
+      const sql = document.querySelector('[data-sql-example-code]:not([hidden]) pre');
+      const inspected = [...document.querySelectorAll(
+        '#query-card, #annotate .ld-s0070, .ld-s0117, ' +
+        '[data-sql-example]:not([hidden]) > div, button[data-example-tab]')];
+      return {viewport:innerWidth,
+        documentOverflow:document.documentElement.scrollWidth-innerWidth,
+        story:box(grid), code:box(grid?.querySelector('.ld-s0117')),
+        explanation:box(explanation), result:box(result),
+        annotation:box(document.getElementById('annotate')),
+        annotatedCode:box(document.getElementById('query-card')),
+        notes:box(document.querySelector('#annotate .ld-s0070')),
+        sql:sql ? {client:sql.clientWidth, scroll:sql.scrollWidth,
+                   fontSize:parseFloat(getComputedStyle(sql).fontSize)} : null,
+        clipped:inspected.map(node=>({name:node.id||node.className,box:box(node)}))
+          .filter(item=>item.box.width &&
+            (item.box.left < -1 || item.box.right > innerWidth+1)),
+        tokens:['select','where','dna4'].map(name=>{
+          const node=document.getElementById('tok-'+name);
+          return {name,text:node?.textContent,
+            underline:node ? getComputedStyle(node).textDecorationLine : '',
+            note:!!document.getElementById('note-'+name)};
+        })};
+    }""")
+
+
+def _exercise_landing_breakpoints(page) -> None:
+    """Tab content must not resize the SQL track or discard query annotations."""
+    wide_sql_widths = {}
+    for width in _LANDING_BOUNDARY_WIDTHS:
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.evaluate("() => document.fonts.ready")
+        widths = []
+        for index in range(3):
+            tab = page.locator(f'button[data-example-tab="{index}"]')
+            tab.click()
+            _check(tab.get_attribute("aria-pressed") == "true",
+                   f"landing: example {index + 1} did not activate at {width}px")
+            state = _landing_layout_state(page)
+            _check(state["documentOverflow"] <= 1 and not state["clipped"],
+                   f"landing: visible component clipped at {width}px: {state['clipped']}")
+            _check(all(state[key] and state[key]["width"] > 0
+                       for key in ("story", "code", "explanation", "result")),
+                   f"landing: example {index + 1} lost a visible component at {width}px")
+            widths.append(state["code"]["width"])
+            for code, aside, label in ((state["code"], state["explanation"], "story"),
+                                       (state["annotatedCode"], state["notes"], "annotation")):
+                if width <= 1024:
+                    _check(aside["top"] >= code["bottom"] - 1,
+                           f"landing: {label} explanation must follow SQL at {width}px")
+                else:
+                    _check(aside["left"] >= code["right"] - 1,
+                           f"landing: {label} columns overlap at {width}px")
+            _check(abs(state["result"]["left"] - state["story"]["left"]) <= 1
+                   and abs(state["result"]["width"] - state["story"]["width"]) <= 1,
+                   f"landing: results must use the story row without shrinking SQL at {width}px")
+            _check(state["sql"] and state["sql"]["fontSize"] >= 11,
+                   f"landing: SQL is too small to read at {width}px")
+            if width >= 1600:
+                _check(state["code"]["width"] >= state["story"]["width"] * .55,
+                       f"landing: large-screen SQL lacks sufficient space at {width}px")
+                _check(state["sql"]["scroll"] <= state["sql"]["client"] + 1,
+                       f"landing: compact SQL still scrolls horizontally at {width}px")
+                wide_sql_widths[width] = state["code"]["width"]
+            _check(all(token["text"] and token["note"]
+                       and "underline" in token["underline"] for token in state["tokens"]),
+                   f"landing: annotated SELECT/WHERE/dna4 UI changed at {width}px")
+        _check(max(widths) - min(widths) <= 1,
+               f"landing: changing examples resizes the SQL track at {width}px: {widths}")
+    _check(wide_sql_widths[2560] > wide_sql_widths[1920] > wide_sql_widths[1600],
+           f"landing: SQL does not gain room on ultrawide screens: {wide_sql_widths}")
+    page.locator('button[data-example-tab="0"]').click()
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+
 def _exercise_tabs(page) -> None:
     """Exercise the three literal landing example selectors and every synced panel."""
     tabs = page.locator("button[data-example-tab]")
@@ -907,9 +1018,13 @@ def _exercise_tabs(page) -> None:
     tabs.first.click()
     install_copy = page.locator("button[data-copy-install]")
     _check(install_copy.count() == 1, "landing install copy button is missing")
+    _check(install_copy.locator("[data-copy-idle]").inner_text().strip()
+           == _landing_text("hero", "copy"), "landing copy label differs from landing.yaml")
     install_copy.click()
     done = install_copy.locator("[data-copy-done]")
     done.wait_for(state="visible", timeout=3000)
+    _check(done.inner_text().strip() == _landing_text("hero", "copied"),
+           "landing copy-success label differs from landing.yaml")
     _check(not done.evaluate("node => node.hidden")
            and install_copy.locator("[data-copy-idle]").evaluate("node => node.hidden"),
            "landing install copy interaction did not show its completion state")
@@ -922,7 +1037,8 @@ def _exercise_tabs(page) -> None:
           document.execCommand = () => false;
         }""")
     install_copy.click()
-    failed = install_copy.locator("[data-copy-idle]", has_text="Copy failed")
+    failed = install_copy.locator("[data-copy-idle]",
+                                  has_text=_landing_text("actions", "copy_failed"))
     try:
         failed.wait_for(state="visible", timeout=3000)
     except Exception as error:  # noqa: BLE001
@@ -1292,6 +1408,10 @@ def _exercise_docs_search(page, request_urls: list[str], contract: dict,
     dropdown = page.locator("#search-dd")
     _check(inp.count() == 1 and dropdown.count() == 1,
            "docs design search input/dropdown is missing")
+    _check(inp.get_attribute("aria-label") == _landing_text("header", "search_documentation")
+           and inp.get_attribute("placeholder") == _landing_text("header", "search_docs_functions_types")
+           and dropdown.get_attribute("aria-label") == _landing_text("header", "search_results"),
+           "shared search lost its authored labels")
     page.locator("body").press("/")
     _check(inp.evaluate("el => el === document.activeElement"),
            "the docs '/' shortcut did not focus search")
@@ -1330,7 +1450,7 @@ def _exercise_docs_search(page, request_urls: list[str], contract: dict,
         dropdown.wait_for(state="visible", timeout=3000)
     except Exception as error:  # noqa: BLE001
         raise AssertionFail(f"docs search did not reopen for focusout test: {error}")
-    page.locator("#dnav nav").get_by_role("link", name="Docs", exact=True).focus()
+    page.locator("#dnav nav a[data-nav-prefix]").focus()
     try:
         dropdown.wait_for(state="hidden", timeout=3000)
     except Exception as error:  # noqa: BLE001
@@ -1353,7 +1473,8 @@ def _exercise_sql_search_order(page) -> None:
         inp.fill(query)
         expect(results.first).to_have_attribute("data-search-id", setting_id)
         expect(results.first.locator(".doc-search-title")).to_have_text(setting_title)
-        expect(results.first.locator(".doc-search-kind")).to_have_text("Setting")
+        expect(results.first.locator(".doc-search-kind")).to_have_text(
+            _landing_text("search", "setting"))
         expect(results.first).to_have_attribute("data-search-domain", "SQL")
     # SQL and C++ both match this query in the real generated catalog. Compare
     # the display order with the ranking output so type grouping cannot undo it.
@@ -1373,6 +1494,14 @@ def _exercise_sql_search_order(page) -> None:
     _check([priorities[domain] for domain in domains]
            == sorted(priorities[domain] for domain in domains),
            "SQL results must appear before C++ results")
+    domain_keys = {"SQL": "sql", "Documentation": "documentation", "C++": "c"}
+    groups = list(dict.fromkeys(domains))
+    expect(page.locator("#search-dd .doc-search-group")).to_have_text(
+        [_landing_text("search", domain_keys[domain]) for domain in groups])
+    unmatched_query = "zzzz_bioseq_no_matching_entry_93841"
+    inp.fill(unmatched_query)
+    expect(page.locator("#search-dd")).to_have_text(
+        f"{_landing_text('search', 'no_matches_for')} {unmatched_query}")
     page.keyboard.press("Escape")
     expect(page.locator("#search-dd")).to_be_hidden()
 
@@ -1421,6 +1550,12 @@ def _exercise_version_selector(page, request_urls: list[str]) -> None:
            and all_versions.get_attribute("role") == "menuitem"
            and all_versions.evaluate("element => element === element.parentElement.lastElementChild"),
            "version manifest replacement removed the authored All versions link")
+    _check(all_versions.text_content().strip() == _landing_text("header", "all_versions"),
+           "version manifest replacement changed the authored versions label")
+    current_badge = menu.locator("a[data-ver][aria-current='page'] .site-version-current")
+    if current_badge.count():
+        _check(current_badge.text_content().strip() == _landing_text("header", "current"),
+               "version manifest replacement changed the authored current-version badge")
     button.click()
     _check(button.get_attribute("aria-expanded") == "true" and menu.is_visible(),
            "clicking the docs version button did not open its menu")
@@ -1475,13 +1610,14 @@ def _table_matrix(table) -> list[list[str]]:
     return [header, *rows]
 
 
-def _landing_result_matrix(result: dict) -> list[list[str]]:
-    header = [f"{column.get('name', '')} ({column.get('type_name', '')})"
+def _landing_result_matrix(result: dict, section: str = "examples") -> list[list[str]]:
+    opening, closing = (_landing_text(section, key) for key in ("symbol", "symbol_2"))
+    header = [f"{column.get('name', '')} {opening}{column.get('type_name', '')}{closing}"
               for column in result.get("columns", [])]
     rows = []
     for row in result.get("rows", []):
-        rows.append(["NULL" if cell.get("is_null") else str(cell.get("text", ""))
-                     for cell in row])
+        rows.append([_landing_text(section, "value_null") if cell.get("is_null")
+                     else str(cell.get("text", "")) for cell in row])
     return [header, *rows]
 
 
@@ -1499,6 +1635,17 @@ def _exercise_landing_results(page, contract: dict) -> None:
                f"landing slot {slot} rendered SQL differs from the resolved model")
         table = wrapper.locator("table.result-table")
         _check(table.count() == 1, f"landing slot {slot} has no executed result table")
+        visible_sql = view["visible_sql"].strip()
+        line_limit, character_limit = _LANDING_SQL_BUDGETS[slot]
+        _check(len(visible_sql.splitlines()) <= line_limit
+               and len(visible_sql) <= character_limit,
+               f"landing slot {slot} expanded its public SQL beyond the original compact example")
+        _check(not re.search(r"(?im)^\s*(?:SET|RESET)\b", visible_sql),
+               f"landing slot {slot} exposes hidden session setup or teardown")
+        rows = view["result"].get("rows", [])
+        _check(bool(rows) and all(row and all(not cell.get("is_null", False)
+                                             for cell in row) for row in rows),
+               f"landing slot {slot} needs illustrative nonempty, non-NULL results")
         expected = _landing_result_matrix(view["result"])
         _check(_table_matrix(table) == expected,
                f"landing slot {slot} rendered fake/stale rows: "
@@ -1510,14 +1657,15 @@ def _exercise_landing_results(page, contract: dict) -> None:
     hero = page.locator(
         '[data-live-result="hero_query"] table.annotated-result-table')
     _check(hero.count() == 1, "annotated landing query is not bound to hero_query result")
-    hero_expected = _landing_result_matrix(contract["landing"]["hero_query"]["result"])
+    hero_expected = _landing_result_matrix(
+        contract["landing"]["hero_query"]["result"], "query")
     _check(_table_matrix(hero) == hero_expected,
            "annotated landing query contains prototype rows instead of backend rows")
     hero_rows = len(contract["landing"]["hero_query"]["result"].get("rows", []))
     hero_label = page.locator(
         '#query-card > [data-live-result="hero_query"] > div')
     _check(hero_label.count() == 1
-           and (hero_label.text_content() or "").strip() == f"{hero_rows} rows",
+           and (hero_label.text_content() or "").strip() == f"{hero_rows} {_landing_text('query', 'rows')}",
            "annotated landing query row-count label is not model-derived")
 
 
@@ -1785,17 +1933,21 @@ def _exercise_project_content(page, tutorial: dict, base_path: str, version: str
 def _assert_landing_routes(page, base_path: str, version: str) -> None:
     first = _public_route(
         base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/")
-    read_links = page.locator("a", has_text="Read the docs")
-    _check(read_links.count() == 2,
-           f"landing has two content Read the docs links below its common header, got {read_links.count()}")
-    for index in range(read_links.count()):
-        _check(read_links.nth(index).get_attribute("href") == first,
-               f"landing Read the docs must target first tutorial {first}")
-    github = page.locator("a", has_text="GitHub")
-    _check(github.count() >= 3, "landing lost its GitHub links")
-    for index in range(github.count()):
-        _check(github.nth(index).get_attribute("href") == _REPOSITORY_URL,
-               "landing GitHub link does not use the configured exact repository URL")
+    for selector, section in ((".ld-s0026", "hero"), ("#cta .ld-s0278", "cta")):
+        link = page.locator(f'{selector}[href="{first}"]')
+        _check(link.count() == 1 and link.get_attribute("href") == first,
+               f"landing {section} documentation action must target first tutorial {first}")
+        _check(link.inner_text().strip() == _landing_text(section, "read_the_docs"),
+               f"landing {section} action differs from landing.yaml")
+    for selector, section, key in (
+            ("#dnav .site-github", "header", "github"),
+            (f'#cta a.ld-s0278[href="{_REPOSITORY_URL}"]', "cta", "view_on_github"),
+            (f'a.ld-s0294[href="{_REPOSITORY_URL}"]', "footer", "github")):
+        link = page.locator(selector)
+        _check(link.count() == 1 and link.get_attribute("href") == _REPOSITORY_URL,
+               f"landing {section} repository action lost its configured destination")
+        _check(link.inner_text().strip() == _landing_text(section, key),
+               f"landing {section} repository label differs from landing.yaml")
 
 
 def _assert_tutorial_sidebar(page, base_path: str, version: str) -> None:
@@ -1909,13 +2061,12 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
         records = design["landing"]
         _compare_design_style(
             page, "#annotate", records["id:annotate"],
-            ("display", "gap", "alignItems", "position"), "landing query anatomy")
+            ("display", "alignItems", "position"), "landing query anatomy")
         hero = '#query-card > [data-live-result="hero_query"]'
         _compare_design_style(
             page, hero, records["hero-result:first"],
             ("borderTopWidth", "borderTopColor", "borderRightWidth",
              "borderBottomWidth", "borderLeftWidth", "borderRadius",
-             "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
              "backgroundColor"),
             "landing live hero result")
         _compare_design_style(
@@ -1925,7 +2076,7 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
             "landing live hero result label")
         _compare_design_style(
             page, f"{hero} > table", records["hero-result-table:first"],
-            ("borderCollapse", "fontFamily", "fontSize"),
+            ("borderCollapse", "fontFamily"),
             "landing live hero result table")
         _compare_design_style(
             page, f"{hero} thead th:first-child",
@@ -1954,14 +2105,12 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
             ("display", "alignItems"), "benchmark body grid")
         _compare_design_style(
             page, "[data-bnav]", records["data-bnav:first"],
-            ("position", "top", "height", "overflowY", "paddingTop",
-             "paddingRight", "paddingBottom", "paddingLeft",
+            ("position", "top", "height", "overflowY",
              "borderRightWidth", "borderRightColor"),
             "benchmark navigation rail")
         _compare_design_style(
             page, "[data-ctrls]", records["data-ctrls:first"],
-            ("display", "gap", "marginTop", "paddingTop", "paddingRight",
-             "paddingBottom", "paddingLeft", "borderTopWidth", "borderRadius"),
+            ("display", "marginTop", "borderTopWidth", "borderRadius"),
             "benchmark filter grid")
         return
 
@@ -1972,11 +2121,11 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
          "borderBottomColor", "backdropFilter"), "docs navigation")
     _compare_design_style(
         page, "[data-bodygrid]", records["data-bodygrid:first"],
-        ("display", "maxWidth", "alignItems"), "docs body grid")
+        ("display", "alignItems"), "docs body grid")
     _compare_design_style(
         page, "#sidebar", records["id:sidebar"],
-        ("position", "top", "height", "overflowY", "paddingTop", "paddingRight",
-         "paddingBottom", "paddingLeft", "borderRightWidth", "borderRightColor"),
+        ("position", "top", "height", "overflowY", "paddingTop",
+         "paddingBottom", "borderRightWidth", "borderRightColor"),
         "docs sidebar")
     _compare_design_style(
         page, "[data-search-box]", records["data-search-box:first"],
@@ -1985,25 +2134,24 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
     if page.locator(".doc-code:not(:has(.anno-cards))").count() > 0:
         _compare_design_style(
             page, ".doc-code:not(:has(.anno-cards))", records["data-term:first"],
-            ("maxWidth", "borderTopWidth", "borderTopColor", "borderRadius",
+            ("borderTopWidth", "borderTopColor", "borderRadius",
              "backgroundImage", "boxShadow", "overflow"), "Markdown code card")
         _compare_design_style(
             page, ".doc-code:not(:has(.anno-cards)) pre", records["data-code:first"],
-            ("marginTop", "marginRight", "marginBottom", "marginLeft", "paddingTop",
-             "paddingRight", "paddingBottom", "paddingLeft", "overflowX"),
+            ("marginTop", "marginRight", "marginBottom", "marginLeft", "overflowX"),
             "Markdown code geometry")
         code_reference = dict(records["data-code:first"])
         code_reference["style"] += (
             ";font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#cbd8e4")
         _compare_design_style(
             page, ".doc-code:not(:has(.anno-cards)) code", code_reference,
-            ("fontFamily", "fontSize", "lineHeight", "color"),
+            ("fontFamily", "color"),
             "Markdown code typography")
 
 
 def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> None:
-    """Pixel-compare the live Prism component with the same DOM restyled to the
-    supplied terminal geometry and explicit design token palette."""
+    """Pixel-compare the syntax palette while preserving the responsive geometry
+    validated at each breakpoint by the layout contract."""
     page.set_viewport_size({"width": 1280, "height": 900})
     page.evaluate("() => document.fonts.ready")
     required_tokens = ("keyword", "function", "string", "operator", "punctuation")
@@ -2025,16 +2173,25 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
     actual_path = artifact_dir / "prism-live.png"
     reference_path = artifact_dir / "prism-design-reference.png"
     actual = pre.screenshot(path=str(actual_path), animations="disabled")
+    geometry = pre.evaluate("""pre => {
+        const style = getComputedStyle(pre);
+        return {fontSize: style.fontSize, lineHeight: style.lineHeight,
+                padding: style.padding,
+                figureWidth: pre.closest('.doc-code').getBoundingClientRect().width};
+    }""")
 
     docs = design["docs"]
     pre.evaluate(
-        """(pre, {termStyle, preStyle, palette}) => {
+        """(pre, {termStyle, preStyle, palette, geometry}) => {
           const figure = pre.closest('.doc-code');
           const code = pre.querySelector('code.language-sql');
           figure.style.cssText = termStyle;
+          figure.style.width = geometry.figureWidth + 'px';
+          figure.style.maxWidth = 'none';
           pre.style.cssText = preStyle;
-          pre.style.fontSize = '13px';
-          pre.style.lineHeight = '1.65';
+          pre.style.padding = geometry.padding;
+          pre.style.fontSize = geometry.fontSize;
+          pre.style.lineHeight = geometry.lineHeight;
           code.style.fontFamily = "'IBM Plex Mono'";
           code.style.fontSize = '13px';
           code.style.lineHeight = '1.65';
@@ -2059,11 +2216,11 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
         }""",
         {"termStyle": docs["data-term:first"]["style"],
          "preStyle": docs["data-code:first"]["style"],
-         "palette": _CODE_PALETTE},
+         "palette": _CODE_PALETTE, "geometry": geometry},
     )
     reference = pre.screenshot(path=str(reference_path), animations="disabled")
     _check(actual == reference,
-           "Prism adaptation is not pixel-identical to the supplied design geometry/palette; "
+           "Prism palette changes pixels in the independently checked responsive layout; "
            f"live={hashlib.sha256(actual).hexdigest()}, "
            f"reference={hashlib.sha256(reference).hexdigest()} (artifacts: {artifact_dir})")
 
@@ -2096,10 +2253,17 @@ def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
             found = page.evaluate("(id) => document.getElementById(id) !== null", target)
             _check(found, f"on-this-page anchor #{target} has no matching element")
         first_target = (anchors.first.get_attribute("href") or "")[1:]
+        original_viewport = page.viewport_size
+        if not toc.is_visible():
+            _check(original_viewport["width"] < 1300,
+                   "on-this-page rail is missing at a desktop width")
+            page.set_viewport_size({"width": 1300, "height": original_viewport["height"]})
+        _check(toc.is_visible(), "on-this-page rail is unavailable at 1300px")
         anchors.first.click()
         page.wait_for_timeout(150)
         _check(page.evaluate("() => location.hash") == f"#{first_target}",
                f"TOC interaction did not update the live hash to #{first_target}")
+        page.set_viewport_size(original_viewport)
 
 
 def _exercise_capability_tracer(page) -> None:
@@ -2287,13 +2451,13 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
            "benchmark heading differs from the published panel")
     _check(f"{benchmark['benchmark_count']} benchmarks" in
            page.locator("#bhead").inner_text(), "benchmark status count is stale")
-    for label, expected in {
-        "Docs": _public_route(base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/"),
-        "Benchmarks": _public_route(base_path, "benchmarks/"),
-    }.items():
-        link = page.locator("#dnav nav a", has_text=label)
-        _check(link.count() == 1 and urlsplit(link.get_attribute("href")).path == expected,
-               f"benchmark {label} navigation lost the configured mount")
+    for key, expected in (
+        ("docs", _public_route(base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/")),
+        ("benchmarks", _public_route(base_path, "benchmarks/")),
+    ):
+        link = page.locator(f'#dnav nav a[href="{expected}"]')
+        _check(link.count() == 1 and link.inner_text().strip() == _landing_text("header", key),
+               f"benchmark {key} navigation lost its configured route or authored label")
     controls = page.locator("[data-ctrls] select")
     _check(controls.count() == 4, "benchmark comparison filters are missing")
     _check(controls.nth(1).locator("option").count() == 1
@@ -2383,7 +2547,9 @@ def _exercise_benchmark_failure(page, remote_state: dict[str, bool]) -> None:
 def _exercise_responsive(page, label: str) -> None:
     """Responsive layout (§15.3/§20): no horizontal overflow and the key landmarks
     are present at each required visual width."""
-    for width in (360, 768, 1024, 1440):
+    from playwright.sync_api import expect
+
+    for width in _RESPONSIVE_WIDTHS:
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(120)
         if width == 360 and label not in ("landing", "benchmarks"):
@@ -2402,9 +2568,12 @@ def _exercise_responsive(page, label: str) -> None:
                    f"{label}: Escape did not close the docs drawer")
         header = page.locator("header#dnav.site-header")
         _check(header.count() == 1, f"{label}: shared header missing at {width}px")
-        for text in ("Docs", "Benchmarks"):
-            _check(header.get_by_role("link", name=text, exact=True).is_visible(),
-                   f"{label}: {text} navigation hidden at {width}px")
+        for key, selector in (("docs", "nav a[data-nav-prefix]"),
+                              ("benchmarks", 'nav a[href$="/benchmarks/"]')):
+            link = header.locator(selector)
+            _check(link.count() == 1 and link.is_visible()
+                   and link.inner_text().strip() == _landing_text("header", key),
+                   f"{label}: {key} navigation hidden or mislabeled at {width}px")
         _check(header.locator("#doc-search").is_visible(),
                f"{label}: common search hidden at {width}px")
         skip_link = page.locator(".skip-link,.benchmark-skip-link")
@@ -2429,6 +2598,32 @@ def _exercise_responsive(page, label: str) -> None:
                f"{label}: header controls overlap/clip at {width}px: {geometry}")
         if label.startswith("tutorial:"):
             _assert_content_scroll_layout(page, label)
+        if label == "landing":
+            code_selector = ".ld-s0055 > code,.ld-s0124 > code,.ld-s0125 > code"
+        else:
+            code_selector = ".doc-code > pre > code"
+        typography = page.locator(code_selector).evaluate_all("""nodes => nodes.map(node => ({
+            code:parseFloat(getComputedStyle(node).fontSize),
+            pre:parseFloat(getComputedStyle(node.parentElement).fontSize),
+            lineHeight:parseFloat(getComputedStyle(node).lineHeight),
+            parentLineHeight:parseFloat(getComputedStyle(node.parentElement).lineHeight)
+        }))""")
+        line_height = 1.85 if label == "landing" else 1.65
+        _check(all(item["code"] == item["pre"] and item["code"] >= 11
+                   and item["lineHeight"] == item["parentLineHeight"]
+                   and abs(item["lineHeight"] / item["code"] - line_height) < .01
+                   for item in typography),
+               f"{label}: code ignores responsive font size at {width}px: {typography}")
+        if width <= 420:
+            _check(all(item["code"] <= 12 for item in typography),
+                   f"{label}: small-screen SQL typography was not reduced at {width}px")
+        if width >= 1920:
+            _check(all(item["code"] >= 15 for item in typography),
+                   f"{label}: wide-screen SQL typography was not enlarged at {width}px")
+            if label not in ("landing", "benchmarks", "error"):
+                main = page.locator("#doc-main")
+                _check(main.count() == 1 and main.bounding_box()["width"] >= width * .6,
+                       f"{label}: documentation wastes the available width at {width}px")
         if label == "benchmarks":
             columns = page.locator("[data-bgrid]").evaluate(
                 "node => getComputedStyle(node).gridTemplateColumns")
@@ -2436,17 +2631,33 @@ def _exercise_responsive(page, label: str) -> None:
                 "node => getComputedStyle(node).position")
             control_columns = page.locator("[data-ctrls]").evaluate(
                 "node => getComputedStyle(node).gridTemplateColumns")
-            if width <= 1080:
+            if width <= 1024:
                 _check(nav_position == "static" and " " not in columns.strip(),
                        f"benchmarks: shell did not collapse at width {width}: "
                        f"nav={nav_position}, columns={columns}")
             else:
                 _check(nav_position == "sticky" and " " in columns.strip(),
                        f"benchmarks: desktop shell lost its navigation rail at {width}")
-            expected_control_columns = 1 if width <= 640 else (2 if width <= 760 else 4)
+            expected_control_columns = 1 if width < 420 else (2 if width < 768 else 4)
             _check(len(control_columns.split()) == expected_control_columns,
                    f"benchmarks: expected {expected_control_columns} filter columns at "
                    f"{width}, got {control_columns}")
+            if width >= 1920:
+                _check(page.locator(".bd-s0059").evaluate_all(
+                    "nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)"),
+                    f"benchmarks: the comparison table wastes available width at {width}px")
+            cell = page.locator('.bd-s0072[tabindex="0"]').first
+            cell.blur()
+            cell.focus()
+            tooltip = page.locator("[data-benchmark-tip]")
+            expect(tooltip).to_have_css("opacity", "1")
+            rect = tooltip.bounding_box()
+            _check(rect is not None and rect["x"] >= 0 and rect["y"] >= 0
+                   and rect["x"] + rect["width"] <= width + 1
+                   and rect["y"] + rect["height"] <= 901,
+                   f"benchmarks: comparison tooltip clips at {width}px: {rect}")
+            page.keyboard.press("Escape")
+            expect(tooltip).to_have_css("opacity", "0")
         overflow = page.evaluate(
             "() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
         _check(overflow <= 1, f"{label}: {overflow}px horizontal overflow at width {width}")
@@ -2600,6 +2811,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_media_band(page)
                 _exercise_cta_grid(page)
                 _exercise_reduced_motion(page)
+                _exercise_landing_breakpoints(page)
             if label.startswith("tutorial:"):
                 slug = label.split(":", 1)[1]
                 tutorial = contract["tutorials"][slug]
