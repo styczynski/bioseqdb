@@ -266,6 +266,40 @@ struct site_configuration {
     std::vector<std::string> required_documentation_entities;
 };
 
+// Landing copy is grouped by section. Keeping values as plain strings lets
+// authors change prose without editing markup, SQL, or the reference export.
+using landing_content = std::map<
+    std::string, std::map<std::string, std::string, std::less<>>, std::less<>>;
+
+[[nodiscard]] landing_content parse_landing_content(
+    const std::string& yaml_text, std::string_view path) {
+    validate_yaml_strict(yaml_text, path);
+    const YAML::Node root = YAML::Load(yaml_text);
+    if (!root.IsMap() || root.size() == 0) {
+        throw std::runtime_error("landing content must contain section mappings: " + std::string(path));
+    }
+    landing_content content;
+    for (const auto& section : root) {
+        const auto group = section.first.as<std::string>();
+        if (!is_lower_snake(group) || !section.second.IsMap()) {
+            throw std::runtime_error("invalid landing content section: " + group);
+        }
+        auto& entries = content[group];
+        for (const auto& entry : section.second) {
+            const auto key = entry.first.as<std::string>();
+            if (!is_lower_snake(key)) {
+                throw std::runtime_error("invalid landing content key: " + group + "." + key);
+            }
+            auto value = require_scalar(entry.second, group + "." + key, path);
+            if (value.empty()) {
+                throw std::runtime_error("empty landing content: " + group + "." + key);
+            }
+            entries.emplace(key, std::move(value));
+        }
+    }
+    return content;
+}
+
 namespace {
 
 void validate_base_path(std::string_view value, std::string_view path) {

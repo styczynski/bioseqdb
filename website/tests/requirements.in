@@ -14,3 +14,4 @@
 # <build>/website/playwright-browsers via `playwright install chromium`.
 html5lib==1.1
 playwright==1.52.0
+PyYAML==6.0.2

@@ -3,7 +3,6 @@ import { normalizeSearchText } from "./search_tokens.mjs";
 import { rankedSearch, searchDomain, searchType } from "./search-ranking.mjs";
 
 const root = document.querySelector("[data-site-header]");
-const SEARCH_LABELS = { Tutorial: "Tutorial", Function: "Function", Class: "Class", Type: "Type", Setting: "Setting", SQL: "SQL object" };
 const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T", Setting: "S", SQL: "S" };
 
 function appendHighlight(target, text, query) {
@@ -60,6 +59,16 @@ function search() {
     document.querySelector("#search-dialog[data-search-index]") ||
     document.querySelector("[data-search-index]");
   const url = firstDataUrl([input, dropdown, wrap, source, root], ["searchIndex"]);
+  const labels = {
+    Tutorial: root.dataset.searchTutorial, Function: root.dataset.searchFunction,
+    Class: root.dataset.searchClass, Type: root.dataset.searchType,
+    Setting: root.dataset.searchSetting, SQL: root.dataset.searchSql,
+  };
+  const domains = {
+    SQL: root.dataset.searchDomainSql,
+    Documentation: root.dataset.searchDomainDocumentation,
+    "C++": root.dataset.searchDomainCpp,
+  };
   let records = null;
   let loadPromise = null;
   let options = [];
@@ -70,7 +79,6 @@ function search() {
   input.setAttribute("aria-controls", dropdown.id);
   input.setAttribute("aria-expanded", "false");
   dropdown.setAttribute("role", "listbox");
-  dropdown.setAttribute("aria-label", "Search results");
 
   const setOpen = (open) => {
     dropdown.style.display = open ? "block" : "none";
@@ -121,7 +129,7 @@ function search() {
   };
   const render = () => {
     if (!records) {
-      renderMessage("Loading search index…");
+      renderMessage(root.dataset.searchLoading || "");
       return;
     }
     const query = input.value;
@@ -131,7 +139,7 @@ function search() {
     selected = -1;
     input.removeAttribute("aria-activedescendant");
     if (!matches.length) {
-      renderMessage("No matches for ", query);
+      renderMessage((root.dataset.searchNoMatches || "") + " ", query);
       return;
     }
     let previousDomain = "";
@@ -141,7 +149,7 @@ function search() {
       if (domain !== previousDomain) {
         const heading = document.createElement("div");
         heading.className = "doc-search-group";
-        heading.textContent = domain;
+        heading.textContent = domains[domain] || domain;
         dropdown.appendChild(heading);
         previousDomain = domain;
       }
@@ -169,7 +177,7 @@ function search() {
       titleRow.className = "doc-search-title-row";
       const kindLabel = document.createElement("span");
       kindLabel.className = "doc-search-kind";
-      kindLabel.textContent = SEARCH_LABELS[type];
+      kindLabel.textContent = labels[type] || type;
       titleRow.append(title, kindLabel);
       text.appendChild(titleRow);
       if (record.summary) {
@@ -219,7 +227,7 @@ function search() {
     setFocusStyle(true);
     setOpen(true);
     if (!url) {
-      renderMessage("Search index is unavailable.");
+      renderMessage(root.dataset.searchUnavailable || "");
       return;
     }
     render();
@@ -227,7 +235,7 @@ function search() {
       await load();
       if (document.activeElement === input || wrap.contains(document.activeElement)) render();
     } catch {
-      if (document.activeElement === input) renderMessage("Search is temporarily unavailable.");
+      if (document.activeElement === input) renderMessage(root.dataset.searchError || "");
     }
   };
   const close = (blur = false) => {
@@ -304,6 +312,7 @@ function version() {
   const currentClass = currentTemplate?.className || "site-version-link";
   const regularClass = regularTemplate?.className || "site-version-link";
   const badgeClass = currentTemplate?.querySelector("span")?.className || "site-version-current";
+  const currentLabel = currentTemplate?.querySelector("span")?.textContent || "";
 
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-controls", menu.id);
@@ -381,7 +390,7 @@ function version() {
           link.setAttribute("aria-current", "page");
           const badge = document.createElement("span");
           badge.className = badgeClass;
-          badge.textContent = "current";
+          badge.textContent = currentLabel;
           link.append(document.createTextNode(" "), badge);
         }
         fragment.appendChild(link);

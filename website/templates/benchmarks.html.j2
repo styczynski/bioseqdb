@@ -24,36 +24,37 @@
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/project-content.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/site-header.css">
+<link rel="stylesheet" href="{{ site.assets_base_url }}css/responsive.css">
 </head>
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
-<header id="dnav" class="site-header" data-site-header>
+<header id="dnav" class="site-header" data-site-header data-search-loading="{{ landing.search.loading_search_index }}" data-search-no-matches="{{ landing.search.no_matches_for }}" data-search-unavailable="{{ landing.search.search_index_is_unavailable }}" data-search-error="{{ landing.search.search_is_temporarily_unavailable }}" data-search-tutorial="{{ landing.search.tutorial }}" data-search-function="{{ landing.search.function }}" data-search-class="{{ landing.search.class }}" data-search-type="{{ landing.search.type }}" data-search-setting="{{ landing.search.setting }}" data-search-sql="{{ landing.search.sql_object }}" data-search-domain-sql="{{ landing.search.sql }}" data-search-domain-documentation="{{ landing.search.documentation }}" data-search-domain-cpp="{{ landing.search.c }}">
   <div class="site-header-inner">
-    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
-    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="BioseqDB home">
+    <button type="button" data-menu class="site-menu" aria-label="{{ landing.header.documentation_menu }}"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="{{ landing.header.bioseqdb_home }}">
       <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
-      <span>Bioseq<span>DB</span></span>
+      <span>{{ landing.header.bioseq }}<span>{{ landing.header.db }}</span></span>
     </a>
-    <nav data-topnav class="site-navigation" aria-label="Main navigation">
-      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
-      <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
+    <nav data-topnav class="site-navigation" aria-label="{{ landing.header.main_navigation }}">
+      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">{{ landing.header.docs }}</a>
+      <a href="{{ site.base_path }}benchmarks/">{{ landing.header.benchmarks }}</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
-        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
-        <kbd>/</kbd>
+        <input id="doc-search" type="search" role="combobox" aria-label="{{ landing.header.search_documentation }}" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="{{ landing.header.search_docs_functions_types }}" autocomplete="off" spellcheck="false">
+        <kbd>{{ landing.header.symbol }}</kbd>
       </div>
-      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="{{ landing.header.search_results }}"></div>
     </div>
     <div data-ver-wrap class="site-version-wrap">
       <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
       <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
-        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">current</span></a>
-        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">All versions</a>
+        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">{{ landing.header.current }}</span></a>
+        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">{{ landing.header.all_versions }}</a>
       </div>
     </div>
-    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">{{ landing.header.github }}</a>
   </div>
 </header>
 <div id="benchmarks-app"

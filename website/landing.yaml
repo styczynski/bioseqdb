@@ -1,0 +1,337 @@
+# Edit the landing page text here, then rebuild the website with CMake.
+# Keys are stable bindings to the supplied design; changing values never changes
+# the layout, classes, annotation hooks, or the SQL executed by the builder.
+# Inline styling splits a few sentences across neighboring entries. Keep those
+# fragments in reading order. SQL examples live in v0.1/landing_examples.md.
+# The header section is shared by the landing, documentation, and benchmarks.
+# This file is authored content: the design translator never overwrites it.
+
+meta:
+  title: BioseqDB
+  description: Load FASTA and FASTQ data, store sequences beside metadata, and search them with
+    ordinary SQL.
+header:
+  documentation_menu: Documentation menu
+  bioseqdb_home: BioseqDB home
+  bioseq: Bioseq
+  db: DB
+  main_navigation: Main navigation
+  docs: Docs
+  benchmarks: Benchmarks
+  search_documentation: Search documentation
+  search_docs_functions_types: Search docs, functions, types…
+  symbol: /
+  search_results: Search results
+  current: current
+  all_versions: All versions
+  github: GitHub
+hero:
+  sql_native_sequence_search: SQL-native sequence search
+  search_biological_sequences_with_plain: Search biological sequences with plain
+  sql: SQL
+  symbol: .
+  bioseqdb_is_a_sql_native_system_for: BioseqDB is a SQL-native system for biological sequence
+    data. Load FASTA and FASTQ files, store sequences beside their metadata, and search them
+    with one query.
+  read_the_docs: Read the docs
+  see_the_examples: See the examples
+  symbol_2: $
+  create_extension_bioseq: CREATE EXTENSION bioseq;
+  copied: Copied
+  copy: Copy
+  symbol_3: ·
+  scroll: Scroll
+  symbol_4: ▾
+query:
+  reading_the_query: Reading the query
+  one_select_now_sequence_aware: One SELECT, now sequence-aware
+  a_normal_query_becomes_a_sequence_search: A normal query becomes a sequence search the moment
+  mmsearch: mmsearch()
+  appears_in_the_where_clause_everything_else: appears in the WHERE clause. Everything else
+    is SQL you already write.
+  query_sql: query.sql
+  rows: rows
+  symbol: (
+  symbol_2: )
+  value_null: 'NULL'
+  select: SELECT
+  select_any_metadata_from_the_table_just: Select any metadata from the table just like in ordinary
+    Postgres. Join, filter, and project columns exactly as you normally would.
+  where: WHERE
+  add: Add
+  to_the_where_clause_and_it_activates: to the WHERE clause and it activates a custom scan that
+    performs alignments efficiently.
+  dna4: '''dna4'''
+  bioseqdb_supports_different_sequence_alphabets_and_storage: BioseqDB supports different sequence
+    alphabets and storage interfaces, chosen right in the column type.
+experience:
+  free_and_open_source_forever: Free and open source, forever.
+  built_by_a_single_maintainer_with_experience: Built by a single maintainer, with experience
+    from
+  google: Google
+  bytedance: ByteDance
+  goldman_sachs: Goldman Sachs
+  sumo_logic: Sumo Logic
+  entrepreneur_first: Entrepreneur First
+workflow:
+  one_workflow: One workflow
+  load_query_and_scale_in_one_place: Load, query, and scale in one place
+  every_step_is_ordinary_sql_nothing_leaves: Every step is ordinary SQL. Nothing leaves the
+    database, so sequence work and metadata work stay together.
+  value_01: '01'
+  load: Load
+  stream_fasta_and_fastq_files_straight_into: Stream FASTA and FASTQ files straight into tables.
+  value_02: '02'
+  query: Query
+  find_sequence_matches_with_mmsearch_inside_a: Find sequence matches with mmsearch inside a
+    normal SELECT.
+  value_03: '03'
+  filter: Filter
+  combine_matches_with_metadata_filters_in_the: Combine matches with metadata filters in the
+    same query.
+  value_04: '04'
+  inspect: Inspect
+  read_alignment_context_such_as_match_start: Read alignment context such as match start and
+    end.
+  value_05: '05'
+  scale: Scale
+  work_with_very_large_records_without_splitting: Work with very large records without splitting
+    them by hand.
+examples:
+  the_sql: The SQL
+  three_queries_one_product_story: Three queries, one product story
+  start_with_the_smallest_search_add_metadata: Start with the smallest search, add metadata
+    filters, then load a file and keep indexes current. Same language throughout.
+  value_01: '01'
+  search: Search
+  value_02: '02'
+  filter_and_sort: Filter and sort
+  value_03: '03'
+  load_and_index: Load and index
+  query_sql: query.sql
+  the_smallest_story: The smallest story
+  this_is_the_smallest_bioseqdb_story_a: This is the smallest BioseqDB story. A normal SELECT
+    becomes sequence-aware when mmsearch appears in the WHERE clause.
+  executed_query_result: Executed query result
+  symbol: (
+  symbol_2: )
+  value_null: 'NULL'
+  what_the_query_does: What the query does
+  the_table_mixes_ordinary_metadata_with_a: The table mixes ordinary metadata with a BioseqDB
+    sequence column. The query filters by organism, date, length, and sequence match before
+    sorting the result.
+  performance: Performance
+  the_sequence_search_work_can_use_selected: The sequence-search work can use selected Vulkan-backed
+    GPU paths. The metadata filters and ordering stay in the same SQL query.
+  loading: Loading
+  bioseq_load_streams_a_fasta_or_fastq: bioseq.load streams a FASTA or FASTQ file into the table.
+    Header fields can become typed columns, so sequence data arrives with searchable context.
+  indexing: Indexing
+  with_insert_time_indexing_on_new_records: With insert-time indexing on, new records can update
+    sequence indexes as they arrive. For deferred bulk work, BioseqDB can also rebuild indexes
+    after loading.
+  the_payoff: The payoff
+  the_follow_up_query_shows_the_payoff: The follow-up query shows the payoff. Loaded and inserted
+    records are available to sequence search and metadata ordering in one place.
+performance:
+  under_the_hood: Under the hood
+  built_to_keep_pace_with_the_instrument: Built to keep pace with the instrument
+  vectorized_cpu_paths_vulkan_backed_gpu_acceleration: Vectorized CPU paths, Vulkan-backed GPU
+    acceleration, and parallel scans — the search runs where the data already lives.
+capabilities:
+  what_bioseqdb_gives_you: What BioseqDB gives you
+  a_sequence_engine_that_speaks_sql: A sequence engine that speaks SQL
+  system_architecture: System architecture
+  select_a_capability_below_to_trace_it: Select a capability below to trace it ↓
+  input_fasta: input.fasta
+  sql: SQL
+  index: INDEX
+  value_1: '#1'
+  value_2: '#2'
+  value_3: '#3'
+  meta: META
+  bioseqdb_execution: BioseqDB execution
+  engine_layer: engine layer
+  cpu: CPU
+  gpu: GPU
+  mmsearch: mmsearch()
+  sql_native_search: SQL-native search
+  mmsearch_is_a_predicate_you_drop_into: mmsearch is a predicate you drop into a WHERE clause.
+    Everything around it is the SQL you already write.
+  seq_meta: seq + meta
+  sequences_beside_metadata: Sequences beside metadata
+  a_sequence_column_sits_next_to_ordinary: A sequence column sits next to ordinary columns,
+    so one query filters by organism, date, length, and sequence match.
+  bioseq_load: bioseq.load()
+  streaming_loads: Streaming loads
+  stream_fasta_and_fastq_files_into_tables: Stream FASTA and FASTQ files into tables. Header
+    fields can map to typed columns as they arrive.
+  set_on: SET = on
+  current_indexes: Current indexes
+  keep_sequence_indexes_current_as_records_are: Keep sequence indexes current as records are
+    inserted, or rebuild them after a bulk load.
+  columnar: columnar
+  columnar_storage: Columnar storage
+  a_columnar_layout_lets_scans_read_only: A columnar layout lets scans read only the columns
+    a query actually needs.
+  simd: SIMD
+  vectorized_cpu_paths: Vectorized CPU paths
+  selected_operations_use_simd_vectorized_paths_on: Selected operations use SIMD vectorized
+    paths on the CPU.
+  vulkan: Vulkan
+  gpu_paths: GPU paths
+  selected_search_indexing_and_alignment_workloads_can: Selected search, indexing, and alignment
+    workloads can run on Vulkan-backed GPU paths.
+  parallel: parallel
+  parallel_execution: Parallel execution
+  large_scans_index_builds_and_batch_alignment: Large scans, index builds, and batch alignment
+    run in parallel.
+index:
+  how_the_index_works: How the index works
+  from_long_sequences_to_small_searchable_seeds: From long sequences to small, searchable seeds
+  before_search_runs_bioseqdb_turns_each_sequence: Before search runs, BioseqDB turns each sequence
+    into a set of compact seeds. It picks representative k-mers as minimizers, tolerates gaps
+    with spaced seeds, and links distant k-mers into strobemers. Those seeds are what mmsearch
+    looks up, which is why search stays fast as collections grow.
+  value_01: '01'
+  minimizers: Minimizers
+  a_minimizer_is_the_most_compact_way: A minimizer is the most compact way to seed a sequence.
+    BioseqDB slides a short window along the read, hashes every k-mer inside it, and keeps only
+    the one with the smallest hash. Neighboring windows usually agree on that k-mer, so a long
+    sequence reduces to a small, stable set of seeds.
+  window_4_k_mers_k_7: Window · 4 k-mers · k = 7
+  gctatta: GCTATTA
+  hash: Hash
+  value_0xa1: '0xA1'
+  ctattac: CTATTAC
+  value_0x02: '0x02'
+  min: min
+  tattacc: TATTACC
+  value_0xfc: '0xFC'
+  attacct: ATTACCT
+  value_0x45: '0x45'
+  find_min: Find min
+  minimizer_seed: Minimizer · seed
+  value_02: '02'
+  spaced_seeds: Spaced seeds
+  a_spaced_seed_keeps_some_positions_and: A spaced seed keeps some positions and ignores others
+    along a fixed pattern. Two k-mers that differ only at the ignored positions map to the same
+    seed, so a single mismatch does not hide a real match.
+  pattern: Pattern
+  value_1: '1'
+  x: X
+  value_3: '3'
+  value_4: '4'
+  value_6: '6'
+  value_7: '7'
+  keep_1_3_4_6_7_ignore: keep 1, 3, 4, 6, 7 · ignore 2 and 5
+  g: G
+  ta: TA
+  gatacta: GATACTA
+  same: Same
+  seed: seed
+  gacacta: GACACTA
+  ca: CA
+  value_03: '03'
+  strobemers: Strobemers
+  a_strobemer_links_several_short_k_mers: A strobemer links several short k-mers taken from
+    gapped positions into one seed. Spreading the pieces out covers a wider span while staying
+    small, which helps matches survive insertions and deletions.
+  symbol: ​
+  gcta: GCTA
+  ttc: TTC
+  ttaa: TTAA
+  gtg: GTG
+  tgga: TGGA
+  c: C
+  link: Link
+  gctattaatgga: GCTATTAATGGA
+  ccc: CCC
+  ggg: GGG
+  cctc: CCTC
+  taaa: TAAA
+  cctctaaatgga: CCTCTAAATGGA
+  rows_1_and_2_pick_the_same: Rows 1 and 2 pick the same strobes, so they link to the same seed
+    even though the bases between them differ. Row 3 picks different strobes and lands on another
+    seed.
+  sequence_k_mer: Sequence k-mer
+  transform_step: Transform step
+  hash_value: Hash value
+  selected_seed: Selected seed
+scale:
+  built_for_big_records: Built for big records
+  one_record_any_size: One record, any size
+  bioseqdb_stores_sequence_lengths_in_a_64: BioseqDB stores sequence lengths in a 64-bit range,
+    up to the 2
+  value_64: '64'
+  class_very_large_sequences_are_sharded_internally: class. Very large sequences are sharded
+    internally, so a long chromosome or assembly stays a single row.
+  you_never_split_a_record_by_hand: You never split a record by hand to make it fit. The storage
+    model does that work for you.
+  value_2: '2'
+  sequence_length_range_the_full_64_bit: Sequence length range, the full 64-bit class
+  value_1_row: 1 row
+  per_record_however_long: Per record, however long
+  auto: auto
+  internal_sharding_no_manual_splits: Internal sharding, no manual splits
+audience:
+  bioinformatics_teams: Bioinformatics teams
+  search_reads_references_and_samples_without_leaving: Search reads, references, and samples
+    without leaving SQL.
+  research_groups: Research groups
+  keep_sequences_and_annotations_together_for_reproducible: Keep sequences and annotations together
+    for reproducible queries.
+  who_uses_bioseqdb: Who uses BioseqDB
+  built_for_teams_working_at_sequence_scale: Built for teams working at sequence scale
+  platform_engineers: Platform engineers
+  load_and_index_new_data_on_a: Load and index new data on a schedule your systems already run.
+  data_teams: Data teams
+  join_sequence_matches_with_the_rest_of: Join sequence matches with the rest of your tables.
+cta:
+  query_biological_sequences_with_sql_you_already: Query biological sequences with SQL you already
+    know.
+  load_your_reads_and_references_keep_them: Load your reads and references, keep them beside
+    their metadata, and search everything in one place.
+  read_the_docs: Read the docs
+  view_on_github: View on GitHub
+  symbol: ·
+footer:
+  bioseqdb: BioseqDB
+  bioseqdb_logo: BioseqDB logo
+  bioseq: Bioseq
+  db: DB
+  sql_native_search_for_biological_sequence_data: SQL-native search for biological sequence
+    data. Load, store, and query FASTA and FASTQ beside their metadata.
+  free_open_source: Free & open source
+  explore: Explore
+  workflow: Workflow
+  examples: Examples
+  index: Index
+  scale: Scale
+  project: Project
+  documentation: Documentation
+  github: GitHub
+  symbol: ·
+  symbol_2: ©
+  an_independent_open_source_project: — an independent open-source project.
+  license_mit: License (MIT)
+  versions: Versions
+  back_to_top: Back to top
+accessibility:
+  skip_to_content: Skip to content
+actions:
+  copy_failed: Copy failed
+search:
+  loading_search_index: Loading search index…
+  no_matches_for: No matches for
+  search_index_is_unavailable: Search index is unavailable.
+  search_is_temporarily_unavailable: Search is temporarily unavailable.
+  tutorial: Tutorial
+  function: Function
+  class: Class
+  type: Type
+  setting: Setting
+  sql_object: SQL object
+  sql: SQL
+  documentation: Documentation
+  c: C++

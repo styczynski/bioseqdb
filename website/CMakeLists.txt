@@ -111,6 +111,7 @@ if(_revision STREQUAL "")
 endif()
 
 set(_site_config "${_source_dir}/site.yaml")
+set(_landing_content "${_source_dir}/landing.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
@@ -640,7 +641,7 @@ add_custom_command(
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
           "${_render_static_stamp}"
-          "${_site_config}"
+          "${_site_config}" "${_landing_content}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
@@ -1085,7 +1086,7 @@ add_custom_command(
           --model-validation-stamp "${_model_validation_stamp}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
-          "${_render_static_stamp}"
+          "${_render_static_stamp}" "${_landing_content}"
           ${_template_files} ${_static_files}
   COMMENT "website: render resolved model into owner-marked staging (no database)"
   VERBATIM)
@@ -1106,9 +1107,13 @@ add_custom_command(
           --model "${_site_model}" --site "${_staging_dir}"
           --manifest "${_bioseq_extension_sql_manifest}"
           --documentation-manifest "${_bioseq_settings_documentation_manifest}"
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
+          "${_landing_content}"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -1258,6 +1263,8 @@ add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_project_benchmarks.py" --check
   COMMAND ${_website_benchmark_contract_command}
   COMMAND ${_website_search_contract_command}
+  COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
+  DEPENDS "${_venv_stamp}"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "website: check imported author content and benchmark observations"
   VERBATIM)

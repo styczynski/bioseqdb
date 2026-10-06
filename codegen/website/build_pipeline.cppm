@@ -366,6 +366,24 @@ void verify_website_pipeline() {
     const tutorial_metadata metadata =
         parse_tutorial_metadata(split.yaml, "smoke.md", "smoke");
     expect(metadata.title == "T" && metadata.slug == "smoke", "frontmatter parse");
+    const auto landing_copy_fixture = parse_landing_content(
+        "hero:\n  title: >-\n    A human title & <test>\n", "landing.yaml");
+    expect(landing_copy_fixture.at("hero").at("title") == "A human title & <test>",
+           "landing copy retains authored text and folded YAML paragraphs");
+    expect(render_inline_json_template("{{ landing.hero.title }}",
+               "{\"landing\":{\"hero\":{\"title\":"
+                   + json_text(landing_copy_fixture.at("hero").at("title")) + "}}}")
+               == "A human title &amp; &lt;test&gt;",
+           "landing copy is escaped as text rather than interpreted as HTML");
+    for (const std::string invalid : {
+             "hero:\n  title: one\n  title: two\n",
+             "hero: [title]\n", "hero:\n  title: null\n",
+             "hero:\n  title: [one, two]\n"}) {
+        bool rejected = false;
+        try { (void)parse_landing_content(invalid, "landing.yaml"); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "landing copy rejects duplicate or non-text entries");
+    }
 
     // Runnable SQL fence grammar.
     const auto fence = parse_runnable_sql_fence("sql runnable id=probe timeout=5s");
@@ -1784,6 +1802,20 @@ void validate_landing_result(const landing_example_view& view) {
     inputs.push_back(source_input{
         .path = site_config_relpath,
         .content_hash = hex64(bioseq::common::fnv1a_64(site_yaml))});
+    const auto landing_relative =
+        (fs::path(site_config_relpath).parent_path() / "landing.yaml").generic_string();
+    for (const auto& relative : {landing_relative,
+                                 version_string + "/landing_examples.md"}) {
+        const fs::path path = source / relative;
+        if (!fs::is_regular_file(path)) continue;
+        const auto contents = read_artifact_bytes(path);
+        if (relative == landing_relative) {
+            (void)parse_landing_content(contents, path.generic_string());
+        }
+        inputs.push_back(source_input{
+            .path = relative,
+            .content_hash = hex64(bioseq::common::fnv1a_64(contents))});
+    }
 
     std::vector<tutorial> tutorials;
     for (const fs::path& markdown_path : markdown_files) {
@@ -3913,16 +3945,23 @@ void decorate_code_entity_ranges(
     walk(nodes, walk);
 }
 
-/// @brief Renders a saved site model into, a staging directory.
+[[nodiscard]] landing_content load_landing_content(const fs::path& site_config_path) {
+    const fs::path copy_path = site_config_path.parent_path() / "landing.yaml";
+    if (!fs::is_regular_file(copy_path)) return {};
+    return parse_landing_content(read_artifact_bytes(copy_path), copy_path.generic_string());
+}
+
+/// @brief Renders a saved site model into a staging directory.
 ///
 /// Uses the model, templates, and static files without a database connection.
-/// Resolves page URLs for the requested pase path and names the asset bundle
+/// Resolves page URLs for the requested base path and names the asset bundle
 /// by its hash. Writes the manifest and checks that its file list matches
 /// staging. Returns the manifest SHA-256 for publication.
 [[nodiscard]] std::string render_site_model(
     const site_model& model, const site_configuration& config,
     const std::string& base_path, const std::string& revision,
-    const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging) {
+    const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging,
+    const landing_content& landing_copy = {}) {
     const std::string version = model.version.path_component;
     const auto url = [&base_path](std::string_view rel) -> std::string {
         return base_path + std::string(rel);
@@ -3988,16 +4027,30 @@ void decorate_code_entity_ranges(
     site.nav_tutorials = config.navigation.at("tutorials");
     site.nav_reference = config.navigation.at("reference");
 
-    const auto render = [&route, &site, &templates_dir, &writer](
+    boost::json::object landing_context;
+    for (const auto& [section, entries] : landing_copy) {
+        boost::json::object values;
+        for (const auto& [key, value] : entries) {
+            values[key] = boost::json::parse(json_text(value));
+        }
+        landing_context[section] = std::move(values);
+    }
+    const auto landing_meta = [&landing_copy](std::string_view key, const std::string& fallback) {
+        const auto meta = landing_copy.find("meta");
+        if (meta == landing_copy.end()) return fallback;
+        const auto value = meta->second.find(key);
+        return value == meta->second.end() ? fallback : value->second;
+    };
+    const auto render = [&route, &site, &templates_dir, &writer, &landing_context](
                             std::string_view rel,
                             std::string_view template_name,
                             std::string_view page_object,
                             std::string_view key,
                             std::string_view collection) -> void {
-        const std::string context =
-            build_page_context(site, page_object, key, collection);
+        auto context = boost::json::parse(build_page_context(site, page_object, key, collection));
+        context.as_object()["landing"] = landing_context;
         const std::string html =
-            render_page_template(templates_dir.string(), template_name, context);
+            render_page_template(templates_dir.string(), template_name, boost::json::serialize(context));
         writer.emit(route(rel), html);
     };
 
@@ -4321,8 +4374,8 @@ void decorate_code_entity_ranges(
     }
     const std::string landing_examples_json = boost::json::serialize(landing_data);
     render("index.html", "landing.html.j2",
-           "{\"title\":" + json_text(config.title)
-               + ",\"description\":" + json_text(config.short_description)
+           "{\"title\":" + json_text(landing_meta("title", config.title))
+               + ",\"description\":" + json_text(landing_meta("description", config.short_description))
                + ",\"canonical\":" + json_text(canonical("index.html"))
                + ",\"page_type\":" + json_text("landing")
                + ",\"eyebrow\":" + json_text("PostgreSQL-native")
@@ -4974,7 +5027,8 @@ void decorate_code_entity_ranges(
             options.contains("include-drafts"), options);
         manifest_hash = render_site_model(model, config, base_path, revision,
             fs::path(require_option(options, "templates")),
-            fs::path(require_option(options, "static")), staging);
+            fs::path(require_option(options, "static")), staging,
+            load_landing_content(site_config_path));
     }
 
     // Write a prepublish descriptor before swapping directories so  the next
@@ -5178,7 +5232,8 @@ void decorate_code_entity_ranges(
     const auto stage_started = std::chrono::steady_clock::now();
     const site_model model = deserialize_site_model(read_artifact_bytes(model_path));
     const std::string manifest_hash = render_site_model(
-        model, config, base_path, revision, templates_dir, static_dir, staging);
+        model, config, base_path, revision, templates_dir, static_dir, staging,
+        load_landing_content(site_config_path));
     const auto stage_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - stage_started).count();
     std::uint64_t staged_html = 0;

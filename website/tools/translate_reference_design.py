@@ -16,6 +16,7 @@ after changing any reference export.
 from __future__ import annotations
 
 import json
+import html
 import re
 import shutil
 import sys
@@ -692,9 +693,90 @@ def dynamicize_landing(markup: str, catalog: StyleCatalog) -> str:
     return markup
 
 
+LANDING_DEFAULT_COPY: dict[str, dict[str, str]] = {}
+
+
+def landing_text(group: str, value: str) -> str:
+    """Bind a literal from the immutable export to editable landing.yaml copy.
+
+    Keys derive from the original export, never from the edited YAML value, so
+    changing copy does not change template bindings or require retranslating.
+    Keep inline spans/SVG/text order and all styles in the original markup.
+    """
+    values = LANDING_DEFAULT_COPY.setdefault(group, {})
+    value = html.unescape(value)
+    for key, existing in values.items():
+        if existing == value:
+            return "{{ landing." + group + "." + key + " }}"
+    words = re.findall(r"[a-z0-9]+", value.lower())[:7]
+    base = "_".join(words) or "symbol"
+    if base[0].isdigit() or base in {"true", "false", "null", "none"}:
+        base = "value_" + base
+    key = base
+    suffix = 2
+    while key in values:
+        key = f"{base}_{suffix}"
+        suffix += 1
+    values[key] = value
+    return "{{ landing." + group + "." + key + " }}"
+
+
+def localize_landing_markup(markup: str, group: str = "hero") -> str:
+    """Replace display text/accessible labels while preserving exported HTML."""
+    sections = {
+        "NAV": "header", "HERO": "hero", "ANNOTATED QUERY": "query",
+        "OPEN SOURCE": "experience", "WORKFLOW": "workflow",
+        "EXAMPLES SHOWCASE": "examples", "CINEMATIC BAND": "performance",
+        "CAPABILITIES": "capabilities", "INDEX DIAGRAM": "index",
+        "SCALE": "scale", "WHO": "audience", "FINAL CTA": "cta",
+        "FOOTER": "footer",
+    }
+    token = re.compile(r'<!--.*?-->|\{\{.*?\}\}|\{%.*?%\}|<(?:[^>"\']|"[^"]*"|\'[^\']*\')*>', re.S)
+    parts = []
+    cursor = 0
+
+    def text_fragment(fragment: str) -> str:
+        stripped = fragment.strip()
+        if not stripped:
+            return fragment
+        start = len(fragment) - len(fragment.lstrip())
+        return fragment[:start] + landing_text(group, stripped) + fragment[start + len(stripped):]
+
+    for match in token.finditer(markup):
+        parts.append(text_fragment(markup[cursor:match.start()]))
+        current = match.group()
+        if current.startswith("<!--"):
+            label = current[4:].strip()
+            for prefix, section in sections.items():
+                if label.startswith(prefix):
+                    group = section
+                    break
+        elif current.startswith("<"):
+            def replace_label(attribute: re.Match[str]) -> str:
+                value = attribute.group(2)
+                if not value or "{{" in value or "{%" in value:
+                    return attribute.group()
+                return attribute.group(1) + landing_text(group, value) + '"'
+            current = re.sub(r'((?:aria-label|alt|title|placeholder)=")([^"]*)"', replace_label, current)
+        parts.append(current)
+        cursor = match.end()
+    parts.append(text_fragment(markup[cursor:]))
+    return "".join(parts)
+
+
 def shared_header() -> str:
     """One navigation/search surface, using the supplied documentation palette."""
-    return '''<header id="dnav" class="site-header" data-site-header>
+    search_copy = {
+        "loading": "Loading search index…", "no-matches": "No matches for",
+        "unavailable": "Search index is unavailable.",
+        "error": "Search is temporarily unavailable.",
+        "tutorial": "Tutorial", "function": "Function", "class": "Class",
+        "type": "Type", "setting": "Setting", "sql": "SQL object",
+        "domain-sql": "SQL", "domain-documentation": "Documentation", "domain-cpp": "C++",
+    }
+    labels = " ".join(f'data-search-{name}="{landing_text("search", value)}"'
+                      for name, value in search_copy.items())
+    markup = '''<header id="dnav" class="site-header" data-site-header>
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="BioseqDB home">
@@ -723,6 +805,7 @@ def shared_header() -> str:
     <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
   </div>
 </header>'''
+    return localize_landing_markup(markup.replace("data-site-header>", f"data-site-header {labels}>"), "header")
 
 
 def replace_header(markup: str, old_id: str, replacement: str) -> str:
@@ -733,10 +816,15 @@ def replace_header(markup: str, old_id: str, replacement: str) -> str:
 
 def landing_template(markup: str) -> str:
     markup = replace_header(markup, "nav", shared_header())
+    markup = localize_landing_markup(markup)
+    skip_label = landing_text("accessibility", "Skip to content")
+    failed_label = landing_text("actions", "Copy failed")
+    markup = markup.replace("data-copy-install", f'data-copy-install data-copy-failure="{failed_label}"', 1)
+    markup = markup.replace('class="ld-s0031"', 'class="ld-s0031" data-install-command', 1)
     return f'''{{% extends "base.html.j2" %}}
 {{% block body_class %}}landing-design-page{{% endblock %}}
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/landing-design.css">{{% endblock %}}
-{{% block skip_link %}}<a class="skip-link" href="#main">Skip to content</a>{{% endblock %}}
+{{% block skip_link %}}<a class="skip-link" href="#main">{skip_label}</a>{{% endblock %}}
 {{% block page %}}
 {markup}
 {{% endblock %}}
@@ -919,6 +1007,7 @@ def base_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-benchmarks.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 </head>
 <body id="page-top" class="{{% block body_class %}}docs-design-page{{% endblock %}}">
 {{% block skip_link %}}<a class="skip-link" href="#doc-main">Skip to main content</a>{{% endblock %}}
@@ -991,6 +1080,7 @@ def benchmarks_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 </head>
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>

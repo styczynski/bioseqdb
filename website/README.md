@@ -2,6 +2,24 @@
 
 This folder contains the pages for bioseqdb.com. SQL tutorials are written in Markdown and grouped by documentation version, while the reference pages get their function signatures and descriptions from the extension and its C++ code. Marked SQL examples run during the build. A temporary PostgreSQL instance loads both BioseqDB extensions, then the generator saves query results for the pages.
 
+Edit landing-page wording in `landing.yaml`. It contains the page text, diagram
+labels, accessible labels, copy-button messages and shared header labels, grouped
+by section. Keep the keys and edit their values; YAML folded paragraphs are
+supported. The generator escapes these values as text and preserves the existing
+inline styles and SQL annotation hooks. The design translator never overwrites
+this file. Global project URLs, release information and copyright stay in
+`site.yaml`.
+
+Landing SQL lives in `v0.1/landing_examples.md`. Hidden `bioseq:setup` and
+`bioseq:teardown` sections prepare and clean up the local database; only the
+`bioseq:visible` section appears in the cards. The build rejects empty results or
+NULL cells. Keep visible examples compact when changing their fixtures.
+
+`static/css/responsive.css` adapts the supplied design at 420, 568, 666, 768,
+1024, 1300 and 1600 pixels, with extra room on wider screens. Wide result tables
+scroll within their cards on small screens. Browser checks cover these widths,
+the three landing tabs, SQL annotation connectors and benchmark tooltips.
+
 The layout starts with HTML design files. A Python script turns these into page templates and stylesheets, and the build checks that the generated copies still agree with the design. JavaScript handles documentation search and lets you explore benchmark measurements in the browser. Search reads generated JSON.
 
 Benchmark pages read saved reports. The build checks the reports against their benchmark configurations before copying both into the site, so the browser can show measurements alongside the settings used for each run.
