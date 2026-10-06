@@ -616,11 +616,9 @@ function responsive() {
   menu.setAttribute("aria-controls", sidebarElement.id);
   menu.setAttribute("aria-expanded", "false");
   const apply = () => {
-    const drawer = innerWidth < 760;
-    const showRight = innerWidth >= 1000;
+    const drawer = innerWidth <= 768;
+    const showRight = innerWidth >= 1300;
     if (rail) rail.style.display = showRight ? "" : "none";
-    grid.style.gridTemplateColumns = drawer ? "minmax(0,1fr)" :
-      showRight ? "248px minmax(0,1fr) 210px" : "248px minmax(0,1fr)";
     menu.style.display = drawer ? "flex" : "none";
     if (drawer) {
       Object.assign(sidebarElement.style, {
@@ -656,7 +654,7 @@ function responsive() {
     wasDrawer = drawer;
   };
   const setOpen = (next, focus = false) => {
-    if (innerWidth >= 760) return;
+    if (innerWidth > 768) return;
     open = next;
     apply();
     if (open && focus) sidebarElement.querySelector("a,button")?.focus();
