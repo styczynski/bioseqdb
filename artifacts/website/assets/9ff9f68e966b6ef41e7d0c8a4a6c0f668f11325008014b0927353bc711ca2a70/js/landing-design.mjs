@@ -147,17 +147,18 @@ function examples() {
     const done = copy.querySelector("[data-copy-done]");
     const idle = copy.querySelector("[data-copy-idle]");
     const idleLabel = idle?.querySelector("span") || idle;
-    const original = idleLabel?.textContent || "Copy";
+    const original = idleLabel?.textContent || "";
+    const installCommand = root.querySelector("[data-install-command]")?.textContent || "";
     let timer = 0;
     copy.setAttribute("aria-live", "polite");
     copy.addEventListener("click", async () => {
       let copied = false;
       try {
-        await navigator.clipboard.writeText("CREATE EXTENSION bioseq;");
+        await navigator.clipboard.writeText(installCommand);
         copied = true;
       } catch {
         const area = document.createElement("textarea");
-        area.value = "CREATE EXTENSION bioseq;";
+        area.value = installCommand;
         area.style.position = "fixed";
         area.style.opacity = "0";
         document.body.appendChild(area);
@@ -168,7 +169,7 @@ function examples() {
       window.clearTimeout(timer);
       if (done) done.hidden = !copied;
       if (idle) idle.hidden = copied;
-      if (!copied && idleLabel) idleLabel.textContent = "Copy failed";
+      if (!copied && idleLabel) idleLabel.textContent = copy.dataset.copyFailure;
       timer = window.setTimeout(() => {
         if (done) done.hidden = true;
         if (idle) idle.hidden = false;
@@ -208,9 +209,15 @@ function connectors() {
     const width = wrap.clientWidth;
     const height = wrap.clientHeight;
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-    if (width <= 820) { svg.hidden = true; svg.replaceChildren(); return; }
+    const cardBox = card.getBoundingClientRect();
+    const firstNote = document.getElementById(specs[0].note)?.getBoundingClientRect();
+    if (width <= 820 || !firstNote || firstNote.left < cardBox.right) {
+      svg.hidden = true;
+      svg.replaceChildren();
+      return;
+    }
     svg.hidden = false;
-    const cardRight = card.getBoundingClientRect().right - wrapBox.left;
+    const cardRight = cardBox.right - wrapBox.left;
     const paths = [];
     specs.forEach((spec) => {
       const token = document.getElementById(spec.tok)?.getBoundingClientRect();

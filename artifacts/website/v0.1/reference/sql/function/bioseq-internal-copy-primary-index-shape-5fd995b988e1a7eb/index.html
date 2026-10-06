@@ -11,20 +11,21 @@
 <meta property="og:description" content="Copy a donor index&#39;s predicate or expression into the target primary idex. Tests use this catalog change to check rejection of malformed index schemas. The change belongs to the current transaction">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-copy-primary-index-shape-5fd995b988e1a7eb/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_internal.copy_primary_index_shape">
 <meta name="twitter:description" content="Copy a donor index&#39;s predicate or expression into the target primary idex. Tests use this catalog change to check rejection of malformed index schemas. The change belongs to the current transaction">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png">
-<link rel="icon" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/favicon.svg">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-content.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/css/site-header.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/media/social_card.png">
+<link rel="icon" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/favicon.svg">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/site.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/docs-design.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/code-theme.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/project-content.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/site-header.css">
+<link rel="stylesheet" href="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/css/responsive.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -32,11 +33,11 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="site-header" data-site-header>
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -155,7 +156,7 @@ ROLLBACK;</code></pre></figure></div>
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/8c78acb5130fc411a95ed4fb7389d78aa846c61e/bioseq/backend/pg/extension/index.cppm#L2244" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/caa381db96df954d47b9250505981b4f3502c70e/bioseq/backend/pg/extension/index.cppm#L2244" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
   
 </article>
@@ -180,7 +181,7 @@ ROLLBACK;</code></pre></figure></div>
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -240,16 +241,16 @@ ROLLBACK;</code></pre></figure></div>
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.copy_primary_index_shape","description":"Copy a donor index&#39;s predicate or expression into the target primary idex. Tests use this catalog change to check rejection of malformed index schemas. The change belongs to the current transaction","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-copy-primary-index-shape-5fd995b988e1a7eb/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.copy_primary_index_shape","item":"/v0.1/reference/sql/function/bioseq-internal-copy-primary-index-shape-5fd995b988e1a7eb/"}]}]}</script>
-<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-init.js"></script>
-<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/prism/prism.min.js"></script>
-<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/prism-languages.js"></script>
-<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/vendor/katex/katex.min.js"></script>
-<script src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-math.js"></script>
-<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/main.js"></script>
-<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/site-header.mjs"></script>
-<script type="module" src="/assets/08fce2527343bb0744f852f6f40d98140c40313516f8c58b912ffa69977ee3da/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.copy_primary_index_shape","description":"Copy a donor index&#39;s predicate or expression into the target primary idex. Tests use this catalog change to check rejection of malformed index schemas. The change belongs to the current transaction","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-copy-primary-index-shape-5fd995b988e1a7eb/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.copy_primary_index_shape","item":"/v0.1/reference/sql/function/bioseq-internal-copy-primary-index-shape-5fd995b988e1a7eb/"}]}]}</script>
+<script src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/prism-init.js"></script>
+<script src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/vendor/prism/prism.min.js"></script>
+<script src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/prism-languages.js"></script>
+<script src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/vendor/katex/katex.min.js"></script>
+<script src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/project-math.js"></script>
+<script type="module" src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/main.js"></script>
+<script type="module" src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/site-header.mjs"></script>
+<script type="module" src="/assets/9ff9f68e966b6ef41e7d0c8a4a6c0f668f11325008014b0927353bc711ca2a70/js/docs-design.mjs"></script>
 
 </body>
 </html>
