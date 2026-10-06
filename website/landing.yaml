@@ -8,7 +8,7 @@
 
 meta:
   title: BioseqDB
-  description: Load FASTA and FASTQ data, store sequences beside metadata, and search them with
+  description: BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with
     ordinary SQL.
 header:
   documentation_menu: Documentation menu
@@ -26,17 +26,15 @@ header:
   all_versions: All versions
   github: GitHub
 hero:
-  sql_native_sequence_search: SQL-native sequence search
+  sql_native_sequence_search: SQL sequence search (alignments)
   search_biological_sequences_with_plain: Search biological sequences with plain
   sql: SQL
   symbol: .
-  bioseqdb_is_a_sql_native_system_for: BioseqDB is a SQL-native system for biological sequence
-    data. Load FASTA and FASTQ files, store sequences beside their metadata, and search them
-    with one query.
+  bioseqdb_is_a_sql_native_system_for: BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with just SQL! Amazingly nobody before was crazy enough to combine database engine and genomic aligner algorithms.
   read_the_docs: Read the docs
   see_the_examples: See the examples
   symbol_2: $
-  create_extension_bioseq: CREATE EXTENSION bioseq;
+  create_extension_bioseq: docker pull styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04
   copied: Copied
   copy: Copy
   symbol_3: ·
@@ -45,7 +43,7 @@ hero:
 query:
   reading_the_query: Reading the query
   one_select_now_sequence_aware: One SELECT, now sequence-aware
-  a_normal_query_becomes_a_sequence_search: A normal query becomes a sequence search the moment
+  a_normal_query_becomes_a_sequence_search: A normal query becomes a sequence (alignment) search the moment
   mmsearch: mmsearch()
   appears_in_the_where_clause_everything_else: appears in the WHERE clause. Everything else
     is SQL you already write.
@@ -56,14 +54,14 @@ query:
   value_null: 'NULL'
   select: SELECT
   select_any_metadata_from_the_table_just: Select any metadata from the table just like in ordinary
-    Postgres. Join, filter, and project columns exactly as you normally would.
+    Postgres. Join, filter, and transform columns exactly as you normally would.
   where: WHERE
   add: Add
   to_the_where_clause_and_it_activates: to the WHERE clause and it activates a custom scan that
     performs alignments efficiently.
   dna4: '''dna4'''
   bioseqdb_supports_different_sequence_alphabets_and_storage: BioseqDB supports different sequence
-    alphabets and storage interfaces, chosen right in the column type.
+    alphabets and storage interfaces.
 experience:
   free_and_open_source_forever: Free and open source, forever.
   built_by_a_single_maintainer_with_experience: Built by a single maintainer, with experience
@@ -76,8 +74,7 @@ experience:
 workflow:
   one_workflow: One workflow
   load_query_and_scale_in_one_place: Load, query, and scale in one place
-  every_step_is_ordinary_sql_nothing_leaves: Every step is ordinary SQL. Nothing leaves the
-    database, so sequence work and metadata work stay together.
+  every_step_is_ordinary_sql_nothing_leaves: Every step is ordinary SQL, so we don't have to rely on bash scripts or unintuitive CLIs for BLASTN, minimap2 or other tools.
   value_01: '01'
   load: Load
   stream_fasta_and_fastq_files_straight_into: Stream FASTA and FASTQ files straight into tables.
@@ -99,9 +96,9 @@ workflow:
     them by hand.
 examples:
   the_sql: The SQL
-  three_queries_one_product_story: Three queries, one product story
+  three_queries_one_product_story: Finally, one clean interface for all DNA/RNA operations!
   start_with_the_smallest_search_add_metadata: Start with the smallest search, add metadata
-    filters, then load a file and keep indexes current. Same language throughout.
+    filters, then load a file, update indexes, shuffle sequences or order them. Operations are unlimited and you son't have to write custom scripts ever again.
   value_01: '01'
   search: Search
   value_02: '02'
@@ -121,8 +118,8 @@ examples:
     sequence column. The query filters by organism, date, length, and sequence match before
     sorting the result.
   performance: Performance
-  the_sequence_search_work_can_use_selected: The sequence-search work can use selected Vulkan-backed
-    GPU paths. The metadata filters and ordering stay in the same SQL query.
+  the_sequence_search_work_can_use_selected: The sequence-search work can use selected 
+    GPU paths inmplemented in Vulkan.
   loading: Loading
   bioseq_load_streams_a_fasta_or_fastq: bioseq.load streams a FASTA or FASTQ file into the table.
     Header fields can become typed columns, so sequence data arrives with searchable context.
@@ -130,9 +127,8 @@ examples:
   with_insert_time_indexing_on_new_records: With insert-time indexing on, new records can update
     sequence indexes as they arrive. For deferred bulk work, BioseqDB can also rebuild indexes
     after loading.
-  the_payoff: The payoff
-  the_follow_up_query_shows_the_payoff: The follow-up query shows the payoff. Loaded and inserted
-    records are available to sequence search and metadata ordering in one place.
+  the_payoff: Benefits
+  the_follow_up_query_shows_the_payoff: As everything is stored in custom columnar format in Postgres, all operations can be optimised by the optimiser and offer speedups up to 120x compared to tools like minimap2
 performance:
   under_the_hood: Under the hood
   built_to_keep_pace_with_the_instrument: Built to keep pace with the instrument
@@ -140,9 +136,9 @@ performance:
     acceleration, and parallel scans — the search runs where the data already lives.
 capabilities:
   what_bioseqdb_gives_you: What BioseqDB gives you
-  a_sequence_engine_that_speaks_sql: A sequence engine that speaks SQL
+  a_sequence_engine_that_speaks_sql: Aligner, sequence transformation toolkit, search engine - everything accessible via just SQL!
   system_architecture: System architecture
-  select_a_capability_below_to_trace_it: Select a capability below to trace it ↓
+  select_a_capability_below_to_trace_it: Select a capability below to read more ↓
   input_fasta: input.fasta
   sql: SQL
   index: INDEX
@@ -156,19 +152,17 @@ capabilities:
   gpu: GPU
   mmsearch: mmsearch()
   sql_native_search: SQL-native search
-  mmsearch_is_a_predicate_you_drop_into: mmsearch is a predicate you drop into a WHERE clause.
-    Everything around it is the SQL you already write.
+  mmsearch_is_a_predicate_you_drop_into: mmsearch is a predicate you drop into a WHERE clause in Postgres datrabase. You can join all other tables as you would normally do.
   seq_meta: seq + meta
   sequences_beside_metadata: Sequences beside metadata
   a_sequence_column_sits_next_to_ordinary: A sequence column sits next to ordinary columns,
     so one query filters by organism, date, length, and sequence match.
   bioseq_load: bioseq.load()
   streaming_loads: Streaming loads
-  stream_fasta_and_fastq_files_into_tables: Stream FASTA and FASTQ files into tables. Header
-    fields can map to typed columns as they arrive.
+  stream_fasta_and_fastq_files_into_tables: Stream FASTA and FASTQ files into tables, BioseqDB will atuomatically map different header formats to your table layout.
   set_on: SET = on
   current_indexes: Current indexes
-  keep_sequence_indexes_current_as_records_are: Keep sequence indexes current as records are
+  keep_sequence_indexes_current_as_records_are: BioseqDB can automatically keep sequence indexes current as records are
     inserted, or rebuild them after a bulk load.
   columnar: columnar
   columnar_storage: Columnar storage
@@ -188,7 +182,7 @@ capabilities:
     run in parallel.
 index:
   how_the_index_works: How the index works
-  from_long_sequences_to_small_searchable_seeds: From long sequences to small, searchable seeds
+  from_long_sequences_to_small_searchable_seeds: BioseqDB was created based on minimap2 design
   before_search_runs_bioseqdb_turns_each_sequence: Before search runs, BioseqDB turns each sequence
     into a set of compact seeds. It picks representative k-mers as minimizers, tolerates gaps
     with spaced seeds, and links distant k-mers into strobemers. Those seeds are what mmsearch
@@ -214,9 +208,8 @@ index:
   minimizer_seed: Minimizer · seed
   value_02: '02'
   spaced_seeds: Spaced seeds
-  a_spaced_seed_keeps_some_positions_and: A spaced seed keeps some positions and ignores others
-    along a fixed pattern. Two k-mers that differ only at the ignored positions map to the same
-    seed, so a single mismatch does not hide a real match.
+  a_spaced_seed_keeps_some_positions_and: Currently BioseqDB doesn't support spaced seeds, but I want to add support in a newar future. A spaced seed keeps some positions and ignores others
+    along a fixed pattern.
   pattern: Pattern
   value_1: '1'
   x: X
@@ -234,9 +227,8 @@ index:
   ca: CA
   value_03: '03'
   strobemers: Strobemers
-  a_strobemer_links_several_short_k_mers: A strobemer links several short k-mers taken from
-    gapped positions into one seed. Spreading the pieces out covers a wider span while staying
-    small, which helps matches survive insertions and deletions.
+  a_strobemer_links_several_short_k_mers: Currently BioseqDB doesn't support strobomers, but I want to add support in a newar future. A strobemer links several short k-mers taken from
+    gapped positions into one seed.
   symbol: ​
   gcta: GCTA
   ttc: TTC
@@ -277,7 +269,7 @@ scale:
 audience:
   bioinformatics_teams: Bioinformatics teams
   search_reads_references_and_samples_without_leaving: Search reads, references, and samples
-    without leaving SQL.
+    without doing any custom scripting, using single tool and writing only easy to undetstand SQL.
   research_groups: Research groups
   keep_sequences_and_annotations_together_for_reproducible: Keep sequences and annotations together
     for reproducible queries.
