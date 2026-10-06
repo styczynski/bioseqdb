@@ -112,9 +112,25 @@ slots:
 
 """
     for name, step in [('hero_query', '06'), ('sequence_storage', '13'), ('similarity_search', '12')]:
-        landing += examples[f'readme_step_{step}'].replace(f'id=readme_step_{step}', f'id=landing_{name}') + '\n\n'
+        example = examples[f'readme_step_{step}'].replace(f'id=readme_step_{step}', f'id=landing_{name}')
+        if name == 'hero_query':
+            # Use the README's self-join query shape so alignment context is
+            # available. Keep mmsearch in WHERE for the landing annotations;
+            # the original README setup and teardown remain unchanged.
+            setup, remainder = example.split('-- bioseq:visible\n', 1)
+            _, teardown = remainder.split('-- bioseq:teardown\n', 1)
+            visible = """SELECT t.id, t.patient_name,
+  bioseq.target_start(t.seq) AS target_start,
+  bioseq.target_end(t.seq) AS target_end,
+  bioseq.score(t.seq) AS score,
+  bioseq.cigar(t.seq) AS cigar
+FROM samples AS t, samples AS q
+WHERE t.age >= 30 AND q.id = 2
+  AND mmsearch(t.seq, q.seq::bioseq.seq('dna4', 64));"""
+            example = setup + '-- bioseq:visible\n' + visible + '\n-- bioseq:teardown\n' + teardown
+        landing += example + '\n\n'
     outputs = {DEST: page, ROOT / 'website/tests/fixtures/readme_samples.fasta': fixture,
-               ROOT / 'website/v0.1/landing_examples.md': landing}
+               ROOT / 'website/v0.1/landing_examples.md': landing.rstrip() + '\n'}
     for path, content in outputs.items():
         if args.check:
             if not path.exists() or path.read_text() != content:
