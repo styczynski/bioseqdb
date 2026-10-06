@@ -984,10 +984,87 @@ def _exercise_landing_breakpoints(page) -> None:
                    f"landing: annotated SELECT/WHERE/dna4 UI changed at {width}px")
         _check(max(widths) - min(widths) <= 1,
                f"landing: changing examples resizes the SQL track at {width}px: {widths}")
+        _assert_landing_engine_layout(page, f"{width}px")
     _check(wide_sql_widths[2560] > wide_sql_widths[1920] > wide_sql_widths[1600],
            f"landing: SQL does not gain room on ultrawide screens: {wide_sql_widths}")
     page.locator('button[data-example-tab="0"]').click()
+    _exercise_index_scroll_layout(page)
     page.set_viewport_size({"width": 1280, "height": 900})
+
+
+def _assert_landing_engine_layout(page, label: str) -> None:
+    """Architecture stays centered; every index diagram has its own text-free track."""
+    state = page.evaluate("""() => {
+      const box = node => {
+        const r = node.getBoundingClientRect();
+        return {left:r.left, right:r.right, top:r.top, bottom:r.bottom,
+                width:r.width, height:r.height};
+      };
+      const capability = document.querySelector('#capabilities > .ld-s0041');
+      const capStyle = getComputedStyle(capability);
+      return {width:innerWidth, capability:box(capability),
+        gutter:parseFloat(getComputedStyle(document.documentElement)
+          .getPropertyValue('--page-gutter')),
+        padding:[parseFloat(capStyle.paddingLeft), parseFloat(capStyle.paddingRight)],
+        rows:[...document.querySelectorAll('[data-idx-block]')].map(row => {
+          const media = row.querySelector('[data-idx-media]');
+          return {side:row.dataset.side, box:box(row), media:box(media),
+            drawing:box(media.firstElementChild),
+            text:[...row.children].filter(node => node !== media).map(box)};
+        })};
+    }""")
+    capability = state["capability"]
+    _check(capability["width"] <= min(state["width"], 1360) + 1
+           and abs(capability["left"] - (state["width"] - capability["right"])) <= 1
+           and all(padding >= state["gutter"] for padding in state["padding"]),
+           f"landing: capabilities need a centered width cap and side gutters at {label}: {state}")
+    _check(len(state["rows"]) == 3,
+           f"landing: expected three index explanations at {label}")
+    for index, row in enumerate(state["rows"], start=1):
+        media, drawing, texts = row["media"], row["drawing"], row["text"]
+        _check(len(texts) == 2 and all(text["width"] > 0 for text in texts)
+               and drawing["width"] > 0 and drawing["height"] > 0,
+               f"landing: index row {index} lost its content at {label}: {row}")
+        for text in texts:
+            for graphic in (media, drawing):
+                overlap_x = min(text["right"], graphic["right"]) - max(text["left"], graphic["left"])
+                overlap_y = min(text["bottom"], graphic["bottom"]) - max(text["top"], graphic["top"])
+                _check(overlap_x <= 1 or overlap_y <= 1,
+                       f"landing: index row {index} diagram overlaps text at {label}: {row}")
+        if state["width"] <= 1024:
+            _check(abs(texts[0]["left"] - texts[1]["left"]) <= 1
+                   and abs(media["width"] - row["box"]["width"]) <= 1
+                   and texts[1]["top"] >= texts[0]["bottom"] - 1
+                   and media["top"] >= texts[1]["bottom"] - 1,
+                   f"landing: index row {index} must stack title, text, and diagram at {label}: {row}")
+        elif row["side"] == "left":
+            _check(media["right"] <= min(text["left"] for text in texts) + 1,
+                   f"landing: index row {index} diagram must stay left of its text at {label}: {row}")
+        else:
+            _check(media["left"] >= max(text["right"] for text in texts) - 1,
+                   f"landing: index row {index} diagram must stay right of its text at {label}: {row}")
+
+
+def _exercise_index_scroll_layout(page) -> None:
+    """The live horizontal reveal must remain clear of text at both scroll extremes."""
+    _check(not page.evaluate("() => matchMedia('(prefers-reduced-motion: reduce)').matches"),
+           "landing: index scrolling must be checked with normal motion enabled")
+    for width in (420, 1024, 1025, 1600):
+        page.set_viewport_size({"width": width, "height": 900})
+        for index in range(3):
+            for position in (-.25, .5, 1.25):
+                page.evaluate("""async ({index, position}) => {
+                  const row = document.querySelectorAll('[data-idx-block]')[index];
+                  const box = row.getBoundingClientRect();
+                  const center = scrollY + box.top + box.height / 2;
+                  window.scrollTo({top:center - innerHeight * position, behavior:'instant'});
+                  // Let the scroll event, its animation frame, and paint settle.
+                  for (let frame = 0; frame < 3; frame++) {
+                    await new Promise(requestAnimationFrame);
+                  }
+                }""", {"index": index, "position": position})
+                _assert_landing_engine_layout(
+                    page, f"{width}px, row {index + 1}, scroll position {position}")
 
 
 def _exercise_tabs(page) -> None:
