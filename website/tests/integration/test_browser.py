@@ -2193,8 +2193,8 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
           pre.style.fontSize = geometry.fontSize;
           pre.style.lineHeight = geometry.lineHeight;
           code.style.fontFamily = "'IBM Plex Mono'";
-          code.style.fontSize = '13px';
-          code.style.lineHeight = '1.65';
+          code.style.fontSize = geometry.fontSize;
+          code.style.lineHeight = geometry.lineHeight;
           code.style.color = palette.plain;
           code.style.background = 'transparent';
           code.style.textShadow = 'none';
