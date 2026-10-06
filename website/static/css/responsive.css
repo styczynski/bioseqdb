@@ -31,7 +31,7 @@
   overflow-x: auto;
 }
 .landing-design-page :is(.ld-s0055, .ld-s0124, .ld-s0125) > code[class*="language-"],
-.docs-design-page .docs-content .doc-code > pre > code[class*="language-"] {
+.docs-design-page .docs-content .doc-code > pre > code {
   font-size: inherit;
   line-height: inherit;
 }

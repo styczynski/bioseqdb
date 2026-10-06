@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as loader from '../../static/js/project-benchmark-loader.mjs';
 
-globalThis.document = { querySelector: () => null };
+globalThis.document = new EventTarget();
+document.querySelector = () => null;
 globalThis.HTMLElement = class {};
 globalThis.HTMLTemplateElement = class {};
 const { ProjectComponent } = await import('../../static/js/benchmarks-design.mjs');
@@ -46,4 +47,29 @@ const run = model.benchmarks['aws-2-k15-w10'].runs[0];
 const custom = loader.buildTable(run, { metric: 'wall_clock_ns', direction: -1, baselineAlgo: 'mpf-bounded-simd-block' });
 assert.equal(custom.baseline, 'mpf-bounded-simd-block');
 assert.ok(custom.groups[0].rows.find((r) => r.algo === custom.baseline).values.every((cell) => cell.ratio === null));
+
+// Escape must dismiss hover-only tooltips on the page and embedded chapter
+// tables, even when no tooltip trigger owns keyboard focus.
+const tooltipComponents = [true, true, false].map((isConnected) => {
+  const component = new ProjectComponent();
+  component.render = () => {};
+  component.tipRenders = 0;
+  component.renderTip = () => { component.tipRenders++; };
+  component.mount({ isConnected }, {}, {});
+  component.mount(component.root, component.template, {});
+  component.state.tip = { title: 'Hovered benchmark cell' };
+  return component;
+});
+const key = (value) => {
+  const event = new Event('keydown');
+  Object.defineProperty(event, 'key', { value });
+  document.dispatchEvent(event);
+};
+key('ArrowDown');
+assert.ok(tooltipComponents.every((component) => component.state.tip));
+key('Escape');
+assert.ok(tooltipComponents.slice(0, 2).every((component) => component.state.tip === null));
+assert.ok(tooltipComponents[2].state.tip, 'detached components must ignore document events');
+key('Escape');
+assert.deepEqual(tooltipComponents.map((component) => component.tipRenders), [1, 1, 0]);
 console.log(`Verified ${model.order.length} panels, ${cells} cells and ${measured} measured A/B pairs with same-column baselines.`);

@@ -2229,6 +2229,8 @@ def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
     """Three-region doc frame (§15.1): a visual breadcrumb trail, a left
     documentation-navigation rail, and — on article pages — an on-this-page
     table of contents whose links target in-page anchors that exist."""
+    from playwright.sync_api import expect
+
     crumbs = page.locator("nav.breadcrumb ol li")
     canonical_crumbs = page.locator("[data-breadcrumb] > *")
     design_crumbs = page.locator("nav.design-breadcrumb a[href]")
@@ -2258,6 +2260,9 @@ def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
             _check(original_viewport["width"] < 1300,
                    "on-this-page rail is missing at a desktop width")
             page.set_viewport_size({"width": 1300, "height": original_viewport["height"]})
+        # The responsive controller updates inline rail visibility in a resize
+        # animation frame; wait for that real UI state before checking/clicking.
+        expect(toc).to_be_visible(timeout=3000)
         _check(toc.is_visible(), "on-this-page rail is unavailable at 1300px")
         anchors.first.click()
         page.wait_for_timeout(150)

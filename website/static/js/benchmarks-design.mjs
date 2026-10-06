@@ -118,6 +118,12 @@ function bindNode(node, scope) {
 class DCLogic {
   props = {};
 
+  dismissTipOnEscape = (event) => {
+    if (event.key === "Escape" && this.root?.isConnected && this.state.tip) {
+      this.setState({ tip: null });
+    }
+  };
+
   setState(update) {
     const patch = typeof update === "function" ? update(this.state) : update;
     this.state = { ...this.state, ...patch };
@@ -129,6 +135,8 @@ class DCLogic {
     this.root = root;
     this.template = template;
     this.props = props;
+    // Hover tooltips also need Escape when their trigger has no keyboard focus.
+    document.addEventListener("keydown", this.dismissTipOnEscape);
     this.render();
   }
 
