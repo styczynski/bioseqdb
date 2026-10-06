@@ -96,11 +96,14 @@
 .landing-design-page [data-wf-card] + [data-wf-card] {
   border-top: 1px solid rgba(255,255,255,.08);
 }
+/* Keep the architecture and capability cards comfortably grouped on wide screens. */
+.landing-design-page #capabilities > .ld-s0041 { max-width: 1360px; }
 .landing-design-page [data-idx-block] {
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
-.landing-design-page [data-idx-block] > :is(.ld-s0188, .ld-s0191, [data-idx-media]) {
+.landing-design-page [data-idx-block] > :is(.ld-s0188, .ld-s0191,
+    .ld-s0216, .ld-s0217, [data-idx-media]) {
   grid-column: 1;
   grid-row: auto;
 }
@@ -260,6 +263,10 @@
   .landing-design-page [data-idx-block] > .ld-s0188 { grid-column: 1; grid-row: 1; }
   .landing-design-page [data-idx-block] > .ld-s0191 { grid-column: 1; grid-row: 2; }
   .landing-design-page [data-idx-block] > [data-idx-media] { grid-column: 2; grid-row: 1 / span 2; }
+  .landing-design-page [data-idx-block][data-side="left"] { grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); }
+  .landing-design-page [data-idx-block] > .ld-s0216 { grid-column: 2; grid-row: 1; }
+  .landing-design-page [data-idx-block] > .ld-s0217 { grid-column: 2; grid-row: 2; }
+  .landing-design-page [data-idx-block][data-side="left"] > [data-idx-media] { grid-column: 1; }
   .benchmarks-design-page [data-bgrid] { grid-template-columns: 248px minmax(0, 1fr) !important; }
   .benchmarks-design-page [data-bnav] {
     display: block;

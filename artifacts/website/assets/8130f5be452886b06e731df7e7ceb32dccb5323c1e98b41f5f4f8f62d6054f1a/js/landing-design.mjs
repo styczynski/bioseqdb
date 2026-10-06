@@ -388,7 +388,8 @@ function workflowAndIndex() {
       const side = block.dataset.side === "left" ? -1 : 1;
       const media = block.querySelector("[data-idx-media]");
       if (media) {
-        media.style.transform = `translate3d(${(side * position * 42).toFixed(1)}px,0,0)`;
+        // Stay inside the space between the diagram and its explanation.
+        media.style.transform = `translate3d(${(side * position * 16).toFixed(1)}px,0,0)`;
         media.style.opacity = (1 - clamp(Math.abs(position) - 0.5, 0, 0.5)).toFixed(3);
       }
     });
