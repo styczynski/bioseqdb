@@ -37,18 +37,14 @@ UNION ALL
 SELECT 3, DATE '2026-09-03', 'Cara', 29,
   s::bioseq.seq('dna4', 64) FROM dna;
 -- bioseq:visible
-SELECT seq::text AS probe
-FROM samples WHERE id = 2 ;
-
-SELECT id, patient_name,
-  bioseq.target_start(seq) AS target_start,
-  bioseq.target_end(seq) AS target_end,
-  bioseq.score(seq) AS score,
-  bioseq.cigar(seq) AS cigar
-FROM samples
-WHERE age >= 30
-  AND mmsearch(seq,
-    (SELECT seq FROM samples WHERE id = 2)::bioseq.seq('dna4', 64));
+SELECT t.id, t.patient_name,
+  bioseq.target_start(t.seq) AS target_start,
+  bioseq.target_end(t.seq) AS target_end,
+  bioseq.score(t.seq) AS score,
+  bioseq.cigar(t.seq) AS cigar
+FROM samples AS t, samples AS q
+WHERE t.age >= 30 AND q.id = 2
+  AND mmsearch(t.seq, q.seq::bioseq.seq('dna4', 64));
 -- bioseq:teardown
 DROP TABLE samples;
 RESET bioseq.aligner.vulkan.enabled;
@@ -143,4 +139,3 @@ RESET bioseq.aligner.vulkan.enabled;
 RESET max_parallel_workers_per_gather;
 RESET bioseq.index.insert_maintenance.enabled;
 ```
-

@@ -69,6 +69,8 @@ namespace {
 
 [[nodiscard]] std::string hex64(std::uint64_t value);
 
+void validate_landing_result(const landing_example_view& view);
+
 [[nodiscard]] std::string canonical_result_type_key(
     std::string_view value) {
     const auto canonical_scalar = [](std::string_view scalar) {
@@ -372,6 +374,27 @@ void verify_website_pipeline() {
         "-- bioseq:setup\nCREATE TABLE t(v int);\n-- bioseq:visible\n"
         "SELECT 1;\n-- bioseq:teardown\nDROP TABLE t;\n");
     expect(sections.visible == "SELECT 1;", "SQL section split");
+    landing_example_view landing_result;
+    landing_result.slot = "fixture";
+    landing_result.has_result = true;
+    landing_result.result.shape = result_shape::rows;
+    landing_result.result.columns = {{.name = "score", .type_name = "integer"}};
+    landing_result.result.rows = {{{.is_null = false, .text = "1024"}}};
+    validate_landing_result(landing_result);
+    const auto rejects_landing_result = [](const landing_example_view& view) {
+        try { validate_landing_result(view); }
+        catch (const std::runtime_error&) { return true; }
+        return false;
+    };
+    landing_result.result.rows.front().front().is_null = true;
+    expect(rejects_landing_result(landing_result), "landing rejects NULL placeholders");
+    landing_result.result.rows.front().clear();
+    expect(rejects_landing_result(landing_result), "landing rejects missing result columns");
+    landing_result.result.rows.clear();
+    expect(rejects_landing_result(landing_result), "landing rejects empty tables");
+    landing_result.result.rows = {{{.is_null = false, .text = "1024"}}};
+    landing_result.has_result = false;
+    expect(rejects_landing_result(landing_result), "landing requires a captured table");
 
     // Doxygen XML parsed with pugixml.
     const auto compounds = parse_doxygen_compound_index(
@@ -1596,6 +1619,30 @@ void configure_manifest_acl_targets(
     }
 }
 
+// A landing example must demonstrate real data. Fail generation if a planner
+// or fixture change would otherwise publish an empty table or NULL placeholders.
+void validate_landing_result(const landing_example_view& view) {
+    if (!view.has_result || view.result.shape != result_shape::rows
+        || view.result.columns.empty() || view.result.rows.empty()) {
+        throw std::runtime_error("landing example '" + view.slot
+            + "' must return a nonempty table");
+    }
+    for (std::size_t row_index = 0; row_index < view.result.rows.size(); ++row_index) {
+        const auto& row = view.result.rows[row_index];
+        if (row.size() != view.result.columns.size()) {
+            throw std::runtime_error("landing example '" + view.slot
+                + "' has a result row with missing columns");
+        }
+        for (std::size_t column_index = 0; column_index < row.size(); ++column_index) {
+            if (row[column_index].is_null) {
+                throw std::runtime_error("landing example '" + view.slot
+                    + "' returned NULL in column '" + view.result.columns[column_index].name
+                    + "', row " + std::to_string(row_index + 1));
+            }
+        }
+    }
+}
+
 // Bind landing-page slots to runnable examples and capture  their results.
 // Every block must belong to exactly one slot. Unknown IDs and duplicate
 // slots fail the build. With a database connection, run each exampl and keep
@@ -1698,6 +1745,7 @@ void configure_manifest_acl_targets(
                     break;
                 }
             }
+            validate_landing_result(view);
         }
         views.push_back(std::move(view));
     }
