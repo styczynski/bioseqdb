@@ -1,0 +1,27 @@
+{% extends "base.html.j2" %}
+{% block body_class %}contact-page contact-thanks-page{% endblock %}
+{% block design_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/contact.css">{% endblock %}
+{% block skip_link %}<a class="skip-link" href="#contact-main">{{ landing.accessibility.skip_to_content }}</a>{% endblock %}
+{% block page %}
+{% include "site-header.html.j2" %}
+<main id="contact-main" class="contact-scene">
+  <div class="contact-wordmark" aria-hidden="true">{{ contact.page.wordmark }}</div>
+  <section class="contact-thanks" aria-labelledby="contact-title" data-contact-thanks data-home-url="{{ site.base_path }}">
+    <p class="contact-eyebrow"><span aria-hidden="true"></span>{{ contact.thanks.eyebrow }}</p>
+    <h1 id="contact-title">{{ contact.thanks.title }}</h1>
+    <p class="contact-lede">{{ contact.thanks.message }}</p>
+    <p class="contact-response">{{ contact.thanks.response }}</p>
+    <div class="contact-countdown" data-contact-countdown hidden>
+      <div class="contact-timer" role="timer" aria-label="{{ contact.thanks.timer_label }}" aria-live="off">
+        <svg viewBox="0 0 120 120" aria-hidden="true"><circle class="contact-timer-track" cx="60" cy="60" r="52"></circle><circle data-countdown-ring class="contact-timer-progress" cx="60" cy="60" r="52" pathLength="100"></circle></svg>
+        <span data-countdown-number>6</span>
+      </div>
+      <p data-countdown-caption>{{ contact.thanks.countdown }} <span data-countdown-seconds>6</span> {{ contact.thanks.seconds }}.</p>
+      <p data-countdown-paused hidden>{{ contact.thanks.paused }}</p>
+      <button type="button" class="contact-pause" data-countdown-pause data-pause-label="{{ contact.thanks.pause }}" data-resume-label="{{ contact.thanks.resume }}">{{ contact.thanks.pause }}</button>
+    </div>
+    <a class="contact-submit contact-home" href="{{ site.base_path }}">{{ contact.thanks.home }}<span aria-hidden="true">→</span></a>
+  </section>
+</main>
+{% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/contact.mjs"></script>{% endblock %}

@@ -6,35 +6,7 @@
 <div data-screen-label="BioseqDB landing" class="ld-s0001">
 
   <!-- NAV -->
-  <header id="dnav" class="site-header" data-site-header data-search-loading="{{ landing.search.loading_search_index }}" data-search-no-matches="{{ landing.search.no_matches_for }}" data-search-unavailable="{{ landing.search.search_index_is_unavailable }}" data-search-error="{{ landing.search.search_is_temporarily_unavailable }}" data-search-tutorial="{{ landing.search.tutorial }}" data-search-function="{{ landing.search.function }}" data-search-class="{{ landing.search.class }}" data-search-type="{{ landing.search.type }}" data-search-setting="{{ landing.search.setting }}" data-search-sql="{{ landing.search.sql_object }}" data-search-domain-sql="{{ landing.search.sql }}" data-search-domain-documentation="{{ landing.search.documentation }}" data-search-domain-cpp="{{ landing.search.c }}">
-  <div class="site-header-inner">
-    <button type="button" data-menu class="site-menu" aria-label="{{ landing.header.documentation_menu }}"><span></span><span></span><span></span></button>
-    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="{{ landing.header.bioseqdb_home }}">
-      <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
-      <span>{{ landing.header.bioseq }}<span>{{ landing.header.db }}</span></span>
-    </a>
-    <nav data-topnav class="site-navigation" aria-label="{{ landing.header.main_navigation }}">
-      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">{{ landing.header.docs }}</a>
-      <a href="{{ site.base_path }}benchmarks/">{{ landing.header.benchmarks }}</a>
-    </nav>
-    <div data-search-wrap class="site-search-wrap">
-      <div data-search-box class="site-search-box">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
-        <input id="doc-search" type="search" role="combobox" aria-label="{{ landing.header.search_documentation }}" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="{{ landing.header.search_docs_functions_types }}" autocomplete="off" spellcheck="false">
-        <kbd>{{ landing.header.symbol }}</kbd>
-      </div>
-      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="{{ landing.header.search_results }}"></div>
-    </div>
-    <div data-ver-wrap class="site-version-wrap">
-      <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
-      <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
-        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">{{ landing.header.current }}</span></a>
-        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">{{ landing.header.all_versions }}</a>
-      </div>
-    </div>
-    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">{{ landing.header.github }}</a>
-  </div>
-</header>
+  {% include "site-header.html.j2" %}
 
   <main id="main">
 
@@ -57,6 +29,7 @@
         <div class="ld-s0025">
           <a href="{{ nav.documentation }}" class="ld-s0026">{{ landing.hero.read_the_docs }}</a>
           <a href="#examples" class="ld-s0027 ld-h002">{{ landing.hero.see_the_examples }}</a>
+          <a href="{{ site.base_path }}contact/" class="ld-s0027 landing-contact-link">{{ landing.hero.contact_me }}</a>
         </div>
         <div class="ld-s0028">
           <div class="ld-s0029">
@@ -362,79 +335,79 @@
           <svg viewBox="0 36 900 226" width="100%" data-architecture-click font-family="'Space Grotesk','IBM Plex Sans',sans-serif" class="ld-s0165">
             <defs>
               <linearGradient id="dgGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stop-color="#63cdf0"></stop>
-                <stop offset="1" stop-color="#1f86b0"></stop>
+                <stop offset="0" stop-color="var(--theme-63cdf0, #63cdf0)"></stop>
+                <stop offset="1" stop-color="var(--theme-1f86b0, #1f86b0)"></stop>
               </linearGradient>
-              <marker id="dgAh" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0.6,0.6 L6,3 L0.6,5.4" fill="none" stroke="#5a6b7c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path></marker>
+              <marker id="dgAh" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0.6,0.6 L6,3 L0.6,5.4" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path></marker>
             </defs>
 
             <g data-diag-node class="ld-s0166">
-              <line x1="132" y1="150" x2="192" y2="150" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></line>
-              <line x1="272" y1="150" x2="336" y2="150" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></line>
-              <path d="M362,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M406,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M450,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M468,150 H516" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M468,193 H516" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M516,150 V193" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M516,150 H596" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <circle cx="598" cy="150" r="3.4" fill="#6a7f90"></circle>
-              <path d="M692,150 H714 V120 H744" fill="none" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></path>
-              <path d="M692,150 H714 V180 H744" fill="none" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></path>
+              <line x1="132" y1="150" x2="192" y2="150" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></line>
+              <line x1="272" y1="150" x2="336" y2="150" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></line>
+              <path d="M362,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M406,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M450,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M468,150 H516" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M468,193 H516" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M516,150 V193" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M516,150 H596" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <circle cx="598" cy="150" r="3.4" fill="var(--theme-6a7f90, #6a7f90)"></circle>
+              <path d="M692,150 H714 V120 H744" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></path>
+              <path d="M692,150 H714 V180 H744" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></path>
             </g>
 
             <g id="dgFile" class="ld-s0167">
-              <path d="M162,44 H194 V98 H150 V56 Z" fill="rgba(242,101,34,0.07)" stroke="#f4894f" stroke-width="1.8" stroke-linejoin="round"></path>
-              <path d="M150,56 H162 V44" fill="none" stroke="#f4894f" stroke-width="1.6" stroke-linejoin="round"></path>
-              <line x1="158" y1="70" x2="186" y2="70" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <line x1="158" y1="78" x2="186" y2="78" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <line x1="158" y1="86" x2="178" y2="86" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <text x="172" y="112" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="9.5" fill="#f4894f">{{ landing.capabilities.input_fasta }}</text>
-              <path d="M194,68 H232 V114" fill="none" stroke="#f26522" stroke-width="1.7" stroke-dasharray="1.5 5" stroke-linecap="round"></path>
-              <circle cx="194" cy="68" r="4" fill="#f26522"></circle>
+              <path d="M162,44 H194 V98 H150 V56 Z" fill="var(--theme-f26522-a0_07, rgba(242,101,34,0.07))" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.8" stroke-linejoin="round"></path>
+              <path d="M150,56 H162 V44" fill="none" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.6" stroke-linejoin="round"></path>
+              <line x1="158" y1="70" x2="186" y2="70" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <line x1="158" y1="78" x2="186" y2="78" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <line x1="158" y1="86" x2="178" y2="86" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <text x="172" y="112" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="9.5" fill="var(--theme-f4894f, #f4894f)">{{ landing.capabilities.input_fasta }}</text>
+              <path d="M194,68 H232 V114" fill="none" stroke="var(--theme-f26522, #f26522)" stroke-width="1.7" stroke-dasharray="1.5 5" stroke-linecap="round"></path>
+              <circle cx="194" cy="68" r="4" fill="var(--theme-f26522, #f26522)"></circle>
             </g>
 
             <g data-diag="sql" data-click="mmsearch" data-diag-node class="ld-s0168">
-              <rect class="f s" x="40" y="108" width="86" height="84" rx="12" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <line class="ink" x1="40" y1="133" x2="126" y2="133" stroke="#6b8091" stroke-width="1.5"></line>
-              <circle cx="54" cy="120" r="3.3" fill="#f26522"></circle>
-              <circle cx="66" cy="120" r="3.3" fill="#d8a15f"></circle>
-              <circle cx="78" cy="120" r="3.3" fill="#2ba6d0"></circle>
-              <text class="ink" x="83" y="171" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="21" fill="#93a6b6" letter-spacing="1">{{ landing.capabilities.sql }}</text>
+              <rect class="f s" x="40" y="108" width="86" height="84" rx="12" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <line class="ink" x1="40" y1="133" x2="126" y2="133" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.5"></line>
+              <circle cx="54" cy="120" r="3.3" fill="var(--theme-f26522, #f26522)"></circle>
+              <circle cx="66" cy="120" r="3.3" fill="var(--theme-d8a15f, #d8a15f)"></circle>
+              <circle cx="78" cy="120" r="3.3" fill="var(--theme-2ba6d0, #2ba6d0)"></circle>
+              <text class="ink" x="83" y="171" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="21" fill="var(--theme-93a6b6, #93a6b6)" letter-spacing="1">{{ landing.capabilities.sql }}</text>
             </g>
 
             <g data-diag="pg" data-click="load" data-diag-node class="ld-s0169">
-              <path class="f s" d="M198,116 V184 A34 9 0 0 0 266 184 V116" fill="transparent" stroke="#6b8091" stroke-width="2"></path>
-              <ellipse class="f s" cx="232" cy="116" rx="34" ry="9" fill="transparent" stroke="#6b8091" stroke-width="2"></ellipse>
-              <ellipse class="s" cx="232" cy="140" rx="34" ry="9" fill="none" stroke="#6b8091" stroke-width="1.4" opacity="0.72"></ellipse>
-              <ellipse class="s" cx="232" cy="164" rx="34" ry="9" fill="none" stroke="#6b8091" stroke-width="1.4" opacity="0.72"></ellipse>
+              <path class="f s" d="M198,116 V184 A34 9 0 0 0 266 184 V116" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></path>
+              <ellipse class="f s" cx="232" cy="116" rx="34" ry="9" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></ellipse>
+              <ellipse class="s" cx="232" cy="140" rx="34" ry="9" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.4" opacity="0.72"></ellipse>
+              <ellipse class="s" cx="232" cy="164" rx="34" ry="9" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.4" opacity="0.72"></ellipse>
             </g>
 
             <g data-diag-node class="ld-s0170">
-              <g data-diag="index" data-click="index"><rect class="f s" x="344" y="95" width="124" height="24" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text class="ink" x="406" y="111" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="#93a6b6" letter-spacing="1.5">{{ landing.capabilities.index }}</text></g>
-              <g data-click="columnar"><rect class="s" x="344" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text x="349" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">{{ landing.capabilities.value_1 }}</text></g>
-              <g data-diag="shard" data-click="columnar"><rect class="f s" x="388" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text class="ink" x="393" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">{{ landing.capabilities.value_2 }}</text></g>
-              <g data-click="columnar"><rect class="s" x="432" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text x="437" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">{{ landing.capabilities.value_3 }}</text></g>
-              <g data-diag="meta" data-click="seqmeta"><rect class="f s" x="344" y="179" width="124" height="28" rx="6" fill="transparent" stroke="#d8a15f" stroke-width="2"></rect><text class="ink" x="406" y="197" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="#c69a6a" letter-spacing="1.5">{{ landing.capabilities.meta }}</text></g>
+              <g data-diag="index" data-click="index"><rect class="f s" x="344" y="95" width="124" height="24" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text class="ink" x="406" y="111" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="var(--theme-93a6b6, #93a6b6)" letter-spacing="1.5">{{ landing.capabilities.index }}</text></g>
+              <g data-click="columnar"><rect class="s" x="344" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text x="349" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">{{ landing.capabilities.value_1 }}</text></g>
+              <g data-diag="shard" data-click="columnar"><rect class="f s" x="388" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text class="ink" x="393" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">{{ landing.capabilities.value_2 }}</text></g>
+              <g data-click="columnar"><rect class="s" x="432" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text x="437" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">{{ landing.capabilities.value_3 }}</text></g>
+              <g data-diag="meta" data-click="seqmeta"><rect class="f s" x="344" y="179" width="124" height="28" rx="6" fill="transparent" stroke="var(--theme-d8a15f, #d8a15f)" stroke-width="2"></rect><text class="ink" x="406" y="197" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="var(--theme-c69a6a, #c69a6a)" letter-spacing="1.5">{{ landing.capabilities.meta }}</text></g>
             </g>
 
             <g data-diag="engine" data-click="parallel" data-diag-node class="ld-s0171">
-              <rect class="f s" x="600" y="106" width="92" height="88" rx="16" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <path class="ink" d="M642,120 Q632,135 646,150 Q660,165 650,180" fill="none" stroke="#6b8091" stroke-width="2" stroke-linecap="round"></path>
-              <path class="ink" d="M650,120 Q660,135 646,150 Q632,165 642,180" fill="none" stroke="#6b8091" stroke-width="2" stroke-linecap="round"></path>
-              <line class="ink" x1="639" y1="130" x2="653" y2="130" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="640" y1="140" x2="652" y2="140" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="640" y1="160" x2="652" y2="160" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="639" y1="170" x2="653" y2="170" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <text x="646" y="216" text-anchor="middle" font-weight="700" font-size="12.5" fill="#93a6b6">{{ landing.capabilities.bioseqdb_execution }}</text>
-              <text x="646" y="232" text-anchor="middle" font-weight="700" font-size="12.5" fill="#93a6b6">{{ landing.capabilities.engine_layer }}</text>
+              <rect class="f s" x="600" y="106" width="92" height="88" rx="16" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <path class="ink" d="M642,120 Q632,135 646,150 Q660,165 650,180" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linecap="round"></path>
+              <path class="ink" d="M650,120 Q660,135 646,150 Q632,165 642,180" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linecap="round"></path>
+              <line class="ink" x1="639" y1="130" x2="653" y2="130" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="640" y1="140" x2="652" y2="140" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="640" y1="160" x2="652" y2="160" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="639" y1="170" x2="653" y2="170" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <text x="646" y="216" text-anchor="middle" font-weight="700" font-size="12.5" fill="var(--theme-93a6b6, #93a6b6)">{{ landing.capabilities.bioseqdb_execution }}</text>
+              <text x="646" y="232" text-anchor="middle" font-weight="700" font-size="12.5" fill="var(--theme-93a6b6, #93a6b6)">{{ landing.capabilities.engine_layer }}</text>
             </g>
 
             <g data-diag="cpu" data-click="simd" data-diag-node class="ld-s0172">
               <rect x="743" y="99" width="95" height="44" fill="transparent"></rect>
-              <rect class="f s" x="751" y="104" width="32" height="32" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <rect class="ink" x="759" y="112" width="16" height="16" rx="2.5" fill="none" stroke="#6b8091" stroke-width="1.6"></rect>
-              <g class="s" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round">
+              <rect class="f s" x="751" y="104" width="32" height="32" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <rect class="ink" x="759" y="112" width="16" height="16" rx="2.5" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6"></rect>
+              <g class="s" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round">
                 <line x1="746" y1="112" x2="751" y2="112"></line>
                 <line x1="746" y1="120" x2="751" y2="120"></line>
                 <line x1="746" y1="128" x2="751" y2="128"></line>
@@ -448,13 +421,13 @@
                 <line x1="767" y1="136" x2="767" y2="141"></line>
                 <line x1="775" y1="136" x2="775" y2="141"></line>
               </g>
-              <text class="t" x="795" y="126" font-weight="700" font-size="19" fill="#93a6b6">{{ landing.capabilities.cpu }}</text>
+              <text class="t" x="795" y="126" font-weight="700" font-size="19" fill="var(--theme-93a6b6, #93a6b6)">{{ landing.capabilities.cpu }}</text>
             </g>
 
             <g data-diag="gpu" data-click="vulkan" data-diag-node class="ld-s0173">
               <rect x="743" y="158" width="95" height="46" fill="transparent"></rect>
-              <polygon class="f s" points="773,162 754,183 764,183 759,199 780,176 770,176" fill="transparent" stroke="#6b8091" stroke-width="2" stroke-linejoin="round"></polygon>
-              <text class="t" x="795" y="186" font-weight="700" font-size="19" fill="#93a6b6">{{ landing.capabilities.gpu }}</text>
+              <polygon class="f s" points="773,162 754,183 764,183 759,199 780,176 770,176" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linejoin="round"></polygon>
+              <text class="t" x="795" y="186" font-weight="700" font-size="19" fill="var(--theme-93a6b6, #93a6b6)">{{ landing.capabilities.gpu }}</text>
             </g>
           </svg>
         </div>

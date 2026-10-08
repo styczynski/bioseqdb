@@ -1804,12 +1804,14 @@ void validate_landing_result(const landing_example_view& view) {
         .content_hash = hex64(bioseq::common::fnv1a_64(site_yaml))});
     const auto landing_relative =
         (fs::path(site_config_relpath).parent_path() / "landing.yaml").generic_string();
-    for (const auto& relative : {landing_relative,
+    const auto contact_relative =
+        (fs::path(site_config_relpath).parent_path() / "contact.yaml").generic_string();
+    for (const auto& relative : {landing_relative, contact_relative,
                                  version_string + "/landing_examples.md"}) {
         const fs::path path = source / relative;
         if (!fs::is_regular_file(path)) continue;
         const auto contents = read_artifact_bytes(path);
-        if (relative == landing_relative) {
+        if (relative == landing_relative || relative == contact_relative) {
             (void)parse_landing_content(contents, path.generic_string());
         }
         inputs.push_back(source_input{
@@ -3654,8 +3656,16 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     if (html.find(" style=") != std::string_view::npos) {
         fail("contains an inline style attribute");
     }
-    if (html.find("src=\"http") != std::string_view::npos
-        || html.find("src='http") != std::string_view::npos) {
+    // This one analytics loader is explicitly configured by the site owner.
+    // All other remote script/media resources remain forbidden.
+    std::string resource_html(html);
+    const std::string analytics_tag =
+        "<script async src=\"https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7\"></script>";
+    if (const auto at = resource_html.find(analytics_tag); at != std::string::npos) {
+        resource_html.erase(at, analytics_tag.size());
+    }
+    if (resource_html.find("src=\"http") != std::string::npos
+        || resource_html.find("src='http") != std::string::npos) {
         fail("references an external script/media resource");
     }
     if (html.find("<link") != std::string_view::npos
@@ -3945,8 +3955,9 @@ void decorate_code_entity_ranges(
     walk(nodes, walk);
 }
 
-[[nodiscard]] landing_content load_landing_content(const fs::path& site_config_path) {
-    const fs::path copy_path = site_config_path.parent_path() / "landing.yaml";
+[[nodiscard]] landing_content load_landing_content(
+    const fs::path& site_config_path, std::string_view filename = "landing.yaml") {
+    const fs::path copy_path = site_config_path.parent_path() / filename;
     if (!fs::is_regular_file(copy_path)) return {};
     return parse_landing_content(read_artifact_bytes(copy_path), copy_path.generic_string());
 }
@@ -3961,7 +3972,7 @@ void decorate_code_entity_ranges(
     const site_model& model, const site_configuration& config,
     const std::string& base_path, const std::string& revision,
     const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging,
-    const landing_content& landing_copy = {}) {
+    const landing_content& landing_copy = {}, const landing_content& contact_copy = {}) {
     const std::string version = model.version.path_component;
     const auto url = [&base_path](std::string_view rel) -> std::string {
         return base_path + std::string(rel);
@@ -4035,13 +4046,30 @@ void decorate_code_entity_ranges(
         }
         landing_context[section] = std::move(values);
     }
+    boost::json::object contact_context;
+    for (const auto& [section, entries] : contact_copy) {
+        boost::json::object values;
+        for (const auto& [key, value] : entries) {
+            values[key] = boost::json::parse(json_text(value));
+        }
+        contact_context[section] = std::move(values);
+    }
+    const auto contact_text = [&contact_copy](
+                                  std::string_view section, std::string_view key,
+                                  std::string fallback) -> std::string {
+        const auto group = contact_copy.find(section);
+        if (group == contact_copy.end()) return fallback;
+        const auto value = group->second.find(key);
+        return value == group->second.end() ? fallback : value->second;
+    };
     const auto landing_meta = [&landing_copy](std::string_view key, const std::string& fallback) {
         const auto meta = landing_copy.find("meta");
         if (meta == landing_copy.end()) return fallback;
         const auto value = meta->second.find(key);
         return value == meta->second.end() ? fallback : value->second;
     };
-    const auto render = [&route, &site, &templates_dir, &writer, &landing_context](
+    const auto render = [&route, &site, &templates_dir, &writer, &landing_context,
+                         &contact_context](
                             std::string_view rel,
                             std::string_view template_name,
                             std::string_view page_object,
@@ -4049,6 +4077,7 @@ void decorate_code_entity_ranges(
                             std::string_view collection) -> void {
         auto context = boost::json::parse(build_page_context(site, page_object, key, collection));
         context.as_object()["landing"] = landing_context;
+        context.as_object()["contact"] = contact_context;
         const std::string html =
             render_page_template(templates_dir.string(), template_name, boost::json::serialize(context));
         writer.emit(route(rel), html);
@@ -4394,6 +4423,22 @@ void decorate_code_entity_ranges(
                + ",\"page_type\":" + json_text("benchmarks")
                + ",\"benchmark_methodology_html\":" + json_quote(methodology_html) + "}",
            "", "");
+
+    // Contact pages share the navigation and assets with every other page.
+    render("contact/index.html", "contact.html.j2",
+           "{\"title\":" + json_text(contact_text("meta", "title", "Contact · BioseqDB"))
+               + ",\"description\":" + json_text(contact_text(
+                   "meta", "description", "Contact the BioseqDB maintainer."))
+               + ",\"canonical\":" + json_text(canonical("contact/index.html"))
+               + ",\"page_type\":" + json_text("contact")
+               + ",\"thanks_canonical\":" + json_text(canonical("contact_thanks/index.html"))
+               + "}", "", "");
+    render("contact_thanks/index.html", "contact_thanks.html.j2",
+           "{\"title\":" + json_text(contact_text("thanks", "page_title", "Thank you · BioseqDB"))
+               + ",\"description\":" + json_text(contact_text(
+                   "thanks", "description", "Your message has been received."))
+               + ",\"canonical\":" + json_text(canonical("contact_thanks/index.html"))
+               + ",\"page_type\":" + json_text("contact_thanks") + "}", "", "");
 
     // Render the root-level page used for missing URLs.
     render("error.html", "error.html.j2",
@@ -4762,6 +4807,8 @@ void decorate_code_entity_ranges(
     };
     add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
                    config.short_description);
+    add_page_entry("page:contact", contact_text("page", "title", "Contact me"), "contact/",
+                   contact_text("meta", "description", "Contact the BioseqDB maintainer."));
     add_page_entry("page:benchmarks", "Benchmarks", "benchmarks/",
                    "Interactive BioseqDB benchmark configurations and measured CI reports");
     add_page_entry("page:" + version + ":reference", "API Reference", version + "/reference/",
@@ -4788,11 +4835,11 @@ void decorate_code_entity_ranges(
                 "User-agent: *\nAllow: /\nSitemap: " + config.canonical_origin
                     + url("sitemap.xml") + "\n");
     writer.emit(route("security-headers.txt"),
-                "Content-Security-Policy: default-src 'self'; script-src 'self'; "
-                "style-src 'self'; font-src 'self'; img-src 'self' data:; "
+                "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com; "
+                "style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; "
                 "media-src 'self'; connect-src 'self' https://raw.githubusercontent.com "
-                "https://api.github.com; object-src 'none'; "
-                "base-uri 'self'; form-action 'none'; frame-ancestors 'none'\n"
+                "https://api.github.com https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; "
+                "base-uri 'self'; form-action 'self' https://formserve.io; frame-ancestors 'none'\n"
                 "X-Content-Type-Options: nosniff\n"
                 "Referrer-Policy: strict-origin-when-cross-origin\n"
                 "Permissions-Policy: geolocation=(), microphone=(), camera=()\n");
@@ -5028,7 +5075,8 @@ void decorate_code_entity_ranges(
         manifest_hash = render_site_model(model, config, base_path, revision,
             fs::path(require_option(options, "templates")),
             fs::path(require_option(options, "static")), staging,
-            load_landing_content(site_config_path));
+            load_landing_content(site_config_path),
+            load_landing_content(site_config_path, "contact.yaml"));
     }
 
     // Write a prepublish descriptor before swapping directories so  the next
@@ -5233,7 +5281,8 @@ void decorate_code_entity_ranges(
     const site_model model = deserialize_site_model(read_artifact_bytes(model_path));
     const std::string manifest_hash = render_site_model(
         model, config, base_path, revision, templates_dir, static_dir, staging,
-        load_landing_content(site_config_path));
+        load_landing_content(site_config_path),
+            load_landing_content(site_config_path, "contact.yaml"));
     const auto stage_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - stage_started).count();
     std::uint64_t staged_html = 0;

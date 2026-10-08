@@ -776,6 +776,8 @@ def shared_header() -> str:
     }
     labels = " ".join(f'data-search-{name}="{landing_text("search", value)}"'
                       for name, value in search_copy.items())
+    dark_label = landing_text("header", "Dark mode. Switch to light mode.")
+    light_label = landing_text("header", "Light mode. Switch to dark mode.")
     markup = '''<header id="dnav" class="site-header" data-site-header>
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
@@ -802,9 +804,24 @@ def shared_header() -> str:
         <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">All versions</a>
       </div>
     </div>
-    <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="{{ site.base_path }}contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="__DARK_LABEL__" data-light-label="__LIGHT_LABEL__" aria-label="__DARK_LABEL__" title="__DARK_LABEL__">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">__DARK_LABEL__</span>
+      </button>
+    </div>
   </div>
 </header>'''
+    markup = markup.replace("__DARK_LABEL__", dark_label).replace("__LIGHT_LABEL__", light_label)
     return localize_landing_markup(markup.replace("data-site-header>", f"data-site-header {labels}>"), "header")
 
 
@@ -815,7 +832,13 @@ def replace_header(markup: str, old_id: str, replacement: str) -> str:
 
 
 def landing_template(markup: str) -> str:
-    markup = replace_header(markup, "nav", shared_header())
+    shared_header()  # Register shared editable labels during standalone translation too.
+    markup = replace_header(markup, "nav", '{% include "site-header.html.j2" %}')
+    examples_link = re.search(r'<a\b[^>]*href="#examples"[^>]*>See the examples</a>', markup)
+    if not examples_link:
+        raise RuntimeError("landing examples action was not found")
+    contact_link = '<a href="{{ site.base_path }}contact/" class="ld-s0027 landing-contact-link">Contact me</a>'
+    markup = markup[:examples_link.end()] + "\n          " + contact_link + markup[examples_link.end():]
     markup = localize_landing_markup(markup)
     skip_label = landing_text("accessibility", "Skip to content")
     failed_label = landing_text("actions", "Copy failed")
@@ -976,19 +999,22 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
 
 
 def base_template(markup: str) -> str:
-    markup = replace_header(markup, "dnav", shared_header())
+    markup = replace_header(markup, "dnav", '{% include "site-header.html.j2" %}')
     pop_start = markup.index('<div id="entity-pop"')
     pop_begin, pop_end = element_span(markup, pop_start)
     markup = markup[:pop_begin] + markup[pop_end:]
     return f'''<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
+<script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="{{{{ page.title }}}}">
 <meta property="og:description" content="{{{{ page.description }}}}">
 <meta property="og:type" content="website">
@@ -1008,6 +1034,8 @@ def base_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-benchmarks.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/theme.css">
 </head>
 <body id="page-top" class="{{% block body_class %}}docs-design-page{{% endblock %}}">
 {{% block skip_link %}}<a class="skip-link" href="#doc-main">Skip to main content</a>{{% endblock %}}
@@ -1055,14 +1083,17 @@ def benchmarks_template(markup: str) -> str:
     footer = markup[footer_at:footer_end].replace(' data-bench-click="onTop"', '')
     markup = markup[:footer_at] + markup[footer_end:]
     return f'''<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self' https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
+<script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="{{{{ page.title }}}}">
 <meta property="og:description" content="{{{{ page.description }}}}">
 <meta property="og:type" content="website">
@@ -1081,10 +1112,12 @@ def benchmarks_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/theme.css">
 </head>
 <body id="page-top" class="benchmarks-design-page">
 <a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
-{shared_header()}
+{{% include "site-header.html.j2" %}}
 <div id="benchmarks-app"
      data-loader-url="{{{{ site.assets_base_url }}}}js/project-benchmark-loader.mjs"
      data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"></div>
@@ -1469,6 +1502,7 @@ def write_generated() -> None:
     if any(token in landing + docs + benchmarks for token in forbidden):
         raise RuntimeError("prototype runtime token survived translation")
 
+    (WEBSITE / "templates" / "site-header.html.j2").write_text(shared_header() + "\n", encoding="utf-8")
     (WEBSITE / "templates" / "landing.html.j2").write_text(
         re.sub(r"[ \t]+(?=\n)", "", landing_template(landing)).rstrip() + "\n",
         encoding="utf-8")
@@ -1545,10 +1579,15 @@ def write_generated() -> None:
             raise RuntimeError("benchmarks.html: dynamic style projection was not preserved")
 
 
+    from theme_palette import apply_theme_palette
+    apply_theme_palette(WEBSITE)
+
+
 GENERATED_PATHS = (
     "static/project-benchmark-template.json",
     "static/css/project-benchmarks.css",
     "templates/base.html.j2",
+    "templates/site-header.html.j2",
     "templates/benchmarks.html.j2",
     "templates/landing.html.j2",
     "static/css/benchmarks-design.css",

@@ -1,0 +1,43 @@
+<header id="dnav" class="site-header" data-site-header data-search-loading="{{ landing.search.loading_search_index }}" data-search-no-matches="{{ landing.search.no_matches_for }}" data-search-unavailable="{{ landing.search.search_index_is_unavailable }}" data-search-error="{{ landing.search.search_is_temporarily_unavailable }}" data-search-tutorial="{{ landing.search.tutorial }}" data-search-function="{{ landing.search.function }}" data-search-class="{{ landing.search.class }}" data-search-type="{{ landing.search.type }}" data-search-setting="{{ landing.search.setting }}" data-search-sql="{{ landing.search.sql_object }}" data-search-domain-sql="{{ landing.search.sql }}" data-search-domain-documentation="{{ landing.search.documentation }}" data-search-domain-cpp="{{ landing.search.c }}">
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="{{ landing.header.documentation_menu }}"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="{{ landing.header.bioseqdb_home }}">
+      <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
+      <span>{{ landing.header.bioseq }}<span>{{ landing.header.db }}</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="{{ landing.header.main_navigation }}">
+      <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">{{ landing.header.docs }}</a>
+      <a href="{{ site.base_path }}benchmarks/">{{ landing.header.benchmarks }}</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="{{ landing.header.search_documentation }}" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" placeholder="{{ landing.header.search_docs_functions_types }}" autocomplete="off" spellcheck="false">
+        <kbd>{{ landing.header.symbol }}</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="{{ landing.header.search_results }}"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">{{ site.version }} <span class="site-version-status">{{ site.status_label }}</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="{{ site.versions_url }}">
+        <a data-ver href="{{ nav.documentation }}" aria-current="page" class="site-version-link">{{ site.version }} <span class="site-version-current">{{ landing.header.current }}</span></a>
+        <a data-ver-all href="{{ site.versions_page_url }}" class="site-version-link">{{ landing.header.all_versions }}</a>
+      </div>
+    </div>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="{{ site.base_path }}contact/" aria-label="{{ landing.header.contact_me }}" title="{{ landing.header.contact_the_bioseqdb_maintainer }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">{{ landing.header.contact_me }}</span><span class="site-action-tooltip" aria-hidden="true">{{ landing.header.contact_the_bioseqdb_maintainer }}</span>
+      </a>
+      <a data-ghbtn class="site-github" href="{{ site.repository_url }}" rel="noreferrer" aria-label="{{ landing.header.github }}" title="{{ landing.header.github }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">{{ landing.header.github }}</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="{{ landing.header.dark_mode_switch_to_light_mode }}" data-light-label="{{ landing.header.light_mode_switch_to_dark_mode }}" aria-label="{{ landing.header.dark_mode_switch_to_light_mode }}" title="{{ landing.header.dark_mode_switch_to_light_mode }}">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">{{ landing.header.dark_mode_switch_to_light_mode }}</span>
+      </button>
+    </div>
+  </div>
+</header>

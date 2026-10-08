@@ -1,0 +1,42 @@
+# Edit the values to change the contact pages. Keep the keys unchanged.
+meta:
+  title: Contact · BioseqDB
+  description: Contact the person behind BioseqDB.
+page:
+  eyebrow: A message to the maintainer
+  title: Contact me
+  introduction: Questions, feedback, or something you are building with BioseqDB? Leave me a message.
+  independent: BioseqDB is an independent project maintained by one person. It may take me a while to reply.
+  respect: Please send your message once and give me time to respond. Please do not spam my inbox.
+  wordmark: BioseqDB
+  home: Back to BioseqDB
+form:
+  title: Send a message
+  name: Your name
+  email: Your email
+  message: Your message
+  name_placeholder: How should I call you?
+  email_placeholder: you@example.com
+  message_placeholder: What would you like to share?
+  email_note: I will only use your email to reply to your message.
+  honeypot: Leave this field empty
+  submit: Send message
+  sending: Sending your message…
+  success: Thanks, your message has been sent. Taking you to the confirmation page…
+  error: I could not send your message. Please try again in a moment.
+  validation: Please enter your name, email address and a message before sending.
+  required: All fields are required.
+thanks:
+  page_title: Thank you · BioseqDB
+  description: Your message has been received.
+  eyebrow: Message received
+  title: Thank you for getting in touch.
+  message: Your message has been received. I appreciate your interest in BioseqDB.
+  response: This is an independent project, so it may take me some time to respond. Thank you for your patience.
+  countdown: Returning to the homepage in
+  seconds: seconds
+  home: Go to the homepage
+  pause: Stay here
+  resume: Resume countdown
+  paused: The automatic redirect is paused.
+  timer_label: Time until returning to the homepage

@@ -1,0 +1,33 @@
+{% extends "base.html.j2" %}
+{% block body_class %}contact-page{% endblock %}
+{% block design_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/contact.css">{% endblock %}
+{% block skip_link %}<a class="skip-link" href="#contact-main">{{ landing.accessibility.skip_to_content }}</a>{% endblock %}
+{% block page %}
+{% include "site-header.html.j2" %}
+<main id="contact-main" class="contact-scene">
+  <div class="contact-wordmark" aria-hidden="true">{{ contact.page.wordmark }}</div>
+  <div class="contact-layout">
+    <section class="contact-introduction" aria-labelledby="contact-title">
+      <p class="contact-eyebrow"><span aria-hidden="true"></span>{{ contact.page.eyebrow }}</p>
+      <h1 id="contact-title">{{ contact.page.title }}<span aria-hidden="true">.</span></h1>
+      <p class="contact-lede">{{ contact.page.introduction }}</p>
+      <div class="contact-note"><p>{{ contact.page.independent }}</p><p>{{ contact.page.respect }}</p></div>
+      <a class="contact-back" href="{{ site.base_path }}"><span aria-hidden="true">←</span> {{ contact.page.home }}</a>
+    </section>
+    <section class="contact-card" aria-labelledby="contact-form-title">
+      <h2 id="contact-form-title">{{ contact.form.title }}</h2>
+      <form data-contact-form method="POST" action="https://formserve.io/f/DXTG4KTRmLw" data-success-url="{{ site.base_path }}contact_thanks/" data-sending="{{ contact.form.sending }}" data-success="{{ contact.form.success }}" data-error="{{ contact.form.error }}" data-validation="{{ contact.form.validation }}">
+        <input type="hidden" name="_redirect" value="{{ page.thanks_canonical }}">
+        <div class="contact-honeypot" aria-hidden="true"><label for="contact-website">{{ contact.form.honeypot }}</label><input id="contact-website" type="text" name="_honeypot" tabindex="-1" autocomplete="off"></div>
+        <div class="contact-field"><label for="contact-name">{{ contact.form.name }} <span aria-hidden="true">*</span></label><input id="contact-name" name="name" type="text" autocomplete="name" placeholder="{{ contact.form.name_placeholder }}" maxlength="200" required></div>
+        <div class="contact-field"><label for="contact-email">{{ contact.form.email }} <span aria-hidden="true">*</span></label><input id="contact-email" name="email" type="email" autocomplete="email" placeholder="{{ contact.form.email_placeholder }}" aria-describedby="contact-email-note" maxlength="320" required><p id="contact-email-note" class="contact-field-note">{{ contact.form.email_note }}</p></div>
+        <div class="contact-field"><label for="contact-message">{{ contact.form.message }} <span aria-hidden="true">*</span></label><textarea id="contact-message" name="message" rows="5" placeholder="{{ contact.form.message_placeholder }}" maxlength="10000" required></textarea></div>
+        <p class="contact-required">{{ contact.form.required }}</p>
+        <button type="submit" class="contact-submit"><span data-contact-submit-label>{{ contact.form.submit }}</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+        <p data-contact-status class="contact-status" role="status" aria-live="polite" tabindex="-1" hidden></p>
+      </form>
+    </section>
+  </div>
+</main>
+{% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/contact.mjs"></script>{% endblock %}

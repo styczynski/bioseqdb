@@ -112,6 +112,7 @@ endif()
 
 set(_site_config "${_source_dir}/site.yaml")
 set(_landing_content "${_source_dir}/landing.yaml")
+set(_contact_content "${_source_dir}/contact.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
@@ -641,7 +642,7 @@ add_custom_command(
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
           "${_render_static_stamp}"
-          "${_site_config}" "${_landing_content}"
+          "${_site_config}" "${_landing_content}" "${_contact_content}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
@@ -1086,7 +1087,7 @@ add_custom_command(
           --model-validation-stamp "${_model_validation_stamp}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
-          "${_render_static_stamp}" "${_landing_content}"
+          "${_render_static_stamp}" "${_landing_content}" "${_contact_content}"
           ${_template_files} ${_static_files}
   COMMENT "website: render resolved model into owner-marked staging (no database)"
   VERBATIM)
@@ -1194,6 +1195,7 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             "${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py"
             "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/static_fixture_server.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/support/site_features_checks.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
             "${CMAKE_SOURCE_DIR}/website/tests/fixtures/search_tokens_golden.json"
             ${_benchmark_browser_fixtures}
@@ -1248,6 +1250,10 @@ if(_website_node_executable)
   set(_website_search_contract_command
     "${_website_node_executable}" --test
     "${_source_dir}/tests/contract/test_search_ranking.mjs")
+  set(_website_features_contract_command
+    "${_website_node_executable}" --test
+    "${_source_dir}/tests/contract/test_theme_runtime.mjs"
+    "${_source_dir}/tests/contract/test_analytics_runtime.mjs")
 else()
   set(_website_benchmark_contract_command
     "${CMAKE_COMMAND}" -E echo
@@ -1255,6 +1261,9 @@ else()
   set(_website_search_contract_command
     "${CMAKE_COMMAND}" -E echo
     "website: Node.js unavailable - skipping the search ranking contract")
+  set(_website_features_contract_command
+    "${CMAKE_COMMAND}" -E echo
+    "website: Node.js unavailable - skipping the theme and analytics contracts")
 endif()
 add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
@@ -1263,6 +1272,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_project_benchmarks.py" --check
   COMMAND ${_website_benchmark_contract_command}
   COMMAND ${_website_search_contract_command}
+  COMMAND ${_website_features_contract_command}
   COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
   DEPENDS "${_venv_stamp}"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

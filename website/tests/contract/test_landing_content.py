@@ -26,7 +26,7 @@ def validate(root: Path = ROOT) -> dict[str, int]:
             keys.add((section, key))
 
     templates = [root / "templates" / name for name in
-                 ("landing.html.j2", "base.html.j2", "benchmarks.html.j2")]
+                 ("landing.html.j2", "base.html.j2", "benchmarks.html.j2", "site-header.html.j2")]
     bindings = set()
     for template in templates:
         bindings.update(re.findall(r"landing\.([a-z0-9_]+)\.([a-z0-9_]+)", template.read_text()))

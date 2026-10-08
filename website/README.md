@@ -10,6 +10,14 @@ inline styles and SQL annotation hooks. The design translator never overwrites
 this file. Global project URLs, release information and copyright stay in
 `site.yaml`.
 
+Contact and confirmation-page wording lives in `contact.yaml`. The form posts
+name, email and message to the public Formserve endpoint and includes an empty
+`_honeypot` field. JavaScript adds inline success/error feedback; a successful
+submission opens `/contact_thanks/`, then a six-second circular timer returns to
+the homepage. Visitors can pause that timer. Without JavaScript, the native POST
+uses the same confirmation route through `_redirect`. The browser acceptance
+suite intercepts the endpoint, so checks never send real messages.
+
 Landing SQL lives in `v0.1/landing_examples.md`. Hidden `bioseq:setup` and
 `bioseq:teardown` sections prepare and clean up the local database; only the
 `bioseq:visible` section appears in the cards. The build rejects empty results or

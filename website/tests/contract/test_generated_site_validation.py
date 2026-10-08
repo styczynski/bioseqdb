@@ -247,7 +247,9 @@ def validate_html(path: Path, text: str) -> list[str]:
         problems.append(_fail(path, "contains an inline event handler"))
     if " style=" in text:
         problems.append(_fail(path, "contains an inline style attribute"))
-    if 'src="http' in text or "src='http" in text:
+    analytics_tag = '<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>'
+    resource_text = text.replace(analytics_tag, "", 1)
+    if 'src="http' in resource_text or "src='http" in resource_text:
         problems.append(_fail(path, "references an external script/media resource"))
     if "<link" in text and 'stylesheet" href="http' in text:
         problems.append(_fail(path, "references an external stylesheet"))
@@ -630,7 +632,12 @@ def site_level_checks(site: Path, pages: dict[Path, str],
     if sitemap_path.is_file():
         for node in ET.parse(sitemap_path).iter():
             if node.tag.endswith("loc") and node.text:
-                sitemap_urls.add(node.text.strip())
+                location = node.text.strip()
+                if location in sitemap_urls:
+                    problems.append(f"sitemap.xml: duplicate URL {location}")
+                sitemap_urls.add(location)
+    else:
+        problems.append("sitemap.xml: missing generated sitemap")
     seen_canonical: dict[str, Path] = {}
     for path, text in pages.items():
         found = _CANON.search(text)
@@ -643,9 +650,24 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                                         f"(also on {seen_canonical[canonical]})"))
         else:
             seen_canonical[canonical] = path
+        if path.name == "index.html" and canonical not in sitemap_urls:
+            problems.append(_fail(path, "indexable page is missing from sitemap.xml"))
     for url in sorted(sitemap_urls):
         if url not in seen_canonical:
             problems.append(f"sitemap.xml: {url} is not the canonical URL of any page")
+    robots_path = site / "robots.txt"
+    if not robots_path.is_file():
+        problems.append("robots.txt: missing generated crawler instructions")
+    else:
+        robots = robots_path.read_text(encoding="utf-8")
+        home_canonical = next((url for url, path in seen_canonical.items()
+                               if path == site / "index.html"), None)
+        if home_canonical:
+            expected_sitemap = home_canonical.rsplit("/", 1)[0] + "/sitemap.xml"
+            if f"Sitemap: {expected_sitemap}" not in robots.splitlines():
+                problems.append("robots.txt: must point to the generated absolute sitemap URL")
+        if "User-agent: *" not in robots.splitlines() or "Allow: /" not in robots.splitlines():
+            problems.append("robots.txt: public website pages must be crawlable")
 
     # (4) Every internal link/anchor/asset resolves to an emitted file.
     page_ids: dict[str, set[str]] = {

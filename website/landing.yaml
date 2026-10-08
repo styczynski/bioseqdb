@@ -25,6 +25,10 @@ header:
   current: current
   all_versions: All versions
   github: GitHub
+  contact_me: Contact me
+  contact_the_bioseqdb_maintainer: Contact the BioseqDB maintainer
+  dark_mode_switch_to_light_mode: Dark mode. Switch to light mode.
+  light_mode_switch_to_dark_mode: Light mode. Switch to dark mode.
 hero:
   sql_native_sequence_search: SQL sequence search (alignments)
   search_biological_sequences_with_plain: Search biological sequences with plain
@@ -33,6 +37,7 @@ hero:
   bioseqdb_is_a_sql_native_system_for: BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with just SQL! Amazingly nobody before was crazy enough to combine database engine and genomic aligner algorithms.
   read_the_docs: Read the docs
   see_the_examples: See the examples
+  contact_me: Contact me
   symbol_2: $
   create_extension_bioseq: docker pull styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04
   copied: Copied
