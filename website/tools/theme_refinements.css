@@ -1,0 +1,36 @@
+/* Component-level light colors. Geometry and the dark palette stay authored. */
+html[data-theme="light"] body { background: #f5f8fc; color: #19364d; }
+html[data-theme="light"] ::selection { background: #f4ceb9; color: #173247; }
+html[data-theme="light"] :focus-visible { outline-color: #117899; }
+html[data-theme="light"] .site-header { background: rgba(245,248,252,.92); }
+html[data-theme="light"] .site-search-box:focus-within { border-color: #117899; background: #fff; }
+html[data-theme="light"] :is(.doc-code, .algorithm-panel, #entity-pop, .site-search-dropdown, .site-version-menu) { box-shadow: 0 12px 36px -16px rgba(25,50,72,.18); }
+html[data-theme="light"] :is(input, textarea, select) { accent-color: #117899; }
+html[data-theme="light"] option { background: #fff; color: #19364d; }
+html[data-theme="light"] :is(.landing-design-page .ld-s0282, .docs-design-page .dd-s0237, .benchmarks-design-page .bd-s0111) {
+  background: linear-gradient(180deg,#f5f8fc 0%,#eaf4f7 18%,#d8eef1 55%,#bfe4e6 100%);
+  --theme-063540: #214e5c;
+  --theme-053039: #214e5c;
+  --theme-063a45: #214e5c;
+  --theme-00252e: #173c48;
+  --theme-032832-a0_17: rgba(32,89,106,.10);
+}
+html[data-theme="light"] :is(.landing-design-page .ld-s0274) { background: rgba(255,255,255,.88); }
+html[data-theme="light"] :is(.landing-design-page .ld-s0272) { background: radial-gradient(560px 300px at 50% 50%,rgba(245,248,252,.72),transparent 72%); }
+html[data-theme="light"] :is(.copy-button, [data-copy-install]) { background: #e3edf3; color: #26445b; }
+html[data-theme="light"] :is(.copy-button, [data-copy-install]):hover { background: #d6e4ee; }
+html[data-theme="light"] .landing-design-page .ld-s0022 { text-shadow: none; }
+html[data-theme="light"] [data-idx-media] {
+  --theme-eef4f9: #edf4f8;
+  --theme-ffffff: #ffffff;
+  --theme-0e2233: #203c53;
+  --theme-0e2233-a0_16: rgba(32,60,83,.2);
+  --theme-45647e: #dceaf2;
+  --theme-2b4257: #bdd4e3;
+  --theme-dfeaf2: #203c53;
+}
+html[data-theme="light"] #cta-grid { --theme-ffffff: #ffffff; }
+/* Keep annotations visible without relying on color alone. */
+html[data-theme="light"] .code-entity-ref { text-decoration-color: rgba(17,120,153,.6); }
+html[data-theme="light"] .tutorial-body img[src*="/figures/"] { color-scheme: light; }
+html[data-theme="dark"] .tutorial-body img[src*="/figures/"] { color-scheme: dark; }

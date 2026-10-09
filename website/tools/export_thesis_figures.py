@@ -26,6 +26,7 @@ import sys
 import tempfile
 import textwrap
 import xml.etree.ElementTree as ET
+from theme_palette import theme_svg
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE = REPO / 'papers/src/content/bioseqdb/thesis'
@@ -264,7 +265,7 @@ def main():
         svg = render_tikz(item, definitions, work) if item['kind'] == 'tikz' else render_python(item, work)
         # Matplotlib's multiline path data otherwise leaves trailing spaces.
         # SVG treats these as equivalent separators; keep generated diffs clean.
-        destination.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines()) + '\n')
+        destination.write_text(theme_svg('\n'.join(line.rstrip() for line in svg.read_text().splitlines()) + '\n'))
         print('Exported ' + item['svg'], flush=True)
     failures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -280,12 +281,15 @@ def main():
         item.pop('_content')
         destination = OUTPUT / Path(item['svg']).name
         if destination.is_file():
+            themed = theme_svg(destination.read_text())
+            if themed != destination.read_text():
+                destination.write_text(themed)
             attrs = ET.parse(destination).getroot().attrib
             item.update({key: attrs[key] for key in ('width', 'height', 'viewBox') if key in attrs})
             item['svg_sha256'] = hashlib.sha256(destination.read_bytes()).hexdigest()
     (OUTPUT / 'manifest.json').write_text(json.dumps({
         'entrypoint': 'papers/src/content/bioseqdb/thesis/main.tex',
-        'theme': {'name': 'website-dark', 'background': 'transparent',
+        'theme': {'name': 'website-adaptive', 'background': 'transparent',
                   'surface': '#' + BACKGROUND, 'foreground': '#' + FOREGROUND,
                   'palette': {name: '#' + value for name, value in PALETTE.items()}},
         'sources': [p.relative_to(SOURCE).as_posix() for p in paths],

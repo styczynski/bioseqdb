@@ -13,13 +13,13 @@ export function adaptProjectComponent(Component) {
       if (!sample?.published) return super.sampleRows(sample);
       const cell = sample.source;
       return [
-        { k: 'A · complete', v: cell.a_ns == null ? '—' : this.lib.formatNs(cell.a_ns), color: '#cfe0ec' },
-        { k: 'B · without CIGAR/MAPQ', v: cell.b_ns == null ? '—' : this.lib.formatNs(cell.b_ns), color: '#cfe0ec' },
-        { k: 'samples', v: cell.samples == null ? '—' : String(cell.samples), color: '#cfe0ec' },
-        { k: 'status', v: cell.status, color: '#cfe0ec' },
-        { k: 'timing scope', v: cell.timing_scope || '—', color: '#9db1c2' },
-        { k: 'source', v: cell.source || '—', color: '#9db1c2' },
-        ...(cell.note ? [{ k: 'note', v: String(cell.note), color: '#ffc9a8' }] : []),
+        { k: 'A · complete', v: cell.a_ns == null ? '—' : this.lib.formatNs(cell.a_ns), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+        { k: 'B · without CIGAR/MAPQ', v: cell.b_ns == null ? '—' : this.lib.formatNs(cell.b_ns), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+        { k: 'samples', v: cell.samples == null ? '—' : String(cell.samples), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+        { k: 'status', v: cell.status, color: 'var(--theme-cfe0ec, #cfe0ec)' },
+        { k: 'timing scope', v: cell.timing_scope || '—', color: 'var(--theme-9db1c2, #9db1c2)' },
+        { k: 'source', v: cell.source || '—', color: 'var(--theme-9db1c2, #9db1c2)' },
+        ...(cell.note ? [{ k: 'note', v: String(cell.note), color: 'var(--theme-ffc9a8, #ffc9a8)' }] : []),
       ];
     }
     renderVals() {
@@ -48,8 +48,8 @@ export function adaptProjectComponent(Component) {
       values.groups.forEach((group) => group.rows.forEach((row) => {
         const source = panel.rows.find((r) => r.id === row.algo);
         row.algo = source.label;
-        row.nameColor = source.preferred ? '#f2d28c' : row.isBaseline ? '#b9c5cf' : '#e2edf5';
-        row.rowBg = source.preferred ? 'rgba(242,210,140,.08)' : row.isBaseline ? 'rgba(190,200,210,.08)' : '#0a1826';
+        row.nameColor = source.preferred ? 'var(--theme-f2d28c, #f2d28c)' : row.isBaseline ? 'var(--theme-b9c5cf, #b9c5cf)' : 'var(--theme-e2edf5, #e2edf5)';
+        row.rowBg = source.preferred ? 'var(--theme-f2d28c-a0_08, rgba(242,210,140,.08))' : row.isBaseline ? 'var(--theme-bec8d2-a0_08, rgba(190,200,210,.08))' : 'var(--theme-0a1826, #0a1826)';
         row.cells.forEach((cell, i) => {
           const observation = source.cells[panel.columns[i].id];
           if (observation.a_ns == null) {

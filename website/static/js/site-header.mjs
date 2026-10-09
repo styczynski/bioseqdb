@@ -90,9 +90,9 @@ function search() {
   };
   const setFocusStyle = (focused) => {
     box.style.borderColor = focused ?
-      "rgba(70,184,222,0.55)" : "rgba(255,255,255,0.14)";
+      "var(--theme-46b8de-a0_55, rgba(70,184,222,0.55))" : "var(--theme-ffffff-a0_14, rgba(255,255,255,0.14))";
     box.style.background = focused ?
-      "rgba(70,184,222,0.06)" : "rgba(255,255,255,0.04)";
+      "var(--theme-46b8de-a0_06, rgba(70,184,222,0.06))" : "var(--theme-ffffff-a0_04, rgba(255,255,255,0.04))";
   };
   const setSelected = (next) => {
     if (!options.length) {
@@ -104,7 +104,7 @@ function search() {
     options.forEach((option, index) => {
       const active = index === selected;
       option.setAttribute("aria-selected", active ? "true" : "false");
-      option.style.background = active ? "rgba(70,184,222,0.09)" : "transparent";
+      option.style.background = active ? "var(--theme-46b8de-a0_09, rgba(70,184,222,0.09))" : "transparent";
       if (active) {
         input.setAttribute("aria-activedescendant", option.id);
         option.scrollIntoView({ block: "nearest" });

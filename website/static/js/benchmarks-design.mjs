@@ -224,22 +224,22 @@ class Component extends DCLogic {
   hideTip = () => { if (this.state.tip) this.setState({ tip: null }); };
 
   sampleRows(s) {
-    if (!s) return [{ k: 'samples', v: 'none', color: '#7d94a6' }];
+    if (!s) return [{ k: 'samples', v: 'none', color: 'var(--theme-7d94a6, #7d94a6)' }];
     const f = (v) => (v == null ? '—' : this.fmt(v));
     return [
-      { k: 'samples', v: s.n == null ? '—' : String(s.n), color: '#cfe0ec' },
-      { k: 'P01 / P20', v: f(s.p.P01) + ' / ' + f(s.p.P20), color: '#cfe0ec' },
-      { k: 'P50', v: f(s.p.P50), color: '#8fd6ba' },
-      { k: 'P80 / P99', v: f(s.p.P80) + ' / ' + f(s.p.P99), color: '#cfe0ec' },
-      { k: 'min / max', v: f(s.min) + ' / ' + f(s.max), color: '#cfe0ec' },
-      { k: 'mean / mean90', v: f(s.mean) + ' / ' + f(s.mean90), color: '#cfe0ec' },
-      { k: 'stddev', v: f(s.stddev), color: '#9db1c2' },
+      { k: 'samples', v: s.n == null ? '—' : String(s.n), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+      { k: 'P01 / P20', v: f(s.p.P01) + ' / ' + f(s.p.P20), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+      { k: 'P50', v: f(s.p.P50), color: 'var(--theme-8fd6ba, #8fd6ba)' },
+      { k: 'P80 / P99', v: f(s.p.P80) + ' / ' + f(s.p.P99), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+      { k: 'min / max', v: f(s.min) + ' / ' + f(s.max), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+      { k: 'mean / mean90', v: f(s.mean) + ' / ' + f(s.mean90), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+      { k: 'stddev', v: f(s.stddev), color: 'var(--theme-9db1c2, #9db1c2)' },
     ];
   }
   histBars(s) {
     if (!s || !s.hist || !s.hist.length) return [];
     const max = Math.max(...s.hist.map((h) => h.count)) || 1;
-    return s.hist.map((h) => ({ h: Math.round((h.count / max) * 100), color: h.count ? '#46b8de' : 'rgba(255,255,255,0.08)' }));
+    return s.hist.map((h) => ({ h: Math.round((h.count / max) * 100), color: h.count ? 'var(--theme-46b8de, #46b8de)' : 'var(--theme-ffffff-a0_08, rgba(255,255,255,0.08))' }));
   }
 
   renderVals() {
@@ -252,16 +252,16 @@ class Component extends DCLogic {
       onToggleSources: () => this.setState({ showSources: !st.showSources }),
       onTop: (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
       showSources: st.showSources, srcCaret: st.showSources ? 'rotate(90deg)' : 'none',
-      statusDot: st.loading ? '#f2a071' : (model && model.errors.length ? '#ef7a5a' : '#74c8a8'),
+      statusDot: st.loading ? 'var(--theme-f2a071, #f2a071)' : (model && model.errors.length ? 'var(--theme-ef7a5a, #ef7a5a)' : 'var(--theme-74c8a8, #74c8a8)'),
       statusText: st.loading ? 'loading' : (model ? model.order.length : 0) + ' benchmarks',
       sourceSummary: (st.files.filter((f) => f.status !== 'error').length) + '/' + st.files.length,
       sources: (st.files || []).map((f) => ({
         name: f.name, kind: f.status === 'error' ? 'err' : f.kind,
-        dot: f.status === 'error' ? '#ef7a5a' : (f.kind === 'report' ? '#74c8a8' : f.kind === 'manifest' ? '#f2a071' : '#46b8de'),
+        dot: f.status === 'error' ? 'var(--theme-ef7a5a, #ef7a5a)' : (f.kind === 'report' ? 'var(--theme-74c8a8, #74c8a8)' : f.kind === 'manifest' ? 'var(--theme-f2a071, #f2a071)' : 'var(--theme-46b8de, #46b8de)'),
         onEnter: (e) => this.showTip(e, {
           title: f.name, sub: f.status === 'error' ? 'unreachable' : f.kind,
           note: f.error || f.url,
-          rows: (f.benchmarkKeys || []).slice(0, 9).map((k) => ({ k: 'benchmark', v: k, color: '#8fd6ba' })),
+          rows: (f.benchmarkKeys || []).slice(0, 9).map((k) => ({ k: 'benchmark', v: k, color: 'var(--theme-8fd6ba, #8fd6ba)' })),
         }),
       })),
       tipX: tip ? tip.x : -9999, tipY: tip ? tip.y : -9999, tipOpacity: tip ? 1 : 0,
@@ -296,11 +296,11 @@ class Component extends DCLogic {
       return {
         label: key, open: !!st.open[key],
         caret: st.open[key] ? 'rotate(90deg)' : 'none',
-        headBg: active ? 'rgba(70,184,222,0.10)' : 'transparent',
-        headColor: active ? '#bfe8f8' : (b.hasResults ? '#c2d4e1' : '#7d94a6'),
+        headBg: active ? 'var(--theme-46b8de-a0_1, rgba(70,184,222,0.10))' : 'transparent',
+        headColor: active ? 'var(--theme-bfe8f8, #bfe8f8)' : (b.hasResults ? 'var(--theme-c2d4e1, #c2d4e1)' : 'var(--theme-7d94a6, #7d94a6)'),
         badge: b.hasResults ? 'DATA' : 'CFG',
-        badgeColor: b.hasResults ? '#0a2a1f' : '#8ba3b6',
-        badgeBg: b.hasResults ? '#74c8a8' : 'rgba(255,255,255,0.07)',
+        badgeColor: b.hasResults ? 'var(--theme-0a2a1f, #0a2a1f)' : 'var(--theme-8ba3b6, #8ba3b6)',
+        badgeBg: b.hasResults ? 'var(--theme-74c8a8, #74c8a8)' : 'var(--theme-ffffff-a0_07, rgba(255,255,255,0.07))',
         onToggle: () => {
           const open = Object.assign({}, st.open, { [key]: !st.open[key] });
           if (st.sel !== key) { this.setState({ sel: key, open }); this.resetForBench(key); }
@@ -310,9 +310,9 @@ class Component extends DCLogic {
           const on = active && st.view === v.id;
           return {
             label: v.label, count: counts[v.id],
-            color: on ? '#eaf5fb' : '#9db1c2',
-            bg: on ? 'rgba(255,255,255,0.06)' : 'transparent',
-            bar: on ? '#f26522' : 'transparent',
+            color: on ? 'var(--theme-eaf5fb, #eaf5fb)' : 'var(--theme-9db1c2, #9db1c2)',
+            bg: on ? 'var(--theme-ffffff-a0_06, rgba(255,255,255,0.06))' : 'transparent',
+            bar: on ? 'var(--theme-f26522, #f26522)' : 'transparent',
             onClick: (e) => {
               e.preventDefault();
               if (st.sel !== key) { this.setState({ sel: key, view: v.id }); this.resetForBench(key); }
@@ -335,11 +335,11 @@ class Component extends DCLogic {
 
     const chip = (text, tone, tipPayload) => {
       const tones = {
-        teal: ['#a8e2f6', 'rgba(70,184,222,0.10)', 'rgba(70,184,222,0.28)'],
-        mint: ['#a9e0c8', 'rgba(116,200,168,0.10)', 'rgba(116,200,168,0.28)'],
-        amber: ['#ffc9a8', 'rgba(242,101,34,0.10)', 'rgba(242,101,34,0.30)'],
-        grey: ['#a9bccb', 'rgba(255,255,255,0.045)', 'rgba(255,255,255,0.10)'],
-      }[tone] || ['#a9bccb', 'rgba(255,255,255,0.045)', 'rgba(255,255,255,0.10)'];
+        teal: ['var(--theme-a8e2f6, #a8e2f6)', 'var(--theme-46b8de-a0_1, rgba(70,184,222,0.10))', 'var(--theme-46b8de-a0_28, rgba(70,184,222,0.28))'],
+        mint: ['var(--theme-a9e0c8, #a9e0c8)', 'var(--theme-74c8a8-a0_1, rgba(116,200,168,0.10))', 'var(--theme-74c8a8-a0_28, rgba(116,200,168,0.28))'],
+        amber: ['var(--theme-ffc9a8, #ffc9a8)', 'var(--theme-f26522-a0_1, rgba(242,101,34,0.10))', 'var(--theme-f26522-a0_3, rgba(242,101,34,0.30))'],
+        grey: ['var(--theme-a9bccb, #a9bccb)', 'var(--theme-ffffff-a0_045, rgba(255,255,255,0.045))', 'var(--theme-ffffff-a0_1, rgba(255,255,255,0.10))'],
+      }[tone] || ['var(--theme-a9bccb, #a9bccb)', 'var(--theme-ffffff-a0_045, rgba(255,255,255,0.045))', 'var(--theme-ffffff-a0_1, rgba(255,255,255,0.10))'];
       return {
         text, color: tones[0], bg: tones[1], border: tones[2],
         onEnter: tipPayload ? (e) => this.showTip(e, tipPayload) : () => {},
@@ -352,11 +352,11 @@ class Component extends DCLogic {
         title: run.id, sub: 'report artifact',
         note: run.url,
         rows: [
-          { k: 'created', v: run.created || '—', color: '#cfe0ec' },
-          { k: 'commit', v: run.commit ? run.commit.slice(0, 12) : '—', color: '#8fd6ba' },
-          { k: 'worktree', v: run.dirty ? 'dirty' : 'clean', color: run.dirty ? '#f2a071' : '#8fd6ba' },
-          { k: 'fast mode', v: String(!!run.meta.fast), color: '#cfe0ec' },
-          { k: 'tuples', v: String(run.rows.length), color: '#cfe0ec' },
+          { k: 'created', v: run.created || '—', color: 'var(--theme-cfe0ec, #cfe0ec)' },
+          { k: 'commit', v: run.commit ? run.commit.slice(0, 12) : '—', color: 'var(--theme-8fd6ba, #8fd6ba)' },
+          { k: 'worktree', v: run.dirty ? 'dirty' : 'clean', color: run.dirty ? 'var(--theme-f2a071, #f2a071)' : 'var(--theme-8fd6ba, #8fd6ba)' },
+          { k: 'fast mode', v: String(!!run.meta.fast), color: 'var(--theme-cfe0ec, #cfe0ec)' },
+          { k: 'tuples', v: String(run.rows.length), color: 'var(--theme-cfe0ec, #cfe0ec)' },
         ],
       }));
       if (run.commit) out.benchChips.push(chip(run.commit.slice(0, 7) + (run.dirty ? ' ·dirty' : ''), run.dirty ? 'amber' : 'grey'));
@@ -395,8 +395,8 @@ class Component extends DCLogic {
         { v: -1, label: '↓ lower is better' }, { v: 1, label: '↑ higher is better' }, { v: 0, label: '– neutral' },
       ].map((d) => ({
         label: d.label,
-        bg: dir === d.v ? 'rgba(70,184,222,0.16)' : 'transparent',
-        color: dir === d.v ? '#bfe8f8' : '#7d94a6',
+        bg: dir === d.v ? 'var(--theme-46b8de-a0_16, rgba(70,184,222,0.16))' : 'transparent',
+        color: dir === d.v ? 'var(--theme-bfe8f8, #bfe8f8)' : 'var(--theme-7d94a6, #7d94a6)',
         onClick: () => this.setState({ dir: d.v }),
       }));
       const nRows = table.groups.reduce((a, g) => a + g.rows.length, 0);
@@ -413,8 +413,8 @@ class Component extends DCLogic {
           onEnter: (e) => this.showTip(e, {
             title: tc, sub: 'test case',
             note: info.description || 'No description in the configuration.',
-            rows: Object.keys(data).slice(0, 9).map((k) => ({ k, v: String(data[k]), color: '#cfe0ec' }))
-              .concat(b.iterations[tc] != null ? [{ k: 'iterations', v: String(b.iterations[tc]), color: '#8fd6ba' }] : []),
+            rows: Object.keys(data).slice(0, 9).map((k) => ({ k, v: String(data[k]), color: 'var(--theme-cfe0ec, #cfe0ec)' }))
+              .concat(b.iterations[tc] != null ? [{ k: 'iterations', v: String(b.iterations[tc]), color: 'var(--theme-8fd6ba, #8fd6ba)' }] : []),
           }),
         };
       });
@@ -428,40 +428,40 @@ class Component extends DCLogic {
         return {
           algo: r.algo, detail: r.detail, hasDetail: !!r.detail,
           isBaseline: r.isBaseline,
-          nameColor: r.isBaseline ? '#a9e0c8' : '#e2edf5',
-          rowBg: r.isBaseline ? 'rgba(116,200,168,0.055)' : '#0a1826',
+          nameColor: r.isBaseline ? 'var(--theme-a9e0c8, #a9e0c8)' : 'var(--theme-e2edf5, #e2edf5)',
+          rowBg: r.isBaseline ? 'var(--theme-74c8a8-a0_055, rgba(116,200,168,0.055))' : 'var(--theme-0a1826, #0a1826)',
           onEnter: (e) => this.showTip(e, {
             title: r.algo, sub: 'execution tuple',
             note: (schema && Object.values(schema)[0] && Object.values(schema)[0].description) || '',
             rows: Object.keys(r.params).map((k) => ({
               k, v: String(r.params[k]),
-              color: k === '_' ? '#7d94a6' : '#8fd6ba',
+              color: k === '_' ? 'var(--theme-7d94a6, #7d94a6)' : 'var(--theme-8fd6ba, #8fd6ba)',
             })),
           }),
           cells: r.values.map((cell, i) => {
             const tc = table.cols[i];
             const ratio = cell.ratio;
             const better = cell.better || 0;
-            const col = better > 0 ? '#74c8a8' : better < 0 ? '#ef7a5a' : '#7d94a6';
+            const col = better > 0 ? 'var(--theme-74c8a8, #74c8a8)' : better < 0 ? 'var(--theme-ef7a5a, #ef7a5a)' : 'var(--theme-7d94a6, #7d94a6)';
             return {
               text: cell.value == null ? '—' : lib.formatValue(cell.value, metric),
-              valueColor: cell.value == null ? '#54697a' : '#eef4f9',
-              bg: r.isBaseline ? 'rgba(116,200,168,0.045)' : (better > 0 ? 'rgba(116,200,168,0.05)' : better < 0 ? 'rgba(239,122,90,0.05)' : 'transparent'),
-              ring: cell.isBest ? 'inset 0 0 0 2px #74c8a8' : 'none',
+              valueColor: cell.value == null ? 'var(--theme-54697a, #54697a)' : 'var(--theme-eef4f9, #eef4f9)',
+              bg: r.isBaseline ? 'var(--theme-74c8a8-a0_045, rgba(116,200,168,0.045))' : (better > 0 ? 'var(--theme-74c8a8-a0_05, rgba(116,200,168,0.05))' : better < 0 ? 'var(--theme-ef7a5a-a0_05, rgba(239,122,90,0.05))' : 'transparent'),
+              ring: cell.isBest ? 'inset 0 0 0 2px var(--theme-74c8a8, #74c8a8)' : 'none',
               arrow: r.isBaseline || ratio == null ? '' : (better > 0 ? '▲' : better < 0 ? '▼' : '='),
               ratioText: r.isBaseline ? 'baseline' : (ratio == null ? '' : ratio.toFixed(2) + '×'),
-              chipColor: r.isBaseline ? '#74c8a8' : col,
+              chipColor: r.isBaseline ? 'var(--theme-74c8a8, #74c8a8)' : col,
               onEnter: (e) => this.showTip(e, {
                 title: r.algo + ' · ' + tc,
                 sub: metric + ' · ' + region,
                 note: mspec.description || (b.testCases[tc] && b.testCases[tc].description) || '',
                 rows: [
-                  { k: st.stat + ' (shown)', v: cell.value == null ? '—' : lib.formatValue(cell.value, metric), color: '#f2f7fb' },
-                  { k: 'parameters', v: grp.label || 'none swept', color: '#a8e2f6' },
-                  { k: 'baseline', v: r.isBaseline ? 'this row' : (grp.baselineLabel || '—'), color: '#8fd6ba' },
-                  { k: 'baseline value', v: cell.base == null ? '—' : lib.formatValue(cell.base, metric), color: '#cfe0ec' },
+                  { k: st.stat + ' (shown)', v: cell.value == null ? '—' : lib.formatValue(cell.value, metric), color: 'var(--theme-f2f7fb, #f2f7fb)' },
+                  { k: 'parameters', v: grp.label || 'none swept', color: 'var(--theme-a8e2f6, #a8e2f6)' },
+                  { k: 'baseline', v: r.isBaseline ? 'this row' : (grp.baselineLabel || '—'), color: 'var(--theme-8fd6ba, #8fd6ba)' },
+                  { k: 'baseline value', v: cell.base == null ? '—' : lib.formatValue(cell.base, metric), color: 'var(--theme-cfe0ec, #cfe0ec)' },
                   { k: 'vs baseline', v: ratio == null ? '—' : (ratio.toFixed(3) + '× · ' + (cell.deltaPct >= 0 ? '+' : '') + cell.deltaPct.toFixed(1) + '%'), color: col },
-                  { k: 'rank', v: cell.isBest ? 'best in this group' : '—', color: cell.isBest ? '#74c8a8' : '#7d94a6' },
+                  { k: 'rank', v: cell.isBest ? 'best in this group' : '—', color: cell.isBest ? 'var(--theme-74c8a8, #74c8a8)' : 'var(--theme-7d94a6, #7d94a6)' },
                 ].concat(this.sampleRows(cell.sample)),
                 hist: this.histBars(cell.sample),
               }),
@@ -506,8 +506,8 @@ class Component extends DCLogic {
         return {
           name,
           state: has ? 'measured' : 'declared',
-          stateColor: has ? '#0a2a1f' : '#8ba3b6',
-          stateBg: has ? '#74c8a8' : 'rgba(255,255,255,0.07)',
+          stateColor: has ? 'var(--theme-0a2a1f, #0a2a1f)' : 'var(--theme-8ba3b6, #8ba3b6)',
+          stateBg: has ? 'var(--theme-74c8a8, #74c8a8)' : 'var(--theme-ffffff-a0_07, rgba(255,255,255,0.07))',
           params: Object.keys(schema).length
             ? Object.keys(schema).map((p) => {
                 const s = schema[p] || {};
@@ -531,7 +531,7 @@ class Component extends DCLogic {
         const d = lib.metricDirection(name);
         return {
           name, kind: spec.type || 'builtin',
-          kindColor: spec.type === 'evaluation' ? '#c9a8ff' : spec.type === 'counter' ? '#ffc9a8' : spec.type === 'region' ? '#8fd6ba' : '#7fd3ee',
+          kindColor: spec.type === 'evaluation' ? 'var(--theme-c9a8ff, #c9a8ff)' : spec.type === 'counter' ? 'var(--theme-ffc9a8, #ffc9a8)' : spec.type === 'region' ? 'var(--theme-8fd6ba, #8fd6ba)' : 'var(--theme-7fd3ee, #7fd3ee)',
           dirLabel: d < 0 ? '↓ lower' : d > 0 ? '↑ higher' : '– neutral',
           onOpen: (e) => { e.preventDefault(); this.setState({ view: 'compare', metric: name, dir: null }); },
         };

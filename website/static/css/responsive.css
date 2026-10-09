@@ -94,7 +94,7 @@
 .landing-design-page #wf-grid { grid-template-columns: minmax(0, 1fr); }
 .landing-design-page [data-wf-card] { padding: 20px; border-left: 0; }
 .landing-design-page [data-wf-card] + [data-wf-card] {
-  border-top: 1px solid rgba(255,255,255,.08);
+  border-top: 1px solid var(--theme-ffffff-a0_08, rgba(255,255,255,.08));
 }
 /* Keep the architecture and capability cards comfortably grouped on wide screens. */
 .landing-design-page #capabilities > .ld-s0041 { max-width: 1360px; }
@@ -206,7 +206,7 @@
   .landing-design-page .ld-s0174 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .landing-design-page [data-wf-card] { border: 0; }
   .landing-design-page [data-wf-card] + [data-wf-card] { border-top: 0; }
-  .landing-design-page [data-wf-card]:nth-child(even) { border-left: 1px solid rgba(255,255,255,.08); }
+  .landing-design-page [data-wf-card]:nth-child(even) { border-left: 1px solid var(--theme-ffffff-a0_08, rgba(255,255,255,.08)); }
   .landing-design-page [data-example-tab] { padding: 14px 16px; }
   .landing-design-page [data-example-tab] > span:nth-child(2) { font-size: 15px; }
   .docs-design-page .doc-code > pre { font-size: 13px; padding: 20px; }
@@ -231,7 +231,7 @@
   :root { --page-gutter: 32px; }
   .landing-design-page #wf-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .landing-design-page [data-wf-card] { padding: 22px 16px; }
-  .landing-design-page [data-wf-card] + [data-wf-card] { border-left: 1px solid rgba(255,255,255,.08); }
+  .landing-design-page [data-wf-card] + [data-wf-card] { border-left: 1px solid var(--theme-ffffff-a0_08, rgba(255,255,255,.08)); }
   .landing-design-page .ld-s0055 { font-size: 14px; }
   .landing-design-page [data-live-result] { padding: 20px; }
   .docs-design-page .docs-content { font-size: 16px; }
@@ -272,7 +272,7 @@
     display: block;
     position: sticky !important;
     height: calc(100dvh - var(--site-header-height)) !important;
-    border-right: 1px solid rgba(255,255,255,.07) !important;
+    border-right: 1px solid var(--theme-ffffff-a0_07, rgba(255,255,255,.07)) !important;
     border-bottom: 0 !important;
     padding: 22px 12px 48px;
   }

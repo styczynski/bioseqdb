@@ -1,7 +1,7 @@
 {
   "entrypoint": "papers/src/content/bioseqdb/thesis/main.tex",
   "theme": {
-    "name": "website-dark",
+    "name": "website-adaptive",
     "background": "transparent",
     "surface": "#071320",
     "foreground": "#CBD8E4",
@@ -95,7 +95,7 @@
       "width": "438.78409pt",
       "height": "393.194132pt",
       "viewBox": "-72 -72 438.78409 393.194132",
-      "svg_sha256": "74edd2e09414ca46aceebb578f6b5f63dde35b4519742618d2504dea0e2542b8"
+      "svg_sha256": "a3285473e5313ac759b673f6a3ac6048f5b5b50a3a7c4761af6ed0f9a099af47"
     },
     {
       "source": "chapters/01_biology.tex",
@@ -106,7 +106,7 @@
       "width": "425.57346pt",
       "height": "138.961684pt",
       "viewBox": "-72 -72 425.57346 138.961684",
-      "svg_sha256": "34eaf8c9903c33f8a1c199c5b6547c475a24d3ac78b5cb4d87264c25055c3d5b"
+      "svg_sha256": "0f1523bd9090011e5a02aa80be53deeb64fe99759b6312a2b1e8565a949d7b8f"
     },
     {
       "source": "chapters/02_alignment_foundations.tex",
@@ -117,7 +117,7 @@
       "width": "418.126346pt",
       "height": "207.193624pt",
       "viewBox": "-72 -72 418.126346 207.193624",
-      "svg_sha256": "c358c9fd3166791cc2683acf4bdb58bbffcaeb80f911e1da845a1f0c26cbcf7d"
+      "svg_sha256": "8964994946ab80adb28480b51f0b6aabf612c1c5951a2ac62db2941a6c8a078e"
     },
     {
       "source": "chapters/02_alignment_foundations.tex",
@@ -128,7 +128,7 @@
       "width": "375.385574pt",
       "height": "126.700394pt",
       "viewBox": "-72 -72 375.385574 126.700394",
-      "svg_sha256": "22896bd224ea89bad894e82159d0ea4cdb28ee261550eeec2b6e333a618a7650"
+      "svg_sha256": "2cff1250ae893c4a335df4898be7fc7afb95ebadbcc7e22f3df10269124bf508"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -139,7 +139,7 @@
       "width": "378.358974pt",
       "height": "114.972115pt",
       "viewBox": "-72 -72 378.358974 114.972115",
-      "svg_sha256": "c0102b3073ea92bb621b282fae935710758e86e06885874145d1ba802871c0cd"
+      "svg_sha256": "9500bd07c16c9166ea092a4532eff9c3a56859edbe635ab84cd17e8dcb389234"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -150,7 +150,7 @@
       "width": "390.951153pt",
       "height": "115.630785pt",
       "viewBox": "-72 -72 390.951153 115.630785",
-      "svg_sha256": "f8334cbbfca7f6757dcdf1258bec23e1ff3898d65981366be1d97776a67c68cc"
+      "svg_sha256": "4ea118cc7b22de19ce730ad8a1225c0625d10fa413c55401e8e802c2b6c1bce2"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -161,7 +161,7 @@
       "width": "411.927412pt",
       "height": "171.137156pt",
       "viewBox": "-72 -72 411.927412 171.137156",
-      "svg_sha256": "66408e9cf4d131645386797ac54be3b38da030b0472ae75d0204bef2e3620073"
+      "svg_sha256": "fc8bbdeda087fdc3a2784fae234e6b2425c1564bf2eb1ead4fae364eb3c3c827"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -172,7 +172,7 @@
       "width": "390.382197pt",
       "height": "136.513385pt",
       "viewBox": "-72 -72 390.382197 136.513385",
-      "svg_sha256": "127a91163ed1bb8e881cf13f6d4dcdb717f89238c16bbcc6dc61021897308ee7"
+      "svg_sha256": "fa2031e7844b532ec9874d5ebd3ea84dd9ecaea2b7cded1eaa87d1eeb3a0553f"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -183,7 +183,7 @@
       "width": "303.337983pt",
       "height": "128.271014pt",
       "viewBox": "-72 -72 303.337983 128.271014",
-      "svg_sha256": "49360e681c31120f027e94996dc4db1d8fd8da31221d69bc65bf331e46547968"
+      "svg_sha256": "ee06ef4558192f948c58139ed351ca321d03750093a9855bc9c719c444a1800f"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -194,7 +194,7 @@
       "width": "361.124184pt",
       "height": "135.64795pt",
       "viewBox": "-72 -72 361.124184 135.64795",
-      "svg_sha256": "8f3c048266fa92219ff71dfca2c1a3fdf3eebaf87522af7eba158771529439a1"
+      "svg_sha256": "07eec1d123a94548c19109cdd4d48b1a74458d542f22de5ff82c956640c5992a"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -205,7 +205,7 @@
       "width": "369.960917pt",
       "height": "255.148204pt",
       "viewBox": "-72 -72 369.960917 255.148204",
-      "svg_sha256": "0bc00010abc45c2ba961b39d590d63ff65190d832240ce1ffd1207f6765e2e04"
+      "svg_sha256": "a6b3e107fd70682f9119536699731df2d5c06f6af4a39facc36167c029e941d8"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -216,7 +216,7 @@
       "width": "360.123128pt",
       "height": "108.681066pt",
       "viewBox": "-72 -72 360.123128 108.681066",
-      "svg_sha256": "87bae5ca55bb020c6bdc0ca06deba929f94f41064b691a1d4b76c4cd5a600557"
+      "svg_sha256": "b6a30221cb4197ab6533d36489a2c1a990a01ca65d869c86fda4b4236b43fcce"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -227,7 +227,7 @@
       "width": "410.581798pt",
       "height": "118.060154pt",
       "viewBox": "-72 -72 410.581798 118.060154",
-      "svg_sha256": "d54a4f4f1662f2f36972d8f54c7e3e5b5d93b440423ba57b26b1071da33ab3df"
+      "svg_sha256": "a26a70eb1b6dc6274bd1593c3f687face6a3c3eb22d2d8bc4326b2f68beb3b6f"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -238,7 +238,7 @@
       "width": "377.906491pt",
       "height": "96.201196pt",
       "viewBox": "-72 -72 377.906491 96.201196",
-      "svg_sha256": "b58c10c8447ae4cbde7640eacc71ce4e1d0074d0851ed7900e3a784c9cd5f81b"
+      "svg_sha256": "1525206a1ee26c4427b05df503a551a24aabd29325862538f754c2b216fa523e"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -249,7 +249,7 @@
       "width": "423.723905pt",
       "height": "502.675457pt",
       "viewBox": "-72 -72 423.723905 502.675457",
-      "svg_sha256": "fd2086236bdad5c5946862d61271322d9f452998c5bf25648f8dbeca7f1c7eec"
+      "svg_sha256": "d382f7eb7c0e2fde928abfd2325d6f0c009c5513a98f5954088e63ce33a78d47"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -260,7 +260,7 @@
       "width": "438.390446pt",
       "height": "239.274062pt",
       "viewBox": "-72 -72 438.390446 239.274062",
-      "svg_sha256": "d0b293c54dd80646a58d0709a4f19a5963ea29dd577d3ca3811ec99d93930a46"
+      "svg_sha256": "d40c2dad4e76dd2f58af80fa08ca6ed51599abb2df63e00216bab091db6696ee"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -271,7 +271,7 @@
       "width": "419.279811pt",
       "height": "121.138132pt",
       "viewBox": "-72 -72 419.279811 121.138132",
-      "svg_sha256": "813c71ddfaaed7925bd5dde777e08748a2e6d8cda2798fabcb52f78cee14206b"
+      "svg_sha256": "35bc60beb284de173e2cc4f5f24a7fb154706d324fcd1efb9f4b475b7ab0adac"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -282,7 +282,7 @@
       "width": "426.510605pt",
       "height": "168.457823pt",
       "viewBox": "-72 -72 426.510605 168.457823",
-      "svg_sha256": "4d7399759e9153a7edb567e650ad9ee7c5af7d9d67859c0edff70ad9a45ac4c7"
+      "svg_sha256": "d0ba343eb4a223a55ac15798d98fdb18ac85ff302f5869e4bebae0177f2a7bc4"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -293,7 +293,7 @@
       "width": "392.80865pt",
       "height": "247.941044pt",
       "viewBox": "0 0 392.80865 247.941044",
-      "svg_sha256": "ae106d82cbebf4caca11c1868307a1da48d8d2a7b1746afc1d810674cc724761"
+      "svg_sha256": "7b2837e9f06efd04e2df30891093329612db19d36ded342155b7b1c80d698aa9"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -304,7 +304,7 @@
       "width": "396.779888pt",
       "height": "251.156439pt",
       "viewBox": "0 0 396.779888 251.156439",
-      "svg_sha256": "fcbc5e1d90578e19bbc6e672321bf517d13d799bf5acb2c6e1ee7371115924b9"
+      "svg_sha256": "54b700edd57a8d07a4ddaae2176a2936335b128be78e0fb0549e3d1a60dc42be"
     },
     {
       "source": "chapters/05_minimizers.tex",
@@ -315,7 +315,7 @@
       "width": "401.401443pt",
       "height": "214.439776pt",
       "viewBox": "0 0 401.401443 214.439776",
-      "svg_sha256": "d3db1252439a2a4a873935fd3f24a87d1ed813944652cebdfe8c8dc07964da93"
+      "svg_sha256": "1e1888b701ec7427baf9bd9fd08f6e34ad934727589b4a8127347cade0bd5e31"
     },
     {
       "source": "chapters/06_chaining/01_introduction.tex",
@@ -326,7 +326,7 @@
       "width": "409.595567pt",
       "height": "169.448578pt",
       "viewBox": "-72 -72 409.595567 169.448578",
-      "svg_sha256": "dde7545ecddea238c3fd55c7ec49118d8314988a12bf15889b22ee602e137ff0"
+      "svg_sha256": "20938043e62462a54640fd4cd22d41ae30e3df99109ee17da4a47a91a36ac1ea"
     },
     {
       "source": "chapters/06_chaining/01_introduction.tex",
@@ -337,7 +337,7 @@
       "width": "440.943173pt",
       "height": "192.673823pt",
       "viewBox": "-72 -72 440.943173 192.673823",
-      "svg_sha256": "b6af29d953c0546630d54653283d6f7c67ddbd59f3d613c3ae75a301d3367c0b"
+      "svg_sha256": "3ae98b5e30ad042fe98d813a51432b4832348b03ab7b92e8a2f9ce109684ba47"
     },
     {
       "source": "chapters/06_chaining/01_introduction.tex",
@@ -348,7 +348,7 @@
       "width": "422.761564pt",
       "height": "199.42942pt",
       "viewBox": "-72 -72 422.761564 199.42942",
-      "svg_sha256": "b5fd0ddb55b5d13f473f3df5fee66faa5dd082c56049cd1ad26cf7d4aab58b33"
+      "svg_sha256": "5a98bd6d8235a5f92c266609f39c3a4d4ee6600f810facafa1279d4bf9f59306"
     },
     {
       "source": "chapters/06_chaining/02_cpu.tex",
@@ -359,7 +359,7 @@
       "width": "438.753116pt",
       "height": "317.401375pt",
       "viewBox": "-72 -72 438.753116 317.401375",
-      "svg_sha256": "b991af8014bf3c0e0c65c8c698e92fece1107f4ae2cc28deede7b61462ea3473"
+      "svg_sha256": "13731132db9b7472e2129f7a92fa2289dc0600fea87d4075caad3a97140028eb"
     },
     {
       "source": "chapters/06_chaining/02_cpu.tex",
@@ -370,7 +370,7 @@
       "width": "353.020932pt",
       "height": "180.964344pt",
       "viewBox": "-72 -72 353.020932 180.964344",
-      "svg_sha256": "88caac5bb7403dcc5333d77d36a9dbee4c74ddb44bae6ecec57fdf1639982e45"
+      "svg_sha256": "50209c6e7d498c7eeba8b021ec1ddb562b7839726cff4d3e71c517cc6da4b6c6"
     },
     {
       "source": "chapters/06_chaining/02_cpu.tex",
@@ -381,7 +381,7 @@
       "width": "482.953584pt",
       "height": "341.153494pt",
       "viewBox": "-72 -72 482.953584 341.153494",
-      "svg_sha256": "5409dd84cb2cacb80a80ed6dcbfb7137ec06f4bb7a0428c0b1af4feb467fc0f3"
+      "svg_sha256": "dbc39c0d843da590d16c5daa12f69c611940c0dc6c04ac66949af11fe0512f16"
     },
     {
       "source": "chapters/06_chaining/03_backtracking.tex",
@@ -392,7 +392,7 @@
       "width": "422.611238pt",
       "height": "351.672687pt",
       "viewBox": "-72 -72 422.611238 351.672687",
-      "svg_sha256": "b7a12c955be67cc06062a0aeb24f9e1d895ba8041f5bf16c346d149b21e3b0b2"
+      "svg_sha256": "24b1945354f0c1a0b16bb1d62fe5ffe88f9faff88d6e8df0a98db025e2e2ac54"
     },
     {
       "source": "chapters/06_chaining/03_backtracking.tex",
@@ -403,7 +403,7 @@
       "width": "406.985813pt",
       "height": "290.546381pt",
       "viewBox": "-72 -72 406.985813 290.546381",
-      "svg_sha256": "e11bb4afce29d6455052f85c5f9bd6e7fe16dd1ab66f73aabd68afa2dea7969f"
+      "svg_sha256": "7509bf8f46ee359b94bfccd783ae60d823e1419697ba761f864db21299ee285d"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -414,7 +414,7 @@
       "width": "428.371866pt",
       "height": "410.531975pt",
       "viewBox": "-72 -72 428.371866 410.531975",
-      "svg_sha256": "ee442bf4c3649aa91c71db91f820a87dffb0fe8489448a783522f842597af30a"
+      "svg_sha256": "13211d79d00b5d681dd653fdd7eceac301febdbbee32214afd716097debb13d8"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -425,7 +425,7 @@
       "width": "266.116234pt",
       "height": "169.100613pt",
       "viewBox": "-72 -72 266.116234 169.100613",
-      "svg_sha256": "2c4350a438f3fd73c46d2c4c5add6bbe64519e75bffab3d9d98598c0079cd030"
+      "svg_sha256": "bf8617a3cd1ddeb04457b97a89a8ba4bf14b2b38f7e84ac150c98029675ca4f5"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -436,7 +436,7 @@
       "width": "361.790476pt",
       "height": "183.606565pt",
       "viewBox": "-72 -72 361.790476 183.606565",
-      "svg_sha256": "dc747707e301587f44ec893c8bb9f08afcfcfa160aaaf3f8855369a7e2040c4c"
+      "svg_sha256": "83d982feb8dadfeec4041e277deda404fd616ba8d009b778a975af22a69f6900"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -447,7 +447,7 @@
       "width": "399.164334pt",
       "height": "152.516593pt",
       "viewBox": "-72 -72 399.164334 152.516593",
-      "svg_sha256": "dcc6b1c3c5de543b4cd38e6b89ab6a5cd13cc45e9708c09d8a4f51f5dc67aa7b"
+      "svg_sha256": "b772f7919c700ad15accc258c9b7d48b92459f74760be8a9fbe1fcb20f31b719"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -458,7 +458,7 @@
       "width": "443.157869pt",
       "height": "257.246088pt",
       "viewBox": "0 0 443.157869 257.246088",
-      "svg_sha256": "5d4f9e91cde70b88cae9779f88c00514fe28f1f8354dc8a5b9a2a86edb27b25b"
+      "svg_sha256": "40a69731835b82c2db3f2b9ae8771b3c682ed1e39277efe0d73fa5b0a3f2e187"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -469,7 +469,7 @@
       "width": "449.441733pt",
       "height": "178.367123pt",
       "viewBox": "0 0 449.441733 178.367123",
-      "svg_sha256": "4d18538986d67c05932ca5301812bfc81fe2132557fd8953f67998c7b42cbf91"
+      "svg_sha256": "5b55f16ba5c81d0d99d328ca920f6896ecb086afd06e11d147d4096f010bc7b6"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -480,7 +480,7 @@
       "width": "445.698846pt",
       "height": "255.867908pt",
       "viewBox": "0 0 445.698846 255.867908",
-      "svg_sha256": "3d149766e25c877ffa7f855e377b0a2428294d8d6630843464f917387437d384"
+      "svg_sha256": "8280d7f4a0ce933a952ad03319e8f0ceda89110763aca0ab04d3a4eebefef85a"
     },
     {
       "source": "chapters/06_chaining/04_cpu_expiermental_analysis.tex",
@@ -491,7 +491,7 @@
       "width": "405.484698pt",
       "height": "164.116097pt",
       "viewBox": "0 0 405.484698 164.116097",
-      "svg_sha256": "5bde3159f5598cdb89f82034702c2eff1cd0b815fb1da9fc092e4efe0f1d488f"
+      "svg_sha256": "1908b70c982adf86a3f47ae9413305f6b709f74dd0c31b5e20e774843218ece7"
     },
     {
       "source": "chapters/06_chaining/04_cpu_experimental_analysis/u_batch_chart.tex",
@@ -502,7 +502,7 @@
       "width": "391.921913pt",
       "height": "129.818202pt",
       "viewBox": "-72 -72 391.921913 129.818202",
-      "svg_sha256": "e2492ed4f94d307b47b74aaef97eb02e3bd66e88ed78140a8968b502eaab3364"
+      "svg_sha256": "d1322632b42878d8574095cc97d0463177f1bab8d5491e94a060e2d57c65f91c"
     },
     {
       "source": "chapters/06_chaining/05_cpu_temporary_results.tex",
@@ -513,7 +513,7 @@
       "width": "379.447362pt",
       "height": "311.145873pt",
       "viewBox": "-72 -72 379.447362 311.145873",
-      "svg_sha256": "3df5c143543d9c47c0617851c546af8e6ea938d6dc243df041e42d6c7c0429ef"
+      "svg_sha256": "6daa17b6eeadc81211ef2e0308dc0eef66e9d43293e9353e003142fce65e41ef"
     },
     {
       "source": "chapters/06_chaining/06_rmq.tex",
@@ -524,7 +524,7 @@
       "width": "427.067457pt",
       "height": "188.859846pt",
       "viewBox": "-72 -72 427.067457 188.859846",
-      "svg_sha256": "885251baea69b951b0d18d3edbd74634cd06010089395b33806723b7b8855a84"
+      "svg_sha256": "ecd8c54b75b5bccd2517bcf3c45c6492bef9181d095fb556ec5a562409997290"
     },
     {
       "source": "chapters/06_chaining/07_gpu.tex",
@@ -535,7 +535,7 @@
       "width": "406.635806pt",
       "height": "127.423592pt",
       "viewBox": "-72 -72 406.635806 127.423592",
-      "svg_sha256": "0e0436e4948716dcb4bf18ed24b2f8c815157948734acf992c8127440ae16601"
+      "svg_sha256": "d9b1542bf0166b5c70d8fbfeb2905fd1d9198447121b9355694b1e2886368d94"
     },
     {
       "source": "chapters/06_chaining/07_gpu.tex",
@@ -546,7 +546,7 @@
       "width": "387.812732pt",
       "height": "195.053898pt",
       "viewBox": "-72 -72 387.812732 195.053898",
-      "svg_sha256": "6b2ecafaf7d27833dfac2830851667a0fe8731b905703d98eb8f61edd8401774"
+      "svg_sha256": "c92c2cf39bbf4e4f7adc0f07643cd7b44c30fc79f7156022f7357957ef2108af"
     },
     {
       "source": "chapters/07_final_alignment_postprocessing_and_preprocessing/01_base_level_alignment.tex",
@@ -557,7 +557,7 @@
       "width": "397.130132pt",
       "height": "126.317998pt",
       "viewBox": "-72 -72 397.130132 126.317998",
-      "svg_sha256": "da23fa864035321f32fc54919465858d09f9bf83c3af212893b18a4c1618e134"
+      "svg_sha256": "7fcbe90a6c402b4214a096531226f5abee67fd7a234574785b2d1c1ef182c814"
     },
     {
       "source": "chapters/07_final_alignment_postprocessing_and_preprocessing/02_prefiltering.tex",
@@ -568,7 +568,7 @@
       "width": "387.44007pt",
       "height": "198.772653pt",
       "viewBox": "-72 -72 387.44007 198.772653",
-      "svg_sha256": "25b58f61472e685d8d6e01366f41f46d9e69c9b2fd8a020d696e4acf133f71f6"
+      "svg_sha256": "1504ca78dab0b512e14d6894112efe5cbf24b879c358de3854c9cc6cc8bd81cb"
     },
     {
       "source": "chapters/09_sequence_abstractions/01_values_and_ranges.tex",
@@ -579,7 +579,7 @@
       "width": "351.512399pt",
       "height": "116.045011pt",
       "viewBox": "-72 -72 351.512399 116.045011",
-      "svg_sha256": "f7390a3c465a822908c568b8e582aed8dbbe552cc5816924025a7b35aace1bf4"
+      "svg_sha256": "be542fb4674da83e76e02f43f8285baca81ca71b5b39a6bab5ea6b9186efb3fb"
     },
     {
       "source": "chapters/09_sequence_abstractions/02_slice_coordinates.tex",
@@ -590,7 +590,7 @@
       "width": "361.87194pt",
       "height": "157.790446pt",
       "viewBox": "-72 -72 361.87194 157.790446",
-      "svg_sha256": "efc027c143045e0be47167a2afd776472be5a04154d5b3d088953597b6aabffb"
+      "svg_sha256": "250db2e1126950b84276f1a669869d8224b1f469efe6a5dbe69dd9fe494b8dc2"
     },
     {
       "source": "chapters/09_sequence_abstractions/03_piece_trees.tex",
@@ -601,7 +601,7 @@
       "width": "384.977903pt",
       "height": "235.710844pt",
       "viewBox": "-72 -72 384.977903 235.710844",
-      "svg_sha256": "414aab260463a0ef1a3efdc208e41c4ab35a12cc1f8540cd447e765fa111aea1"
+      "svg_sha256": "c200f450a9c014fc2ddc6356715c6d637679dde3c6be2a03e7ee45e3fb0a4bfc"
     },
     {
       "source": "chapters/09_sequence_abstractions/04_reading_intervals.tex",
@@ -612,7 +612,7 @@
       "width": "377.62922pt",
       "height": "202.860413pt",
       "viewBox": "-72 -72 377.62922 202.860413",
-      "svg_sha256": "1216d1878c017f6c8db876d0a0b659dadd81d5e045a2b346eed16a6a933f68db"
+      "svg_sha256": "bb4bbeb8d293090625f47e52eb6350415cb0c7b916d7fba90dc3cf5943787f5c"
     },
     {
       "source": "chapters/09_sequence_abstractions/04_reading_intervals.tex",
@@ -623,7 +623,7 @@
       "width": "516.515666pt",
       "height": "516.06395pt",
       "viewBox": "-72 -72 516.515666 516.06395",
-      "svg_sha256": "af94abe9ee7a71246de98a768a9806ae2e47a47cc0f0aa6db78e790d29c29539"
+      "svg_sha256": "940bb66900c244c3d8d4c3cb6b72f4cf1236fe936177a60f54b3418b183b1eae"
     },
     {
       "source": "chapters/10_postgres_custom_scan/01_engineering_problem.tex",
@@ -634,7 +634,7 @@
       "width": "348.060941pt",
       "height": "100.936369pt",
       "viewBox": "-72 -72 348.060941 100.936369",
-      "svg_sha256": "757bfea5614c7c9b71600633afea0229905f231a58b9dc3f42e09970df5aeb2f"
+      "svg_sha256": "e6a0825a477aee702c549cef871c64507a0403a84e5bb580d167c05ccec0562f"
     },
     {
       "source": "chapters/10_postgres_custom_scan/02_planner.tex",
@@ -645,7 +645,7 @@
       "width": "420.235696pt",
       "height": "476.352498pt",
       "viewBox": "-72 -72 420.235696 476.352498",
-      "svg_sha256": "022e95d212c0edc71c092d016446a7a218aff5578ce456db16c86171568991d1"
+      "svg_sha256": "573be8c854bcb8af9bef93b9b64806c1946a10451605ce5792f4d84812c631a5"
     },
     {
       "source": "chapters/10_postgres_custom_scan/03_match_fields.tex",
@@ -656,7 +656,7 @@
       "width": "445.639273pt",
       "height": "336.221968pt",
       "viewBox": "-72 -72 445.639273 336.221968",
-      "svg_sha256": "7d49f80492da3a81de3fe40be2a8a88db11389b077857ec152fe70b557fe3915"
+      "svg_sha256": "956d42414ae8c0021c930ab85c0edfc969f9f4fadda68da28e24482c0b5f95d5"
     },
     {
       "source": "chapters/10_postgres_custom_scan/05_joins_and_plans.tex",
@@ -667,7 +667,7 @@
       "width": "328.227427pt",
       "height": "133.13339pt",
       "viewBox": "-72 -72 328.227427 133.13339",
-      "svg_sha256": "c7e9cccc6b79a6d649abf16bb94a091936f679234f12030e695d88f196b73a20"
+      "svg_sha256": "9da43b26414764b1fcd9cd0a90fef7ffefe68a8cb1071f3fb3d2448cc6b50462"
     },
     {
       "source": "chapters/10_postgres_custom_scan/06_result_cache.tex",
@@ -678,7 +678,7 @@
       "width": "402.681275pt",
       "height": "150.760927pt",
       "viewBox": "-72 -72 402.681275 150.760927",
-      "svg_sha256": "28318109bc1c9268485afbaf7d56a4c75d9fbe60663c0cf2452d3b72f87d6fd3"
+      "svg_sha256": "988fb0e04c603df6287b9796262f8293afeec457bfacd17dbec4a702c498d43e"
     },
     {
       "source": "chapters/10_postgres_custom_scan/06_result_cache.tex",
@@ -689,7 +689,7 @@
       "width": "391.721743pt",
       "height": "120.556423pt",
       "viewBox": "-72 -72 391.721743 120.556423",
-      "svg_sha256": "9f16ac10bcfe362b66fa9312084b74905b7bffb86a51294ce33c3c1a6c54208e"
+      "svg_sha256": "14e63a157dcd9cde3a94a28b56d8dc29c444664e6e68899121d9dc8efacd582b"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -700,7 +700,7 @@
       "width": "399.98925pt",
       "height": "154.514371pt",
       "viewBox": "-72 -72 399.98925 154.514371",
-      "svg_sha256": "840f7a243eea36968036b08bb99223e5b1ad219814fbe8c41e61c0eeff4329d1"
+      "svg_sha256": "9ef9b2acb592e611ecd5ea0d931de9926d03e47d2077b9fe1c626042987341d6"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -711,7 +711,7 @@
       "width": "365.334725pt",
       "height": "273.326406pt",
       "viewBox": "-72 -72 365.334725 273.326406",
-      "svg_sha256": "42aff5f0f22924d991a086c9711d7210adeea22c44331932713c83a2f13ffbe7"
+      "svg_sha256": "ae2299e98f6bb145144cb57a01b66ed4d84ea9a4d4bf7a5a00ef6d1112706b2b"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -722,7 +722,7 @@
       "width": "358.446944pt",
       "height": "95.009146pt",
       "viewBox": "-72 -72 358.446944 95.009146",
-      "svg_sha256": "dc1c26ef801f0f149c3647b0baa8109c28a8872835df22689b63ff693cf67b55"
+      "svg_sha256": "4c89cd486c3aa9761fc6c3851132524939b45eb6a8e711c9c0598c72eab97425"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -733,7 +733,7 @@
       "width": "358.744478pt",
       "height": "162.914491pt",
       "viewBox": "-72 -72 358.744478 162.914491",
-      "svg_sha256": "ee782f502e592516c246a5c7682a6e3341e8ed81a28fc4e9fadb1f1703cdef1a"
+      "svg_sha256": "dd237e298d6b0447fef85b157db4a8a63f4c844f460314711da0b70603eeee03"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -744,7 +744,7 @@
       "width": "327.076015pt",
       "height": "105.54138pt",
       "viewBox": "-72 -72 327.076015 105.54138",
-      "svg_sha256": "b1bb7a8acb744976729e77946d9ffc10fb255bc8382cb2984ed574ae038aa8e5"
+      "svg_sha256": "d198daacf66762d0a0603ad485938f8b1cb4d93069ab1426a6a52bceb0e9c8a6"
     },
     {
       "source": "chapters/11_postgres_storage/02_columns_and_pages.tex",
@@ -755,7 +755,7 @@
       "width": "360.070227pt",
       "height": "145.889196pt",
       "viewBox": "-72 -72 360.070227 145.889196",
-      "svg_sha256": "e08b820c7e0756e8fdf56fc65a34709317ce95e83ef926195d59ca74a322720c"
+      "svg_sha256": "07dba12d07da2134830bebc3befd3ec4e4f80f33a5c8919a4f1415d6fc5fdfd0"
     },
     {
       "source": "chapters/11_postgres_storage/03_fragments_and_shards.tex",
@@ -766,7 +766,7 @@
       "width": "452.860264pt",
       "height": "237.401325pt",
       "viewBox": "-72 -72 452.860264 237.401325",
-      "svg_sha256": "979ff432b71626e2de67d4decb8a8ba319fbffab2e14b1baaff5ef5a3a79742d"
+      "svg_sha256": "ea281c7a4a61f695c1446e642860156721f6d54c3cce62c2259795eb3422d1de"
     },
     {
       "source": "chapters/11_postgres_storage/03_fragments_and_shards.tex",
@@ -777,7 +777,7 @@
       "width": "341.040827pt",
       "height": "197.392907pt",
       "viewBox": "-72 -72 341.040827 197.392907",
-      "svg_sha256": "e15ea5463a2c33dbee33c79ecffcd3b70bb1afb2f058639b92b84ce149e591c3"
+      "svg_sha256": "7c5288f258ef8396cf6f7802f1a82b897152ed550b21db52dbf00908482e1e90"
     },
     {
       "source": "chapters/11_postgres_storage/04_versions_and_deletion.tex",
@@ -788,7 +788,7 @@
       "width": "373.856239pt",
       "height": "182.36805pt",
       "viewBox": "-72 -72 373.856239 182.36805",
-      "svg_sha256": "5658b2fe5168bc9f8cb69a5d3869fca64f5b5238695688de3e7dd4a3972b8e6f"
+      "svg_sha256": "90f4a5383baf9386c739677dc1cdc931ec8217e681e3ff3f177fd42c56f5b3ca"
     },
     {
       "source": "chapters/12_index_storage/02_mapper_indexes.tex",
@@ -799,7 +799,7 @@
       "width": "478.046545pt",
       "height": "379.950037pt",
       "viewBox": "-72 -72 478.046545 379.950037",
-      "svg_sha256": "74e43153cb71ac3f2ab860beb5f09cb6376b6bf16732e7102224cd5665fa8ae4"
+      "svg_sha256": "96f66932f72e979779676d82ff2e827d07cdd06462fa337bf61d4e027de06600"
     },
     {
       "source": "chapters/12_index_storage/02_mapper_indexes.tex",
@@ -810,7 +810,7 @@
       "width": "355.327741pt",
       "height": "199.747248pt",
       "viewBox": "-72 -72 355.327741 199.747248",
-      "svg_sha256": "40e0d396f8c993eca6f05c88cb7eaeba7c1c34645dd3f334423f4be97cd56976"
+      "svg_sha256": "9b6b4c3c65c5b25b7520ed4d8e42d2c863ccc3e80b9ee93d4d33bd5f1967e732"
     },
     {
       "source": "chapters/12_index_storage/02_mapper_indexes.tex",
@@ -821,7 +821,7 @@
       "width": "344.58412pt",
       "height": "217.23461pt",
       "viewBox": "-72 -72 344.58412 217.23461",
-      "svg_sha256": "14ae9e1153a685485f4dce7f843c644c59641cbd7335a69203a232a5c420e02a"
+      "svg_sha256": "930a1ca5aacf4c8698cb8066b16089b87596d3b7c3443e193d0f44ce41a3d637"
     },
     {
       "source": "chapters/12_index_storage/03_mpf_and_mps.tex",
@@ -832,7 +832,7 @@
       "width": "427.269888pt",
       "height": "333.089953pt",
       "viewBox": "-72 -72 427.269888 333.089953",
-      "svg_sha256": "fe0f2c4ddd81905cbba1178c5ffca92af4383eaac7c8e779ec22cd84246ba662"
+      "svg_sha256": "30f63d66c3e1aa727f6089ae79ba3a355374a63fb9c38c8e6cf80ed8493ba858"
     },
     {
       "source": "chapters/12_index_storage/03_mpf_and_mps.tex",
@@ -843,7 +843,7 @@
       "width": "410.888468pt",
       "height": "565.524483pt",
       "viewBox": "-72 -72 410.888468 565.524483",
-      "svg_sha256": "82ef5311e66ab2494a8b79ae08cdc7879d7a85dc692ff6b8c78d4ab4c4812921"
+      "svg_sha256": "38a3aa88899dd7878f39dde9e4303aa857ee1e524d775ef5d7894f21414e72f6"
     },
     {
       "source": "chapters/12_index_storage/03_mpf_and_mps.tex",
@@ -854,7 +854,7 @@
       "width": "361.734047pt",
       "height": "124.596334pt",
       "viewBox": "-72 -72 361.734047 124.596334",
-      "svg_sha256": "d7cd6acc1e899172f1e6744e0b82d5a5122e576d4428465e696512414c041ead"
+      "svg_sha256": "87fd997dece2bd837a910a439b0ca8307479d547371fe200d633009a814af84a"
     },
     {
       "source": "chapters/12_index_storage/04_bounded_construction.tex",
@@ -865,7 +865,7 @@
       "width": "390.769674pt",
       "height": "153.421081pt",
       "viewBox": "-72 -72 390.769674 153.421081",
-      "svg_sha256": "23f804574f2e2d91929579d31924a55e3b11a53c0a1f130c8dad9aec158cb52e"
+      "svg_sha256": "2725abbb4b963845df18d7f82932433e437de8e3df480d35842d56b249a5e3c5"
     },
     {
       "source": "chapters/12_index_storage/04_bounded_construction.tex",
@@ -876,7 +876,7 @@
       "width": "370.065594pt",
       "height": "183.188065pt",
       "viewBox": "-72 -72 370.065594 183.188065",
-      "svg_sha256": "386fa8a11db326f5d70d8c9f31f9e8e65bb2dd5bd30a3422e6cb86dd9298389c"
+      "svg_sha256": "a7adac3697852de096f7f1cfec1684ad3f37286d60ab531daa5a27ffb361bd62"
     },
     {
       "source": "chapters/12_index_storage/05_selective_reads.tex",
@@ -887,7 +887,7 @@
       "width": "497.345933pt",
       "height": "183.269798pt",
       "viewBox": "-72 -72 497.345933 183.269798",
-      "svg_sha256": "24be518c0cbb06d9c47e11c7e3db985b2d5a90156f1d45959b9e86a8bc7a528e"
+      "svg_sha256": "4e54f97b701ccc84b25e22025fb58619b65f3608dd2e9cb4d2c24519a37c6a94"
     },
     {
       "source": "chapters/12_index_storage/07_policies_and_reuse.tex",
@@ -898,7 +898,7 @@
       "width": "387.538989pt",
       "height": "297.675955pt",
       "viewBox": "-72 -72 387.538989 297.675955",
-      "svg_sha256": "d0ccd937a1652aec967cbe92e1805e142b96738de086e1434ebd9964839b180f"
+      "svg_sha256": "9ff13ee60adefa69512199333ca87c66c81992d1987dd038847216e6ed88e707"
     }
   ]
 }

@@ -139,9 +139,9 @@ function sidebar() {
   });
   root.querySelectorAll("#sidebar [data-doc-link],#sidebar [data-nav]").forEach((link) => {
     const current = link === active;
-    link.style.color = current ? "#eef4f9" : "#9db1c2";
-    link.style.background = current ? "rgba(70,184,222,0.1)" : "transparent";
-    link.style.borderLeftColor = current ? "#46b8de" : "transparent";
+    link.style.color = current ? "var(--theme-eef4f9, #eef4f9)" : "var(--theme-9db1c2, #9db1c2)";
+    link.style.background = current ? "var(--theme-46b8de-a0_1, rgba(70,184,222,0.1))" : "transparent";
+    link.style.borderLeftColor = current ? "var(--theme-46b8de, #46b8de)" : "transparent";
     link.style.fontWeight = current ? "600" : "400";
     if (current) link.setAttribute("aria-current", "page");
   });
@@ -191,7 +191,7 @@ function toc() {
       borderLeft: "2px solid transparent",
       fontSize: sub ? "12.5px" : "13px",
       lineHeight: "1.4",
-      color: "#7d94a6",
+      color: "var(--theme-7d94a6, #7d94a6)",
       transition: "color .15s,border-color .15s",
       textDecoration: "none",
     });
@@ -223,7 +223,7 @@ function toc() {
         padding: "5px 10px",
         borderLeft: "2px solid transparent",
         fontSize: "12.5px",
-        color: "#6f8698",
+        color: "var(--theme-6f8698, #6f8698)",
         transition: "color .15s,border-color .15s",
         textDecoration: "none",
       });
@@ -254,13 +254,13 @@ function toc() {
     }
     entries.forEach((entry) => {
       const current = entry === selected;
-      entry.link.style.color = current ? "#7fcbe8" : "#7d94a6";
-      entry.link.style.borderLeftColor = current ? "#46b8de" : "transparent";
+      entry.link.style.color = current ? "var(--theme-7fcbe8, #7fcbe8)" : "var(--theme-7d94a6, #7d94a6)";
+      entry.link.style.borderLeftColor = current ? "var(--theme-46b8de, #46b8de)" : "transparent";
       if (current) entry.link.setAttribute("aria-current", "location");
       else entry.link.removeAttribute("aria-current");
       if (entry.leftLink) {
-        entry.leftLink.style.color = current ? "#cfe6f2" : "#6f8698";
-        entry.leftLink.style.borderLeftColor = current ? "#46b8de" : "transparent";
+        entry.leftLink.style.color = current ? "var(--theme-cfe6f2, #cfe6f2)" : "var(--theme-6f8698, #6f8698)";
+        entry.leftLink.style.borderLeftColor = current ? "var(--theme-46b8de, #46b8de)" : "transparent";
       }
     });
   };
@@ -328,28 +328,28 @@ function loadEntityDataset(url) {
 function entityKind(kind) {
   const value = String(kind || "").toLowerCase();
   if (value === "setting") {
-    return { label: "Setting", tone: "type", color: "#8fd6ba",
-      background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)" };
+    return { label: "Setting", tone: "type", color: "var(--theme-8fd6ba, #8fd6ba)",
+      background: "var(--theme-74c8a8-a0_13, rgba(116,200,168,0.13))", border: "var(--theme-74c8a8-a0_3, rgba(116,200,168,0.3))" };
   }
   if (value === "sql_object") {
-    return { label: "SQL object", tone: "type", color: "#8fd6ba",
-      background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)" };
+    return { label: "SQL object", tone: "type", color: "var(--theme-8fd6ba, #8fd6ba)",
+      background: "var(--theme-74c8a8-a0_13, rgba(116,200,168,0.13))", border: "var(--theme-74c8a8-a0_3, rgba(116,200,168,0.3))" };
   }
   if (value.includes("function") || value === "overload_group") {
     return {
-      label: "Function", tone: "function", color: "#7fcbe8",
-      background: "rgba(70,184,222,0.14)", border: "rgba(70,184,222,0.32)",
+      label: "Function", tone: "function", color: "var(--theme-7fcbe8, #7fcbe8)",
+      background: "var(--theme-46b8de-a0_14, rgba(70,184,222,0.14))", border: "var(--theme-46b8de-a0_32, rgba(70,184,222,0.32))",
     };
   }
   if (value.includes("type") || value.includes("alias") || value.includes("enum")) {
     return {
-      label: "Type", tone: "type", color: "#8fd6ba",
-      background: "rgba(116,200,168,0.13)", border: "rgba(116,200,168,0.3)",
+      label: "Type", tone: "type", color: "var(--theme-8fd6ba, #8fd6ba)",
+      background: "var(--theme-74c8a8-a0_13, rgba(116,200,168,0.13))", border: "var(--theme-74c8a8-a0_3, rgba(116,200,168,0.3))",
     };
   }
   return {
-    label: "Class", tone: "class", color: "#f4894f",
-    background: "rgba(242,101,34,0.13)", border: "rgba(242,101,34,0.3)",
+    label: "Class", tone: "class", color: "var(--theme-f4894f, #f4894f)",
+    background: "var(--theme-f26522-a0_13, rgba(242,101,34,0.13))", border: "var(--theme-f26522-a0_3, rgba(242,101,34,0.3))",
   };
 }
 
@@ -595,11 +595,11 @@ function copyButtons() {
     const original = button.dataset.copyLabel || button.textContent;
     button.dataset.copyLabel = original;
     button.textContent = copied ? "Copied" : "Copy failed";
-    button.style.background = copied ? "#8fd6ba" : "#e8a19b";
+    button.style.background = copied ? "var(--theme-8fd6ba, #8fd6ba)" : "var(--theme-e8a19b, #e8a19b)";
     window.clearTimeout(timers.get(button));
     timers.set(button, window.setTimeout(() => {
       button.textContent = original;
-      button.style.background = "#e9f1f8";
+      button.style.background = "var(--theme-e9f1f8, #e9f1f8)";
     }, 1400));
   });
 }
@@ -628,10 +628,10 @@ function responsive() {
         width: "284px",
         maxWidth: "82vw",
         zIndex: "76",
-        background: "#081726",
+        background: "var(--theme-081726, #081726)",
         transform: open ? "none" : "translateX(-105%)",
         transition: "transform .22s cubic-bezier(.2,.7,.2,1)",
-        boxShadow: open ? "0 30px 90px -20px rgba(0,0,0,0.75)" : "none",
+        boxShadow: open ? "0 30px 90px -20px var(--theme-000000-a0_75, rgba(0,0,0,0.75))" : "none",
       });
       backdrop.style.display = open ? "block" : "none";
       backdrop.setAttribute("aria-hidden", open ? "false" : "true");

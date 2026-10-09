@@ -66,8 +66,8 @@ function navigation() {
   if (!nav) return;
   const update = () => {
     const scrolled = window.scrollY > 48;
-    nav.style.background = scrolled ? "rgba(7,19,32,0.82)" : "transparent";
-    nav.style.borderBottomColor = scrolled ? "rgba(255,255,255,0.08)" : "transparent";
+    nav.style.background = scrolled ? "var(--theme-071320-a0_82, rgba(7,19,32,0.82))" : "transparent";
+    nav.style.borderBottomColor = scrolled ? "var(--theme-ffffff-a0_08, rgba(255,255,255,0.08))" : "transparent";
     nav.style.backdropFilter = scrolled ? "blur(14px)" : "none";
     nav.style.webkitBackdropFilter = scrolled ? "blur(14px)" : "none";
   };
@@ -124,8 +124,8 @@ function examples() {
     tabs.forEach((tab) => {
       const active = Number(tab.dataset.exampleTab) === index;
       const labels = tab.querySelectorAll("span");
-      if (labels[0]) labels[0].style.color = active ? "#f26522" : "#64798b";
-      if (labels[1]) labels[1].style.color = active ? "#f2f7fb" : "#a3b7c9";
+      if (labels[0]) labels[0].style.color = active ? "var(--theme-f26522, #f26522)" : "var(--theme-64798b, #64798b)";
+      if (labels[1]) labels[1].style.color = active ? "var(--theme-f2f7fb, #f2f7fb)" : "var(--theme-a3b7c9, #a3b7c9)";
       tab.setAttribute("aria-pressed", active ? "true" : "false");
       tab.tabIndex = active ? 0 : -1;
     });
@@ -167,6 +167,7 @@ function examples() {
         area.remove();
       }
       window.clearTimeout(timer);
+      if (copied) document.dispatchEvent(new CustomEvent("bioseq:install-copy", { detail: { command: installCommand } }));
       if (done) done.hidden = !copied;
       if (idle) idle.hidden = copied;
       if (!copied && idleLabel) idleLabel.textContent = copy.dataset.copyFailure;
@@ -185,9 +186,9 @@ function connectors() {
   const card = document.getElementById("query-card");
   if (!wrap || !svg || !card) return;
   const specs = [
-    { tok: "tok-select", note: "note-select", color: "#46b8de" },
-    { tok: "tok-where", note: "note-where", color: "#f26522" },
-    { tok: "tok-dna4", note: "note-dna4", color: "#74c8a8" },
+    { tok: "tok-select", note: "note-select", color: "var(--theme-46b8de, #46b8de)" },
+    { tok: "tok-where", note: "note-where", color: "var(--theme-f26522, #f26522)" },
+    { tok: "tok-dna4", note: "note-dna4", color: "var(--theme-74c8a8, #74c8a8)" },
   ];
   let drawn = false;
   const animationTimers = new Set();
@@ -345,13 +346,13 @@ function workflowAndIndex() {
   const paintCards = (active) => {
     cards.forEach((card, index) => {
       const number = card.querySelector("[data-wf-num]");
-      card.style.background = index === active ? "rgba(242,101,34,0.09)" :
-        index < active ? "rgba(242,101,34,0.035)" : "transparent";
+      card.style.background = index === active ? "var(--theme-f26522-a0_09, rgba(242,101,34,0.09))" :
+        index < active ? "var(--theme-f26522-a0_035, rgba(242,101,34,0.035))" : "transparent";
       card.style.boxShadow = index === active ?
-        "inset 0 0 0 1.5px rgba(242,101,34,0.55)" : "none";
+        "inset 0 0 0 1.5px var(--theme-f26522-a0_55, rgba(242,101,34,0.55))" : "none";
       if (number) {
-        number.style.color = index === active ? "#f26522" :
-          index < active ? "rgba(242,101,34,0.62)" : "#2ba6d0";
+        number.style.color = index === active ? "var(--theme-f26522, #f26522)" :
+          index < active ? "var(--theme-f26522-a0_62, rgba(242,101,34,0.62))" : "var(--theme-2ba6d0, #2ba6d0)";
       }
     });
   };
@@ -414,9 +415,9 @@ function capabilities() {
   const sync = () => {
     cards.forEach((card) => {
       const on = card.dataset.cap === active;
-      card.style.borderColor = on ? "rgba(70,184,222,0.6)" : "rgba(255,255,255,0.08)";
-      card.style.background = on ? "rgba(70,184,222,0.08)" : "rgba(255,255,255,0.022)";
-      card.style.boxShadow = on ? "0 0 0 1px rgba(70,184,222,0.45), 0 20px 46px -26px rgba(43,166,208,0.7)" : "none";
+      card.style.borderColor = on ? "var(--theme-46b8de-a0_6, rgba(70,184,222,0.6))" : "var(--theme-ffffff-a0_08, rgba(255,255,255,0.08))";
+      card.style.background = on ? "var(--theme-46b8de-a0_08, rgba(70,184,222,0.08))" : "var(--theme-ffffff-a0_022, rgba(255,255,255,0.022))";
+      card.style.boxShadow = on ? "0 0 0 1px var(--theme-46b8de-a0_45, rgba(70,184,222,0.45)), 0 20px 46px -26px var(--theme-2ba6d0-a0_7, rgba(43,166,208,0.7))" : "none";
       card.setAttribute("aria-pressed", on ? "true" : "false");
       card.tabIndex = on ? 0 : -1;
     });
@@ -424,8 +425,8 @@ function capabilities() {
     root.querySelectorAll("[data-diag]").forEach((group) => {
       const on = group.dataset.diag === diagram;
       group.querySelectorAll(".f").forEach((item) => { item.style.fill = on ? "url(#dgGrad)" : ""; });
-      group.querySelectorAll(".s").forEach((item) => { item.style.stroke = on ? "#bfe9fb" : ""; });
-      group.querySelectorAll(".ink").forEach((item) => { item.style.fill = on ? "#06222e" : ""; item.style.stroke = on ? "#06222e" : ""; });
+      group.querySelectorAll(".s").forEach((item) => { item.style.stroke = on ? "var(--theme-bfe9fb, #bfe9fb)" : ""; });
+      group.querySelectorAll(".ink").forEach((item) => { item.style.fill = on ? "var(--theme-06222e, #06222e)" : ""; item.style.stroke = on ? "var(--theme-06222e, #06222e)" : ""; });
       group.querySelectorAll(".t").forEach((item) => { item.style.fill = on ? "url(#dgGrad)" : ""; });
     });
     const file = document.getElementById("dgFile");
@@ -460,15 +461,15 @@ function ctaGrid() {
   const wrap = document.getElementById("cta-grid");
   if (!wrap) return;
   const alphabet = "ACGTN";
-  const dark = ["#0c2033", "#0e2739", "#0a1c2e", "#102a3f"];
+  const dark = ["var(--theme-0c2033, #0c2033)", "var(--theme-0e2739, #0e2739)", "var(--theme-0a1c2e, #0a1c2e)", "var(--theme-102a3f, #102a3f)"];
   const pitch = 52;
   let rows = [];
   let animation = 0;
   const styleTile = (tile) => {
     tile.textContent = alphabet[(Math.random() * alphabet.length) | 0];
     const hot = Math.random() < 0.19;
-    tile.style.background = hot ? "#f26522" : dark[(Math.random() * dark.length) | 0];
-    tile.style.color = hot ? "#fff" : "rgba(150,188,214,0.30)";
+    tile.style.background = hot ? "var(--theme-f26522, #f26522)" : dark[(Math.random() * dark.length) | 0];
+    tile.style.color = hot ? "var(--theme-ffffff, #fff)" : "var(--theme-96bcd6-a0_3, rgba(150,188,214,0.30))";
   };
   const build = () => {
     wrap.replaceChildren(); rows = [];
@@ -551,7 +552,7 @@ function teamWeb() {
   const grid = document.getElementById("who-grid");
   if (!hub || !svg || !center || !grid) return;
   const namespace = "http://www.w3.org/2000/svg";
-  const accent = "#f26522";
+  const accent = "var(--theme-f26522, #f26522)";
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const cards = [
     { element: document.getElementById("who-card-0"), side: "left" },
@@ -647,7 +648,7 @@ function teamWeb() {
       end.setAttribute("cx", item.end.toFixed(2)); end.setAttribute("cy", item.endY.toFixed(2)); end.setAttribute("r", "4.2"); end.setAttribute("fill", accent);
       end.style.opacity = motionPreference.matches ? "1" : "0";
       end.style.transition = motionPreference.matches ? "none" : "opacity .3s ease";
-      end.style.filter = "drop-shadow(0 0 5px rgba(242,101,34,0.75))";
+      end.style.filter = "drop-shadow(0 0 5px var(--theme-f26522-a0_75, rgba(242,101,34,0.75)))";
       svg.appendChild(end);
       return { dots, end, total };
     });
