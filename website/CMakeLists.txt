@@ -441,6 +441,7 @@ set(_design_translation_outputs
   "${_source_dir}/templates/base.html.j2"
   "${_source_dir}/templates/benchmarks.html.j2"
   "${_source_dir}/templates/landing.html.j2"
+  "${_source_dir}/templates/site-header.html.j2"
   "${_source_dir}/static/css/benchmarks-design.css"
   "${_source_dir}/static/css/docs-design.css"
   "${_source_dir}/static/css/landing-design.css"
@@ -484,9 +485,12 @@ set(_design_translation_stamp "${_output_root}/design-translation-check.stamp")
 add_custom_command(
   OUTPUT "${_design_translation_stamp}"
   COMMAND "${Python3_EXECUTABLE}" "${_design_translator}" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/theme_palette.py" --check
   COMMAND "${CMAKE_COMMAND}" -E touch "${_design_translation_stamp}"
   DEPENDS "${_design_translator}" ${_design_translation_inputs}
-          ${_design_translation_outputs}
+          ${_design_translation_outputs} ${_static_files}
+          "${_source_dir}/tools/theme_palette.py"
+          "${_source_dir}/tools/theme_refinements.css"
   COMMENT "website: verify non-mutating supplied-design translation parity"
   VERBATIM)
 
@@ -1266,6 +1270,7 @@ else()
     "website: Node.js unavailable - skipping the theme and analytics contracts")
 endif()
 add_custom_target(bioseq_website_content_check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/theme_palette.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_project_chapters.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tests/contract/test_project_bibliography.py"

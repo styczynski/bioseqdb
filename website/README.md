@@ -18,6 +18,23 @@ the homepage. Visitors can pause that timer. Without JavaScript, the native POST
 uses the same confirmation route through `_redirect`. The browser acceptance
 suite intercepts the endpoint, so checks never send real messages.
 
+The shared header switches between dark (the default) and light mode. The
+choice is stored locally as `bioseq-theme` and restored before the page paints.
+`tools/theme_palette.py` generates light color tokens and adaptive SVG colors;
+additional light-mode styles live in `tools/theme_refinements.css`. CMake checks
+that these generated styles and figures are current.
+
+Google Analytics uses `G-989VYH5HT7`. The `package_link_click` event records
+package destinations, and `docker_command_copy` records successful copies of
+the landing installation commands. These events omit query parameters, command
+arguments and contact form contents. Browser tests intercept analytics requests.
+
+The generator creates `robots.txt` and `sitemap.xml` for every build, using the
+canonical site URL from `site.yaml`. The sitemap lists each page once. Heading
+anchors remain ordinary links in the rendered documentation; fragment URLs are
+not separate canonical pages. Validation checks sitemap coverage and the
+`Sitemap` directive in `robots.txt` before publication.
+
 Landing SQL lives in `v0.1/landing_examples.md`. Hidden `bioseq:setup` and
 `bioseq:teardown` sections prepare and clean up the local database; only the
 `bioseq:visible` section appears in the cards. The build rejects empty results or

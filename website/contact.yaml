@@ -15,7 +15,7 @@ form:
   name: Your name
   email: Your email
   message: Your message
-  name_placeholder: How should I call you?
+  name_placeholder: What should I call you?
   email_placeholder: you@example.com
   message_placeholder: What would you like to share?
   email_note: I will only use your email to reply to your message.

@@ -76,6 +76,11 @@ from support.static_fixture_server import (  # noqa: E402
     parse_security_headers,
 )
 
+from support.site_features_checks import (  # noqa: E402
+    GOOGLE_TAG_URL,
+    exercise_site_features,
+)
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_FAILED = 3
@@ -286,9 +291,9 @@ def _translated_style_catalog(source: str, label: str, prefix: str,
                               page_class: str) -> list[str]:
     """Reproduce the translator's declaration numbering without rewriting files.
 
-    Every authored declaration must survive byte-for-byte in the generated CSS;
+    Every authored declaration must survive in the dark-mode fallback CSS;
     this catches a stale checked-in translation even when a few sampled elements
-    happen to look acceptable.
+    happen to look acceptable. Computed colors and pixels are checked separately.
     """
     start = source.index(f'<div data-screen-label="{label}"')
     end = source.index("</x-dc>", start)
@@ -335,6 +340,12 @@ def _assert_translator_declaration_parity(site: Path, design_source: Path) -> No
         _check(len(css_paths) == 1,
                f"expected one published {css_name}, got {css_paths}")
         css = css_paths[0].read_text(encoding="utf-8")
+        # The light palette wraps original colors without changing their dark
+        # fallback. Keep literal design parity strict after resolving only those
+        # exact color wrappers; do not normalize arbitrary declarations.
+        css = re.sub(
+            r"var\(--theme-[\w-]+,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^()]+\))\)",
+            lambda match: match.group(1), css)
         rules = _translated_style_catalog(source, label, prefix, page_class)
         missing = [rule for rule in rules if rule not in css]
         _check(not missing,
@@ -2804,6 +2815,10 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                     )
                 else:
                     route.continue_()
+            elif route.request.url == GOOGLE_TAG_URL:
+                # Never load Google or emit analytics during browser acceptance.
+                route.fulfill(status=200, content_type="application/javascript",
+                              body="/* offline analytics fixture */")
             elif route.request.url in contract["benchmarks"]["remote_sources"]:
                 if remote_state["failure"]:
                     body = b"{}"
@@ -2967,6 +2982,10 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))
 
         context.close()
+        try:
+            exercise_site_features(browser, server, base_path, version, artifact_dir)
+        except AssertionError as error:
+            raise AssertionFail(str(error)) from error
         browser.close()
 
 
