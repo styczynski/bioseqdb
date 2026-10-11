@@ -310,10 +310,12 @@ footer:
   github: GitHub
   symbol: ·
   symbol_2: ©
-  an_independent_open_source_project: — an independent open-source project.
   license_mit: License (MIT)
   versions: Versions
   back_to_top: Back to top
+  crunchbase: Crunchbase
+  linkedin: LinkedIn
+  author_github: Author GitHub
 accessibility:
   skip_to_content: Skip to content
 actions:

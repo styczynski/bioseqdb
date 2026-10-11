@@ -331,3 +331,8 @@
   .benchmarks-design-page .bd-s0073 { font-size: 14px; }
   .benchmarks-design-page .bd-s0074 { font-size: 11px; }
 }
+
+/* Small profile links share the existing footer bar and wrap on narrow screens. */
+:is(.landing-design-page, .docs-design-page, .benchmarks-design-page) .site-footer-links { gap: 10px 18px; }
+.site-footer-links .site-footer-profile { font-size: 12px; line-height: 1.7; }
+.site-footer-links a { white-space: nowrap; }

@@ -372,7 +372,7 @@ def prepare_benchmark_markup(source: str) -> tuple[str, StyleCatalog]:
         'open-source project.</span>',
         '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;'
         'font-weight:500">&copy; {{ site.copyright_year }} '
-        '{{ site.copyright_holder }} &mdash; an independent open-source project.</span>',
+        '{{ site.copyright_holder }}</span>',
         1,
     )
     markup = markup.replace('>CI artifacts', '>Published results')
@@ -564,7 +564,7 @@ def resolve_landing_runtime(markup: str) -> str:
     )
     markup = markup.replace(
         '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;font-weight:500">&copy; 2027 BioseqDB &mdash; an independent open-source project.</span>',
-        '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;font-weight:500">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>',
+        '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;font-weight:500">&copy; {{ site.copyright_year }} {{ site.copyright_holder }}</span>',
         1,
     )
     markup = markup.replace(
@@ -831,6 +831,38 @@ def replace_header(markup: str, old_id: str, replacement: str) -> str:
     return markup[:begin] + replacement + markup[end:]
 
 
+def add_footer_profile_links(markup: str) -> str:
+    """Add small profile links after style extraction, preserving design hooks."""
+    footer_at = markup.index("<footer")
+    footer_end = markup.index("</footer>", footer_at)
+    footer = markup[footer_at:footer_end]
+    versions = re.search(
+        r'<a\b[^>]*href="\{\{ site\.versions_page_url \}\}"[^>]*>.*?</a>',
+        footer, re.S)
+    if not versions:
+        raise RuntimeError("footer versions link was not found")
+    link_class = re.search(r'class="([^"]+)"', versions.group(0))
+    if not link_class:
+        raise RuntimeError("footer versions link has no design class")
+    profiles = (
+        ("https://www.crunchbase.com/organization/bioseq-db", "Crunchbase"),
+        ("https://www.linkedin.com/in/piotrstyczynski", "LinkedIn"),
+        ("https://github.com/styczynski", "Author GitHub"),
+    )
+    additions = "".join(
+        '\n          <a href="' + url + '" rel="noreferrer" class="'
+        + link_class.group(1) + ' site-footer-profile">'
+        + landing_text("footer", label) + "</a>"
+        for url, label in profiles)
+    footer = footer[:versions.end()] + additions + footer[versions.end():]
+    nav_at = footer.rfind("<nav", 0, versions.start())
+    if nav_at < 0:
+        raise RuntimeError("footer versions navigation was not found")
+    class_at = footer.index('class="', nav_at) + len('class="')
+    footer = footer[:class_at] + "site-footer-links " + footer[class_at:]
+    return markup[:footer_at] + footer + markup[footer_end:]
+
+
 def landing_template(markup: str) -> str:
     shared_header()  # Register shared editable labels during standalone translation too.
     markup = replace_header(markup, "nav", '{% include "site-header.html.j2" %}')
@@ -840,6 +872,7 @@ def landing_template(markup: str) -> str:
     contact_link = '<a href="{{ site.base_path }}contact/" class="ld-s0027 landing-contact-link">Contact me</a>'
     markup = markup[:examples_link.end()] + "\n          " + contact_link + markup[examples_link.end():]
     markup = localize_landing_markup(markup)
+    markup = add_footer_profile_links(markup)
     skip_label = landing_text("accessibility", "Skip to content")
     failed_label = landing_text("actions", "Copy failed")
     markup = markup.replace("data-copy-install", f'data-copy-install data-copy-failure="{failed_label}"', 1)
@@ -988,7 +1021,7 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
         r'<span\1>{{ site.status_label }} &middot; {{ site.version }}</span>', markup)
     markup = re.sub(
         r'<span([^>]*)>&copy; 2027 BioseqDB &mdash; an independent open-source project.</span>',
-        r'<span\1>&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>',
+        r'<span\1>&copy; {{ site.copyright_year }} {{ site.copyright_holder }}</span>',
         markup)
     markup = markup.replace('data-noop href="#"',
                             'href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer"', 1)
@@ -999,6 +1032,7 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
 
 
 def base_template(markup: str) -> str:
+    markup = add_footer_profile_links(markup)
     markup = replace_header(markup, "dnav", '{% include "site-header.html.j2" %}')
     pop_start = markup.index('<div id="entity-pop"')
     pop_begin, pop_end = element_span(markup, pop_start)
@@ -1061,6 +1095,7 @@ def base_template(markup: str) -> str:
 
 def benchmarks_template(markup: str) -> str:
     """Wrap the translated benchmark export in its dedicated production frame."""
+    markup = add_footer_profile_links(markup)
     # The original status/reload controls remain connected to the benchmark
     # runtime; the shared navigation lives outside its rerendered template.
     header_at = markup.index('<header id="bhead"')
