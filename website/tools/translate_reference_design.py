@@ -1181,7 +1181,7 @@ def benchmarks_template(markup: str) -> str:
 
 
 def benchmark_component_source(source: str) -> str:
-    """Extract the supplied component logic and change only its asset seam."""
+    """Extract the supplied logic with asset and accessible-tooltip adapters."""
     match = re.search(
         r'<script type="text/x-dc"[^>]*>\s*'
         r'(class Component extends DCLogic \{.*?\n\})\s*</script>',
@@ -1194,10 +1194,30 @@ def benchmark_component_source(source: str) -> str:
     old_import = "this.lib = await import(new URL('bench-loader.js', location.href).href);"
     if component.count(old_import) != 1:
         raise RuntimeError("benchmark loader import seam changed")
-    return component.replace(
-        old_import,
-        "this.lib = await import(this.props.loaderUrl);",
-    )
+    component = component.replace(old_import, "this.lib = await import(this.props.loaderUrl);")
+    old_show = "  showTip(e, payload) {\n    const r = e.currentTarget.getBoundingClientRect();"
+    new_show = """  showTip(e, payload) {
+    // Scrolling or resizing can enter/leave cells without moving the pointer.
+    // Keep a keyboard tooltip until an actual pointer movement takes ownership.
+    if (e.type === 'mousemove') {
+      if ((!e.movementX && !e.movementY) || this.tipTarget === e.currentTarget) return;
+    } else if (e.type === 'mouseenter' && this.tipTarget === document.activeElement) {
+      return;
+    }
+    this.tipTarget = e.currentTarget;
+    const r = e.currentTarget.getBoundingClientRect();"""
+    old_hide = "  hideTip = () => { if (this.state.tip) this.setState({ tip: null }); };"
+    new_hide = """  hideTip = (event) => {
+    if (event && this.tipTarget) {
+      if (event.currentTarget !== this.tipTarget) return;
+      if (event.type === 'mouseleave' && document.activeElement === this.tipTarget) return;
+    }
+    this.tipTarget = null;
+    if (this.state.tip) this.setState({ tip: null });
+  };"""
+    if component.count(old_show) != 1 or component.count(old_hide) != 1:
+        raise RuntimeError("benchmark tooltip interaction seam changed")
+    return component.replace(old_show, new_show).replace(old_hide, new_hide)
 
 
 def validate_benchmark_manifest(source: str) -> None:
@@ -1319,6 +1339,7 @@ function bindNode(node, scope) {
         if (eventName === "mouseenter") {
           node.tabIndex = 0;
           node.addEventListener("focus", handler);
+          node.addEventListener("mousemove", handler);
           node.addEventListener("keydown", (event) => { if (event.key === "Escape") scope.onTipOut?.(); });
         }
         if (eventName === "mouseleave") node.addEventListener("blur", handler);
@@ -1339,11 +1360,19 @@ function bindNode(node, scope) {
 
 class DCLogic {
   props = {};
+  tipTarget = null;
 
   dismissTipOnEscape = (event) => {
     if (event.key === "Escape" && this.root?.isConnected && this.state.tip) {
+      this.tipTarget = null;
       this.setState({ tip: null });
     }
+  };
+
+  repositionTipOnResize = () => {
+    if (!this.root?.isConnected || !this.state.tip || !this.tipTarget?.isConnected) return;
+    const { x, y, ...payload } = this.state.tip;
+    this.showTip({ type: "resize", currentTarget: this.tipTarget }, payload);
   };
 
   setState(update) {
@@ -1359,6 +1388,7 @@ class DCLogic {
     this.props = props;
     // Hover tooltips also need Escape when their trigger has no keyboard focus.
     document.addEventListener("keydown", this.dismissTipOnEscape);
+    window.addEventListener("resize", this.repositionTipOnResize);
     this.render();
   }
 

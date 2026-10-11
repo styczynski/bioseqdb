@@ -97,6 +97,7 @@ function bindNode(node, scope) {
         if (eventName === "mouseenter") {
           node.tabIndex = 0;
           node.addEventListener("focus", handler);
+          node.addEventListener("mousemove", handler);
           node.addEventListener("keydown", (event) => { if (event.key === "Escape") scope.onTipOut?.(); });
         }
         if (eventName === "mouseleave") node.addEventListener("blur", handler);
@@ -117,11 +118,19 @@ function bindNode(node, scope) {
 
 class DCLogic {
   props = {};
+  tipTarget = null;
 
   dismissTipOnEscape = (event) => {
     if (event.key === "Escape" && this.root?.isConnected && this.state.tip) {
+      this.tipTarget = null;
       this.setState({ tip: null });
     }
+  };
+
+  repositionTipOnResize = () => {
+    if (!this.root?.isConnected || !this.state.tip || !this.tipTarget?.isConnected) return;
+    const { x, y, ...payload } = this.state.tip;
+    this.showTip({ type: "resize", currentTarget: this.tipTarget }, payload);
   };
 
   setState(update) {
@@ -137,6 +146,7 @@ class DCLogic {
     this.props = props;
     // Hover tooltips also need Escape when their trigger has no keyboard focus.
     document.addEventListener("keydown", this.dismissTipOnEscape);
+    window.addEventListener("resize", this.repositionTipOnResize);
     this.render();
   }
 
@@ -214,6 +224,14 @@ class Component extends DCLogic {
   fmt(v) { return this.lib ? this.lib.formatValue(v, this.state.metric) : String(v); }
 
   showTip(e, payload) {
+    // Scrolling or resizing can enter/leave cells without moving the pointer.
+    // Keep a keyboard tooltip until an actual pointer movement takes ownership.
+    if (e.type === 'mousemove') {
+      if ((!e.movementX && !e.movementY) || this.tipTarget === e.currentTarget) return;
+    } else if (e.type === 'mouseenter' && this.tipTarget === document.activeElement) {
+      return;
+    }
+    this.tipTarget = e.currentTarget;
     const r = e.currentTarget.getBoundingClientRect();
     const w = 352;
     let x = Math.max(10, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 10));
@@ -221,7 +239,14 @@ class Component extends DCLogic {
     if (y > window.innerHeight - 280) y = Math.max(10, r.top - 268);
     this.setState({ tip: Object.assign({ x, y }, payload) });
   }
-  hideTip = () => { if (this.state.tip) this.setState({ tip: null }); };
+  hideTip = (event) => {
+    if (event && this.tipTarget) {
+      if (event.currentTarget !== this.tipTarget) return;
+      if (event.type === 'mouseleave' && document.activeElement === this.tipTarget) return;
+    }
+    this.tipTarget = null;
+    if (this.state.tip) this.setState({ tip: null });
+  };
 
   sampleRows(s) {
     if (!s) return [{ k: 'samples', v: 'none', color: 'var(--theme-7d94a6, #7d94a6)' }];

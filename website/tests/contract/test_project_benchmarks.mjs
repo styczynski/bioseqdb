@@ -4,6 +4,9 @@ import * as loader from '../../static/js/project-benchmark-loader.mjs';
 
 globalThis.document = new EventTarget();
 document.querySelector = () => null;
+globalThis.window = new EventTarget();
+window.innerWidth = 1280;
+window.innerHeight = 900;
 globalThis.HTMLElement = class {};
 globalThis.HTMLTemplateElement = class {};
 const { ProjectComponent } = await import('../../static/js/benchmarks-design.mjs');
@@ -72,4 +75,48 @@ assert.ok(tooltipComponents.slice(0, 2).every((component) => component.state.tip
 assert.ok(tooltipComponents[2].state.tip, 'detached components must ignore document events');
 key('Escape');
 assert.deepEqual(tooltipComponents.map((component) => component.tipRenders), [1, 1, 0]);
+// A focus-induced scroll can deliver the previous cell's mouseleave after
+// the new focus event. It must not dismiss or replace the focused cell's data.
+const owner = tooltipComponents[0];
+const target = () => ({ isConnected: true, getBoundingClientRect: () => ({ left: 100, top: 200, bottom: 240, width: 140 }) });
+const oldCell = target(), focusedCell = target(), pointerCell = target();
+document.activeElement = null;
+owner.showTip({ type: 'mouseenter', currentTarget: oldCell }, { title: 'old cell' });
+document.activeElement = focusedCell;
+owner.showTip({ type: 'focus', currentTarget: focusedCell }, { title: 'focused cell' });
+owner.hideTip({ type: 'mouseleave', currentTarget: oldCell });
+owner.showTip({ type: 'mouseenter', currentTarget: pointerCell }, { title: 'layout entered cell' });
+owner.showTip({ type: 'mousemove', currentTarget: pointerCell, movementX: 0, movementY: 0 }, { title: 'stationary pointer' });
+assert.equal(owner.state.tip.title, 'focused cell');
+owner.hideTip({ type: 'mouseleave', currentTarget: focusedCell });
+assert.equal(owner.state.tip.title, 'focused cell', 'keyboard focus survives its own pointer leave');
+
+// Moving the pointer deliberately must still hand control back to hover,
+// even if the old cell keeps keyboard focus.
+owner.showTip({ type: 'mousemove', currentTarget: pointerCell, movementX: 2, movementY: 0 }, { title: 'pointer cell' });
+assert.equal(owner.state.tip.title, 'pointer cell');
+owner.hideTip({ type: 'blur', currentTarget: focusedCell });
+assert.equal(owner.state.tip.title, 'pointer cell', 'stale blur must not dismiss the new owner');
+owner.hideTip({ type: 'mouseleave', currentTarget: pointerCell });
+assert.equal(owner.state.tip, null);
+owner.showTip({ type: 'focus', currentTarget: focusedCell }, { title: 'focused again' });
+key('Escape');
+assert.equal(owner.state.tip, null);
+assert.equal(owner.tipTarget, null, 'Escape releases keyboard ownership for the next hover');
+owner.showTip({ type: 'mouseenter', currentTarget: oldCell }, { title: 'after Escape' });
+assert.equal(owner.state.tip.title, 'after Escape');
+owner.showTip({ type: 'focus', currentTarget: focusedCell }, { title: 'blurred focus' });
+document.activeElement = null;
+owner.hideTip({ type: 'blur', currentTarget: focusedCell });
+assert.equal(owner.state.tip, null, 'leaving keyboard focus dismisses its tooltip');
+const rightCell = { isConnected: true, getBoundingClientRect: () => ({ left: 1000, top: 200, bottom: 240, width: 140 }) };
+document.activeElement = rightCell;
+owner.showTip({ type: 'focus', currentTarget: rightCell }, { title: 'viewport resize' });
+assert.equal(owner.state.tip.x, 894);
+window.innerWidth = 420;
+window.dispatchEvent(new Event('resize'));
+assert.equal(owner.state.tip.x, 58, 'resizing repositions the existing focused tooltip');
+assert.equal(owner.state.tip.title, 'viewport resize');
+key('Escape');
+
 console.log(`Verified ${model.order.length} panels, ${cells} cells and ${measured} measured A/B pairs with same-column baselines.`);
