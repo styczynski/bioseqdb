@@ -1,31 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bioseq.query_len</title>
 <meta name="description" content="Query sequence length in bases for the current mmsearch result">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/theme.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="bioseq.query_len">
 <meta property="og:description" content="Query sequence length in bases for the current mmsearch result">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/">
-<meta property="og:image" content="https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq.query_len">
 <meta name="twitter:description" content="Query sequence length in bases for the current mmsearch result">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png">
-<link rel="icon" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/favicon.svg">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/site.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/docs-design.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/code-theme.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/project-content.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/site-header.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/responsive.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
+<link rel="icon" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/favicon.svg">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/docs-design.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/code-theme.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-content.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-header.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/responsive.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-controls.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/theme.css">
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -37,7 +42,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -59,9 +64,24 @@
         <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
       </div>
     </div>
-    <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="/contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="Dark mode. Switch to light mode." data-light-label="Light mode. Switch to dark mode." aria-label="Dark mode. Switch to light mode." title="Dark mode. Switch to light mode.">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">Dark mode. Switch to light mode.</span>
+      </button>
+    </div>
   </div>
 </header>
+
 
   <!-- ============ BODY GRID ============ -->
   <div data-bodygrid class="dd-s0032">
@@ -151,7 +171,7 @@ ROLLBACK;</code></pre></figure></div>
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/1e7db8fed3ffd3c643291e76dc8b2967b45014af/bioseq/backend/pg/extension/index.cppm#L257" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/4ef3cd32a4bf8d0cbe6ea451dd83fe63afe25921/bioseq/backend/pg/extension/index.cppm#L257" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq · PostgreSQL 17.10</p>
   
 </article>
@@ -176,7 +196,7 @@ ROLLBACK;</code></pre></figure></div>
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -218,10 +238,13 @@ ROLLBACK;</code></pre></figure></div>
     <div class="dd-s0253">
       <div class="dd-s0254"></div>
       <div class="dd-s0255">
-        <span class="dd-s0256">&copy; 2026 Bioseq contributors &mdash; an independent open-source project.</span>
-        <nav class="dd-s0257">
+        <span class="dd-s0256">&copy; 2026 BioseqDB Piotr Styczyński</span>
+        <nav class="site-footer-links dd-s0257">
           <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
           <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
+          <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
           <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
         </nav>
       </div>
@@ -236,16 +259,16 @@ ROLLBACK;</code></pre></figure></div>
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq.query_len","description":"Query sequence length in bases for the current mmsearch result","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq.query_len","item":"/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/"}]}]}</script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/prism-init.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/prism/prism.min.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/prism-languages.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/katex/katex.min.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/project-math.js"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/main.js"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/site-header.mjs"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq.query_len","description":"Query sequence length in bases for the current mmsearch result","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq.query_len","item":"/v0.1/reference/sql/function/bioseq-query-len-9029bd49c9dc8d99/"}]}]}</script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-init.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-languages.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-math.js"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/main.js"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/site-header.mjs"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/docs-design.mjs"></script>
 
 </body>
 </html>

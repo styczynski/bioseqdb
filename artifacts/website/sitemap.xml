@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://bioseqdb.com/benchmarks/</loc></url>
+  <url><loc>https://bioseqdb.com/contact/</loc></url>
+  <url><loc>https://bioseqdb.com/contact_thanks/</loc></url>
   <url><loc>https://bioseqdb.com/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/documentation-coverage/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/</loc></url>

@@ -1,0 +1,58 @@
+/* Contact pages use the same blue, orange, typography and gradients as the site. */
+.contact-page{--contact-bg:#071320;--contact-surface:rgba(10,28,43,.88);--contact-input:rgba(5,17,29,.7);--contact-ink:#eef4f9;--contact-muted:#a7b9c8;--contact-border:rgba(159,191,216,.2);--contact-accent:#7fcbe8;--contact-orange:#f4894f;--contact-field-shadow:0 30px 100px -45px rgba(0,0,0,.65);margin:0;background:var(--contact-bg);color:var(--contact-ink);font-family:'IBM Plex Sans',system-ui,sans-serif}
+html[data-theme="light"] .contact-page{--contact-bg:#f4f8fb;--contact-surface:rgba(255,255,255,.92);--contact-input:#f8fbfd;--contact-ink:#142e42;--contact-muted:#496579;--contact-border:rgba(53,93,119,.23);--contact-accent:#12647f;--contact-orange:#b64b18;--contact-field-shadow:0 30px 90px -55px rgba(21,62,84,.3)}
+.contact-page *{box-sizing:border-box}
+.contact-scene{position:relative;isolation:isolate;min-height:calc(100svh - var(--site-header-height,64px));overflow:hidden;background:radial-gradient(ellipse at 8% 10%,rgba(70,184,222,.15),transparent 55%),radial-gradient(ellipse at 93% 80%,rgba(242,101,34,.12),transparent 54%);display:grid;align-items:center;padding:clamp(52px,8vh,120px) clamp(22px,5vw,100px) clamp(92px,12vh,180px)}
+.contact-wordmark{position:absolute;z-index:-1;inset:auto 0 -0.13em;line-height:1;font-family:'Space Grotesk',sans-serif;font-size:clamp(110px,23.5vw,430px);font-weight:700;letter-spacing:-.065em;text-align:center;color:var(--contact-accent);opacity:.055;pointer-events:none;user-select:none}
+.contact-layout{width:100%;max-width:1360px;margin:auto;display:grid;grid-template-columns:minmax(0,1.06fr) minmax(0,1fr);gap:clamp(36px,7vw,120px);align-items:center}
+.contact-introduction{min-width:0}
+.contact-eyebrow{display:flex;align-items:center;gap:10px;color:var(--contact-accent);font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.08em;margin:0 0 25px;text-transform:uppercase}
+.contact-eyebrow>span{width:7px;height:7px;border-radius:50%;background:var(--contact-orange);box-shadow:0 0 18px rgba(242,101,34,.35);flex:none}
+.contact-page h1{font-family:'Space Grotesk',sans-serif;font-size:clamp(60px,7.1vw,110px);font-weight:600;letter-spacing:-.065em;line-height:1.02;margin:0 0 30px;color:var(--contact-ink)}
+.contact-page h1>span{color:var(--contact-orange)}
+.contact-lede{font-size:clamp(19px,1.6vw,24px);line-height:1.65;max-width:34ch;margin:0 0 35px;color:var(--contact-muted)}
+.contact-note{max-width:46ch;border-left:2px solid var(--contact-border);padding-left:19px;color:var(--contact-muted);font-size:15px;line-height:1.75}
+.contact-note p{margin:0 0 12px}
+.contact-back{display:inline-flex;gap:10px;align-items:center;margin-top:26px;text-decoration:none;color:var(--contact-accent);font-size:14px}
+.contact-back:hover{text-decoration:underline;text-underline-offset:4px}
+.contact-card{min-width:0;padding:clamp(24px,3.1vw,46px);border:1px solid var(--contact-border);border-radius:24px;background:var(--contact-surface);box-shadow:var(--contact-field-shadow);backdrop-filter:blur(16px)}
+.contact-card h2{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:500;letter-spacing:-.035em;margin:0 0 27px;color:var(--contact-ink)}
+.contact-field{display:grid;gap:9px;margin-bottom:21px;min-width:0}
+.contact-field label{color:var(--contact-ink);font-size:14px;font-weight:500}
+.contact-field label>span{color:var(--contact-orange)}
+.contact-field input,.contact-field textarea{width:100%;min-width:0;padding:13px 15px;border:1px solid var(--contact-border);border-radius:9px;background:var(--contact-input);color:var(--contact-ink);font:400 16px/1.5 'IBM Plex Sans',system-ui,sans-serif;transition:border-color .18s,box-shadow .18s}
+.contact-field textarea{resize:vertical;min-height:138px;max-height:60vh}
+.contact-field input::placeholder,.contact-field textarea::placeholder{color:var(--contact-muted);opacity:.76}
+.contact-field input:focus,.contact-field textarea:focus{outline:0;border-color:var(--contact-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--contact-accent) 16%,transparent)}
+.contact-field-note,.contact-required{margin:0;color:var(--contact-muted);font-size:12px;line-height:1.6}
+.contact-required{margin-top:-5px;margin-bottom:17px}
+.contact-honeypot{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+.contact-submit{display:inline-flex;align-items:center;justify-content:center;gap:13px;width:100%;padding:14px 20px;border:1px solid #f26522;border-radius:9px;background:#f26522;color:#071320;text-decoration:none;font:600 15px/1.4 'IBM Plex Sans',system-ui,sans-serif;cursor:pointer;transition:background .15s,transform .15s}
+.contact-submit:hover{background:#ff8549;transform:translateY(-1px)}
+.contact-submit:disabled{opacity:.65;cursor:wait;transform:none}
+.contact-page :focus-visible{outline:2px solid var(--contact-accent);outline-offset:5px}
+.contact-status{font-size:14px;line-height:1.65;padding:12px 14px;border:1px solid var(--contact-border);border-radius:8px;color:var(--contact-ink);background:var(--contact-input);margin:18px 0 0;overflow-wrap:anywhere}
+.contact-status[data-state="error"]{border-color:var(--contact-orange)}
+.contact-status[data-state="success"]{border-color:var(--contact-accent)}
+.contact-thanks{max-width:940px;margin:auto;text-align:center}
+.contact-thanks .contact-eyebrow{justify-content:center}
+.contact-thanks h1{font-size:clamp(48px,6vw,88px);line-height:1.08;max-width:14ch;margin:0 auto 28px}
+.contact-thanks .contact-lede{max-width:48ch;margin:0 auto 20px}
+.contact-response{max-width:58ch;margin:0 auto;color:var(--contact-muted);font-size:16px;line-height:1.75}
+.contact-countdown{margin:30px auto 24px;color:var(--contact-muted);font-size:13px;line-height:1.65}
+.contact-countdown[hidden],.contact-countdown [hidden],.contact-status[hidden]{display:none}
+.contact-timer{position:relative;display:grid;place-items:center;width:100px;height:100px;margin:auto auto 15px;color:var(--contact-ink);font:500 32px/1 'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+.contact-timer svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.contact-timer circle{fill:none;stroke-width:3.5}
+.contact-timer-track{stroke:var(--contact-border)}
+.contact-timer-progress{stroke:var(--contact-orange);stroke-linecap:round;stroke-dasharray:100;stroke-dashoffset:0}
+.contact-pause{border:0;background:none;padding:5px 12px;color:var(--contact-accent);font:400 13px/1.5 'IBM Plex Sans',system-ui,sans-serif;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.contact-home{width:auto;min-width:235px;margin-top:14px}
+@media(min-width:1600px){.contact-layout{gap:120px}.contact-card{padding:46px}.contact-scene{padding-top:85px;padding-bottom:110px}}
+@media(max-width:1300px){.contact-layout{gap:60px}.contact-page h1{font-size:76px}}
+@media(max-width:1024px){.contact-layout{max-width:720px;grid-template-columns:minmax(0,1fr);gap:38px}.contact-scene{padding-top:48px;padding-bottom:95px}.contact-page h1{font-size:72px}.contact-lede{max-width:48ch;margin-bottom:23px}.contact-note{max-width:65ch}.contact-back{margin-top:15px}.contact-card{padding:32px}.contact-thanks h1{font-size:64px}}
+@media(max-width:768px){.contact-scene{padding-left:30px;padding-right:30px}.contact-eyebrow{font-size:11px;margin-bottom:20px}.contact-page h1{font-size:64px;margin-bottom:22px}.contact-lede{font-size:20px}.contact-thanks h1{font-size:58px}.contact-thanks .contact-lede{font-size:19px}.contact-response{font-size:15px}}
+@media(max-width:666px){.contact-scene{padding:40px 24px 80px}.contact-page h1{font-size:59px}.contact-card{padding:27px}.contact-thanks h1{font-size:52px}.contact-thanks .contact-lede{font-size:18px}}
+@media(max-width:568px){.contact-scene{padding-left:20px;padding-right:20px}.contact-layout{gap:29px}.contact-page h1{font-size:56px}.contact-card{padding:24px 21px;border-radius:18px}.contact-note{font-size:14px}.contact-field{margin-bottom:18px}.contact-thanks h1{font-size:48px}.contact-thanks .contact-lede{font-size:17px}.contact-response{font-size:14px}.contact-countdown{margin-top:24px}}
+@media(max-width:420px){.contact-scene{padding:33px 16px 70px}.contact-page h1{font-size:49px}.contact-eyebrow{font-size:10px;gap:8px;letter-spacing:.05em}.contact-lede{font-size:18px}.contact-card{padding:23px 18px}.contact-card h2{font-size:22px}.contact-note{padding-left:14px;font-size:13.5px}.contact-field-note,.contact-required{font-size:11.5px}.contact-thanks h1{font-size:42px}.contact-thanks .contact-lede{font-size:16px}.contact-timer{width:88px;height:88px;font-size:29px}}
+@media(prefers-reduced-motion:reduce){.contact-page *{transition:none!important}.contact-submit:hover{transform:none}}

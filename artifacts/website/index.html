@@ -1,31 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BioseqDB</title>
-<meta name="description" content="Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.">
+<meta name="description" content="BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with ordinary SQL.">
 <link rel="canonical" href="https://bioseqdb.com/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/theme.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="BioseqDB">
-<meta property="og:description" content="Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.">
+<meta property="og:description" content="BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with ordinary SQL.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/">
-<meta property="og:image" content="https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="BioseqDB">
-<meta name="twitter:description" content="Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png">
-<link rel="icon" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/favicon.svg">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/site.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/landing-design.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/code-theme.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/project-content.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/site-header.css">
-<link rel="stylesheet" href="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/css/responsive.css">
+<meta name="twitter:description" content="BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with ordinary SQL.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
+<link rel="icon" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/favicon.svg">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/landing-design.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/code-theme.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-content.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-header.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/responsive.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-controls.css">
+<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/theme.css">
 </head>
 <body id="page-top" class="landing-design-page">
 <a class="skip-link" href="#main">Skip to content</a>
@@ -37,7 +42,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -59,16 +64,31 @@
         <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
       </div>
     </div>
-    <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="/contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="Dark mode. Switch to light mode." data-light-label="Light mode. Switch to dark mode." aria-label="Dark mode. Switch to light mode." title="Dark mode. Switch to light mode.">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">Dark mode. Switch to light mode.</span>
+      </button>
+    </div>
   </div>
 </header>
+
 
   <main id="main">
 
   <!-- HERO with background video -->
   <section id="top" class="ld-s0013">
     <video data-autobg autoplay muted loop playsinline preload="auto" aria-hidden="true" class="ld-s0014">
-      <source src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/vials.mp4" type="video/mp4">
+      <source src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/vials.mp4" type="video/mp4">
     </video>
     <div class="ld-s0015"></div>
     <div class="ld-s0016"></div>
@@ -77,18 +97,19 @@
     <div class="ld-s0018">
       <div class="ld-s0019">
         <div class="ld-s0020">
-          <span class="ld-s0021"></span>SQL-native sequence search
+          <span class="ld-s0021"></span>SQL sequence search (alignments)
         </div>
         <h1 class="ld-s0022">Search biological sequences with plain <span class="ld-s0023">SQL</span>.</h1>
-        <p class="ld-s0024">BioseqDB is a SQL-native system for biological sequence data. Load FASTA and FASTQ files, store sequences beside their metadata, and search them with one query.</p>
+        <p class="ld-s0024">BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with just SQL! Amazingly nobody before was crazy enough to combine database engine and genomic aligner algorithms.</p>
         <div class="ld-s0025">
           <a href="/v0.1/tutorials/getting_started/" class="ld-s0026">Read the docs</a>
           <a href="#examples" class="ld-s0027 ld-h002">See the examples</a>
+          <a href="/contact/" class="ld-s0027 landing-contact-link">Contact me</a>
         </div>
         <div class="ld-s0028">
           <div class="ld-s0029">
             <span class="ld-s0030">$</span>
-            <span class="ld-s0031" data-install-command>CREATE EXTENSION bioseq;</span>
+            <span class="ld-s0031" data-install-command>docker pull styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04</span>
             <button data-copy-install data-copy-failure="Copy failed" class="ld-s0032 ld-h003">
               <span data-copy-done hidden><span class="ld-s0033">Copied</span></span>
               <span data-copy-idle><span>Copy</span></span>
@@ -114,7 +135,7 @@
       <div data-reveal class="ld-s0042">
         <div class="ld-s0043"><span class="ld-s0044"></span>Reading the query</div>
         <h2 class="ld-s0045">One SELECT, now sequence-aware</h2>
-        <p class="ld-s0046">A normal query becomes a sequence search the moment <span class="ld-s0047">mmsearch()</span> appears in the WHERE clause. Everything else is SQL you already write.</p>
+        <p class="ld-s0046">A normal query becomes a sequence (alignment) search the moment <span class="ld-s0047">mmsearch()</span> appears in the WHERE clause. Everything else is SQL you already write.</p>
       </div>
 
       <div id="annotate" data-reveal="fade" class="ld-s0048">
@@ -158,7 +179,7 @@ WHERE t.age &gt;= 30 AND q.id = 2
         <div class="ld-s0070">
           <div id="note-select" class="ld-s0071">
             <span class="ld-s0072">SELECT</span>
-            <p class="ld-s0073">Select any metadata from the table just like in ordinary Postgres. Join, filter, and project columns exactly as you normally would.</p>
+            <p class="ld-s0073">Select any metadata from the table just like in ordinary Postgres. Join, filter, and transform columns exactly as you normally would.</p>
           </div>
           <div id="note-where" class="ld-s0074">
             <span class="ld-s0075">WHERE</span>
@@ -166,7 +187,7 @@ WHERE t.age &gt;= 30 AND q.id = 2
           </div>
           <div id="note-dna4" class="ld-s0078">
             <span class="ld-s0079">&#39;dna4&#39;</span>
-            <p class="ld-s0080">BioseqDB supports different sequence alphabets and storage interfaces, chosen right in the column type.</p>
+            <p class="ld-s0080">BioseqDB supports different sequence alphabets and storage interfaces.</p>
           </div>
         </div>
 
@@ -180,11 +201,11 @@ WHERE t.age &gt;= 30 AND q.id = 2
     <div data-reveal class="ld-s0083">
       <p class="ld-s0084"><span class="ld-s0085">Free and open source, forever.</span> Built by a single maintainer, with experience from</p>
       <div class="ld-s0086">
-        <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/logos/google.png" alt="Google" class="ld-s0087 ld-h004">
-        <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/logos/bytedance.png" alt="ByteDance" class="ld-s0088 ld-h004">
-        <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/logos/goldman.png" alt="Goldman Sachs" class="ld-s0089 ld-h004">
-        <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/logos/sumo.png" alt="Sumo Logic" class="ld-s0090 ld-h004">
-        <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/logos/ef.png" alt="Entrepreneur First" class="ld-s0091 ld-h004">
+        <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/logos/google.png" alt="Google" class="ld-s0087 ld-h004">
+        <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/logos/bytedance.png" alt="ByteDance" class="ld-s0088 ld-h004">
+        <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/logos/goldman.png" alt="Goldman Sachs" class="ld-s0089 ld-h004">
+        <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/logos/sumo.png" alt="Sumo Logic" class="ld-s0090 ld-h004">
+        <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/logos/ef.png" alt="Entrepreneur First" class="ld-s0091 ld-h004">
       </div>
     </div>
   </section>
@@ -197,7 +218,7 @@ WHERE t.age &gt;= 30 AND q.id = 2
           <div class="ld-s0043"><span class="ld-s0044"></span>One workflow</div>
           <h2 class="ld-s0094">Load, query, and scale in one place</h2>
         </div>
-        <p class="ld-s0095">Every step is ordinary SQL. Nothing leaves the database, so sequence work and metadata work stay together.</p>
+        <p class="ld-s0095">Every step is ordinary SQL, so we don&#39;t have to rely on bash scripts or unintuitive CLIs for BLASTN, minimap2 or other tools.</p>
       </div>
       <div data-reveal="fade" class="ld-s0096">
         <div class="ld-s0097">
@@ -239,8 +260,8 @@ WHERE t.age &gt;= 30 AND q.id = 2
     <div class="ld-s0041">
       <div data-reveal>
         <div class="ld-s0043"><span class="ld-s0106"></span>The SQL</div>
-        <h2 class="ld-s0107">Three queries, one product story</h2>
-        <p class="ld-s0108">Start with the smallest search, add metadata filters, then load a file and keep indexes current. Same language throughout.</p>
+        <h2 class="ld-s0107">Finally, one clean interface for all DNA/RNA operations!</h2>
+        <p class="ld-s0108">Start with the smallest search, add metadata filters, then load a file, update indexes, shuffle sequences or order them. Operations are unlimited and you son&#39;t have to write custom scripts ever again.</p>
       </div>
 
       <div data-reveal class="ld-s0109">
@@ -336,7 +357,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
               </div>
               <div class="ld-s0134">
                 <div class="ld-s0135">Performance</div>
-                <p class="ld-s0136">The sequence-search work can use selected Vulkan-backed GPU paths. The metadata filters and ordering stay in the same SQL query.</p>
+                <p class="ld-s0136">The sequence-search work can use selected GPU paths inmplemented in Vulkan.</p>
               </div>
 
             </div>
@@ -390,8 +411,8 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
                 <p class="ld-s0144">With insert-time indexing on, new records can update sequence indexes as they arrive. For deferred bulk work, BioseqDB can also rebuild indexes after loading.</p>
               </div>
               <div class="ld-s0145">
-                <div class="ld-s0146">The payoff</div>
-                <p class="ld-s0147">The follow-up query shows the payoff. Loaded and inserted records are available to sequence search and metadata ordering in one place.</p>
+                <div class="ld-s0146">Benefits</div>
+                <p class="ld-s0147">As everything is stored in custom columnar format in Postgres, all operations can be optimised by the optimiser and offer speedups up to 120x compared to tools like minimap2</p>
               </div>
             </div>
 
@@ -417,7 +438,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
   <!-- CINEMATIC BAND : small_vid.mp4 -->
   <section data-reveal="fade" class="ld-s0148">
     <video data-autobg autoplay muted loop playsinline preload="auto" aria-hidden="true" class="ld-s0149">
-      <source src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/small_vid.mp4" type="video/mp4">
+      <source src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/small_vid.mp4" type="video/mp4">
     </video>
     <div class="ld-s0150"></div>
     <div class="ld-s0151"></div>
@@ -435,90 +456,90 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
     <div class="ld-s0041">
       <div data-reveal>
         <div class="ld-s0043"><span class="ld-s0044"></span>What BioseqDB gives you</div>
-        <h2 class="ld-s0159">A sequence engine that speaks SQL</h2>
+        <h2 class="ld-s0159">Aligner, sequence transformation toolkit, search engine - everything accessible via just SQL!</h2>
       </div>
       <div data-reveal class="ld-s0160">
         <div class="ld-s0161">
           <div class="ld-s0162">
             <div class="ld-s0163">System architecture</div>
-            <div class="ld-s0164">Select a capability below to trace it ↓</div>
+            <div class="ld-s0164">Select a capability below to read more ↓</div>
           </div>
           <svg viewBox="0 36 900 226" width="100%" data-architecture-click font-family="'Space Grotesk','IBM Plex Sans',sans-serif" class="ld-s0165">
             <defs>
               <linearGradient id="dgGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stop-color="#63cdf0"></stop>
-                <stop offset="1" stop-color="#1f86b0"></stop>
+                <stop offset="0" stop-color="var(--theme-63cdf0, #63cdf0)"></stop>
+                <stop offset="1" stop-color="var(--theme-1f86b0, #1f86b0)"></stop>
               </linearGradient>
-              <marker id="dgAh" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0.6,0.6 L6,3 L0.6,5.4" fill="none" stroke="#5a6b7c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path></marker>
+              <marker id="dgAh" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0.6,0.6 L6,3 L0.6,5.4" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path></marker>
             </defs>
 
             <g data-diag-node class="ld-s0166">
-              <line x1="132" y1="150" x2="192" y2="150" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></line>
-              <line x1="272" y1="150" x2="336" y2="150" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></line>
-              <path d="M362,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M406,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M450,119 V133" fill="none" stroke="#5a6b7c" stroke-width="1.5"></path>
-              <path d="M468,150 H516" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M468,193 H516" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M516,150 V193" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <path d="M516,150 H596" fill="none" stroke="#586878" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
-              <circle cx="598" cy="150" r="3.4" fill="#6a7f90"></circle>
-              <path d="M692,150 H714 V120 H744" fill="none" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></path>
-              <path d="M692,150 H714 V180 H744" fill="none" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#dgAh)"></path>
+              <line x1="132" y1="150" x2="192" y2="150" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></line>
+              <line x1="272" y1="150" x2="336" y2="150" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></line>
+              <path d="M362,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M406,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M450,119 V133" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.5"></path>
+              <path d="M468,150 H516" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M468,193 H516" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M516,150 V193" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <path d="M516,150 H596" fill="none" stroke="var(--theme-586878, #586878)" stroke-width="1.5" stroke-dasharray="1.5 6" stroke-linecap="round"></path>
+              <circle cx="598" cy="150" r="3.4" fill="var(--theme-6a7f90, #6a7f90)"></circle>
+              <path d="M692,150 H714 V120 H744" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></path>
+              <path d="M692,150 H714 V180 H744" fill="none" stroke="var(--theme-5a6b7c, #5a6b7c)" stroke-width="1.7" marker-end="url(#dgAh)"></path>
             </g>
 
             <g id="dgFile" class="ld-s0167">
-              <path d="M162,44 H194 V98 H150 V56 Z" fill="rgba(242,101,34,0.07)" stroke="#f4894f" stroke-width="1.8" stroke-linejoin="round"></path>
-              <path d="M150,56 H162 V44" fill="none" stroke="#f4894f" stroke-width="1.6" stroke-linejoin="round"></path>
-              <line x1="158" y1="70" x2="186" y2="70" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <line x1="158" y1="78" x2="186" y2="78" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <line x1="158" y1="86" x2="178" y2="86" stroke="#f4894f" stroke-width="1.3" opacity="0.7"></line>
-              <text x="172" y="112" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="9.5" fill="#f4894f">input.fasta</text>
-              <path d="M194,68 H232 V114" fill="none" stroke="#f26522" stroke-width="1.7" stroke-dasharray="1.5 5" stroke-linecap="round"></path>
-              <circle cx="194" cy="68" r="4" fill="#f26522"></circle>
+              <path d="M162,44 H194 V98 H150 V56 Z" fill="var(--theme-f26522-a0_07, rgba(242,101,34,0.07))" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.8" stroke-linejoin="round"></path>
+              <path d="M150,56 H162 V44" fill="none" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.6" stroke-linejoin="round"></path>
+              <line x1="158" y1="70" x2="186" y2="70" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <line x1="158" y1="78" x2="186" y2="78" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <line x1="158" y1="86" x2="178" y2="86" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.3" opacity="0.7"></line>
+              <text x="172" y="112" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="9.5" fill="var(--theme-f4894f, #f4894f)">input.fasta</text>
+              <path d="M194,68 H232 V114" fill="none" stroke="var(--theme-f26522, #f26522)" stroke-width="1.7" stroke-dasharray="1.5 5" stroke-linecap="round"></path>
+              <circle cx="194" cy="68" r="4" fill="var(--theme-f26522, #f26522)"></circle>
             </g>
 
             <g data-diag="sql" data-click="mmsearch" data-diag-node class="ld-s0168">
-              <rect class="f s" x="40" y="108" width="86" height="84" rx="12" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <line class="ink" x1="40" y1="133" x2="126" y2="133" stroke="#6b8091" stroke-width="1.5"></line>
-              <circle cx="54" cy="120" r="3.3" fill="#f26522"></circle>
-              <circle cx="66" cy="120" r="3.3" fill="#d8a15f"></circle>
-              <circle cx="78" cy="120" r="3.3" fill="#2ba6d0"></circle>
-              <text class="ink" x="83" y="171" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="21" fill="#93a6b6" letter-spacing="1">SQL</text>
+              <rect class="f s" x="40" y="108" width="86" height="84" rx="12" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <line class="ink" x1="40" y1="133" x2="126" y2="133" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.5"></line>
+              <circle cx="54" cy="120" r="3.3" fill="var(--theme-f26522, #f26522)"></circle>
+              <circle cx="66" cy="120" r="3.3" fill="var(--theme-d8a15f, #d8a15f)"></circle>
+              <circle cx="78" cy="120" r="3.3" fill="var(--theme-2ba6d0, #2ba6d0)"></circle>
+              <text class="ink" x="83" y="171" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="21" fill="var(--theme-93a6b6, #93a6b6)" letter-spacing="1">SQL</text>
             </g>
 
             <g data-diag="pg" data-click="load" data-diag-node class="ld-s0169">
-              <path class="f s" d="M198,116 V184 A34 9 0 0 0 266 184 V116" fill="transparent" stroke="#6b8091" stroke-width="2"></path>
-              <ellipse class="f s" cx="232" cy="116" rx="34" ry="9" fill="transparent" stroke="#6b8091" stroke-width="2"></ellipse>
-              <ellipse class="s" cx="232" cy="140" rx="34" ry="9" fill="none" stroke="#6b8091" stroke-width="1.4" opacity="0.72"></ellipse>
-              <ellipse class="s" cx="232" cy="164" rx="34" ry="9" fill="none" stroke="#6b8091" stroke-width="1.4" opacity="0.72"></ellipse>
+              <path class="f s" d="M198,116 V184 A34 9 0 0 0 266 184 V116" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></path>
+              <ellipse class="f s" cx="232" cy="116" rx="34" ry="9" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></ellipse>
+              <ellipse class="s" cx="232" cy="140" rx="34" ry="9" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.4" opacity="0.72"></ellipse>
+              <ellipse class="s" cx="232" cy="164" rx="34" ry="9" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.4" opacity="0.72"></ellipse>
             </g>
 
             <g data-diag-node class="ld-s0170">
-              <g data-diag="index" data-click="index"><rect class="f s" x="344" y="95" width="124" height="24" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text class="ink" x="406" y="111" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="#93a6b6" letter-spacing="1.5">INDEX</text></g>
-              <g data-click="columnar"><rect class="s" x="344" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text x="349" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">#1</text></g>
-              <g data-diag="shard" data-click="columnar"><rect class="f s" x="388" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text class="ink" x="393" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">#2</text></g>
-              <g data-click="columnar"><rect class="s" x="432" y="133" width="36" height="34" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect><text x="437" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="#7d94a6">#3</text></g>
-              <g data-diag="meta" data-click="seqmeta"><rect class="f s" x="344" y="179" width="124" height="28" rx="6" fill="transparent" stroke="#d8a15f" stroke-width="2"></rect><text class="ink" x="406" y="197" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="#c69a6a" letter-spacing="1.5">META</text></g>
+              <g data-diag="index" data-click="index"><rect class="f s" x="344" y="95" width="124" height="24" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text class="ink" x="406" y="111" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="var(--theme-93a6b6, #93a6b6)" letter-spacing="1.5">INDEX</text></g>
+              <g data-click="columnar"><rect class="s" x="344" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text x="349" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">#1</text></g>
+              <g data-diag="shard" data-click="columnar"><rect class="f s" x="388" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text class="ink" x="393" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">#2</text></g>
+              <g data-click="columnar"><rect class="s" x="432" y="133" width="36" height="34" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect><text x="437" y="146" font-family="'IBM Plex Mono',monospace" font-weight="600" font-size="8.5" fill="var(--theme-7d94a6, #7d94a6)">#3</text></g>
+              <g data-diag="meta" data-click="seqmeta"><rect class="f s" x="344" y="179" width="124" height="28" rx="6" fill="transparent" stroke="var(--theme-d8a15f, #d8a15f)" stroke-width="2"></rect><text class="ink" x="406" y="197" text-anchor="middle" font-family="'IBM Plex Mono',monospace" font-weight="700" font-size="11" fill="var(--theme-c69a6a, #c69a6a)" letter-spacing="1.5">META</text></g>
             </g>
 
             <g data-diag="engine" data-click="parallel" data-diag-node class="ld-s0171">
-              <rect class="f s" x="600" y="106" width="92" height="88" rx="16" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <path class="ink" d="M642,120 Q632,135 646,150 Q660,165 650,180" fill="none" stroke="#6b8091" stroke-width="2" stroke-linecap="round"></path>
-              <path class="ink" d="M650,120 Q660,135 646,150 Q632,165 642,180" fill="none" stroke="#6b8091" stroke-width="2" stroke-linecap="round"></path>
-              <line class="ink" x1="639" y1="130" x2="653" y2="130" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="640" y1="140" x2="652" y2="140" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="640" y1="160" x2="652" y2="160" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <line class="ink" x1="639" y1="170" x2="653" y2="170" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round"></line>
-              <text x="646" y="216" text-anchor="middle" font-weight="700" font-size="12.5" fill="#93a6b6">BioseqDB execution</text>
-              <text x="646" y="232" text-anchor="middle" font-weight="700" font-size="12.5" fill="#93a6b6">engine layer</text>
+              <rect class="f s" x="600" y="106" width="92" height="88" rx="16" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <path class="ink" d="M642,120 Q632,135 646,150 Q660,165 650,180" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linecap="round"></path>
+              <path class="ink" d="M650,120 Q660,135 646,150 Q632,165 642,180" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linecap="round"></path>
+              <line class="ink" x1="639" y1="130" x2="653" y2="130" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="640" y1="140" x2="652" y2="140" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="640" y1="160" x2="652" y2="160" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <line class="ink" x1="639" y1="170" x2="653" y2="170" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round"></line>
+              <text x="646" y="216" text-anchor="middle" font-weight="700" font-size="12.5" fill="var(--theme-93a6b6, #93a6b6)">BioseqDB execution</text>
+              <text x="646" y="232" text-anchor="middle" font-weight="700" font-size="12.5" fill="var(--theme-93a6b6, #93a6b6)">engine layer</text>
             </g>
 
             <g data-diag="cpu" data-click="simd" data-diag-node class="ld-s0172">
               <rect x="743" y="99" width="95" height="44" fill="transparent"></rect>
-              <rect class="f s" x="751" y="104" width="32" height="32" rx="6" fill="transparent" stroke="#6b8091" stroke-width="2"></rect>
-              <rect class="ink" x="759" y="112" width="16" height="16" rx="2.5" fill="none" stroke="#6b8091" stroke-width="1.6"></rect>
-              <g class="s" stroke="#6b8091" stroke-width="1.6" stroke-linecap="round">
+              <rect class="f s" x="751" y="104" width="32" height="32" rx="6" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2"></rect>
+              <rect class="ink" x="759" y="112" width="16" height="16" rx="2.5" fill="none" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6"></rect>
+              <g class="s" stroke="var(--theme-6b8091, #6b8091)" stroke-width="1.6" stroke-linecap="round">
                 <line x1="746" y1="112" x2="751" y2="112"></line>
                 <line x1="746" y1="120" x2="751" y2="120"></line>
                 <line x1="746" y1="128" x2="751" y2="128"></line>
@@ -532,13 +553,13 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
                 <line x1="767" y1="136" x2="767" y2="141"></line>
                 <line x1="775" y1="136" x2="775" y2="141"></line>
               </g>
-              <text class="t" x="795" y="126" font-weight="700" font-size="19" fill="#93a6b6">CPU</text>
+              <text class="t" x="795" y="126" font-weight="700" font-size="19" fill="var(--theme-93a6b6, #93a6b6)">CPU</text>
             </g>
 
             <g data-diag="gpu" data-click="vulkan" data-diag-node class="ld-s0173">
               <rect x="743" y="158" width="95" height="46" fill="transparent"></rect>
-              <polygon class="f s" points="773,162 754,183 764,183 759,199 780,176 770,176" fill="transparent" stroke="#6b8091" stroke-width="2" stroke-linejoin="round"></polygon>
-              <text class="t" x="795" y="186" font-weight="700" font-size="19" fill="#93a6b6">GPU</text>
+              <polygon class="f s" points="773,162 754,183 764,183 759,199 780,176 770,176" fill="transparent" stroke="var(--theme-6b8091, #6b8091)" stroke-width="2" stroke-linejoin="round"></polygon>
+              <text class="t" x="795" y="186" font-weight="700" font-size="19" fill="var(--theme-93a6b6, #93a6b6)">GPU</text>
             </g>
           </svg>
         </div>
@@ -547,7 +568,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
         <div data-cap="mmsearch" data-cap-select class="ld-s0175">
           <span class="ld-s0176">mmsearch()</span>
           <div class="ld-s0177">SQL-native search</div>
-          <div class="ld-s0178">mmsearch is a predicate you drop into a WHERE clause. Everything around it is the SQL you already write.</div>
+          <div class="ld-s0178">mmsearch is a predicate you drop into a WHERE clause in Postgres datrabase. You can join all other tables as you would normally do.</div>
         </div>
         <div data-cap="seqmeta" data-cap-select class="ld-s0175">
           <span class="ld-s0176">seq + meta</span>
@@ -557,12 +578,12 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
         <div data-cap="load" data-cap-select class="ld-s0175">
           <span class="ld-s0176">bioseq.load()</span>
           <div class="ld-s0177">Streaming loads</div>
-          <div class="ld-s0178">Stream FASTA and FASTQ files into tables. Header fields can map to typed columns as they arrive.</div>
+          <div class="ld-s0178">Stream FASTA and FASTQ files into tables, BioseqDB will atuomatically map different header formats to your table layout.</div>
         </div>
         <div data-cap="index" data-cap-select class="ld-s0175">
           <span class="ld-s0176">SET = on</span>
           <div class="ld-s0177">Current indexes</div>
-          <div class="ld-s0178">Keep sequence indexes current as records are inserted, or rebuild them after a bulk load.</div>
+          <div class="ld-s0178">BioseqDB can automatically keep sequence indexes current as records are inserted, or rebuild them after a bulk load.</div>
         </div>
         <div data-cap="columnar" data-cap-select class="ld-s0175">
           <span class="ld-s0176">columnar</span>
@@ -593,7 +614,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
     <div class="ld-s0041">
       <div data-reveal class="ld-s0181">
         <div class="ld-s0182"><span class="ld-s0183"></span>How the index works<span class="ld-s0106"></span></div>
-        <h2 class="ld-s0184">From long sequences to small, searchable seeds</h2>
+        <h2 class="ld-s0184">BioseqDB was created based on minimap2 design</h2>
         <p class="ld-s0185">Before search runs, BioseqDB turns each sequence into a set of compact seeds. It picks representative k-mers as minimizers, tolerates gaps with spaced seeds, and links distant k-mers into strobemers. Those seeds are what mmsearch looks up, which is why search stays fast as collections grow.</p>
       </div>
       <div class="ld-s0186">
@@ -658,7 +679,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
             <span class="ld-s0189">02</span>
             <h3 class="ld-s0190">Spaced seeds</h3>
           </div>
-          <p class="ld-s0217">A spaced seed keeps some positions and ignores others along a fixed pattern. Two k-mers that differ only at the ignored positions map to the same seed, so a single mismatch does not hide a real match.</p>
+          <p class="ld-s0217">Currently BioseqDB doesn&#39;t support spaced seeds, but I want to add support in a newar future. A spaced seed keeps some positions and ignores others along a fixed pattern.</p>
           <div data-idx-media class="ld-s0218">
             <div class="ld-s0219">
               <div class="ld-s0220">
@@ -724,7 +745,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
             <span class="ld-s0189">03</span>
             <h3 class="ld-s0190">Strobemers</h3>
           </div>
-          <p class="ld-s0191">A strobemer links several short k-mers taken from gapped positions into one seed. Spreading the pieces out covers a wider span while staying small, which helps matches survive insertions and deletions.</p>
+          <p class="ld-s0191">Currently BioseqDB doesn&#39;t support strobomers, but I want to add support in a newar future. A strobemer links several short k-mers taken from gapped positions into one seed.</p>
           <div data-idx-media class="ld-s0192">
             <div class="ld-s0141">
               <div class="ld-s0226">
@@ -818,7 +839,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
           <div data-reveal="fade" class="ld-s0262">
             <div id="who-card-0" data-who-card class="ld-s0263">
               <div class="ld-s0264">Bioinformatics teams</div>
-              <div class="ld-s0178">Search reads, references, and samples without leaving SQL.</div>
+              <div class="ld-s0178">Search reads, references, and samples without doing any custom scripting, using single tool and writing only easy to undetstand SQL.</div>
             </div>
             <div id="who-card-1" data-who-card class="ld-s0263">
               <div class="ld-s0264">Research groups</div>
@@ -879,7 +900,7 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
       <div class="ld-s0285">
         <div>
           <div class="ld-s0004">
-            <img src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="ld-s0005">
+            <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="ld-s0005">
             <span class="ld-s0286">Bioseq<span class="ld-s0287">DB</span></span>
           </div>
           <p class="ld-s0288">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
@@ -908,10 +929,13 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
     <div class="ld-s0296">
       <div class="ld-s0297"></div>
       <div class="ld-s0298">
-        <span class="ld-s0299">© 2026 Bioseq contributors — an independent open-source project.</span>
-        <nav class="ld-s0300">
+        <span class="ld-s0299">© 2026 BioseqDB Piotr Styczyński</span>
+        <nav class="site-footer-links ld-s0300">
           <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="ld-s0301 ld-h005">License (MIT)</a>
           <a href="/versions/" class="ld-s0301 ld-h005">Versions</a>
+          <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="ld-s0301 ld-h005 site-footer-profile">Crunchbase</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="ld-s0301 ld-h005 site-footer-profile">LinkedIn</a>
+          <a href="https://github.com/styczynski" rel="noreferrer" class="ld-s0301 ld-h005 site-footer-profile">Author GitHub</a>
           <a href="#top" class="ld-s0301 ld-h005">Back to top</a>
         </nav>
       </div>
@@ -922,16 +946,16 @@ SELECT bioseq.load(&#39;imported&#39;, &#39;readme_samples.fasta&#39;);</code></
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"BioseqDB","description":"Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.","url":"https://bioseqdb.com/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/media/social_card.png"}</script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/prism-init.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/prism/prism.min.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/prism-languages.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/vendor/katex/katex.min.js"></script>
-<script src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/project-math.js"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/main.js"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/site-header.mjs"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/docs-design.mjs"></script>
-<script type="module" src="/assets/8130f5be452886b06e731df7e7ceb32dccb5323c1e98b41f5f4f8f62d6054f1a/js/landing-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"BioseqDB","description":"BioseqDB is an experimental Postgres extension providing complete overhaul of relational storage. Now you can load FASTA and FASTQ files, store sequences (even larger than 160Gbs!) beside any metadata, and search them with ordinary SQL.","url":"https://bioseqdb.com/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png"}</script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-init.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-languages.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.js"></script>
+<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-math.js"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/main.js"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/site-header.mjs"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/docs-design.mjs"></script>
+<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/landing-design.mjs"></script>
 </body>
 </html>
