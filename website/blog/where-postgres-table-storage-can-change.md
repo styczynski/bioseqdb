@@ -15,6 +15,8 @@ When I look at a slow query, I usually start with the query and its indexes, bec
 
 For this post I wanted to start with an ordinary table and a question I can answer from SQL: which part owns its storage, and which part helps me find a row?
 
+For a working extension to compile and inspect, continue with [writing a small table access method in C++](../writing-a-postgres-table-access-method-in-cpp/).
+
 ## Two meanings of access method
 
 The [pg_am catalog](https://www.postgresql.org/docs/17/catalog-pg-am.html) records both table and index access methods. Its `amtype` column distinguishes them, which is useful because `USING` appears in both table and index definitions and can make the two choices look more similar than they are.

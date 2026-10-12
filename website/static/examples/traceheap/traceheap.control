@@ -1,0 +1,4 @@
+comment = 'Educational PostgreSQL 17 heap callback counters'
+default_version = '1.0'
+module_pathname = '$libdir/traceheap'
+relocatable = false

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="588" viewBox="0 0 640 588" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">A small table callback experiment</title>
+<desc id="desc">The SQL name traceheap selects a handler with its own callback table. Instrumented callbacks delegate storage to heap. TOAST uses native heap, while user index creation and the clustering rewrite callback report an unsupported-operation error.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker></defs>
+<g font-family="Inter,Arial,sans-serif">
+<g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+<rect x="12" y="12" width="616" height="86" rx="16"/>
+<rect x="12" y="134" width="616" height="98" rx="16"/>
+<rect x="12" y="268" width="616" height="114" rx="16"/>
+<rect x="12" y="418" width="296" height="154" rx="16"/>
+<rect x="332" y="418" width="296" height="154" rx="16"/>
+</g>
+<g stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2.5" fill="none" marker-end="url(#arrow)"><path d="M320 100V122"/><path d="M320 234V256"/><path d="M168 384V406"/><path d="M482 384V406"/></g>
+<g font-size="27" font-weight="600" fill="var(--theme-eef4f9, #eef4f9)">
+<text x="36" y="49">CREATE TABLE … USING traceheap</text>
+<text x="36" y="172">Our TableAmRoutine</text>
+<text x="36" y="307">Count selected callbacks</text>
+<text x="36" y="458">Delegate to heap</text>
+<text x="354" y="458">Explicit errors</text>
+</g>
+<g font-size="23" fill="var(--theme-a9bccb, #a9bccb)">
+<text x="36" y="80">SQL name → handler → stable routine pointer</text>
+<text x="36" y="207">Copy heap's routine, then replace members</text>
+<text x="36" y="342">Scans · ordinary writes · COPY · VACUUM</text>
+<text x="36" y="368">Counters belong to this backend process</text>
+<text x="36" y="496">Heap tuples and slots</text>
+<text x="36" y="529">TOAST uses native heap</text>
+<text x="36" y="556">Same stored row format</text>
+<text x="354" y="496">User index creation</text>
+<text x="354" y="529">Index validation</text>
+<text x="354" y="556">Clustering / full vacuum</text>
+</g>
+</g></svg>
