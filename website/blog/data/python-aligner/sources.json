@@ -1,0 +1,59 @@
+{
+  "course_results": {
+    "title": "Algorytmy analizy danych genomicznych: wyniki projektu 1, 2024/25",
+    "updated": "2024-12-18",
+    "file": "results_rmap1.pdf",
+    "sha256": "ad15bacd04c31d5ceec44e0a41e3bc6da1521d9d470b4c2b66f3919c595c515f",
+    "pages": 8,
+    "original_url": "https://moodle.mimuw.edu.pl/pluginfile.php/330449/mod_page/content/7/results_rmap1.pdf",
+    "access": "The author supplied the downloaded PDF; the Moodle URL may require a course login. The PDF is not redistributed here.",
+    "measurement_notes": [
+      "The PDF contains raster plots, not original numeric result tables. Runtime and memory CSVs are approximate digitizations, not exact raw measurements.",
+      "The logarithmic runtime axis is in minutes, and the logarithmic memory axis is in MB.",
+      "PS identifies Piotr Styczynski; all other labels retain the anonymous student/team codes from the report.",
+      "Runtime markers partly overlap; affected values were estimated from the adjoining line segments. Rounding may change very close rankings.",
+      "All six tests are plotted for every runtime series. No timeout or missing-result marker is shown; no missing values were converted to zero.",
+      "The report contains no total score or final league table. Its plots alone cannot verify an overall course ranking.",
+      "The exact runtime of MS_ZB on 20M/a cannot be recovered from the image; the plotted value is about 105 minutes and is rounded to about 110 minutes in the two-significant-figure CSV. Do not infer a timeout from that rounding."
+    ],
+    "datasets": {
+      "reference_1M": "yeast genome fragment, 1 million bases",
+      "reference_5M": "bacterial genome fragment, 5 million bases",
+      "reference_20M": "yeast genome fragment, 20 million bases",
+      "reads_per_test": 1000,
+      "read_length_bp": 1000,
+      "a_error_rate_approx": 0.05,
+      "b_error_rate_approx": 0.1,
+      "indels_fraction_of_errors": 0.2
+    }
+  },
+  "assignment": {
+    "title": "Assignment 1: read mapping",
+    "version": "winter semester 2024/2025, ver. 2",
+    "file_supplied_as": "assignment_rmap2.pdf",
+    "sha256": "24e3b66ea536ca435b163f544404f10856af42cc9ced3d121fabd0a7780eb454",
+    "pages": 2,
+    "runtime_limit_minutes": "5 + number_of_reads / 10",
+    "runtime_limit_for_1000_reads_minutes": 105,
+    "memory_limit": "< 1 GB",
+    "correctness_coordinate_tolerance_bp": 20,
+    "minimum_mapped_fraction": 0.8,
+    "maximum_incorrect_fraction": 0.01,
+    "unique_occurrence_guarantee": false,
+    "strand_requirement_stated": false
+  },
+  "local_profiles": {
+    "source": "papers/src/content/aadg/project1/experiments_data.json",
+    "sha256": "51df7ca5076350a0e86f2028babdece742a357ac2d8530edc24e1fa7bf14cfb4",
+    "unit_basis": "The slide plotting code divides t_total by 1000 for seconds and labels BWT t_avg and DP t_total as milliseconds.",
+    "notes": [
+      "These local profiling runs are separate from the course comparison PDF. Hardware, Python/NumPy versions and repeat-run variance are not recorded in these files.",
+      "t_samples_count counts timed calls within a run, not independent benchmark repetitions.",
+      "DP appears only four times for 20Ma and five times for 20Mb in the selected comparisons. Missing DP metrics in smaller cases are not fabricated as zero measurements.",
+      "For bwt-dp-numpy and bwt-dp-lists the slide labels describe suffix-array/BWT implementation variants, not a claim that every operation is vectorized.",
+      "The CSV preserves the exact JSON values, including the original rounded means.",
+      "Historical checker.py at ca3651cc6 selects v10.py for solution, v10_bwt_lists.py for bwt-dp-lists, and v10_bwt_dp_numpy.py for bwt-dp-numpy. These were earlier experiments, not timings of the final mapper.py.",
+      "The v10 development profile uses k=16 and w=7; the final mapper.py uses k=17 and w=8. Timer phases are sequential; setup, control flow, collection and other work remain outside the named phase timers."
+    ]
+  }
+}

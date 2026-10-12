@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="403.2pt" viewBox="0 0 504 403.2" xmlns="http://www.w3.org/2000/svg" version="1.1" role="img" aria-labelledby="figure-title figure-desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="figure-title">PS memory use in the course report</title>
+<desc id="figure-desc">Approximate memory digitized from the raster plot on page 8. Both error levels use about 92 MB for 1M reference bases, 280 MB for 5M and 900 MB for 20M. The source does not provide original memory logs or specify its peak-memory measurement method.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB chart generator</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 403.2 
+L 504 403.2 
+L 504 0 
+L 0 0 
+L 0 403.2 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 85.68 334.656 
+L 428.4 334.656 
+L 428.4 100.8 
+L 85.68 100.8 
+L 85.68 334.656 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 85.68 334.656 
+L 85.68 100.8 
+" clip-path="url(#ped9775821e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="85.68" y="352.774125" transform="rotate(-0 85.68 352.774125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 171.36 334.656 
+L 171.36 100.8 
+" clip-path="url(#ped9775821e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="171.36" y="352.774125" transform="rotate(-0 171.36 352.774125)">250</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 257.04 334.656 
+L 257.04 100.8 
+" clip-path="url(#ped9775821e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="257.04" y="352.774125" transform="rotate(-0 257.04 352.774125)">500</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 342.72 334.656 
+L 342.72 100.8 
+" clip-path="url(#ped9775821e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="342.72" y="352.774125" transform="rotate(-0 342.72 352.774125)">750</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 428.4 334.656 
+L 428.4 100.8 
+" clip-path="url(#ped9775821e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_10"/>
+     <g id="text_5">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="428.4" y="352.774125" transform="rotate(-0 428.4 352.774125)">1000</text>
+     </g>
+    </g>
+    <g id="text_6">
+     <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="257.04" y="379.907562" transform="rotate(-0 257.04 379.907562)">Memory (MB)</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_11"/>
+     <g id="text_7">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="127.316356" transform="rotate(-0 76.68 127.316356)">1M/a</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_12"/>
+     <g id="text_8">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="165.760545" transform="rotate(-0 76.68 165.760545)">5M/a</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_13"/>
+     <g id="text_9">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="204.204734" transform="rotate(-0 76.68 204.204734)">20M/a</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_14"/>
+     <g id="text_10">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="242.648922" transform="rotate(-0 76.68 242.648922)">1M/b</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_15"/>
+     <g id="text_11">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="281.093111" transform="rotate(-0 76.68 281.093111)">5M/b</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_16"/>
+     <g id="text_12">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="319.5373" transform="rotate(-0 76.68 319.5373)">20M/b</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 85.68 111.429818 
+L 117.21024 111.429818 
+L 117.21024 131.805238 
+L 85.68 131.805238 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 85.68 149.874007 
+L 181.6416 149.874007 
+L 181.6416 170.249427 
+L 85.68 170.249427 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 85.68 188.318196 
+L 394.128 188.318196 
+L 394.128 208.693616 
+L 85.68 208.693616 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 85.68 226.762384 
+L 117.21024 226.762384 
+L 117.21024 247.137804 
+L 85.68 247.137804 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 85.68 265.206573 
+L 181.6416 265.206573 
+L 181.6416 285.581993 
+L 85.68 285.581993 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 85.68 303.650762 
+L 394.128 303.650762 
+L 394.128 324.026182 
+L 85.68 324.026182 
+z
+" clip-path="url(#ped9775821e)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="123.3792" y="125.756591" transform="rotate(-0 123.3792 125.756591)">~92</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="187.81056" y="164.200779" transform="rotate(-0 187.81056 164.200779)">~280</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="400.29696" y="202.644968" transform="rotate(-0 400.29696 202.644968)">~900</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="123.3792" y="241.089157" transform="rotate(-0 123.3792 241.089157)">~92</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="187.81056" y="279.533346" transform="rotate(-0 187.81056 279.533346)">~280</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-65b9dd, #65b9dd)" x="400.29696" y="317.977534" transform="rotate(-0 400.29696 317.977534)">~900</text>
+   </g>
+  </g>
+  <g id="text_19">
+   <text style="font-weight: 700; font-size: 19px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="25.2" y="32.581031" transform="rotate(-0 25.2 32.581031)">PS memory grew with the reference</text>
+  </g>
+  <g id="text_20">
+   <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="50.4" transform="rotate(-0 25.2 50.4)">Approximate values from the course PDF.</text>
+  </g>
+  <g id="text_21">
+   <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="72.576" transform="rotate(-0 25.2 72.576)">The assignment allowed less than 1 GB.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="ped9775821e">
+   <rect x="85.68" y="100.8" width="342.72" height="233.856"/>
+  </clipPath>
+ </defs>
+</svg>

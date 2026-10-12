@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="417.6pt" viewBox="0 0 504 417.6" xmlns="http://www.w3.org/2000/svg" version="1.1" role="img" aria-labelledby="figure-title figure-desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="figure-title">PS mapping completeness and incorrect mappings</title>
+<desc id="figure-desc">The course report pages 3 through 6 show zero unmapped PS reads in every test. Incorrect mappings for 1M/a, 5M/a, 20M/a, 1M/b, 5M/b, 20M/b are 1, 3, 0, 0, 4, 0 respectively, with 1,000 reads per test. These are course results, separate from the development-slide checks.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB chart generator</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 417.6 
+L 504 417.6 
+L 504 0 
+L 0 0 
+L 0 417.6 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 85.68 342.432 
+L 463.68 342.432 
+L 463.68 112.752 
+L 85.68 112.752 
+L 85.68 342.432 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 85.68 342.432 
+L 85.68 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="85.68" y="362.829656" transform="rotate(-0 85.68 362.829656)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 161.28 342.432 
+L 161.28 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="161.28" y="362.829656" transform="rotate(-0 161.28 362.829656)">1</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 236.88 342.432 
+L 236.88 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="236.88" y="362.829656" transform="rotate(-0 236.88 362.829656)">2</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 312.48 342.432 
+L 312.48 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="312.48" y="362.829656" transform="rotate(-0 312.48 362.829656)">3</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 388.08 342.432 
+L 388.08 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_10"/>
+     <g id="text_5">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="388.08" y="362.829656" transform="rotate(-0 388.08 362.829656)">4</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_11">
+      <path d="M 463.68 342.432 
+L 463.68 112.752 
+" clip-path="url(#pe2eb3c576e)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_12"/>
+     <g id="text_6">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="463.68" y="362.829656" transform="rotate(-0 463.68 362.829656)">5</text>
+     </g>
+    </g>
+    <g id="text_7">
+     <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="274.68" y="390.587" transform="rotate(-0 274.68 390.587)">Incorrect mappings / 1,000 reads</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_13"/>
+     <g id="text_8">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="138.896615" transform="rotate(-0 76.68 138.896615)">1M/a</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_14"/>
+     <g id="text_9">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="176.6543" transform="rotate(-0 76.68 176.6543)">5M/a</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_15"/>
+     <g id="text_10">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="214.411985" transform="rotate(-0 76.68 214.411985)">20M/a</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_16"/>
+     <g id="text_11">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="252.169671" transform="rotate(-0 76.68 252.169671)">1M/b</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_17"/>
+     <g id="text_12">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="289.927356" transform="rotate(-0 76.68 289.927356)">5M/b</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_18"/>
+     <g id="text_13">
+      <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="76.68" y="327.685042" transform="rotate(-0 76.68 327.685042)">20M/b</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 85.68 123.192 
+L 161.28 123.192 
+L 161.28 143.203573 
+L 85.68 143.203573 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 85.68 160.949685 
+L 312.48 160.949685 
+L 312.48 180.961259 
+L 85.68 180.961259 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 85.68 198.707371 
+L 85.68 198.707371 
+L 85.68 218.718944 
+L 85.68 218.718944 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 85.68 236.465056 
+L 85.68 236.465056 
+L 85.68 256.476629 
+L 85.68 256.476629 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 85.68 274.222741 
+L 388.08 274.222741 
+L 388.08 294.234315 
+L 85.68 294.234315 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 85.68 311.980427 
+L 85.68 311.980427 
+L 85.68 331.992 
+L 85.68 331.992 
+z
+" clip-path="url(#pe2eb3c576e)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="170.352" y="137.888724" transform="rotate(-0 170.352 137.888724)">1</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="321.552" y="175.646409" transform="rotate(-0 321.552 175.646409)">3</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="94.752" y="213.404095" transform="rotate(-0 94.752 213.404095)">0</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="94.752" y="251.16178" transform="rotate(-0 94.752 251.16178)">0</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="397.152" y="288.919466" transform="rotate(-0 397.152 288.919466)">4</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-f4894f, #f4894f)" x="94.752" y="326.677151" transform="rotate(-0 94.752 326.677151)">0</text>
+   </g>
+  </g>
+  <g id="text_20">
+   <text style="font-weight: 700; font-size: 21px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="25.2" y="34.748719" transform="rotate(-0 25.2 34.748719)">PS mapped every read</text>
+  </g>
+  <g id="text_21">
+   <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-74c8a8, #74c8a8)" x="25.2" y="52.2" transform="rotate(-0 25.2 52.2)">0 unmapped · 8 incorrect out of 6,000</text>
+  </g>
+  <g id="text_22">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="79.344" transform="rotate(-0 25.2 79.344)">Course tests: a ≈ 5% errors; b ≈ 10% errors.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pe2eb3c576e">
+   <rect x="85.68" y="112.752" width="378" height="229.68"/>
+  </clipPath>
+ </defs>
+</svg>

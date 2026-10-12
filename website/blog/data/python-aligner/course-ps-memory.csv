@@ -1,0 +1,7 @@
+student_code,dataset,memory_mb_approx,source_page,precision
+PS,1M/a,92,8,approximately two significant figures; raster digitization
+PS,5M/a,280,8,approximately two significant figures; raster digitization
+PS,20M/a,900,8,approximately two significant figures; raster digitization
+PS,1M/b,92,8,approximately two significant figures; raster digitization
+PS,5M/b,280,8,approximately two significant figures; raster digitization
+PS,20M/b,900,8,approximately two significant figures; raster digitization

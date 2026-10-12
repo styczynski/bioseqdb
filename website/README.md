@@ -216,6 +216,17 @@ The blog index has its own search, keyword filter, sorting and pagination. Its
 category choice is remembered in the browser, with BioseqDB selected on a first
 visit. The dedicated search filters blog posts; the header search includes the
 whole website and ranks blog matches after documentation and code matches.
+
+The Python mapper tutorial keeps its executable cells in ordinary `python`
+fences with `id=py_aligner_...`. They form one ordered standard-library session.
+Run `python3 website/tools/check_python_aligner.py` after changing those cells
+to regenerate `website/static/examples/python-aligner.py`. The CMake content
+and publication checks run the same tool with `--check`: it rejects a stale
+download and checks the algorithms against independent small-input oracles in
+a subprocess with a time limit. Other Python fences are highlighted without
+being executed. The course charts have CSV inputs and provenance under
+`website/blog/data/python-aligner/`; their generator is
+`website/tools/generate_python_aligner_figures.py` (requires Matplotlib).
 Without JavaScript, the index keeps links to all published posts available.
 
 ## Stable public assets

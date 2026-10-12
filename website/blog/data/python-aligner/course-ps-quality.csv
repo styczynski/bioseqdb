@@ -1,0 +1,7 @@
+student_code,dataset,reads,unmapped_reads,incorrect_reads,source_pages,precision
+PS,1M/a,1000,0,1,3-6,integer counts read from plotted markers
+PS,5M/a,1000,0,3,3-6,integer counts read from plotted markers
+PS,20M/a,1000,0,0,3-6,integer counts read from plotted markers
+PS,1M/b,1000,0,0,3-6,integer counts read from plotted markers
+PS,5M/b,1000,0,4,3-6,integer counts read from plotted markers
+PS,20M/b,1000,0,0,3-6,integer counts read from plotted markers

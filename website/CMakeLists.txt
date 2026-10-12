@@ -1120,12 +1120,17 @@ add_custom_command(
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_blog_content.py"
           --model "${_site_model}" --site "${_staging_dir}"
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py" --check
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
           "${_landing_content}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_blog_content.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/blog/writing-a-dna-read-mapper-in-python.md"
+          "${_static_dir}/examples/python-aligner.py"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -1289,6 +1294,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND ${_website_search_contract_command}
   COMMAND ${_website_features_contract_command}
   COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_python_aligner.py" --check
   DEPENDS "${_venv_stamp}" "${_source_dir}/tests/contract/test_theme_palette.py"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "website: check imported author content and benchmark observations"
