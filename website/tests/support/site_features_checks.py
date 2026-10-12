@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+from support.badges_checks import serve_badge
 
 GOOGLE_TAG_URL = "https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"
 FORMSERVE_URL = "https://formserve.io/f/DXTG4KTRmLw"
@@ -127,6 +128,8 @@ def exercise_site_features(browser, server, base_path, version, artifact_dir: Pa
         elif url == GOOGLE_TAG_URL:
             external_requests.append(url)
             route.fulfill(status=200, content_type="application/javascript", body="/* offline analytics */")
+        elif serve_badge(route):
+            pass
         elif url == FORMSERVE_URL:
             if route.request.method == "OPTIONS":
                 route.fulfill(status=204, headers={"access-control-allow-origin": "*",

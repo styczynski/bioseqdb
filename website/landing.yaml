@@ -41,6 +41,36 @@ announcement:
   contact: contact
   pause: Pause release announcement
   resume: Resume release announcement
+# Shields.io endpoints and separate colors for the saved website theme.
+badges:
+  label: Project links and download statistics
+  label_color_dark: 142b3c
+  label_color_light: e2eaf2
+  github_label: GitHub stars
+  github_url: https://github.com/styczynski/bioseqdb/stargazers
+  github_image: https://img.shields.io/github/stars/styczynski/bioseqdb?label=stars&logo=github
+  github_dark: 237ca0
+  github_light: 167da2
+  sourceforge_label: SourceForge downloads
+  sourceforge_url: https://sourceforge.net/projects/bioseqdb/files/
+  sourceforge_image: https://img.shields.io/sourceforge/dt/bioseqdb?label=downloads&logo=sourceforge
+  sourceforge_dark: ad4e20
+  sourceforge_light: ac4e18
+  docker_label: Docker pulls
+  docker_url: https://hub.docker.com/r/styczynski/bioseqdb
+  docker_image: https://img.shields.io/docker/pulls/styczynski/bioseqdb?label=pulls&logo=docker
+  docker_dark: 2c7a5b
+  docker_light: '247752'
+  version_label: Version 0.1.0-alpha.1
+  version_url: https://sourceforge.net/projects/bioseqdb/files/
+  version_image: https://img.shields.io/badge/version-0.1.0--alpha.1-a89ce6?logo=semver
+  version_dark: 7c65b3
+  version_light: 6e58a4
+  license_label: Apache 2.0 license
+  license_url: https://github.com/styczynski/bioseqdb/blob/main/LICENSE
+  license_image: https://img.shields.io/badge/license-Apache%202.0-d8a15f?logo=apache
+  license_dark: '916721'
+  license_light: '866023'
 hero:
   sql_native_sequence_search: SQL sequence search (alignments)
   search_biological_sequences_with_plain: Search biological sequences with plain

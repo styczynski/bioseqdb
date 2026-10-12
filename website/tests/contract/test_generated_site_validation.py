@@ -249,6 +249,8 @@ def validate_html(path: Path, text: str) -> list[str]:
         problems.append(_fail(path, "contains an inline style attribute"))
     analytics_tag = '<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>'
     resource_text = text.replace(analytics_tag, "", 1)
+    resource_text = re.sub(r'(<img src=")https://img\.shields\.io/[^"<>]*"',
+                           r'\1shields-badge"', resource_text)
     if 'src="http' in resource_text or "src='http" in resource_text:
         problems.append(_fail(path, "references an external script/media resource"))
     if "<link" in text and 'stylesheet" href="http' in text:

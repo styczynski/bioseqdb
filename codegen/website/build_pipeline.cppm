@@ -4086,13 +4086,25 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     if (html.find(" style=") != std::string_view::npos) {
         fail("contains an inline style attribute");
     }
-    // This one analytics loader is explicitly configured by the site owner.
-    // All other remote script/media resources remain forbidden.
+    // The analytics loader and Shields badge images are configured by the
+    // site owner. Other remote script/media resources remain forbidden.
     std::string resource_html(html);
     const std::string analytics_tag =
         "<script async src=\"https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7\"></script>";
     if (const auto at = resource_html.find(analytics_tag); at != std::string::npos) {
         resource_html.erase(at, analytics_tag.size());
+    }
+    constexpr std::string_view badge_prefix = "<img src=\"https://img.shields.io/";
+    std::size_t badge_at = 0;
+    while ((badge_at = resource_html.find(badge_prefix, badge_at)) != std::string::npos) {
+        const auto url_begin = badge_at + std::string_view("<img src=\"").size();
+        const auto url_end = resource_html.find('"', badge_at + badge_prefix.size());
+        if (url_end == std::string::npos) break;
+        const auto url = resource_html.substr(url_begin, url_end - url_begin);
+        if (url.find_first_of("<>") == std::string::npos) {
+            resource_html.replace(url_begin, url_end - url_begin, "shields-badge");
+        }
+        ++badge_at;
     }
     if (resource_html.find("src=\"http") != std::string::npos
         || resource_html.find("src='http") != std::string::npos) {
@@ -5407,7 +5419,7 @@ void decorate_code_entity_ranges(
                     + url("sitemap.xml") + "\n");
     writer.emit(route("security-headers.txt"),
                 "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com; "
-                "style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; "
+                "style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; "
                 "media-src 'self'; connect-src 'self' https://raw.githubusercontent.com "
                 "https://api.github.com https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; "
                 "base-uri 'self'; form-action 'self' https://formserve.io; frame-ancestors 'none'\n"

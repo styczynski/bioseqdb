@@ -881,6 +881,39 @@ def add_footer_profile_links(markup: str) -> str:
     return markup[:footer_at] + footer + markup[footer_end:]
 
 
+def landing_badges() -> str:
+    """Keep badge labels, destinations and Shields endpoints in authored YAML."""
+    values = {
+        "label": "Project links and download statistics",
+        "label_color_dark": "142b3c", "label_color_light": "e2eaf2",
+        "github_label": "GitHub stars", "github_url": "https://github.com/styczynski/bioseqdb/stargazers",
+        "github_image": "https://img.shields.io/github/stars/styczynski/bioseqdb?label=stars&logo=github",
+        "github_dark": "237ca0", "github_light": "167da2",
+        "sourceforge_label": "SourceForge downloads", "sourceforge_url": "https://sourceforge.net/projects/bioseqdb/files/",
+        "sourceforge_image": "https://img.shields.io/sourceforge/dt/bioseqdb?label=downloads&logo=sourceforge",
+        "sourceforge_dark": "ad4e20", "sourceforge_light": "ac4e18",
+        "docker_label": "Docker pulls", "docker_url": "https://hub.docker.com/r/styczynski/bioseqdb",
+        "docker_image": "https://img.shields.io/docker/pulls/styczynski/bioseqdb?label=pulls&logo=docker",
+        "docker_dark": "2c7a5b", "docker_light": "247752",
+        "version_label": "Version 0.1.0-alpha.1", "version_url": "https://sourceforge.net/projects/bioseqdb/files/",
+        "version_image": "https://img.shields.io/badge/version-0.1.0--alpha.1-a89ce6?logo=semver",
+        "version_dark": "7c65b3", "version_light": "6e58a4",
+        "license_label": "Apache 2.0 license", "license_url": "https://github.com/styczynski/bioseqdb/blob/main/LICENSE",
+        "license_image": "https://img.shields.io/badge/license-Apache%202.0-d8a15f?logo=apache",
+        "license_dark": "916721", "license_light": "866023",
+    }
+    LANDING_DEFAULT_COPY["badges"] = values
+    parts = ['<nav class="landing-badges" data-project-badges aria-label="{{ landing.badges.label }}" data-label-dark="{{ landing.badges.label_color_dark }}" data-label-light="{{ landing.badges.label_color_light }}">']
+    for badge in ("github", "sourceforge", "docker", "version", "license"):
+        binding = "landing.badges." + badge
+        parts.append(
+            '  <a class="landing-badge" data-project-badge="' + badge + '" href="{{ ' + binding + '_url }}" aria-label="{{ ' + binding + '_label }}" title="{{ ' + binding + '_label }}">'
+            '<img src="{{ ' + binding + '_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ ' + binding + '_dark }}" data-badge-image="{{ ' + binding + '_image }}" data-color-dark="{{ ' + binding + '_dark }}" data-color-light="{{ ' + binding + '_light }}" alt="{{ ' + binding + '_label }}" height="20" decoding="async" referrerpolicy="no-referrer">'
+            '<span class="landing-badge-fallback" aria-hidden="true">{{ ' + binding + '_label }}</span></a>')
+    parts.append('</nav>')
+    return "\n".join(parts)
+
+
 def landing_template(markup: str) -> str:
     shared_header()  # Register shared editable labels during standalone translation too.
     markup = replace_header(markup, "nav", '{% include "site-header.html.j2" %}')
@@ -895,14 +928,16 @@ def landing_template(markup: str) -> str:
     failed_label = landing_text("actions", "Copy failed")
     markup = markup.replace("data-copy-install", f'data-copy-install data-copy-failure="{failed_label}"', 1)
     markup = markup.replace('class="ld-s0031"', 'class="ld-s0031" data-install-command', 1)
+    markup = markup.replace('<div class="ld-s0018">', '<div class="ld-s0018">\n' + landing_badges(), 1)
     return f'''{{% extends "base.html.j2" %}}
 {{% block body_class %}}landing-design-page{{% endblock %}}
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/landing-design.css">{{% endblock %}}
+{{% block extra_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/landing-badges.css">{{% endblock %}}
 {{% block skip_link %}}<a class="skip-link" href="#main">{skip_label}</a>{{% endblock %}}
 {{% block page %}}
 {markup}
 {{% endblock %}}
-{{% block design_script %}}<script type="module" src="{{{{ site.assets_base_url }}}}js/landing-design.mjs"></script>{{% endblock %}}
+{{% block design_script %}}<script type="module" src="{{{{ site.assets_base_url }}}}js/landing-design.mjs"></script><script type="module" src="{{{{ site.assets_base_url }}}}js/landing-badges.mjs"></script>{{% endblock %}}
 '''
 
 
@@ -1066,7 +1101,7 @@ def base_template(markup: str) -> str:
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
@@ -1150,7 +1185,7 @@ def benchmarks_template(markup: str) -> str:
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>

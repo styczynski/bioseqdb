@@ -1,5 +1,28 @@
 <p align="center"><img src="https://bioseqdb.com/bioseq-mark.svg" alt="BioseqDB" width="180"></p>
 
+<p align="center">
+  <a href="https://github.com/styczynski/bioseqdb/stargazers"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/github/stars/styczynski/bioseqdb?label=stars&amp;logo=github&amp;style=flat-square&amp;labelColor=142b3c&amp;color=237ca0&amp;logoColor=dbe6f0">
+    <img alt="GitHub stars" src="https://img.shields.io/github/stars/styczynski/bioseqdb?label=stars&amp;logo=github&amp;style=flat-square&amp;labelColor=e2eaf2&amp;color=167da2&amp;logoColor=223f53" height="20">
+  </picture></a>
+  <a href="https://sourceforge.net/projects/bioseqdb/files/"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/sourceforge/dt/bioseqdb?label=downloads&amp;logo=sourceforge&amp;style=flat-square&amp;labelColor=142b3c&amp;color=ad4e20&amp;logoColor=dbe6f0">
+    <img alt="SourceForge downloads" src="https://img.shields.io/sourceforge/dt/bioseqdb?label=downloads&amp;logo=sourceforge&amp;style=flat-square&amp;labelColor=e2eaf2&amp;color=ac4e18&amp;logoColor=223f53" height="20">
+  </picture></a>
+  <a href="https://hub.docker.com/r/styczynski/bioseqdb"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/docker/pulls/styczynski/bioseqdb?label=pulls&amp;logo=docker&amp;style=flat-square&amp;labelColor=142b3c&amp;color=2c7a5b&amp;logoColor=dbe6f0">
+    <img alt="Docker pulls" src="https://img.shields.io/docker/pulls/styczynski/bioseqdb?label=pulls&amp;logo=docker&amp;style=flat-square&amp;labelColor=e2eaf2&amp;color=247752&amp;logoColor=223f53" height="20">
+  </picture></a>
+  <a href="https://sourceforge.net/projects/bioseqdb/files/"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/version-0.1.0--alpha.1-a89ce6?logo=semver&amp;style=flat-square&amp;labelColor=142b3c&amp;color=7c65b3&amp;logoColor=dbe6f0">
+    <img alt="Version 0.1.0-alpha.1" src="https://img.shields.io/badge/version-0.1.0--alpha.1-a89ce6?logo=semver&amp;style=flat-square&amp;labelColor=e2eaf2&amp;color=6e58a4&amp;logoColor=223f53" height="20">
+  </picture></a>
+  <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/license-Apache%202.0-d8a15f?logo=apache&amp;style=flat-square&amp;labelColor=142b3c&amp;color=916721&amp;logoColor=dbe6f0">
+    <img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-d8a15f?logo=apache&amp;style=flat-square&amp;labelColor=e2eaf2&amp;color=866023&amp;logoColor=223f53" height="20">
+  </picture></a>
+</p>
+
 # BioseqDB
 
 BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL. Combine genomic matches with relational data using compact sequence types and columnar storage!

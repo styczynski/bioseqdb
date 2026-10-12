@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block body_class %}landing-design-page{% endblock %}
 {% block design_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/landing-design.css">{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/landing-badges.css">{% endblock %}
 {% block skip_link %}<a class="skip-link" href="#main">{{ landing.accessibility.skip_to_content }}</a>{% endblock %}
 {% block page %}
 <div data-screen-label="BioseqDB landing" class="ld-s0001">
@@ -20,6 +21,13 @@
     <div class="ld-s0017"></div>
 
     <div class="ld-s0018">
+<nav class="landing-badges" data-project-badges aria-label="{{ landing.badges.label }}" data-label-dark="{{ landing.badges.label_color_dark }}" data-label-light="{{ landing.badges.label_color_light }}">
+  <a class="landing-badge" data-project-badge="github" href="{{ landing.badges.github_url }}" aria-label="{{ landing.badges.github_label }}" title="{{ landing.badges.github_label }}"><img src="{{ landing.badges.github_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ landing.badges.github_dark }}" data-badge-image="{{ landing.badges.github_image }}" data-color-dark="{{ landing.badges.github_dark }}" data-color-light="{{ landing.badges.github_light }}" alt="{{ landing.badges.github_label }}" height="20" decoding="async" referrerpolicy="no-referrer"><span class="landing-badge-fallback" aria-hidden="true">{{ landing.badges.github_label }}</span></a>
+  <a class="landing-badge" data-project-badge="sourceforge" href="{{ landing.badges.sourceforge_url }}" aria-label="{{ landing.badges.sourceforge_label }}" title="{{ landing.badges.sourceforge_label }}"><img src="{{ landing.badges.sourceforge_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ landing.badges.sourceforge_dark }}" data-badge-image="{{ landing.badges.sourceforge_image }}" data-color-dark="{{ landing.badges.sourceforge_dark }}" data-color-light="{{ landing.badges.sourceforge_light }}" alt="{{ landing.badges.sourceforge_label }}" height="20" decoding="async" referrerpolicy="no-referrer"><span class="landing-badge-fallback" aria-hidden="true">{{ landing.badges.sourceforge_label }}</span></a>
+  <a class="landing-badge" data-project-badge="docker" href="{{ landing.badges.docker_url }}" aria-label="{{ landing.badges.docker_label }}" title="{{ landing.badges.docker_label }}"><img src="{{ landing.badges.docker_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ landing.badges.docker_dark }}" data-badge-image="{{ landing.badges.docker_image }}" data-color-dark="{{ landing.badges.docker_dark }}" data-color-light="{{ landing.badges.docker_light }}" alt="{{ landing.badges.docker_label }}" height="20" decoding="async" referrerpolicy="no-referrer"><span class="landing-badge-fallback" aria-hidden="true">{{ landing.badges.docker_label }}</span></a>
+  <a class="landing-badge" data-project-badge="version" href="{{ landing.badges.version_url }}" aria-label="{{ landing.badges.version_label }}" title="{{ landing.badges.version_label }}"><img src="{{ landing.badges.version_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ landing.badges.version_dark }}" data-badge-image="{{ landing.badges.version_image }}" data-color-dark="{{ landing.badges.version_dark }}" data-color-light="{{ landing.badges.version_light }}" alt="{{ landing.badges.version_label }}" height="20" decoding="async" referrerpolicy="no-referrer"><span class="landing-badge-fallback" aria-hidden="true">{{ landing.badges.version_label }}</span></a>
+  <a class="landing-badge" data-project-badge="license" href="{{ landing.badges.license_url }}" aria-label="{{ landing.badges.license_label }}" title="{{ landing.badges.license_label }}"><img src="{{ landing.badges.license_image }}&amp;style=flat-square&amp;labelColor={{ landing.badges.label_color_dark }}&amp;color={{ landing.badges.license_dark }}" data-badge-image="{{ landing.badges.license_image }}" data-color-dark="{{ landing.badges.license_dark }}" data-color-light="{{ landing.badges.license_light }}" alt="{{ landing.badges.license_label }}" height="20" decoding="async" referrerpolicy="no-referrer"><span class="landing-badge-fallback" aria-hidden="true">{{ landing.badges.license_label }}</span></a>
+</nav>
       <div class="ld-s0019">
         <div class="ld-s0020">
           <span class="ld-s0021"></span>{{ landing.hero.sql_native_sequence_search }}
@@ -813,4 +821,4 @@
 
 </div>
 {% endblock %}
-{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/landing-design.mjs"></script>{% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/landing-design.mjs"></script><script type="module" src="{{ site.assets_base_url }}js/landing-badges.mjs"></script>{% endblock %}

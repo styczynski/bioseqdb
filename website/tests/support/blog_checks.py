@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
+from support.badges_checks import serve_badge
 
 from support.site_features_checks import GOOGLE_TAG_URL, _header_geometry, _light_readability
 
@@ -434,6 +435,8 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
             route.continue_()
         elif route.request.url == GOOGLE_TAG_URL:
             route.fulfill(status=200, content_type='application/javascript', body='/* offline analytics */')
+        elif serve_badge(route):
+            pass
         else:
             unexpected_requests.append(route.request.url)
             route.abort()
