@@ -19,6 +19,7 @@ module;
 #include <print>
 #include <set>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -228,6 +229,7 @@ void bind_public_manifest_identity(
 // Called by verify_website_pipeline aftrr the reference helpers are defined
 void verify_reference_pipeline();
 namespace {
+void verify_blog_pipeline();
 void rewrite_entity_link_routes(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
@@ -246,6 +248,7 @@ void decorate_code_entity_ranges(
 /// Exercises Markdown and Doxygen parsing, entity matching, JSON output, and
 /// templates with, small examples. PostgreSQL execution is tested  separately.
 void verify_website_pipeline() {
+    verify_blog_pipeline();
     const auto algorithm = parse_markdown_content(
         "```pseudocode\nRequire: $x$\nFor $i$\n  If $x_i$\n    Return `score` // saved score\n  End If\nEnd For\n```\n");
     const auto algorithm_html = render_content_html(algorithm.children);
@@ -1770,6 +1773,264 @@ void validate_landing_result(const landing_example_view& view) {
     return views;
 }
 
+// Keep published Markdown readable without exposing database fixtures. Fence
+// lengths and both CommonMark fence characters are respected.
+[[nodiscard]] std::string blog_public_markdown(std::string_view source) {
+    const auto container_content = [](std::string_view line) {
+        std::size_t offset = 0;
+        const auto spaces = [&] {
+            while (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) ++offset;
+        };
+        spaces();
+        for (;;) {
+            if (offset < line.size() && line[offset] == '>') { ++offset; spaces(); continue; }
+            const auto marker = offset;
+            if (offset + 1 < line.size() && (line[offset] == '-' || line[offset] == '+' || line[offset] == '*')
+                && (line[offset + 1] == ' ' || line[offset + 1] == '\t')) {
+                offset += 2;
+                spaces();
+                continue;
+            }
+            while (offset < line.size() && line[offset] >= '0' && line[offset] <= '9') ++offset;
+            if (offset > marker && offset + 1 < line.size() && (line[offset] == '.' || line[offset] == ')')
+                && (line[offset + 1] == ' ' || line[offset + 1] == '\t')) {
+                offset += 2;
+                spaces();
+                continue;
+            }
+            offset = marker;
+            break;
+        }
+        return std::pair{std::string(line.substr(0, offset)), trim_ascii_whitespace(line.substr(offset))};
+    };
+    std::istringstream input{std::string(source)};
+    std::string output, line, fence, block, opening, opening_prefix, content_prefix;
+    bool runnable = false;
+    int section = 0;
+    while (std::getline(input, line)) {
+        auto [prefix, trimmed] = container_content(line);
+        if (!fence.empty()) {
+            // Strip only containers belonging to this fence. A literal > ```
+            // inside a top-level code block is code, never its closing fence.
+            std::size_t offset = 0;
+            for (const char expected : content_prefix) {
+                if (expected == '>') {
+                    if (offset < line.size() && line[offset] == '>') ++offset;
+                    else break;
+                } else if (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) ++offset;
+            }
+            trimmed = trim_ascii_whitespace(std::string_view(line).substr(offset));
+        }
+        if (fence.empty()) {
+            const std::size_t count = trimmed.empty() ? 0 : trimmed.find_first_not_of(trimmed.front());
+            const std::size_t length = count == std::string::npos ? trimmed.size() : count;
+            if (!trimmed.empty() && (trimmed.front() == '`' || trimmed.front() == '~') && length >= 3) {
+                fence = trimmed.substr(0, length);
+                const std::string info = trim_ascii_whitespace(trimmed.substr(length));
+                runnable = info.starts_with("sql") && parse_runnable_sql_fence(info).has_value();
+                opening = line;
+                opening_prefix = prefix;
+                content_prefix = prefix;
+                for (char& character : content_prefix)
+                    if (character != '>' && character != '\t') character = ' ';
+                block.clear();
+                section = 0;
+            } else output += line + "\n";
+        } else if (trimmed.size() >= fence.size()
+                   && trimmed.find_first_not_of(fence.front()) == std::string::npos) {
+            if (runnable && section != 3) throw std::runtime_error("invalid runnable sections in blog Markdown");
+            output += runnable ? opening_prefix + fence + "sql\n" + block : opening + "\n" + block;
+            output += line + "\n";
+            fence.clear();
+        } else if (!runnable) block += line + "\n";
+        else if (trimmed == "-- bioseq:setup") section = 1;
+        else if (trimmed == "-- bioseq:visible") section = 2;
+        else if (trimmed == "-- bioseq:teardown") section = 3;
+        else if (section == 2) block += line + "\n";
+    }
+    if (!fence.empty()) {
+        if (runnable) {
+            if (section != 3) throw std::runtime_error("invalid runnable sections in blog Markdown");
+            output += opening_prefix + fence + "sql\n" + block + content_prefix + fence + "\n";
+        } else output += opening + "\n" + block;
+    }
+    return output;
+}
+
+[[nodiscard]] std::uint32_t blog_reading_minutes(const std::vector<content_node>& nodes) {
+    std::size_t words = 0;
+    const auto count = [&words](const std::vector<content_node>& items, auto&& self) -> void {
+        for (const auto& node : items) {
+            if (node.kind == content_node_kind::raw_html || node.kind == content_node_kind::image)
+                continue;
+            bool in_word = false;
+            for (const unsigned char character : node.text) {
+                const bool letter = character > 127 || (character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
+                if (letter && !in_word) ++words;
+                in_word = letter;
+            }
+            self(node.children, self);
+        }
+    };
+    count(nodes, count);
+    return static_cast<std::uint32_t>(std::max<std::size_t>(1, (words + 199) / 200));
+}
+
+void autolink_blog_keywords(std::vector<content_node>& nodes,
+                           const std::vector<blog_keyword>& keywords) {
+    struct spelling { std::string text; std::size_t keyword; };
+    std::vector<spelling> spellings;
+    const auto lowercase = [](std::string value) {
+        for (char& c : value) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        return value;
+    };
+    for (std::size_t i = 0; i < keywords.size(); ++i)
+        for (const auto& alias : keywords[i].aliases)
+            spellings.push_back({lowercase(alias), i});
+    std::ranges::stable_sort(spellings, [](const auto& left, const auto& right) {
+        return left.text.size() > right.text.size();
+    });
+    const auto word_at = [](std::string_view text, std::size_t offset) {
+        while (offset > 0 && (static_cast<unsigned char>(text[offset]) & 0xc0) == 0x80) --offset;
+        const auto first = static_cast<unsigned char>(text[offset]);
+        if (first < 128) return (first >= 'a' && first <= 'z') || (first >= '0' && first <= '9') || first == '_';
+        std::uint32_t point = first;
+        std::size_t length = 1;
+        if ((first & 0xe0) == 0xc0) { point = first & 0x1f; length = 2; }
+        else if ((first & 0xf0) == 0xe0) { point = first & 0x0f; length = 3; }
+        else if ((first & 0xf8) == 0xf0) { point = first & 7; length = 4; }
+        for (std::size_t i = 1; i < length && offset + i < text.size(); ++i)
+            point = (point << 6) | (static_cast<unsigned char>(text[offset + i]) & 0x3f);
+        // Unicode spaces and punctuation delimit English terms just as ASCII
+        // spaces do; non-ASCII letters still protect whole-word boundaries.
+        return !(point == 0xa0 || point == 0xab || point == 0xbb || point == 0x1680
+            || (point >= 0x2000 && point <= 0x206f) || point == 0x3000
+            || (point >= 0x3001 && point <= 0x303f) || point == 0xfeff);
+    };
+    std::set<std::size_t> used;
+    const auto walk = [&](std::vector<content_node>& list, auto&& self) -> void {
+        std::vector<content_node> replaced;
+        for (auto& node : list) {
+            if (node.kind == content_node_kind::link || node.kind == content_node_kind::entity_link
+                || node.kind == content_node_kind::code_span || node.kind == content_node_kind::code_block
+                || node.kind == content_node_kind::heading || node.kind == content_node_kind::raw_html
+                || node.kind == content_node_kind::image || node.kind == content_node_kind::math_inline
+                || node.kind == content_node_kind::math_display) {
+                replaced.push_back(std::move(node));
+                continue;
+            }
+            if (node.kind != content_node_kind::text) {
+                self(node.children, self);
+                replaced.push_back(std::move(node));
+                continue;
+            }
+            const auto lower = lowercase(node.text);
+            std::size_t emitted = 0;
+            for (std::size_t offset = 0; offset < lower.size(); ++offset) {
+                if (offset != 0 && word_at(lower, offset - 1)) continue;
+                for (const auto& spelling : spellings) {
+                    const auto end = offset + spelling.text.size();
+                    if (used.contains(spelling.keyword) || end > lower.size()
+                        || lower.compare(offset, spelling.text.size(), spelling.text) != 0
+                        || (end < lower.size() && word_at(lower, end))) continue;
+                    if (offset > emitted) replaced.push_back(content_node{
+                        .kind = content_node_kind::text, .text = node.text.substr(emitted, offset - emitted)});
+                    const auto& keyword = keywords[spelling.keyword];
+                    content_node link;
+                    link.kind = content_node_kind::link;
+                    link.target = keyword.url;
+                    link.attributes["glossary_term"] = keyword.term;
+                    link.attributes["glossary_description"] = keyword.description;
+                    link.children.push_back(content_node{.kind = content_node_kind::text,
+                        .text = node.text.substr(offset, spelling.text.size())});
+                    replaced.push_back(std::move(link));
+                    used.insert(spelling.keyword);
+                    emitted = end;
+                    offset = end - 1;
+                    break;
+                }
+            }
+            if (emitted < node.text.size()) {
+                node.text.erase(0, emitted);
+                replaced.push_back(std::move(node));
+            }
+        }
+        list = std::move(replaced);
+    };
+    walk(nodes, walk);
+}
+
+void verify_blog_pipeline() {
+    const auto metadata = parse_blog_metadata(
+        "title: Introducing BioseqDB!\ndescription: Sequence queries\ndate: 2026-10-01\nkeywords: [SQL, DNA]\n",
+        "blog.md");
+    expect(metadata.slug == "introducing-bioseqdb" && metadata.publication_date == "2026-10-01",
+           "blog routes derive from titles and dates retain ISO form");
+    for (const auto& extra : {"date: 2026-02-30\n", "date: tomorrow\n", "date: 2026-10-01\nslug: ../escape\n",
+                              "date: 2026-10-01\ntitle: duplicate\n"}) {
+        bool rejected = false;
+        try { (void)parse_blog_metadata(std::string("title: Test\ndescription: Test\nkeywords: [SQL]\n") + extra, "bad.md"); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "blog metadata rejects invalid dates, routes and duplicate keys");
+    }
+    const std::string raw = "Before\n\n~~~~sql runnable id=blog_probe\n-- bioseq:setup\nCREATE TABLE hidden_fixture(x int);\n"
+        "-- bioseq:visible\nSELECT 42;\n-- bioseq:teardown\nDROP TABLE hidden_fixture;\n~~~~\nAfter\n";
+    const auto published = blog_public_markdown(raw);
+    expect(published == "Before\n\n~~~~sql\nSELECT 42;\n~~~~\nAfter\n",
+           "raw blog Markdown preserves prose and visible SQL without hidden fixtures");
+    for (const auto& nested : {
+        std::string("> ```sql runnable id=quoted\n> -- bioseq:setup\n> SELECT 'hidden';\n> -- bioseq:visible\n> SELECT 42;\n> -- bioseq:teardown\n> SELECT 'hidden';\n> ```\n"),
+        std::string("- > ```sql runnable id=mixed\n  > -- bioseq:setup\n  > SELECT 'hidden';\n  > -- bioseq:visible\n  > SELECT 42;\n  > -- bioseq:teardown\n  > SELECT 'hidden';\n  > ```\n"),
+        std::string("- ```sql runnable id=listed\n  -- bioseq:setup\n  SELECT 'hidden';\n  -- bioseq:visible\n  SELECT 42;\n  -- bioseq:teardown\n  SELECT 'hidden';\n  ```\n")}) {
+        const auto public_source = blog_public_markdown(nested);
+        expect(!public_source.contains("hidden") && !public_source.contains("bioseq:")
+            && public_source.contains("SELECT 42;"), "nested runnable Markdown never leaks fixtures");
+    }
+    const std::string ordinary = "> ```sql\n> SELECT 1;\n> ```\n\n```text\n> ```\nopaque\n```\n";
+    expect(blog_public_markdown(ordinary) == ordinary, "ordinary nested code remains unchanged");
+    const auto rebased = rewrite_markdown_destinations(
+        "[Docs][reference] [Home](</>)\n\n[reference]: /v0.1/tutorials/intro/\n\n`[Keep](/unchanged)`\n",
+        [](std::string_view target) { return "/mounted" + std::string(target); });
+    expect(rebased.contains("[reference]: /mounted/v0.1/tutorials/intro/")
+        && rebased.contains("[Home](</mounted/>)") && rebased.contains("`[Keep](/unchanged)`"),
+        "public Markdown rebases reference and angle destinations without changing code");
+    const auto glossary = parse_blog_keywords(
+        "keywords:\n  - term: alignment\n    aliases: [sequence alignment]\n"
+        "    url: https://en.wikipedia.org/wiki/Sequence_alignment\n"
+        "    description: 'Read <this> & learn'\n", "keywords.yaml");
+    auto nodes = parse_markdown_content(
+        "## alignment\n\n`alignment` [alignment](https://example.org) sequence alignment; alignment.\n").children;
+    autolink_blog_keywords(nodes, glossary);
+    const auto html = render_content_html(nodes);
+    const auto first = html.find("class=\"glossary-link\"");
+    expect(first != std::string::npos && html.find("class=\"glossary-link\"", first + 1) == std::string::npos
+        && html.contains(">sequence alignment</a>; alignment.")
+        && html.contains("Read &lt;this&gt; &amp; learn"),
+        "glossary prefers longest aliases, skips code/links/headings, escapes text and links first occurrence only");
+    auto punctuation = parse_markdown_content("“alignment”—comparison").children;
+    autolink_blog_keywords(punctuation, glossary);
+    expect(render_content_html(punctuation).contains(">alignment</a>"),
+           "typographic punctuation remains a whole-word boundary");
+    bool unsafe_rejected = false;
+    try { (void)parse_blog_keywords("keywords:\n  - term: SQL\n    url: javascript:alert(1)\n    description: Unsafe\n", "bad.yaml"); }
+    catch (const std::exception&) { unsafe_rejected = true; }
+    expect(unsafe_rejected, "glossary rejects unsafe URL schemes");
+    site_view site;
+    site.title = "BioseqDB";
+    const auto context = boost::json::parse(build_page_context(site,
+        R"({"page_type":"blog","title":"A &amp; B","description":"&lt;SQL&gt;","canonical":"https://example.org/blog/test/","date":"2026-10-01","reading_minutes":1,"structured_title":"A & B </script><b>","structured_description":"<SQL>","structured_author":"A \"B\"","structured_keywords":["<DNA>"]})", "", ""));
+    const auto structured = boost::json::parse(context.at("page").at("jsonld").as_string());
+    expect(structured.at("headline").as_string() == "A & B </script><b>"
+        && structured.at("description").as_string() == "<SQL>"
+        && !std::string(context.at("page").at("jsonld").as_string()).contains("</script>"),
+        "BlogPosting structured data retains original text rather than HTML entities");
+    std::string long_text;
+    for (int i = 0; i < 201; ++i) long_text += "word ";
+    expect(blog_reading_minutes(parse_markdown_content(long_text).children) == 2,
+           "reading time rounds up at 200 visible words per minute");
+}
+
 /// @brief Parses tutorials and builds the website plan.
 ///
 /// Reads Markdown files under <source>/<version>/tutorials, collects runnable
@@ -1806,12 +2067,14 @@ void validate_landing_result(const landing_example_view& view) {
         (fs::path(site_config_relpath).parent_path() / "landing.yaml").generic_string();
     const auto contact_relative =
         (fs::path(site_config_relpath).parent_path() / "contact.yaml").generic_string();
-    for (const auto& relative : {landing_relative, contact_relative,
+    const auto blog_relative =
+        (fs::path(site_config_relpath).parent_path() / "blog.yaml").generic_string();
+    for (const auto& relative : {landing_relative, contact_relative, blog_relative,
                                  version_string + "/landing_examples.md"}) {
         const fs::path path = source / relative;
         if (!fs::is_regular_file(path)) continue;
         const auto contents = read_artifact_bytes(path);
-        if (relative == landing_relative || relative == contact_relative) {
+        if (relative == landing_relative || relative == contact_relative || relative == blog_relative) {
             (void)parse_landing_content(contents, path.generic_string());
         }
         inputs.push_back(source_input{
@@ -1877,6 +2140,57 @@ void validate_landing_result(const landing_example_view& view) {
         }
     }
 
+    std::vector<blog_keyword> glossary;
+    const fs::path glossary_path = source / "blog_keywords.yaml";
+    if (fs::is_regular_file(glossary_path)) {
+        const auto yaml = read_artifact_bytes(glossary_path);
+        glossary = parse_blog_keywords(yaml, glossary_path.generic_string());
+        inputs.push_back({content_relative_path(glossary_path, source),
+                          hex64(bioseq::common::fnv1a_64(yaml))});
+    }
+    std::vector<tutorial> posts;
+    std::vector<fs::path> post_files;
+    if (fs::is_directory(source / "blog")) {
+        for (const auto& entry : fs::recursive_directory_iterator(source / "blog"))
+            if (entry.is_regular_file() && entry.path().extension() == ".md")
+                post_files.push_back(entry.path());
+    }
+    std::ranges::sort(post_files);
+    std::set<std::string> blog_slugs;
+    for (const auto& path : post_files) {
+        const auto markdown = read_artifact_bytes(path);
+        const auto split = separate_front_matter(markdown);
+        tutorial item;
+        item.metadata = parse_blog_metadata(split.yaml, path.generic_string());
+        item.source_path = content_relative_path(path, source);
+        item.version = version;
+        inputs.push_back({item.source_path, hex64(bioseq::common::fnv1a_64(markdown))});
+        if (item.metadata.draft && !include_drafts) continue;
+        if (!blog_slugs.insert(item.metadata.slug).second)
+            throw std::runtime_error("duplicate blog slug " + item.metadata.slug);
+        const auto document = parse_markdown_content(split.body);
+        item.content = document.children;
+        collect_examples_and_queries(document, item.metadata.slug, "blog",
+                                     item.sql_examples, item.entity_queries);
+        std::set<std::string> local_ids;
+        for (auto& example : item.sql_examples) {
+            example.canonical_id = "blog/" + item.metadata.slug + "#" + example.local_id;
+            if (!local_ids.insert(example.local_id).second)
+                throw std::runtime_error("duplicate runnable id '" + example.local_id + "' in " + item.source_path);
+        }
+        process_annotations(item.content, item.source_path);
+        strip_runnable_fence_hidden_sql(item.content);
+        item.metadata.reading_minutes = blog_reading_minutes(item.content);
+        item.public_markdown = blog_public_markdown(markdown);
+        autolink_blog_keywords(item.content, glossary);
+        posts.push_back(std::move(item));
+    }
+    std::ranges::sort(posts, [](const tutorial& left, const tutorial& right) {
+        if (left.metadata.publication_date != right.metadata.publication_date)
+            return left.metadata.publication_date > right.metadata.publication_date;
+        return left.metadata.slug < right.metadata.slug;
+    });
+
     std::uint64_t signature = bioseq::common::fnv1a_64(base_path);
     signature = bioseq::common::hash_combine_64(signature, version.path_component);
     for (const source_input& input : inputs) {
@@ -1895,6 +2209,7 @@ void validate_landing_result(const landing_example_view& view) {
     plan.source_revision = std::move(revision);
     plan.site_title = config.title;
     plan.tutorials = std::move(tutorials);
+    plan.blog_posts = std::move(posts);
     plan.inputs = std::move(inputs);
     plan.signature = hex64(signature);
     return plan;
@@ -2746,7 +3061,7 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     const entity_reference_index reference_index =
         build_entity_reference_index(model.cpp_entities, model.sql_entities);
 
-    for (tutorial& item : plan.tutorials) {
+    const auto execute_document = [&](tutorial& item) {
         apply_entity_shorthand(item.content, true);
         resolve_entity_links(item.content, reference_index, item.source_path);
         std::map<std::string, sql_example_result, std::less<>> results;
@@ -2775,8 +3090,11 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
             example.setup_sql.clear();
             example.teardown_sql.clear();
         }
-    }
+    };
+    for (auto& item : plan.tutorials) execute_document(item);
+    for (auto& item : plan.blog_posts) execute_document(item);
     model.tutorials = std::move(plan.tutorials);
+    model.blog_posts = std::move(plan.blog_posts);
 
     // Count documentation for public C++ and SQL entities. Exclude generated
     // SQL overload-group pages from the totals.
@@ -2791,6 +3109,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     for (const tutorial& item : model.tutorials) {
         collect_referenced_entity_ids(item.content, referenced);
     }
+    for (const tutorial& item : model.blog_posts)
+        collect_referenced_entity_ids(item.content, referenced);
     const std::vector<std::string> referenced_ids(referenced.begin(), referenced.end());
     const reference_coverage_report coverage = evaluate_reference_coverage(
         coverage_entities, config.required_documentation_entities, referenced_ids);
@@ -3152,6 +3472,7 @@ void verify_reference_pipeline() {
     for (const tutorial& item : plan.tutorials) {
         example_count += item.sql_examples.size();
     }
+    for (const tutorial& item : plan.blog_posts) example_count += item.sql_examples.size();
     const auto stage_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - stage_started).count();
     write_stage_report(options, "plan",
@@ -3972,7 +4293,8 @@ void decorate_code_entity_ranges(
     const site_model& model, const site_configuration& config,
     const std::string& base_path, const std::string& revision,
     const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging,
-    const landing_content& landing_copy = {}, const landing_content& contact_copy = {}) {
+    const landing_content& landing_copy = {}, const landing_content& contact_copy = {},
+    const landing_content& blog_copy = {}) {
     const std::string version = model.version.path_component;
     const auto url = [&base_path](std::string_view rel) -> std::string {
         return base_path + std::string(rel);
@@ -4054,6 +4376,13 @@ void decorate_code_entity_ranges(
         }
         contact_context[section] = std::move(values);
     }
+    boost::json::object blog_context;
+    for (const auto& [section, entries] : blog_copy) {
+        boost::json::object values;
+        for (const auto& [key, value] : entries)
+            values[key] = boost::json::parse(json_text(value));
+        blog_context[section] = std::move(values);
+    }
     const auto contact_text = [&contact_copy](
                                   std::string_view section, std::string_view key,
                                   std::string fallback) -> std::string {
@@ -4069,7 +4398,7 @@ void decorate_code_entity_ranges(
         return value == meta->second.end() ? fallback : value->second;
     };
     const auto render = [&route, &site, &templates_dir, &writer, &landing_context,
-                         &contact_context](
+                         &contact_context, &blog_context](
                             std::string_view rel,
                             std::string_view template_name,
                             std::string_view page_object,
@@ -4078,6 +4407,7 @@ void decorate_code_entity_ranges(
         auto context = boost::json::parse(build_page_context(site, page_object, key, collection));
         context.as_object()["landing"] = landing_context;
         context.as_object()["contact"] = contact_context;
+        context.as_object()["blog"] = blog_context;
         const std::string html =
             render_page_template(templates_dir.string(), template_name, boost::json::serialize(context));
         writer.emit(route(rel), html);
@@ -4240,6 +4570,13 @@ void decorate_code_entity_ranges(
         for (const std::string& id : refs) {
             backlinks_by_id[id].push_back({item.metadata.title, tutorial_route});
         }
+    }
+
+    for (const tutorial& item : model.blog_posts) {
+        std::set<std::string> refs;
+        collect_referenced_entity_ids(item.content, refs);
+        for (const auto& id : refs)
+            backlinks_by_id[id].push_back({item.metadata.title, url("blog/" + item.metadata.slug + "/")});
     }
 
     // Give documentation pages the same sidebar of tutorials and C++/SQL
@@ -4533,6 +4870,110 @@ void decorate_code_entity_ranges(
         render(rel, "tutorial.html.j2", page, "", "");
     }
 
+    // Blog pages use the exact document renderer and SQL/entity decoration as
+    // tutorials, while retaining their own permanent, unversioned routes.
+    const auto blog_asset = [&site](std::string value) {
+        if (value.empty()) return value;
+        if (value.starts_with("/static/")) value.erase(0, 8);
+        else if (value.starts_with("static/")) value.erase(0, 7);
+        if (value.starts_with('/') || value.contains("..") || value.contains(':'))
+            throw std::runtime_error("blog image must use a bundled asset");
+        return site.assets_base_url + value;
+    };
+    const auto blog_copy_text = [&blog_copy](std::string_view key, std::string fallback) {
+        const auto group = blog_copy.find("index");
+        if (group == blog_copy.end()) return fallback;
+        const auto value = group->second.find(key);
+        return value == group->second.end() ? fallback : value->second;
+    };
+    boost::json::array blog_posts;
+    std::string markdown_headers;
+    const std::array<std::string_view, 12> month_names{
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"};
+    for (const tutorial& item : model.blog_posts) {
+        const std::string relative = "blog/" + item.metadata.slug + "/";
+        const std::string rel = relative + "index.html";
+        const auto escaped = [](std::string_view text) { return boost::json::parse(json_text(text)); };
+        boost::json::object page;
+        page["title"] = escaped(item.metadata.title);
+        page["description"] = escaped(item.metadata.description);
+        page["canonical"] = escaped(canonical(rel));
+        page["url"] = escaped(url(relative));
+        page["page_type"] = "blog";
+        page["date"] = item.metadata.publication_date;
+        const auto& date = item.metadata.publication_date;
+        page["date_label"] = std::to_string(std::stoi(date.substr(8, 2))) + " "
+            + std::string(month_names.at(std::stoi(date.substr(5, 2)) - 1)) + " " + date.substr(0, 4);
+        page["reading_minutes"] = item.metadata.reading_minutes;
+        page["author"] = escaped(item.metadata.author);
+        page["structured_title"] = item.metadata.title;
+        page["structured_description"] = item.metadata.description;
+        page["structured_author"] = item.metadata.author;
+        boost::json::array structured_keywords;
+        for (const auto& keyword : item.metadata.keywords) structured_keywords.push_back(boost::json::value(keyword));
+        page["structured_keywords"] = std::move(structured_keywords);
+        page["cover_url"] = escaped(blog_asset(item.metadata.cover));
+        page["image_alt"] = escaped(item.metadata.image_alt);
+        page["social_image_url"] = item.metadata.social_image
+            ? escaped(config.canonical_origin + blog_asset(*item.metadata.social_image))
+            : escaped(site.social_image_url);
+        page["markdown_url"] = escaped(url(relative + "index.md"));
+        page["breadcrumb"] = boost::json::parse(breadcrumb_json({
+            {"Home", url("")}, {"Blog", url("blog/")}, {item.metadata.title, url(relative)}}));
+        boost::json::array keywords;
+        std::string keywords_text;
+        for (const auto& keyword : item.metadata.keywords) {
+            keywords.push_back(escaped(keyword));
+            if (!keywords_text.empty()) keywords_text += ", ";
+            keywords_text += keyword;
+        }
+        page["keywords"] = std::move(keywords);
+        page["keywords_text"] = escaped(keywords_text);
+        blog_posts.push_back(page);
+
+        auto body_nodes = item.content;
+        rewrite_entity_link_routes(body_nodes, identity_by_reference, route_by_id, tooltip_url);
+        decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id, tooltip_url,
+                                    "blog " + item.metadata.slug);
+        const auto rewrite_links = [&site, &base_path](content_node& node, auto&& self) -> void {
+            if (node.kind == content_node_kind::image || node.kind == content_node_kind::link) {
+                if (node.target.starts_with("/static/"))
+                    node.target = site.assets_base_url + node.target.substr(8);
+                else if (node.target.starts_with('/') && !node.target.starts_with("//"))
+                    node.target = base_path + node.target.substr(1);
+            }
+            for (auto& child : node.children) self(child, self);
+        };
+        for (auto& node : body_nodes) rewrite_links(node, rewrite_links);
+        page["on_this_page"] = boost::json::parse(build_on_this_page(body_nodes));
+        page["body_html"] = render_content_html(body_nodes);
+        render(rel, "blog.html.j2", boost::json::serialize(page), "", "");
+
+        const auto markdown = rewrite_markdown_destinations(item.public_markdown,
+            [&site, &base_path](std::string_view destination) -> std::string {
+                if (destination.starts_with("/static/"))
+                    return site.assets_base_url + std::string(destination.substr(8));
+                if (destination.starts_with('/') && !destination.starts_with("//"))
+                    return base_path + std::string(destination.substr(1));
+                return std::string(destination);
+            });
+        writer.emit(route(relative + "index.md"), markdown);
+        markdown_headers += url(relative + "index.md") + "\n"
+            "  Content-Type: text/plain; charset=utf-8\n"
+            "  Content-Disposition: inline\n"
+            "  Link: <" + canonical(rel) + ">; rel=\"canonical\"\n\n";
+    }
+    writer.emit(route("_headers"), markdown_headers);
+    boost::json::object blog_index_page;
+    blog_index_page["title"] = boost::json::parse(json_text(blog_copy_text("title", "BioseqDB blog")));
+    blog_index_page["description"] = boost::json::parse(json_text(blog_copy_text(
+        "description", "BioseqDB notes, examples and project updates.")));
+    blog_index_page["canonical"] = canonical("blog/index.html");
+    blog_index_page["page_type"] = "blog_index";
+    blog_index_page["posts"] = std::move(blog_posts);
+    render("blog/index.html", "blog_index.html.j2", boost::json::serialize(blog_index_page), "", "");
+
     // Render the reference home, C++ and SQL indexes, and  entity pages.
     render(version + "/reference/index.html", "reference_index.html.j2",
            "{\"title\":" + json_text("API Reference")
@@ -4789,6 +5230,19 @@ void decorate_code_entity_ranges(
         entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
         search_entries.push_back(std::move(entry));
     }
+    for (const tutorial& item : model.blog_posts) {
+        search_index_entry entry;
+        entry.id = "blog:" + item.metadata.slug;
+        entry.group = "Blog";
+        entry.kind = "blog";
+        entry.title = item.metadata.title;
+        entry.route = url("blog/" + item.metadata.slug + "/");
+        entry.summary = item.metadata.description;
+        entry.name_source = item.metadata.title;
+        for (const auto& keyword : item.metadata.keywords) entry.name_source += " " + keyword;
+        entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
+        search_entries.push_back(std::move(entry));
+    }
     const auto add_page_entry = [&search_entries, &url](
                                     std::string id,
                                     std::string title,
@@ -4807,6 +5261,7 @@ void decorate_code_entity_ranges(
     };
     add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
                    config.short_description);
+    add_page_entry("page:blog", "Blog", "blog/", "BioseqDB notes, examples and project updates.");
     add_page_entry("page:contact", contact_text("page", "title", "Contact me"), "contact/",
                    contact_text("meta", "description", "Contact the BioseqDB maintainer."));
     add_page_entry("page:benchmarks", "Benchmarks", "benchmarks/",
@@ -5076,7 +5531,8 @@ void decorate_code_entity_ranges(
             fs::path(require_option(options, "templates")),
             fs::path(require_option(options, "static")), staging,
             load_landing_content(site_config_path),
-            load_landing_content(site_config_path, "contact.yaml"));
+            load_landing_content(site_config_path, "contact.yaml"),
+            load_landing_content(site_config_path, "blog.yaml"));
     }
 
     // Write a prepublish descriptor before swapping directories so  the next
@@ -5282,7 +5738,8 @@ void decorate_code_entity_ranges(
     const std::string manifest_hash = render_site_model(
         model, config, base_path, revision, templates_dir, static_dir, staging,
         load_landing_content(site_config_path),
-            load_landing_content(site_config_path, "contact.yaml"));
+            load_landing_content(site_config_path, "contact.yaml"),
+            load_landing_content(site_config_path, "blog.yaml"));
     const auto stage_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - stage_started).count();
     std::uint64_t staged_html = 0;

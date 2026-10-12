@@ -690,6 +690,16 @@ struct html_content_writer {
                 && node.target.starts_with("https://github.com/")
                 && (node.target.contains("/blob/") || node.target.contains("/tree/"));
             if (source_link) out += " class=\"source-link\"";
+            if (node.attributes.contains("glossary_description")) {
+                if (!source_link) out += " class=\"glossary-link\"";
+                out += " title=\"";
+                append_escaped_attribute(out, node.attributes.at("glossary_description"));
+                out += "\" data-glossary-description=\"";
+                append_escaped_attribute(out, node.attributes.at("glossary_description"));
+                out += "\" data-glossary-term=\"";
+                append_escaped_attribute(out, node.attributes.at("glossary_term"));
+                out += "\"";
+            }
             out.push_back('>');
             if (source_link) {
                 out += "<svg class=\"github-mark\" aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"><path fill=\"currentColor\" d=\"M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z\"/></svg>";

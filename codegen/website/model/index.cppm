@@ -68,6 +68,12 @@ struct tutorial_metadata {
     std::vector<std::string> keywords;
     std::optional<std::string> social_image;
     bool draft{};
+    // Blog metadata is empty for versioned tutorials.
+    std::string publication_date;
+    std::string author;
+    std::string cover;
+    std::string image_alt;
+    std::uint32_t reading_minutes{};
     source_span source;
 };
 
@@ -111,6 +117,7 @@ struct tutorial {
     std::vector<unresolved_entity_query> entity_queries;
     std::optional<std::string> previous_slug;
     std::optional<std::string> next_slug;
+    std::string public_markdown;  // blog source with execution-only SQL removed
 };
 
 /// @brief An input path and content hash recorded in the site  plan.
@@ -131,6 +138,7 @@ struct site_plan {
     std::string base_path;
     std::string source_revision;
     std::string site_title;
+    std::vector<tutorial> blog_posts;
     std::vector<tutorial> tutorials;
     std::vector<source_input> inputs;
     std::string signature;
@@ -293,6 +301,7 @@ struct site_model {
     release_identifier version;
     std::string site_title;
     std::string source_revision;
+    std::vector<tutorial> blog_posts;
     std::vector<tutorial> tutorials;               // content stripped of hidden SQL
     std::vector<landing_example_view> landing_examples;
     std::vector<reference_entity> cpp_entities;   // routes resolved during rendering

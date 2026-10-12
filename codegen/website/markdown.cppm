@@ -3,6 +3,9 @@ module;
 #include <md4c.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -197,6 +200,46 @@ int append_markdown_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, vo
         throw std::runtime_error("MD4C failed to parse tutorial Markdown");
     }
     return std::move(builder.root);
+}
+
+// Rebase only destinations identified by Markdown parsing. This covers inline,
+// angle-delimited and reference-style links while leaving code examples intact.
+[[nodiscard]] std::string rewrite_markdown_destinations(
+    std::string_view markdown,
+    const std::function<std::string(std::string_view)>& rewrite) {
+    struct edits {
+        std::string_view source;
+        const std::function<std::string(std::string_view)>* rewrite;
+        std::map<std::size_t, std::pair<std::size_t, std::string>, std::greater<>> replacements;
+    } state{markdown, &rewrite, {}};
+    MD_PARSER parser{};
+    parser.flags = MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS
+        | MD_FLAG_WIKILINKS | MD_FLAG_LATEXMATHSPANS | MD_DIALECT_GITHUB;
+    parser.enter_block = [](MD_BLOCKTYPE, void*, void*) { return 0; };
+    parser.leave_block = [](MD_BLOCKTYPE, void*, void*) { return 0; };
+    parser.leave_span = [](MD_SPANTYPE, void*, void*) { return 0; };
+    parser.text = [](MD_TEXTTYPE, const MD_CHAR*, MD_SIZE, void*) { return 0; };
+    parser.enter_span = [](MD_SPANTYPE type, void* detail, void* data) {
+        auto& state = *static_cast<edits*>(data);
+        const MD_ATTRIBUTE* destination = nullptr;
+        if (type == MD_SPAN_A) destination = &static_cast<MD_SPAN_A_DETAIL*>(detail)->href;
+        if (type == MD_SPAN_IMG) destination = &static_cast<MD_SPAN_IMG_DETAIL*>(detail)->src;
+        if (!destination || !destination->text) return 0;
+        const auto start = reinterpret_cast<std::uintptr_t>(state.source.data());
+        const auto address = reinterpret_cast<std::uintptr_t>(destination->text);
+        if (address < start || address + destination->size > start + state.source.size()) return 0;
+        const auto original = attribute_text(*destination);
+        const auto changed = (*state.rewrite)(original);
+        if (changed != original)
+            state.replacements[address - start] = {destination->size, changed};
+        return 0;
+    };
+    if (md_parse(markdown.data(), static_cast<MD_SIZE>(markdown.size()), &parser, &state) != 0)
+        throw std::runtime_error("MD4C failed to rebase public Markdown links");
+    std::string result(markdown);
+    for (const auto& [offset, replacement] : state.replacements)
+        result.replace(offset, replacement.first, replacement.second);
+    return result;
 }
 
 }  // namespace bioseq::codegen::website

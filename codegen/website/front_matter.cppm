@@ -4,6 +4,7 @@ module;
 #include <yaml-cpp/yaml.h>
 #include <yaml-cpp/eventhandler.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -247,6 +248,130 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
                                  + std::string(path));
     }
     return metadata;
+}
+
+/// @brief Stable, readable routes derived from blog titles.
+[[nodiscard]] std::string blog_title_slug(std::string_view title) {
+    std::string slug;
+    for (char character : title) {
+        if (character >= 'A' && character <= 'Z') character += 'a' - 'A';
+        if ((character >= 'a' && character <= 'z')
+            || (character >= '0' && character <= '9')) slug += character;
+        else if (!slug.empty() && slug.back() != '-') slug += '-';
+    }
+    if (!slug.empty() && slug.back() == '-') slug.pop_back();
+    return slug;
+}
+
+[[nodiscard]] tutorial_metadata parse_blog_metadata(
+    std::string_view yaml, std::string_view path) {
+    validate_yaml_strict(std::string(yaml), path);
+    const auto root = YAML::Load(std::string(yaml));
+    if (!root.IsMap()) throw std::runtime_error("blog frontmatter must be a mapping: " + std::string(path));
+    const std::set<std::string> allowed{
+        "title", "description", "date", "keywords", "slug", "author", "cover",
+        "image_alt", "social_image", "draft"};
+    for (const auto& entry : root) {
+        const auto key = entry.first.as<std::string>();
+        if (!allowed.contains(key))
+            throw std::runtime_error("unknown blog frontmatter key '" + key + "': " + std::string(path));
+    }
+    tutorial_metadata metadata;
+    metadata.source.path = path;
+    const auto text = [&root, path](std::string_view key) {
+        return require_scalar(root[std::string(key)], key, path);
+    };
+    metadata.title = text("title");
+    metadata.description = text("description");
+    metadata.publication_date = text("date");
+    metadata.slug = root["slug"] ? text("slug") : blog_title_slug(metadata.title);
+    if (metadata.slug.empty() || blog_title_slug(metadata.slug) != metadata.slug)
+        throw std::runtime_error("blog slug must use lowercase words separated by hyphens: " + std::string(path));
+    if (trim_ascii_whitespace(metadata.title).empty()
+        || trim_ascii_whitespace(metadata.description).empty())
+        throw std::runtime_error("blog title and description must not be empty: " + std::string(path));
+    const auto& date = metadata.publication_date;
+    bool valid_date = date.size() == 10 && date[4] == '-' && date[7] == '-';
+    for (std::size_t i = 0; valid_date && i < date.size(); ++i)
+        if (i != 4 && i != 7 && (date[i] < '0' || date[i] > '9')) valid_date = false;
+    if (valid_date) {
+        const auto parsed = std::chrono::year(std::stoi(date.substr(0, 4)))
+            / std::chrono::month(static_cast<unsigned>(std::stoi(date.substr(5, 2))))
+            / std::chrono::day(static_cast<unsigned>(std::stoi(date.substr(8, 2))));
+        valid_date = parsed.ok();
+    }
+    if (!valid_date) throw std::runtime_error("blog date must be a valid YYYY-MM-DD date: " + std::string(path));
+    const auto keywords = root["keywords"];
+    if (!keywords || !keywords.IsSequence() || keywords.size() == 0)
+        throw std::runtime_error("blog keywords must be a nonempty sequence: " + std::string(path));
+    for (const auto& keyword : keywords) {
+        const auto value = require_scalar(keyword, "keywords", path);
+        if (trim_ascii_whitespace(value).empty())
+            throw std::runtime_error("blog keywords must not be empty: " + std::string(path));
+        metadata.keywords.push_back(value);
+    }
+    metadata.author = root["author"] ? text("author") : "Piotr Styczyński";
+    if (root["cover"]) metadata.cover = text("cover");
+    if (root["image_alt"]) metadata.image_alt = text("image_alt");
+    if (root["social_image"]) metadata.social_image = text("social_image");
+    const auto bundled_image = [path](std::string image) {
+        if (image.starts_with("/static/")) image.erase(0, 8);
+        else if (image.starts_with("static/")) image.erase(0, 7);
+        if (image.empty() || image.starts_with('/') || image.contains("..") || image.contains(':'))
+            throw std::runtime_error("blog images must reference bundled static assets: " + std::string(path));
+    };
+    if (!metadata.cover.empty()) bundled_image(metadata.cover);
+    if (metadata.social_image) bundled_image(*metadata.social_image);
+    if (root["draft"]) metadata.draft = root["draft"].as<bool>();
+    return metadata;
+}
+
+struct blog_keyword {
+    std::string term;
+    std::vector<std::string> aliases;
+    std::string url;
+    std::string description;
+};
+
+[[nodiscard]] std::vector<blog_keyword> parse_blog_keywords(
+    std::string_view yaml, std::string_view path) {
+    validate_yaml_strict(std::string(yaml), path);
+    const auto root = YAML::Load(std::string(yaml));
+    if (!root.IsMap() || root.size() != 1 || !root["keywords"].IsSequence())
+        throw std::runtime_error("blog glossary requires a keywords sequence: " + std::string(path));
+    std::vector<blog_keyword> keywords;
+    std::set<std::string> spellings;
+    for (const auto& entry : root["keywords"]) {
+        if (!entry.IsMap()) throw std::runtime_error("blog keyword must be a mapping: " + std::string(path));
+        for (const auto& field : entry) {
+            const auto key = field.first.as<std::string>();
+            if (key != "term" && key != "aliases" && key != "url" && key != "description")
+                throw std::runtime_error("unknown blog keyword field '" + key + "': " + std::string(path));
+        }
+        blog_keyword item;
+        item.term = require_scalar(entry["term"], "term", path);
+        item.url = require_scalar(entry["url"], "url", path);
+        item.description = require_scalar(entry["description"], "description", path);
+        if (!item.url.starts_with("https://") || item.url.size() <= 8
+            || item.url.find_first_of(" \t\r\n\"<>") != std::string::npos)
+            throw std::runtime_error("blog keyword URL must be an absolute HTTPS URL: " + std::string(path));
+        item.aliases.push_back(item.term);
+        if (const auto aliases = entry["aliases"]) {
+            if (!aliases.IsSequence()) throw std::runtime_error("keyword aliases must be a sequence: " + std::string(path));
+            for (const auto& alias : aliases)
+                item.aliases.push_back(require_scalar(alias, "aliases", path));
+        }
+        for (std::string alias : item.aliases) {
+            for (char& character : alias)
+                if (character >= 'A' && character <= 'Z') character += 'a' - 'A';
+            if (trim_ascii_whitespace(alias).empty() || !spellings.insert(alias).second)
+                throw std::runtime_error("empty or duplicate blog keyword spelling '" + alias + "': " + std::string(path));
+        }
+        if (trim_ascii_whitespace(item.description).empty())
+            throw std::runtime_error("blog keyword description must not be empty: " + std::string(path));
+        keywords.push_back(std::move(item));
+    }
+    return keywords;
 }
 
 /// @brief Website settings read from site.yaml.

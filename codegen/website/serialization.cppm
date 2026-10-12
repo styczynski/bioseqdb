@@ -990,6 +990,14 @@ namespace {
     }
     object["keywords"] = std::move(keywords);
     object["draft"] = item.metadata.draft;
+    object["publication_date"] = item.metadata.publication_date;
+    object["author"] = item.metadata.author;
+    object["cover"] = item.metadata.cover;
+    object["image_alt"] = item.metadata.image_alt;
+    object["reading_minutes"] = item.metadata.reading_minutes;
+    object["social_image"] = item.metadata.social_image
+        ? boost::json::value(*item.metadata.social_image) : boost::json::value(nullptr);
+    object["public_markdown"] = item.public_markdown;
     object["source_path"] = item.source_path;
     object["previous_slug"] =
         item.previous_slug ? boost::json::value(*item.previous_slug) : boost::json::value(nullptr);
@@ -1051,6 +1059,11 @@ namespace {
         tutorials.push_back(serialize_tutorial(item));
     }
     root["tutorials"] = std::move(tutorials);
+    boost::json::array blog_posts;
+    for (const tutorial& item : plan.blog_posts) {
+        blog_posts.push_back(serialize_tutorial(item));
+    }
+    root["blog_posts"] = std::move(blog_posts);
     boost::json::array inputs;
     for (const source_input& input : plan.inputs) {
         boost::json::object object;
@@ -1548,6 +1561,19 @@ namespace {
         item.metadata.keywords.push_back(std::string(keyword.as_string()));
     }
     item.metadata.draft = object.at("draft").as_bool();
+    const auto optional_text = [&object](std::string_view key) {
+        const auto* value = object.if_contains(key);
+        return value && value->is_string() ? std::string(value->as_string()) : std::string{};
+    };
+    item.metadata.publication_date = optional_text("publication_date");
+    item.metadata.author = optional_text("author");
+    item.metadata.cover = optional_text("cover");
+    item.metadata.image_alt = optional_text("image_alt");
+    item.public_markdown = optional_text("public_markdown");
+    if (const auto* minutes = object.if_contains("reading_minutes"))
+        item.metadata.reading_minutes = minutes->to_number<std::uint32_t>();
+    if (const auto* social = object.if_contains("social_image"))
+        item.metadata.social_image = as_optional_string(*social);
     item.source_path = std::string(object.at("source_path").as_string());
     item.previous_slug = as_optional_string(object.at("previous_slug"));
     item.next_slug = as_optional_string(object.at("next_slug"));
@@ -1794,6 +1820,11 @@ namespace {
         tutorials.push_back(serialize_tutorial(item));
     }
     root["tutorials"] = std::move(tutorials);
+    boost::json::array blog_posts;
+    for (const tutorial& item : model.blog_posts) {
+        blog_posts.push_back(serialize_tutorial(item));
+    }
+    root["blog_posts"] = std::move(blog_posts);
     boost::json::array landing;
     for (const landing_example_view& slot : model.landing_examples) {
         landing.push_back(serialize_landing_view(slot));
@@ -1887,6 +1918,7 @@ namespace {
          "site_title",
          "source_revision",
          "tutorials",
+         "blog_posts",
          "landing_examples",
          "cpp_entities",
          "sql_entities",
@@ -1927,6 +1959,10 @@ namespace {
     model.source_revision = std::string(object.at("source_revision").as_string());
     for (const boost::json::value& item : object.at("tutorials").as_array()) {
         model.tutorials.push_back(deserialize_tutorial(item));
+    }
+    if (const auto* posts = object.if_contains("blog_posts")) {
+        for (const auto& item : posts->as_array())
+            model.blog_posts.push_back(deserialize_tutorial(item));
     }
     for (const boost::json::value& slot : object.at("landing_examples").as_array()) {
         model.landing_examples.push_back(deserialize_landing_view(slot));
@@ -2174,6 +2210,8 @@ namespace {
             const std::string hint(page_object_ref.at("page_type").as_string().c_str());
             if (hint == "landing") {
                 page_type = "WebSite";
+            } else if (hint == "blog") {
+                page_type = "BlogPosting";
             } else if (hint == "tutorial" || hint == "entity") {
                 page_type = "TechArticle";
             }
@@ -2189,6 +2227,20 @@ namespace {
         primary["isPartOf"] = site.title;
         if (!site.social_image_url.empty()) {
             primary["image"] = site.social_image_url;
+        }
+        if (page_type == "BlogPosting") {
+            primary["name"] = page_object_ref.at("structured_title");
+            primary["headline"] = page_object_ref.at("structured_title");
+            primary["description"] = page_object_ref.at("structured_description");
+            primary["mainEntityOfPage"] = primary.at("url");
+            primary["datePublished"] = page_object_ref.at("date");
+            primary["author"] = boost::json::object{
+                {"@type", "Person"}, {"name", page_object_ref.at("structured_author")}};
+            primary["keywords"] = page_object_ref.at("structured_keywords");
+            primary["timeRequired"] = "PT" + std::to_string(
+                page_object_ref.at("reading_minutes").to_number<std::uint32_t>()) + "M";
+            if (page_object_ref.contains("social_image_url"))
+                primary["image"] = page_object_ref.at("social_image_url");
         }
         boost::json::object json_ld;
         json_ld["@context"] = "https://schema.org";
@@ -2223,7 +2275,7 @@ namespace {
                 json_ld[field.key()] = field.value();
             }
         }
-        page_object_ref["jsonld"] = boost::json::serialize(json_ld);
+        page_object_ref["jsonld"] = apply_html_safe_escapes(boost::json::serialize(json_ld));
     }
 
     boost::json::object root;

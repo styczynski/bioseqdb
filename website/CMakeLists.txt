@@ -176,6 +176,8 @@ endif()
 
 # --- Config inputs that must reconfigure on author additions -------------------
 file(GLOB_RECURSE _tutorial_md CONFIGURE_DEPENDS "${_source_dir}/${_version}/*.md")
+file(GLOB_RECURSE _blog_md CONFIGURE_DEPENDS "${_source_dir}/blog/*.md")
+set(_blog_inputs ${_blog_md} "${_source_dir}/blog.yaml" "${_source_dir}/blog_keywords.yaml")
 file(GLOB_RECURSE _template_files CONFIGURE_DEPENDS "${_templates_dir}/*.j2")
 file(GLOB_RECURSE _static_files CONFIGURE_DEPENDS "${_static_dir}/*")
 
@@ -442,6 +444,7 @@ set(_design_translation_outputs
   "${_source_dir}/templates/benchmarks.html.j2"
   "${_source_dir}/templates/landing.html.j2"
   "${_source_dir}/templates/site-header.html.j2"
+  "${_source_dir}/templates/site-footer.html.j2"
   "${_source_dir}/static/css/benchmarks-design.css"
   "${_source_dir}/static/css/docs-design.css"
   "${_source_dir}/static/css/landing-design.css"
@@ -647,7 +650,7 @@ add_custom_command(
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
           "${_render_static_stamp}"
           "${_site_config}" "${_landing_content}" "${_contact_content}"
-          ${_tutorial_md} ${_template_files} ${_static_files}
+          ${_tutorial_md} ${_blog_inputs} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
 
@@ -1069,7 +1072,7 @@ add_custom_command(
           "${_landing_fasta}" "${_readme_fasta}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
-          ${_tutorial_md} ${_template_files} ${_static_files}
+          ${_tutorial_md} ${_blog_inputs} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
   USES_TERMINAL VERBATIM)
@@ -1114,11 +1117,15 @@ add_custom_command(
           --documentation-manifest "${_bioseq_settings_documentation_manifest}"
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_blog_content.py"
+          --model "${_site_model}" --site "${_staging_dir}"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
           "${_landing_content}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_blog_content.py"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -1200,6 +1207,7 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/static_fixture_server.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/site_features_checks.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/support/blog_checks.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
             "${CMAKE_SOURCE_DIR}/website/tests/fixtures/search_tokens_golden.json"
             ${_benchmark_browser_fixtures}
@@ -1271,6 +1279,7 @@ else()
 endif()
 add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/theme_palette.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tests/contract/test_theme_palette.py"
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_readme_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/import_project_chapters.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tests/contract/test_project_bibliography.py"
@@ -1279,7 +1288,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND ${_website_search_contract_command}
   COMMAND ${_website_features_contract_command}
   COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
-  DEPENDS "${_venv_stamp}"
+  DEPENDS "${_venv_stamp}" "${_source_dir}/tests/contract/test_theme_palette.py"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "website: check imported author content and benchmark observations"
   VERBATIM)
