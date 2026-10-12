@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="622" viewBox="0 0 640 622" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">The table access boundary</title>
+<desc id="desc">A SQL query reaches the executor. An optional index supplies candidate identifiers. The table access method performs scan or fetch operations and applies visibility rules over its stored rows.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker></defs>
+<g font-family="Inter, Arial, sans-serif">
+  <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+    <rect x="12" y="12" width="616" height="94" rx="18"/>
+    <rect x="12" y="150" width="286" height="144" rx="18"/>
+    <rect x="342" y="150" width="286" height="144" rx="18"/>
+    <rect x="12" y="354" width="616" height="112" rx="18"/>
+    <rect x="12" y="518" width="616" height="92" rx="18"/>
+  </g>
+  <g fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2.5" marker-end="url(#arrow)">
+    <path d="M155 108V137"/><path d="M300 220H330"/>
+    <path d="M155 296V342"/><path d="M485 296V342"/>
+    <path d="M320 468V506"/>
+  </g>
+  <g font-size="26" font-weight="600" fill="var(--theme-eef4f9, #eef4f9)">
+    <text x="36" y="49">The SQL stays familiar</text>
+    <text x="36" y="190">Executor</text><text x="364" y="190">Index method</text>
+    <text x="36" y="396">Table access method</text>
+    <text x="36" y="556">Stored rows</text>
+  </g>
+  <g font-size="24" fill="var(--theme-a9bccb, #a9bccb)">
+    <text x="36" y="81">SELECT specimen, read_count …</text>
+    <text x="36" y="230">Visible rows</text><text x="36" y="263">for this query</text>
+    <text x="364" y="230">Find candidates</text><text x="364" y="263">using an index</text>
+    <text x="45" y="328">scan</text><text x="364" y="328">row IDs</text>
+    <text x="36" y="587">Heap, or another implemented layout</text>
+  </g>
+  <rect x="32" y="414" width="571" height="33" rx="8" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity=".12"/>
+  <text x="44" y="437" font-size="24" fill="var(--theme-74c8a8, #74c8a8)">scan / fetch · visibility · tuple slots</text>
+</g>
+</svg>
