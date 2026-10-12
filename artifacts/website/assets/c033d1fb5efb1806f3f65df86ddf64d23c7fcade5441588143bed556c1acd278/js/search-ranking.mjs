@@ -48,7 +48,9 @@ export function rankedSearch(records, query, limit = MAX_SEARCH_RESULTS) {
     else if (tokens.every((token) => `${names} ${text}`.includes(token))) tier = 3;
     if (tier >= 0) scored.push({
       record, tier,
-      domain: DOMAIN_PRIORITY[searchDomain(record)],
+      // Blog posts remain discoverable without displacing any reference or
+      // documentation result, even when a post title matches exactly.
+      domain: searchType(record) === "Blog" ? 3 : DOMAIN_PRIORITY[searchDomain(record)],
       exactSetting: searchType(record) === "Setting" && tier === 0 ? 0 : 1,
     });
   });

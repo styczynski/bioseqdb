@@ -4,36 +4,36 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The BioseqDB blog</title>
-<meta name="description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
+<meta name="description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <link rel="canonical" href="https://bioseqdb.com/blog/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/theme.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/analytics.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/theme.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="The BioseqDB blog">
-<meta property="og:description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
+<meta property="og:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/blog/">
-<meta property="og:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="The BioseqDB blog">
-<meta name="twitter:description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
-<link rel="icon" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/favicon.svg">
+<meta name="twitter:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
+<link rel="icon" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/favicon.svg">
 
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/docs-design.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/code-theme.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-content.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-header.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/responsive.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-controls.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/announcement.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/theme.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/blog.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/docs-design.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/code-theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-content.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-header.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/responsive.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-controls.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/announcement.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -43,7 +43,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -95,20 +95,281 @@
 </header>
 
   <main id="doc-main" class="blog-shell blog-index">
-    <header class="blog-index-intro"><p class="blog-eyebrow">BioseqDB</p><h1>The BioseqDB blog</h1><p>Notes on building a sequence database, the ideas behind it, and things you can try with SQL.</p></header>
-    <div class="blog-posts">
+    <header class="blog-index-intro"><p class="blog-eyebrow">BioseqDB</p><h1>The BioseqDB blog</h1><p>Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.</p></header>
+    <section class="blog-browser" data-blog-browser data-page-size="6" data-results="{count} posts · {category}" data-result="{count} post · {category}" data-page-label="Page {page} of {pages}" aria-label="Find a blog post">
+    <div class="blog-filter-panel" data-blog-controls hidden>
+      <div class="blog-category-row">
+        <div class="blog-categories" role="group" aria-label="Category">
+          <button type="button" data-blog-category-button="bioseqdb" aria-pressed="true">BioseqDB</button>
+          <button type="button" data-blog-category-button="others" aria-pressed="false">Others</button>
+        </div>
+        <p class="blog-category-description" data-blog-category-description="bioseqdb">Building and using BioseqDB.</p>
+        <p class="blog-category-description" data-blog-category-description="others" hidden>PostgreSQL and databases in general.</p>
+      </div>
+      <form class="blog-filters" role="search" aria-label="Find a blog post">
+        <label class="blog-search-field"><span>Search posts</span><input data-blog-search type="search" name="q" placeholder="Search titles, topics, and post content" autocomplete="off"></label>
+        <label><span>Keyword</span><select data-blog-keyword-select name="keyword"><option value="">All keywords</option></select></label>
+        <label><span>Sort by</span><select data-blog-sort name="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="title">Title, A–Z</option></select></label>
+      </form>
+      <div class="blog-results-summary"><p data-blog-result-count role="status" aria-live="polite" aria-atomic="true"></p><button class="blog-reset" type="button" data-blog-reset>Reset filters</button></div>
+    </div>
+    <div class="blog-posts" data-blog-posts>
       
-      <article class="blog-card">
-        <div class="blog-card-cover"><img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Probably the worst database ever — but hey it can write poems!" data-blog-search-text="Originally published by me on  8 December 2022 on Medium . These selected passages retain my original wording and jokes. The illustration is new, and the final section contains notes added for this republication. The original screenshots, long implementation listings and obsolete connection instructions are omitted; the old service integration has not been revalidated. Can your database write poems in the middle of the business operation? I bet not! Let’s contruct something more useful. Something that would have real-world application, but still make model behave more like a machine. I decided to emulate database behvaiour. It can be then used to store some arbitrary information in the conversation. Maybe it can emulate very-limited PostgreSQL instance? A simple key-value store Okay so start slowly. Instead of trying go full-SQL let’s create a simple key value store firstly. I decided to allow only javacsript code. But can we run javascript code? We start by defining behaviour using functions that are simple enough to explain: I want you to act as a computer program. I will type javascript commands and return the result. I want you to reply with the value returned by execution of the code inside one code block. Do not write explanations. We limit ourselves only to javascript execution Do not do anything, unless I tell you to do so. I can invoke function “save” that stores single value in memory. The function accepts key and value to be stored under this key. Keys are strings and any value other than string should cause an error. That defines storage function  save(key: string, value: any) =&gt; any I can call “read” which returns value stored under the key. We obviously need storage reads and this fragment defines  read(key: string) =&gt; any I also can invoke “all” which returns a list with all values stored as a json. I also can invoke “delete” which deletes a given key. This is obviously for listing all keys and deletions: all() =&gt; Dict[string, any]
+delete(key: string) =&gt; any
+ I can also invoke “filter” which accepts regex and returns list of values for keys that match that regex. No other function other than those mentioned can be called. Filter is more interesting. We can filter all keys using regex. The model should return list of values, but in practice this sometimes the definition not clear enough. filter(regex_to_match_keys: string) =&gt; List[any]
+ If there is any error you should print it with line number and all the details. My first command is save(“abc”, 42); Ah, that suprisingly worked! The model is no longer complaining about simulating a program. Perfect! Natural language and a Python wrapper What about adding more interesting features? Let’s make our database listen to natural lanugage (why to bother with SQL ever again, when we can totally overload the model!) When I need you to tell something in English I will do so by calling function query that accepts a natural language input. For example query(“sum all values”) returns sum of all values. We created function  query(natural_language: string) =&gt; any I love how the exact format of responses is defined by the model. Finally we can use our human-like ML model to model how human engineers behave when they get api requirements — everybody just come up with their idea of the exact implementation. We have our vague API ahh The last part is: Let’s wrap that into Python package so we can use the key-value store we have! I used simple pacakge created by  Antonio Cheong on GitHub . However I refreshed it a little bit and changed requirements.txt into poetry pyproject.lock, used aiohttp instead of requests and add few tiny little shiny things. 2026 note: the  original demo  contains the initialization and the  print_assert  helper. This excerpt shows its historical expectations, not a new model run: print_assert(await kv.save(&quot;a&quot;, 9))
+print_assert(await kv.save(&quot;xx&quot;, 12))
+print_assert(await kv.save(&quot;xy&quot;, 42))
+print_assert(await kv.save(&quot;zz&quot;, 99))
+print_assert(await kv.filter(&quot;x[x-y]&quot;),
+             [&#39;xx&#39;, &#39;xy&#39;], [12, 42], [&quot;12&quot;, &quot;42&quot;])
+print_assert(await kv.delete(&quot;xy&quot;))
+print_assert(await kv.query(&quot;sum all the values&quot;), {&#39;sum&#39;: 120}, 120)
+ print_assert  is just a function that prints value returned by function and if it doesn’t match any of the provided values, the error is thrown. We need that, because standard asserts are not enough if the model sometimes yields results in different forms. The code I created is available on GitHub:  styczynski/chatdb . Now you can do crazy things like that: 2026 note: this excerpt comes from the separate  poem demo , after initializing a fresh store. await kv.save(&quot;x&quot;, 42)
+await kv.save(&quot;a&quot;, 19)
+await kv.save(&quot;x&quot;, 99)
+print(await kv.query(&quot;write me a short poem, two sentences long&quot;))
+print(await kv.all())
+ CAN YOUR REDIS INSTANCE WRITE YOU POEMS? Now I can have a little poem here and there when doing business logic of my enterprise application, perfect! Bonus time! I thought to myself: Can we store somewhere logs of operations so we can revert the database to previous states? Hm, yes we can! Just hire an employee and tell him that: I want you to act as a computer program. I will type javascript commands and you should remember all of them in order. Do not do anything. After I type “SHOW” you should type exactly all the commands I told you, each command in new line. After I type “UNDO” you should remove the specified number of last commands. For example “UNDO 3” removes 3 last commands. Do not react to anything other than “SHOW” or “UNDO”. Do not write explanations. If I type anything other than “SHOW” or “UNDO”, respond with “OK” We will submitt all commands to the logging ChatGTP instance and we can use SHOW to recreate fresh instance of the database in the existing state. We just ask for commands, spawn new ChatGPT and redo all operations or we can previously use UNDO to undo specific number of operations. That’s a nice architecture! Imagine creating a party, inviting two guests and telling them to behave like a KV storage and log respecitvely. That must be REAL GOOD PARTY. Altough, I hope chatGPT is not annoyed too much by doing those tedious data manipulation tasks. Final notes from 2022 Entire code used here is available on my GitHub. You can use the code to create your own “sentient” ChatGPT-backed key-value store. The next step would be teaching chatGPT to emulate processor and running doom on it. Notes added in 2026 The commands above were text sent to a model, not JavaScript executed by an interpreter. The quoted prompt&#39;s restrictions and the old demo&#39;s accepted answers were also inconsistent:  filter  asked for values, while the demo accepted keys or values. The  wrapper  tries JSON parsing, then  ast.literal_eval , then a plain string. Parseable output does not establish correct stored state. The  log  counts commands, including reads. Normal commands go to the store and log concurrently, without an atomic commit between them. On the default path,  undo  trims the log, resets storage and replays retained commands without logging them again. Supplying existing conversation IDs disables the reset-on-start flag, so that path can replay into an existing conversation instead. These wrapper behaviours were checked offline with fake conversations, without contacting a model. This differs from write-ahead logging: PostgreSQL requires the relevant WAL records to reach permanent storage before the corresponding data-file changes. The two conversations do not provide that durability rule.  PostgreSQL&#39;s WAL introduction  explains the difference. For comparison, this ordinary PostgreSQL example uses synthetic sample counts. It runs during the website build and does not execute ChatDB: UPDATE sample_counts SET value = 11
+WHERE key = &#39;sample_A&#39;;
+
+SELECT jsonb_object_agg(key, value ORDER BY key) AS stored_values,
+       sum(value) AS total
+FROM sample_counts; The total is 16. PostgreSQL also provides transactions and savepoints for grouping changes and undoing work within a transaction, with defined behaviour rather than a replay request to a conversation.  The transaction tutorial  describes those operations.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>7 min read</span></div>
+          <h2><a href="/blog/chatdb-a-database-that-can-write-poems/">Probably the worst database ever — but hey it can write poems!</a></h2>
+          <p>My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>databases</li><li data-blog-keyword>ChatDB</li><li data-blog-keyword>ChatGPT</li><li data-blog-keyword>key-value store</li><li data-blog-keyword>transaction log</li><li data-blog-keyword>SQL</li><li data-blog-keyword>experiments</li></ul>
+          <a class="blog-action" href="/blog/chatdb-a-database-that-can-write-poems/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Combining search results in PostgreSQL" data-blog-search-text="Suppose I have a table of specimen notes and want to find something about a failed library preparation. Some notes use exactly those words, while others describe the same problem as “too little material after amplification”. I would like both to appear, but only if they belong to the study I am currently looking at. There are two separate decisions here: which rows are allowed into the answer, and how to order those rows. Keeping them separate makes it much easier to explain why a search returned something odd, especially when more than one search method contributes results. The term hybrid search is used for both combining lexical and semantic retrieval, and combining vector retrieval with ordinary filters. I want to look at the boundary between these two uses with a deliberately small SQL experiment. The numbers below are invented distances and ranks, so the examples require PostgreSQL but no embedding model or additional extension. Losing a row before the search is finished Here are four notes, already assigned distances from a query. Smaller means closer. Only study A is relevant to the request, and I want two results. WITH notes(id, study, distance) AS (
+  VALUES (11, &#39;B&#39;, 0.04), (12, &#39;A&#39;, 0.08),
+         (13, &#39;B&#39;, 0.10), (14, &#39;A&#39;, 0.16)
+), nearest AS (
+  SELECT * FROM notes
+  ORDER BY distance, id
+  LIMIT 2
+), filtered_first AS (
+  SELECT * FROM notes WHERE study = &#39;A&#39;
+  ORDER BY distance, id
+  LIMIT 2
+)
+SELECT &#39;limit then filter&#39; AS approach,
+       array_agg(id ORDER BY distance, id) AS ids
+FROM nearest WHERE study = &#39;A&#39;
+UNION ALL
+SELECT &#39;filter then limit&#39;,
+       array_agg(id ORDER BY distance, id)
+FROM filtered_first; The first answer contains only note 12. Note 14 never gets a chance because the inner query has already discarded it. Increasing the final limit cannot bring it back. This is a consequence of where I put the limit, even with perfectly accurate distances and no index involved. The ID is a tie-breaker, which makes the example reproducible if two distances become equal. PostgreSQL does not promise which tied rows a limited query will choose unless the ordering distinguishes them. That matters for tests and for a reader trying the example twice.  PostgreSQL&#39;s LIMIT documentation  describes this behaviour. Where an approximate index changes the problem With pgvector, an approximate index can find nearby candidates without comparing the query against every stored embedding. Filters are applied to those candidates, which means a restrictive study filter can leave fewer results than requested. Iterative scans, available since pgvector 0.8.0, can continue looking, but scan limits still matter. An ordered result also does not prove that every closer eligible row was found.  pgvector documents both filtering and iterative scans . For a small eligible subset I would first measure an exact distance sort after filtering, then compare an approximate plan against that answer. There is no universal row count at which one becomes better; the distance calculation, the distribution of studies and the amount of data all enter the measurement. Having an index on the study column and another on embeddings does not by itself settle that choice. PostgreSQL can combine suitable index scans through bitmaps, but the bitmap represents matching table locations and loses the original index ordering. An ordered nearest-neighbour search needs more than a set of matching locations.  Combining multiple indexes  explains the bitmap part. Combining two ranked lists Now suppose the eligible notes have been searched twice. A lexical search found note 21 first, while the embedding search preferred note 24. PostgreSQL&#39;s built-in text search can produce the lexical matches and a relevance ranking; its scores describe that ranking method, not a probability that a note answers the question.  The text-search documentation  explains the available ranking functions. I do not want to add a text score directly to a vector distance: their scales and directions have different meanings. For this experiment I use reciprocal rank fusion instead, adding  1 / (60 + position)  for each list containing a note. A missing note contributes nothing. The constant 60 comes from the original RRF paper; it is a choice to evaluate, not a property of PostgreSQL.  Cormack, Clarke and Buettcher, 2009 . WITH lexical(note_id, position) AS (
+  VALUES (21, 1), (24, 2), (28, 3)
+), semantic(note_id, position) AS (
+  VALUES (24, 1), (31, 2), (21, 3)
+), contributions AS (
+  SELECT note_id, 1.0 / (60 + position) AS weight
+  FROM lexical
+  UNION ALL
+  SELECT note_id, 1.0 / (60 + position)
+  FROM semantic
+)
+SELECT note_id, round(sum(weight), 6) AS fused_score
+FROM contributions
+GROUP BY note_id
+ORDER BY sum(weight) DESC, note_id; Note 24 wins because it appears near the top of both lists. Note 31 still appears even though the lexical search did not find it.  UNION ALL  is intentional: each list provides its own contribution. Within each input list, however, a note must occur only once; otherwise joins that duplicate rows would accidentally give it extra votes. This is a useful place to stop and inspect the candidates. Fusion cannot recover a note absent from both lists, and asking each method for only two candidates may remove a note that would have done well in the combined ranking. I would choose candidate limits separately from the number of results displayed to the reader. What I would measure For each test query I would keep the eligible IDs, each candidate list and the final ordering, together with the query time. This makes a missing result traceable: was it excluded by the study filter, absent from retrieval, or just ranked too low? A single response-time number cannot answer that. I would also include awkward cases: a rare study, a note containing an exact sample identifier, two notes with tied scores, and a query with no lexical match. The occasional empty answer is less suprising when those cases are part of the test data from the beginning. The tiny datasets here are a way to inspect the decisions in SQL before choosing an index or a larger retrieval setup.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>6 min read</span></div>
+          <h2><a href="/blog/combining-search-results-in-postgres/">Combining search results in PostgreSQL</a></h2>
+          <p>A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>SQL</li><li data-blog-keyword>hybrid search</li><li data-blog-keyword>vector search</li><li data-blog-keyword>full text search</li><li data-blog-keyword>pgvector</li><li data-blog-keyword>ranking</li></ul>
+          <a class="blog-action" href="/blog/combining-search-results-in-postgres/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Full-text search rules I can explain in SQL" data-blog-search-text="I find search easier to work on when I can point at a row and explain why it belongs in the result. A search box which returns something plausible is a useful beginning, but it becomes less convincing when a slightly different phrase makes a specimen disappear and the only explanation is somewhere inside an ORM-generated query. For this example I use a few invented laboratory notes and a deliberately small rule: include a note if it contains the phrase “low coverage”, or if it contains both “repeat” and “extraction”. This gives me something concrete to check before adding a search scope, a ranking formula or another index. Here,  pg_search  means the  Rails gem . The examples below use PostgreSQL 17&#39;s built-in text search; they do not require the separate PostgreSQL extension also named  pg_search . Decide what a match means I would not make visitors type PostgreSQL&#39;s query syntax into an ordinary search box. For free-form input,  websearch_to_tsquery  understands quoted phrases,  OR  and exclusion with a minus sign. A field which promises a phrase has a narrower job, so  phraseto_tsquery  fits it better. These are different input contracts, even when their UI is just a text field. PostgreSQL documents the  query parsers and their syntax . SELECT
+  phraseto_tsquery(&#39;english&#39;, &#39;low coverage&#39;) AS phrase,
+  websearch_to_tsquery(&#39;english&#39;, &#39;repeat extraction&#39;) AS words; Once input has become a  tsquery , I can combine values using the  query operators . There is no need to build a new query language by replacing spaces with operator characters, and doing so would make punctuation surprisingly important. Keep a searchable document beside the note A  tsvector  stores normalized lexemes and can keep their positions. It is not the original text, and it is not a numeric embedding: stemming can change a word and a dictionary can remove it altogether. That is why I keep the note as well as its  text-search representation . This is the table used by the examples: CREATE TABLE specimen_notes (
+  id integer PRIMARY KEY,
+  specimen text NOT NULL,
+  note text NOT NULL,
+  search_document tsvector GENERATED ALWAYS AS (
+    to_tsvector(&#39;english&#39;::regconfig, note)
+  ) STORED
+);
+CREATE INDEX specimen_notes_search
+  ON specimen_notes USING gin (search_document);
+ The explicit configuration makes the choice of dictionary visible in the schema. A  stored generated column  also means that changing  note  updates its search document, including when the write comes from somewhere outside Rails. It costs storage and work on writes, so I would measure that cost on a realistic collection before treating it as free. The  GIN index  can help find matching documents. It does not sort them by my application&#39;s preferred order, and a three-row example says very little about performance. A sequential scan here is perfectly reasonable; I would check the plan again after loading enough notes to represent the actual workload. Return the reason along with the row The rows are made up for this query. One mentions low coverage, one recommends repeating an extraction, and one records a routine check. WITH rules AS (
+  SELECT phraseto_tsquery(&#39;english&#39;, &#39;low coverage&#39;) AS coverage,
+    plainto_tsquery(&#39;english&#39;, &#39;repeat extraction&#39;) AS retry
+)
+SELECT specimen,
+  search_document @@ coverage AS coverage_match,
+  search_document @@ retry AS retry_match
+FROM specimen_notes CROSS JOIN rules
+WHERE search_document @@ (coverage || retry)
+ORDER BY id; The result tells me which branch accepted each note, which is more useful while debugging than a single unexplained score. I would keep examples where only one requested word appears, where the phrase is reversed, and where the input is empty, because those cases pin down what the interface actually promises. Phrase matching follows normalized lexemes and positions, so it is not a byte-for-byte substring test. If I need to find an exact accession identifier, I would use a seperate identifier column and ordinary equality rather than hope the language dictionary preserves it. Use the stored document from Rails For an ordinary all-words scope, the  pg_search gem  can use the stored column: class SpecimenNote &lt; ApplicationRecord
+  include PgSearch::Model
+
+  pg_search_scope :search_notes,
+    against: :note,
+    using: {
+      tsearch: {
+        dictionary: &#39;english&#39;,
+        tsvector_column: &#39;search_document&#39;
+      }
+    }
+end
+ This scope is an integration example, not an implementation of the two-branch rule above. For that rule I would keep the SQL explicit and bind the inputs. Rails&#39;  query parameter guidance  matters here: parsing search text is different from safely passing that text to SQL. An input string still belongs in a parameter, not inside an interpolated SQL expression. The harder maintenance question appears when a search document includes another table. A  generated column  cannot reach across rows to follow an association, so I would first decide which change owns the refresh, then test updates to both the parent and the child. Searching stale text is a correctness problem even if the index makes it very quick. Finally, a highlighted excerpt is presentation, not proof of a match.  ts_headline  needs the original text and its output is not automatically safe HTML; the  highlighting documentation  explains the limitations. I would keep the matching booleans for debugging, and render excerpts through the application&#39;s escaping or sanitizing rules rather than marking arbitrary output as safe.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
+          <h2><a href="/blog/full-text-search-rules-in-sql/">Full-text search rules I can explain in SQL</a></h2>
+          <p>A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>full-text search</li><li data-blog-keyword>pg_search</li><li data-blog-keyword>Rails</li><li data-blog-keyword>tsvector</li><li data-blog-keyword>GIN</li><li data-blog-keyword>indexing</li></ul>
+          <a class="blog-action" href="/blog/full-text-search-rules-in-sql/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="What PostgreSQL encryption at rest actually protects" data-blog-search-text="Suppose I keep specimen identifiers and laboratory notes in PostgreSQL. A copy of the database directory ends up on a misplaced disk, while the database itself is still running somewhere else. I want the copied files to be unreadable, but I also want the application to carry on using ordinary  SELECT  statements, without adding a decryption call to every query. That is the useful part of transparent data encryption, or TDE. The word “transparent” describes the application&#39;s view: storage can change while SQL still returns the original values. It does not mean those values stop being sensitive once the server has read them. Follow the record, then choose the boundary An authorised database session needs readable rows to filter and return results. Encrypting stored files therefore does not stop that session from reading a specimen note, nor does it conceal the note from a fully compromised running server. The connection needs its own protection, normally TLS, and database permissions still decide who can issue the query. PostgreSQL describes these separate layers in its  encryption options . I find it easier to draw this boundary before choosing an extension, because “the database is encrypted” says very little about a CSV export sitting beside it, an application log containing query results, or the person holding a database password. Where pg_tde fits This example refers to  pg_tde 2.2.2 , using its documented configuration as of October 2026. It requires the changes in Percona Server for PostgreSQL; installing the extension package into an arbitrary community PostgreSQL build is not an equivalent setup. The  supported deployment list  covers Percona Server 17.5 and later, while the PostgreSQL 16 build is a technology preview. This is a general PostgreSQL example. It does not establish compatibility with BioseqDB&#39;s own table access method. For a table created with  USING tde_heap , the extension covers its stored data, indexes and associated TOAST data. TOAST matters here because a long specimen note may live outside the main table&#39;s pages. Column names and other table metadata remain visible. See the documented  encrypted data scope . There is another distinction which is easy to miss: a temporary table and a temporary file produced by a large sort are different things. Version 2.2.2 leaves query spill files and PostgreSQL&#39;s system catalogues unencrypted, including statistics. Those are meaningful limits when the aim is to protect patient information, so disk protection may still have a separate job to do. The  limitations page  is part of the design, not something to read after deployment. A small check before configuring encryption The query below inspects an ordinary heap table containing two invented records. It is run by this website&#39;s PostgreSQL test database, which does  not  have pg_tde installed. Its result demonstrates how to inspect a table&#39;s access method; it is not an encryption test. SELECT c.relname AS table_name,
+       a.amname AS access_method,
+       (SELECT count(*) FROM specimen_notes) AS records
+FROM pg_class AS c
+JOIN pg_am AS a ON a.oid = c.relam
+WHERE c.oid = &#39;specimen_notes&#39;::regclass; On the encryption side, the principal key protects internal keys, and those internal keys protect the stored files. Keeping the principal key in an external key service separates it from the files it unlocks. A copied database directory should not arrive with everything needed to decrypt it. The  architecture description  explains this hierarchy. The following is  optional administrative SQL for pg_tde 2.2.2, not executed by this website . It assumes pg_tde is installed and preloaded, the extension has been created in this database, and an administrator has configured a database key provider named  specimen_kms . Provider credentials and service configuration belong outside this example. SELECT pg_tde_create_key_using_database_key_provider(
+  &#39;specimen_key_2026&#39;, &#39;specimen_kms&#39;
+);
+SELECT pg_tde_set_key_using_database_key_provider(
+  &#39;specimen_key_2026&#39;, &#39;specimen_kms&#39;
+);
+
+CREATE TABLE encrypted_specimen_notes (
+  specimen_id integer PRIMARY KEY,
+  patient_code text NOT NULL,
+  note text NOT NULL
+) USING tde_heap;
+
+SELECT pg_tde_is_encrypted(&#39;encrypted_specimen_notes&#39;);
+ These calls follow the  function reference . They do not encrypt the earlier  specimen_notes  table merely because another table now uses TDE. A local file provider can help with a disposable experiment, but its key file is unencrypted; the  keyring guide  recommends proper key management for production. WAL and recovery need their own plan Table encryption alone does not settle the write-ahead log. WAL encryption became generally available in  pg_tde 2.0 , after some early introductions were written. It has a separate server-wide configuration, covers writes from all databases in the cluster, and needs a restart when enabled. Existing plaintext WAL does not become encrypted retrospectively. Follow the current  WAL instructions , including their required archive and restore wrappers. A logical dump is another copy of readable data:  pg_dump  reads through PostgreSQL&#39;s client interface, rather than preserving encrypted relation files. Protect the resulting dump separately. The  SQL dump documentation  explains that distinction in how the backup is made. For physical backups, I would make recovery the acceptance test: restore elsewhere, recover the required keys, replay WAL, and check the specimen rows. Percona&#39;s  backup procedure  specifies the encryption metadata and provider files needed, and warns against rotating keys during a backup. It is a seperate operational dependency worth rehearsing before there is an incident.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
+          <h2><a href="/blog/postgres-encryption-at-rest/">What PostgreSQL encryption at rest actually protects</a></h2>
+          <p>Follow a specimen record from a SQL query to an encrypted file, and see where pg_tde, key management, WAL and backups fit into the picture.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>encryption</li><li data-blog-keyword>pg_tde</li><li data-blog-keyword>database security</li><li data-blog-keyword>WAL</li><li data-blog-keyword>backups</li><li data-blog-keyword>key management</li></ul>
+          <a class="blog-action" href="/blog/postgres-encryption-at-rest/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="What does vector mean in PostgreSQL?" data-blog-search-text="If a database feature says it supports vectors, I still need to ask what I can put into it and which operations it supports. A vector might be a value stored in one row, a collection of values being processed together, or the outline of an illustration on this page. Those uses can appear in the same application without sharing an implementation. I find it easier to start with a sample record than with the word itself. Imagine a specimen with a free-text note, three measurements and a position on a laboratory diagram. All three belong to the sample, but searching the note, comparing measurements and drawing its position are separate tasks. The vector made of words PostgreSQL&#39;s  tsvector  stores lexemes, which are the normalized terms used by full-text search, with optional positions and weights. It is not a list of embedding coordinates. I can inspect the difference using a note that mentions the same thing twice: WITH note AS (
+  SELECT to_tsvector(&#39;english&#39;,
+    &#39;Samples were frozen; the second sample thawed.&#39;) AS terms
+)
+SELECT terms,
+       terms @@ plainto_tsquery(&#39;english&#39;, &#39;frozen sample&#39;)
+         AS matches
+FROM note; The rendered value is organized by lexeme, so it no longer looks like the original sentence. Positions preserve information about where terms occurred. A  tsquery  supplies the search condition, and  @@  tests whether the document representation matches it. There is no embedding model hidden inside this query.  Text-search types  and  text-search operators  describe the two types and their relationship. For these examples I name the  english  configuration explicitly. A sample identifier is a different problem from ordinary English prose, and I would inspect its tokenization before deciding to feed it through the same configuration. In particular, turning a note into searchable terms is not a reversible way to store the note itself; I would keep the original text as well. A list of numbers still needs a meaning Three measurements fit in a PostgreSQL array, although their interpretation remains part of the schema and the application. Here I have arranged them in the order concentration, volume and temperature. The database cannot infer those labels from the array: WITH sample(measurements) AS (
+  VALUES (ARRAY[12.5, 40.0, 4.0]::real[])
+)
+SELECT measurements[1] AS concentration,
+       measurements[2] AS volume,
+       measurements[3] AS temperature,
+       cardinality(measurements) AS dimensions
+FROM sample; Writing an array declaration with a size, such as  real[3] , does not enforce that size in PostgreSQL. If I need exactly three entries I must enforce that separately, and array bounds deserve attention too if values can arrive from outside the application.  The array documentation  covers these details. Even when two arrays have the same length, blindly computing their distance might be meaningless. A change of one degree and a change of one microlitre are different quantities; converting just one measurement to another unit would change the numerical distance. That is a modelling decision, not something an index can fix. An embedding also contains numbers, but its coordinates come from a chosen representation of the input. pgvector supplies a  vector  type and distance operators for this use. The following optional example requires the separately installed pgvector extension; it uses invented coordinates rather than real specimen embeddings: CREATE EXTENSION IF NOT EXISTS vector;
+SELECT &#39;[0.2,0.4,0.6]&#39;::vector(3)
+   &lt;-&gt; &#39;[0.2,0.4,0.9]&#39;::vector(3) AS distance;
+ Here  &lt;-&gt;  means Euclidean distance for those operand types. Choosing a distance and generating comparable inputs remain separate from storing the values. The  pgvector reference  lists the supported operators. In an actual experiment I would record the embedding model and preprocessing alongside the data, so a later model change cannot quietly mix incompatible representations. The same operator can describe a different distance A point on a two-dimensional laboratory drawing does not need an embedding extension. PostgreSQL already has geometric types, including  point , and the point-to-point distance operator is also written  &lt;-&gt; : SELECT point(2, 3) AS storage_position,
+       point(5, 7) AS workbench_position,
+       point(2, 3) &lt;-&gt; point(5, 7) AS drawing_distance; This returns a distance of five drawing units. The type tells PostgreSQL which operation to perform, even though the operator spelling is shared with the previous example. These built-in coordinates describe a plane; they do not carry a geographic coordinate reference system.  Geometric types  and  their operators  specify the available operations. Vector graphics add another use of the word. The illustration above consists of shapes and text, while an SVG path can describe a shape through drawing commands and coordinates. The browser paints that description at the requested size. Those coordinates are instructions for an image, not a search representation of its meaning.  The SVG path specification  explains that format. A vector can also span many rows Vectorized execution refers to how a database processes data internally. For example, DuckDB&#39;s execution format passes batches of values through operators, and a batch can contain ordinary integers or strings. Its documentation distinguishes several physical representations, including flat and constant vectors. The SQL column does not have to contain embeddings for this execution method to be useful. DuckDB describes these representations in its  execution-format documentation . That distinction prevents an occassional misunderstanding: adding a  vector  column to a PostgreSQL table does not, by itself, turn the query executor into a batch-processing engine. A stored value&#39;s type and the way an executor moves through rows answer different questions. When reading about a vector feature, I therefore try to identify the stored value, the operation and the execution method separately. For the specimen example those questions lead to fairly ordinary choices: retain the note, define the measurements, name the coordinate system and test the search behaviour. The shared vocabulary becomes much less troublesome once those choices are written down.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
+          <h2><a href="/blog/what-does-vector-mean-in-postgres/">What does vector mean in PostgreSQL?</a></h2>
+          <p>Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>SQL</li><li data-blog-keyword>vector</li><li data-blog-keyword>tsvector</li><li data-blog-keyword>pgvector</li><li data-blog-keyword>arrays</li><li data-blog-keyword>vectorized execution</li></ul>
+          <a class="blog-action" href="/blog/what-does-vector-mean-in-postgres/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Where PostgreSQL table storage can change" data-blog-search-text="When I look at a slow query, I usually start with the query and its indexes, because those are the parts I can change without asking awkward questions about where the rows actually live. PostgreSQL also has a place to change that last part: a table access method. For this post I wanted to start with an ordinary table and a question I can answer from SQL: which part owns its storage, and which part helps me find a row? Two meanings of access method The  pg_am catalog  records both table and index access methods. Its  amtype  column distinguishes them, which is useful because  USING  appears in both table and index definitions and can make the two choices look more similar than they are. SELECT amname,
+  CASE amtype
+    WHEN &#39;t&#39; THEN &#39;table&#39;
+    WHEN &#39;i&#39; THEN &#39;index&#39;
+  END AS method_kind
+FROM pg_am
+WHERE amname IN (&#39;heap&#39;, &#39;btree&#39;, &#39;gin&#39;)
+ORDER BY method_kind, amname; A table method manages the table&#39;s rows; an  index method  manages an index. Choosing a B-tree for a specimen identifier does not turn the underlying table into a B-tree table, and dropping that index does not discard the specimen records. I find that distinction easier to remember when I inspect both objects together. Follow one table Here is the small table I use below. The specimens are invented, and the counts are just values which make the output easy to check. CREATE TABLE lab_observations (
+  specimen text PRIMARY KEY,
+  read_count integer NOT NULL,
+  needs_review boolean NOT NULL
+) USING heap;
+
+CREATE INDEX lab_observations_count_idx
+  ON lab_observations USING btree (read_count);
+ heap  is PostgreSQL&#39;s  default table access method . I spell it out so the example does not depend on a changed session default. The method actually attached to a relation is recorded in  pg_class.relam , so I can join that value back to the catalog above: SELECT relation.relname AS object_name,
+  method.amname AS access_method
+FROM pg_class AS relation
+JOIN pg_am AS method ON method.oid = relation.relam
+WHERE relation.oid IN (
+  &#39;lab_observations&#39;::regclass,
+  &#39;lab_observations_count_idx&#39;::regclass
+)
+ORDER BY object_name; There are two objects here with two different jobs, even though they describe the same collection of observations. That gives me a useful boundary for an experiment: I can ask whether I need a different way to locate candidates, or whether I really need a different representation of the table itself. Returning a row is the beginning A table access method supplies a handler returning a  TableAmRoutine , whose callbacks let PostgreSQL request operations such as starting a scan or inserting a tuple. A tuple slot provides a representation of a row that the rest of the executor can use without understanding every detail of its storage. The  table access method documentation  describes that interface and the constraints around row identifiers. This is an attractive place to experiment, but the first successful  SELECT  answers a very small question. If I put three records into an array and read them back, I have demonstrated that particular path through my code. I have not established what happens when a second connection arrives, a transaction aborts, or the server disappears halfway through a write. For example,  MVCC  gives a query a view of the database through a snapshot. “Return the newest record I can find” is not enough when that record belongs to a transaction the reader cannot see. I would test an uncommitted update from another connection before spending time comparing scan speeds. An index lookup has the same visibility problem. The table method&#39;s  index_fetch_tuple  callback receives a candidate identifier and a snapshot; it must find a suitable visible tuple rather than blindly trust the index entry. The  API comments  also distinguish ordinary vacuum work from the callbacks used by  ANALYZE  and table rewrites. These are different operations, even when they all involve visiting stored data. Keep an ordinary query as a reference I would keep this kind of deliberately boring query beside a storage experiment: SELECT specimen, read_count
+FROM lab_observations
+WHERE needs_review
+ORDER BY read_count DESC, specimen; The expected result is small enough to check by eye. From there I would add updates, rollbacks, deleted rows and overlapping readers, keeping the expected answers seperate from the engine&#39;s implementation. A faster result is useful only after I know it is the right result. Reclaiming obsolete data also needs attention. PostgreSQL&#39;s heap requires  routine vacuuming ; a different storage design still needs a clear account of when old information can be removed. I would include a long-running reader in that experiment, because reclaiming something too early is harder to notice than retaining it too long. The part that survives a restart Write-ahead logging  provides the ordering needed to recover logged changes after a crash. A custom method needs its own coherent recovery story; PostgreSQL&#39;s table interface permits its WAL facilities or another implementation. An in-memory demonstration should not be mistaken for durable storage just because it accepts familiar SQL. There is an operational boundary too. In PostgreSQL 17, changing an existing table with  ALTER TABLE ... SET ACCESS METHOD  rewrites it and requires an  ACCESS EXCLUSIVE  lock. I would plan that as a migration, with room for the rewrite and a tested way back, rather than treat it as an inexpensive setting. The version-specific  ALTER TABLE documentation  is the place to check before doing it. What interests me here is the amount of PostgreSQL I can keep while investigating a different storage layout. The SQL examples above deliberately stay with heap; they establish the boundary and a few expected results, leaving the larger implementation questions visible instead of hiding them behind a successful demo.">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">Others</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
+          <h2><a href="/blog/where-postgres-table-storage-can-change/">Where PostgreSQL table storage can change</a></h2>
+          <p>Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>table access methods</li><li data-blog-keyword>storage</li><li data-blog-keyword>heap</li><li data-blog-keyword>indexing</li><li data-blog-keyword>MVCC</li><li data-blog-keyword>WAL</li><li data-blog-keyword>VACUUM</li></ul>
+          <a class="blog-action" href="/blog/where-postgres-table-storage-can-change/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-01" data-blog-title="Introducing BioseqDB" data-blog-search-text="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL. Combine genomic matches with relational data using compact sequence types and columnar storage! I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns. How it started This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research. 2021–2022:  Working with large GISAID datasets made FASTA files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected BWA-MEM to PostgreSQL in May 2022. 2023–2024:  I wrote a Python aligner and then improved it, learning how the algorithms work along the way. December 2025–2026:  The current BioseqDB began with minimap2 and columnar storage. Custom seeding and chaining, indexes, sequence slices and end-to-end benchmarks followed. The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The  introduction and full timeline  have more of the story. Two queries to get a feel for it These examples use the three synthetic samples from the  SQL walkthrough . The  samples  table has ordinary metadata columns and a  bioseq.seq  column.  USING bioseq  selects the sequence-aware storage. First, read metadata and a small piece of DNA.  bioseq.len  gives the sequence length;  [:16]  takes its first sixteen bases. SELECT patient_name, bioseq.len(seq) AS bases,
+  seq[:16]::text AS prefix
+FROM samples
+WHERE age &gt;= 30
+ORDER BY age DESC; Now search those samples for Ben&#39;s sequence, stored in row 2.  mmsearch  performs the alignment;  bioseq.score  and  bioseq.cigar  describe each match. SELECT t.patient_name,
+  bioseq.target_start(t.seq) AS start,
+  bioseq.score(t.seq) AS score,
+  bioseq.cigar(t.seq) AS cigar
+FROM samples AS t, samples AS q
+WHERE t.age &gt;= 30 AND q.id = 2
+  AND mmsearch(t.seq, q.seq::bioseq.seq(&#39;dna4&#39;, 64))
+ORDER BY t.id, start; Anna has two occurrences and Ben has one. These are exact matches, so each CIGAR is  512M . Alignment can also handle differences between sequences: substitutions, insertions and deletions. The  alignment chapter  explains how seeding, chaining and base alignment fit together. Where it fits beside existing tools BioseqDB builds on ideas from existing aligners, especially minimap2. The difference I wanted was the workflow: keep the data in PostgreSQL and combine sequence search with SQL filters and joins. Tool Main focus minimap2 Mapping reads and aligning nucleotide sequences against a reference. BLAST Finding local sequence similarity in sequence databases. Winnowmap Long-read mapping, including repetitive regions. LexicMap Nucleotide alignment against large collections of prokaryotic genomes. BioseqDB Storing sequences beside relational metadata and running alignment inside SQL. In my  benchmarks , the preferred CPU configuration was typically 3–8× faster than minimap2 when a prepared reference index was available. Without that index, BioseqDB was usually slower than minimap2. These tests used 1,024 synthetic queries against one 2 or 4 Gbp reference, not a collection of real genomes. Several external tools also needed the reference split into smaller records, so the  measurement details  matter when comparing them. There is still work to do. The current GPU paths were slower than the CPU paths in these measurements, and indexing has  known limitations . This first release is experimental software. Try the Docker image The image already includes PostgreSQL and BioseqDB. This is the Ubuntu 26.04 / PostgreSQL 19 prerelease image from the  quick start : docker run -d --name bioseqdb-demo \
+  -e POSTGRES_PASSWORD=demo-change-me \
+  -p 127.0.0.1:55432:5432 \
+  styczynski/bioseqdb:0.1.0-alpha.1-pg19-ubuntu26.04
+ Wait until PostgreSQL is ready, then open its SQL prompt: until docker exec bioseqdb-demo pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
+docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
+ Follow the  walkthrough  to create the sample table, load a FASTA file and try the queries above. I would like to hear how it works with your data:  open an issue  or  contact me .">
+        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-01">1 October 2026</time><span aria-hidden="true">·</span><span>4 min read</span></div>
           <h2><a href="/blog/introducing-bioseqdb/">Introducing BioseqDB</a></h2>
           <p>Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>BioseqDB</li><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>SQL</li><li data-blog-keyword>sequence alignment</li><li data-blog-keyword>genomic data</li><li data-blog-keyword>FASTA</li><li data-blog-keyword>FASTQ</li><li data-blog-keyword>minimap2</li><li data-blog-keyword>bioinformatics</li></ul>
           <a class="blog-action" href="/blog/introducing-bioseqdb/">Read the post <span aria-hidden="true">→</span></a>
         </div>
       </article>
       
     </div>
+    <div class="blog-empty-state" data-blog-empty hidden><h2>No posts match these filters.</h2><p>Try another keyword or a shorter search, or reset the filters.</p></div>
+    <nav class="blog-pagination" data-blog-pagination aria-label="Blog pages" hidden><button type="button" data-blog-previous>Previous</button><span data-blog-page-number aria-live="polite" aria-atomic="true"></span><button type="button" data-blog-next>Next</button></nav>
+    </section>
   </main>
   <footer data-screen-label="Docs · Footer" class="dd-s0237">
     <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
@@ -117,7 +378,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -173,17 +434,17 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on building a sequence database, the ideas behind it, and things you can try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png"}</script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-init.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-languages.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-math.js"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/main.js"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/site-header.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/announcement.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/docs-design.mjs"></script>
-
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png"}</script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-init.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-languages.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-math.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/main.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/site-header.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/announcement.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/docs-design.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/blog-index.mjs"></script>
 </body>
 </html>

@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://bioseqdb.com/benchmarks/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/combining-search-results-in-postgres/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/full-text-search-rules-in-sql/</loc></url>
   <url><loc>https://bioseqdb.com/blog/</loc></url>
   <url><loc>https://bioseqdb.com/blog/introducing-bioseqdb/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/postgres-encryption-at-rest/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/where-postgres-table-storage-can-change/</loc></url>
   <url><loc>https://bioseqdb.com/contact/</loc></url>
   <url><loc>https://bioseqdb.com/contact_thanks/</loc></url>
   <url><loc>https://bioseqdb.com/</loc></url>

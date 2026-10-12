@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="536" viewBox="0 0 640 536" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">Two searches, one eligible set</title>
+  <desc id="desc">Specimen notes are restricted to study A. Text search and vector search each produce an ordered candidate list. Reciprocal rank fusion combines their positions into the final order 24, 21, 31, 28.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker></defs>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+      <rect x="14" y="12" width="612" height="94" rx="18"/>
+      <rect x="14" y="170" width="292" height="174" rx="18"/>
+      <rect x="334" y="170" width="292" height="174" rx="18"/>
+      <rect x="14" y="412" width="612" height="110" rx="18"/>
+    </g>
+    <g fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M 320 108 V 133 H 160 V 160"/>
+      <path d="M 320 133 H 480 V 160"/>
+      <path d="M 160 347 V 376 H 320 V 402"/>
+      <path d="M 480 347 V 376 H 320" marker-end="none"/>
+    </g>
+    <g fill="var(--theme-eef4f9, #eef4f9)" font-size="26" font-weight="600" text-anchor="middle">
+      <text x="320" y="49">Specimen notes · study A</text>
+      <text x="160" y="211">Text matches</text>
+      <text x="480" y="211">Vector neighbours</text>
+      <text x="320" y="452">Combine positions with RRF</text>
+    </g>
+    <g fill="var(--theme-a9bccb, #a9bccb)" font-size="21" text-anchor="middle">
+      <text x="320" y="81">The same eligibility rule in both searches</text>
+      <text x="160" y="246">lexical order</text>
+      <text x="480" y="246">semantic order</text>
+    </g>
+    <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="25" text-anchor="middle">
+      <g fill="var(--theme-f4894f, #f4894f)"><rect x="42" y="268" width="236" height="48" rx="9" fill-opacity=".12"/><text x="160" y="300">21 → 24 → 28</text></g>
+      <g fill="var(--theme-65b9dd, #65b9dd)"><rect x="362" y="268" width="236" height="48" rx="9" fill-opacity=".12"/><text x="480" y="300">24 → 31 → 21</text></g>
+      <text x="320" y="492" fill="var(--theme-74c8a8, #74c8a8)">24 → 21 → 31 → 28</text>
+    </g>
+  </g>
+</svg>

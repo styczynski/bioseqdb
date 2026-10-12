@@ -1,5 +1,38 @@
+/blog/chatdb-a-database-that-can-write-poems/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/>; rel="canonical"
+
+/blog/combining-search-results-in-postgres/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/combining-search-results-in-postgres/>; rel="canonical"
+
+/blog/full-text-search-rules-in-sql/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/full-text-search-rules-in-sql/>; rel="canonical"
+
+/blog/postgres-encryption-at-rest/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/postgres-encryption-at-rest/>; rel="canonical"
+
+/blog/what-does-vector-mean-in-postgres/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/>; rel="canonical"
+
+/blog/where-postgres-table-storage-can-change/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/where-postgres-table-storage-can-change/>; rel="canonical"
+
 /blog/introducing-bioseqdb/index.md
   Content-Type: text/plain; charset=utf-8
   Content-Disposition: inline
   Link: <https://bioseqdb.com/blog/introducing-bioseqdb/>; rel="canonical"
+
+/bioseq-mark.svg
+  Cache-Control: public, max-age=300, must-revalidate
 

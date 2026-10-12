@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="594" viewBox="0 0 640 594" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c9a8ff:#735091;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">What belongs to one row, and what spans rows?</title>
+  <desc id="desc">One specimen can have searchable terms, a numeric measurement array and a geometric position. Execution batches instead collect values from several rows for processing.</desc>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="20" y="35" font-size="27" font-weight="600" fill="var(--theme-eef4f9, #eef4f9)">Different values belonging to one sample</text>
+    <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+      <rect x="14" y="58" width="612" height="102" rx="16"/>
+      <rect x="14" y="174" width="612" height="102" rx="16"/>
+      <rect x="14" y="290" width="612" height="102" rx="16"/>
+      <rect x="14" y="458" width="612" height="122" rx="16"/>
+    </g>
+    <g font-size="23" font-weight="600">
+      <text x="38" y="95" fill="var(--theme-f4894f, #f4894f)">Text-search terms</text>
+      <text x="38" y="211" fill="var(--theme-65b9dd, #65b9dd)">Numeric measurements</text>
+      <text x="38" y="327" fill="var(--theme-74c8a8, #74c8a8)">A position on a drawing</text>
+    </g>
+    <g font-size="23" fill="var(--theme-a9bccb, #a9bccb)" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">
+      <text x="38" y="134">'frozen':3 'sampl':1,6 'thaw':7</text>
+      <text x="38" y="250">[12.5, 40.0, 4.0]</text>
+      <text x="38" y="366">point(2, 3)</text>
+    </g>
+    <g stroke="var(--theme-74c8a8, #74c8a8)" fill="none" stroke-width="2"><path d="M 494 369 V 313 M 494 369 H 590"/><path d="M 550 369 V 335 H 494" stroke-dasharray="4 5" opacity=".55"/></g>
+    <circle cx="550" cy="335" r="6" fill="var(--theme-74c8a8, #74c8a8)"/>
+    <text x="20" y="437" font-size="27" font-weight="600" fill="var(--theme-eef4f9, #eef4f9)">Execution batches span several rows</text>
+    <g fill="var(--theme-c9a8ff, #c9a8ff)" fill-opacity=".12" stroke="var(--theme-c9a8ff, #c9a8ff)" stroke-opacity=".5">
+      <rect x="38" y="480" width="113" height="40" rx="7"/>
+      <rect x="163" y="480" width="113" height="40" rx="7"/>
+      <rect x="288" y="480" width="113" height="40" rx="7"/>
+    </g>
+    <g font-size="22" fill="var(--theme-c9a8ff, #c9a8ff)" text-anchor="middle"><text x="94" y="507">row 1</text><text x="219" y="507">row 2</text><text x="344" y="507">row 3</text></g>
+    <text x="420" y="507" font-size="23" fill="var(--theme-eef4f9, #eef4f9)">→ operation</text>
+    <text x="38" y="553" font-size="22" fill="var(--theme-a9bccb, #a9bccb)">Ordinary column values, processed together</text>
+  </g>
+</svg>

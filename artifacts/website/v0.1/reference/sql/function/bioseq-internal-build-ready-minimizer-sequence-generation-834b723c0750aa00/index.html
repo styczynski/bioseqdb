@@ -7,32 +7,32 @@
 <meta name="description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/theme.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/analytics.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/theme.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="bioseq_internal.build_ready_minimizer_sequence_generation">
 <meta property="og:description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/">
-<meta property="og:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq_internal.build_ready_minimizer_sequence_generation">
 <meta name="twitter:description" content="Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
-<link rel="icon" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
+<link rel="icon" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/favicon.svg">
 
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/docs-design.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/code-theme.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-content.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-header.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/responsive.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-controls.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/announcement.css">
-<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/docs-design.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/code-theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-content.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-header.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/responsive.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-controls.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/announcement.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/theme.css">
 
 </head>
 <body id="page-top" class="docs-design-page">
@@ -45,7 +45,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -188,7 +188,7 @@ ROLLBACK;</code></pre></figure></div>
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/a7ed30b8368307421c0f5aa44c66c542cc870c07/bioseq/backend/pg/extension/index.cppm#L2595" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/b8bfb36c34d1b6994cadb0ea34a11cf20493b96f/bioseq/backend/pg/extension/index.cppm#L2595" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq_internal · PostgreSQL 17.10</p>
   
 </article>
@@ -213,7 +213,7 @@ ROLLBACK;</code></pre></figure></div>
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -277,17 +277,17 @@ ROLLBACK;</code></pre></figure></div>
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.build_ready_minimizer_sequence_generation","description":"Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.build_ready_minimizer_sequence_generation","item":"/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/"}]}]}</script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-init.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-languages.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.js"></script>
-<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-math.js"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/main.js"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/site-header.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/announcement.mjs"></script>
-<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq_internal.build_ready_minimizer_sequence_generation","description":"Build a stored whole-sequence minimizer index for a SQL test. Publish and verify, the generation, release temporary  sort runs, and return build counters. Keep the active index choice and update timestamp unchanged.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq_internal.build_ready_minimizer_sequence_generation","item":"/v0.1/reference/sql/function/bioseq-internal-build-ready-minimizer-sequence-generation-834b723c0750aa00/"}]}]}</script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-init.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-languages.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-math.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/main.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/site-header.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/announcement.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/docs-design.mjs"></script>
 
 </body>
 </html>

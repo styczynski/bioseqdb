@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probably the worst database ever — but hey it can write poems!</title>
+<meta name="description" content="My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.">
+<link rel="canonical" href="https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/theme.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<meta property="og:title" content="Probably the worst database ever — but hey it can write poems!">
+<meta property="og:description" content="My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/">
+<meta property="og:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Probably the worst database ever — but hey it can write poems!">
+<meta name="twitter:description" content="My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
+<link rel="icon" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/favicon.svg">
+
+<link rel="alternate" type="text/markdown" href="/blog/chatdb-a-database-that-can-write-poems/index.md" title="Probably the worst database ever — but hey it can write poems!">
+<meta name="keywords" content="PostgreSQL, databases, ChatDB, ChatGPT, key-value store, transaction log, SQL, experiments">
+<meta name="author" content="Piotr Styczyński">
+<meta property="article:published_time" content="2026-10-12">
+<meta property="article:section" content="others">
+<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="databases"><meta property="article:tag" content="ChatDB"><meta property="article:tag" content="ChatGPT"><meta property="article:tag" content="key-value store"><meta property="article:tag" content="transaction log"><meta property="article:tag" content="SQL"><meta property="article:tag" content="experiments">
+
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/docs-design.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/code-theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-content.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-header.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/responsive.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-controls.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/announcement.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/theme.css">
+<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/blog.css">
+</head>
+<body id="page-top" class="docs-design-page blog-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB documentation">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+      <a href="/blog/">Blog</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="/contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="Dark mode. Switch to light mode." data-light-label="Light mode. Switch to dark mode." aria-label="Dark mode. Switch to light mode." title="Dark mode. Switch to light mode.">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">Dark mode. Switch to light mode.</span>
+      </button>
+    </div>
+  </div>
+  
+  <section class="site-announcement" data-announcement aria-label="Release announcement">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>BioseqDB first version released!</strong> Note that this is experimental software that still contains bugs. Feel free to provide feedback via <a href="https://github.com/styczynski/bioseqdb/issues">GitHub issues</a> and <a href="/contact/">contact</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="Pause release announcement" data-pause-label="Pause release announcement" data-resume-label="Resume release announcement" title="Pause release announcement"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  
+</header>
+
+  <main id="doc-main" class="blog-shell">
+    <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
+    <article class="blog-article">
+      <header class="blog-hero">
+        <img class="blog-cover" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." fetchpriority="high">
+        <div class="blog-hero-copy">
+          <p class="blog-eyebrow"><a href="/blog/?category=others">Others</a></p>
+          <h1>Probably the worst database ever — but hey it can write poems!</h1>
+          <p class="blog-description">My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>7 min read</span><span aria-hidden="true">·</span><span>Piotr Styczyński</span></div>
+        </div>
+      </header>
+      <div class="blog-layout">
+        <div class="blog-reading-column">
+          <div class="blog-tools"><a class="blog-markdown" href="/blog/chatdb-a-database-that-can-write-poems/index.md" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>Markdown</a></div>
+          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph"><em>Originally published by me on <a href="https://medium.com/@styczynski/probably-the-worst-database-ever-but-hey-it-can-write-poems-539b7757ad6d" rel="noreferrer">8 December 2022 on Medium</a>. These selected passages retain my original wording and jokes. The illustration is new, and the final section contains notes added for this republication. The original screenshots, long implementation listings and obsolete connection instructions are omitted; the old service integration has not been revalidated.</em></p><p class="doc-paragraph">Can your database write poems in the middle of the business operation? I bet not!</p><p class="doc-paragraph">Let’s contruct something more useful. Something that would have real-world application, but still make model behave more like a machine. I decided to emulate database behvaiour. It can be then used to store some arbitrary information in the conversation. Maybe it can emulate very-limited <a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a> instance?</p><h2 class="hx" id="a-simple-key-value-store" data-toc data-title="A simple key-value store">A simple key-value store<a data-hash href="#a-simple-key-value-store" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Okay so start slowly. Instead of trying go full-<a href="https://www.postgresql.org/docs/current/tutorial-sql.html" rel="noreferrer" class="glossary-link" title="The language used to define, query and change data in relational databases." data-glossary-description="The language used to define, query and change data in relational databases." data-glossary-term="SQL">SQL</a> let’s create a simple key value store firstly. I decided to allow only javacsript code. But can we run javascript code?</p><p class="doc-paragraph">We start by defining behaviour using functions that are simple enough to <a href="https://www.postgresql.org/docs/current/using-explain.html" rel="noreferrer" class="glossary-link" title="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-description="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-term="EXPLAIN">explain</a>:</p><blockquote><p class="doc-paragraph">I want you to act as a computer program. I will type javascript commands and return the result. I want you to reply with the value returned by execution of the code inside one code block. Do not write explanations.</p></blockquote><p class="doc-paragraph">We limit ourselves only to javascript execution</p><blockquote><p class="doc-paragraph">Do not do anything, unless I tell you to do so. I can invoke function “save” that stores single value in memory. The function accepts key and value to be stored under this key. Keys are strings and any value other than string should cause an error.</p></blockquote><p class="doc-paragraph">That defines storage function <code>save(key: string, value: any) =&gt; any</code></p><blockquote><p class="doc-paragraph">I can call “read” which returns value stored under the key.</p></blockquote><p class="doc-paragraph">We obviously need storage reads and this fragment defines <code>read(key: string) =&gt; any</code></p><blockquote><p class="doc-paragraph">I also can invoke “all” which returns a list with all values stored as a json. I also can invoke “delete” which deletes a given key.</p></blockquote><p class="doc-paragraph">This is obviously for listing all keys and deletions:</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">Text</span><button type="button" class="copy-button" data-copy data-copy-target="code-f01fea33ba4977f8-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-f01fea33ba4977f8-0">all() =&gt; Dict[string, any]
+delete(key: string) =&gt; any
+</code></pre></figure><blockquote><p class="doc-paragraph">I can also invoke “filter” which accepts regex and returns list of values for keys that match that regex. No other function other than those mentioned can be called.</p></blockquote><p class="doc-paragraph">Filter is more interesting. We can filter all keys using regex. The model should return list of values, but in practice this sometimes the definition not clear enough.</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">Text</span><button type="button" class="copy-button" data-copy data-copy-target="code-a19a8c1e2a33ddfa-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-a19a8c1e2a33ddfa-1">filter(regex_to_match_keys: string) =&gt; List[any]
+</code></pre></figure><blockquote><p class="doc-paragraph">If there is any error you should print it with line number and all the details. My first command is save(“abc”, 42);</p></blockquote><p class="doc-paragraph">Ah, that suprisingly worked! The model is no longer complaining about simulating a program. Perfect!</p><h2 class="hx" id="natural-language-and-a-python-wrapper" data-toc data-title="Natural language and a Python wrapper">Natural language and a Python wrapper<a data-hash href="#natural-language-and-a-python-wrapper" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">What about adding more interesting features? Let’s make our database listen to natural lanugage (why to bother with SQL ever again, when we can totally overload the model!)</p><blockquote><p class="doc-paragraph">When I need you to tell something in English I will do so by calling function query that accepts a natural language input. For example query(“sum all values”) returns sum of all values.</p></blockquote><p class="doc-paragraph">We created function <code>query(natural_language: string) =&gt; any</code></p><p class="doc-paragraph">I love how the exact format of responses is defined by the model. Finally we can use our human-like ML model to model how human engineers behave when they get api requirements — everybody just come up with their idea of the exact implementation. We have our vague API ahh</p><p class="doc-paragraph">The last part is:<br>Let’s wrap that into Python package so we can use the key-value store we have! I used simple pacakge created by <a href="https://github.com/acheong08/ChatGPT" rel="noreferrer">Antonio Cheong on GitHub</a>. However I refreshed it a little bit and changed requirements.txt into poetry pyproject.lock, used aiohttp instead of requests and add few tiny little shiny things.</p><p class="doc-paragraph"><em>2026 note: the <a href="https://github.com/styczynski/chatdb/blob/bbeda04166ac506fb97df6fb88dc5af90b1e022c/demo.py" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>original demo</a> contains the initialization and the <code>print_assert</code> helper. This excerpt shows its historical expectations, not a new model run:</em></p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">Text</span><button type="button" class="copy-button" data-copy data-copy-target="code-92cb6c1e8894dc6d-2" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-92cb6c1e8894dc6d-2">print_assert(await kv.save("a", 9))
+print_assert(await kv.save("xx", 12))
+print_assert(await kv.save("xy", 42))
+print_assert(await kv.save("zz", 99))
+print_assert(await kv.filter("x[x-y]"),
+             ['xx', 'xy'], [12, 42], ["12", "42"])
+print_assert(await kv.delete("xy"))
+print_assert(await kv.query("sum all the values"), &#123;'sum': 120&#125;, 120)
+</code></pre></figure><p class="doc-paragraph"><code>print_assert</code> is just a function that prints value returned by function and if it doesn’t match any of the provided values, the error is thrown. We need that, because standard asserts are not enough if the model sometimes yields results in different forms.</p><p class="doc-paragraph">The code I created is available on GitHub: <a href="https://github.com/styczynski/chatdb" rel="noreferrer">styczynski/chatdb</a>.</p><p class="doc-paragraph">Now you can do crazy things like that:</p><p class="doc-paragraph"><em>2026 note: this excerpt comes from the separate <a href="https://github.com/styczynski/chatdb/blob/bbeda04166ac506fb97df6fb88dc5af90b1e022c/poem_demo.py" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>poem demo</a>, after initializing a fresh store.</em></p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">Text</span><button type="button" class="copy-button" data-copy data-copy-target="code-90a9e6345a9c6f89-3" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-90a9e6345a9c6f89-3">await kv.save("x", 42)
+await kv.save("a", 19)
+await kv.save("x", 99)
+print(await kv.query("write me a short poem, two sentences long"))
+print(await kv.all())
+</code></pre></figure><p class="doc-paragraph">CAN YOUR REDIS INSTANCE WRITE YOU POEMS? Now I can have a little poem here and there when doing business logic of my enterprise application, perfect!</p><h2 class="hx" id="bonus-time" data-toc data-title="Bonus time!">Bonus time!<a data-hash href="#bonus-time" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">I thought to myself: Can we store somewhere logs of operations so we can revert the database to previous states? Hm, yes we can! Just hire an employee and tell him that:</p><blockquote><p class="doc-paragraph">I want you to act as a computer program.</p><p class="doc-paragraph">I will type javascript commands and you should remember all of them in order. Do not do anything.</p><p class="doc-paragraph">After I type “SHOW” you should type exactly all the commands I told you, each command in new line.</p><p class="doc-paragraph">After I type “UNDO” you should remove the specified number of last commands.<br>For example “UNDO 3” removes 3 last commands. Do not react to anything other than “SHOW” or “UNDO”.</p><p class="doc-paragraph">Do not write explanations.<br>If I type anything other than “SHOW” or “UNDO”, respond with “OK”</p></blockquote><p class="doc-paragraph">We will submitt all commands to the logging ChatGTP instance and we can use SHOW to recreate fresh instance of the database in the existing state. We just ask for commands, spawn new ChatGPT and redo all operations or we can previously use UNDO to undo specific number of operations.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/chatdb-conversations.svg"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/chatdb-conversations.svg" alt="The Python wrapper sends commands concurrently to a storage conversation and a log conversation. Undo shortens the log, resets the default storage conversation and replays the retained commands." loading="lazy"></a></p><p class="doc-paragraph">That’s a nice architecture! Imagine creating a party, inviting two guests and telling them to behave like a KV storage and log respecitvely. That must be REAL GOOD PARTY. Altough, I hope chatGPT is not annoyed too much by doing those tedious data manipulation tasks.</p><h2 class="hx" id="final-notes-from-2022" data-toc data-title="Final notes from 2022">Final notes from 2022<a data-hash href="#final-notes-from-2022" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Entire code used here is available on my GitHub. You can use the code to create your own “sentient” ChatGPT-backed key-value store.</p><p class="doc-paragraph">The next step would be teaching chatGPT to emulate processor and running doom on it.</p><h2 class="hx" id="notes-added-in-2026" data-toc data-title="Notes added in 2026">Notes added in 2026<a data-hash href="#notes-added-in-2026" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">The commands above were text sent to a model, not JavaScript executed by an interpreter. The quoted prompt's restrictions and the old demo's accepted answers were also inconsistent: <code>filter</code> asked for values, while the demo accepted keys or values. The <a href="https://github.com/styczynski/chatdb/blob/bbeda04166ac506fb97df6fb88dc5af90b1e022c/chatgptdb/key_value_store.py" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>wrapper</a> tries JSON parsing, then <code>ast.literal_eval</code>, then a plain string. Parseable output does not establish correct stored state.</p><p class="doc-paragraph">The <a href="https://github.com/styczynski/chatdb/blob/bbeda04166ac506fb97df6fb88dc5af90b1e022c/chatgptdb/action_log.py" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>log</a> counts commands, including reads. Normal commands go to the store and log concurrently, without an atomic commit between them. On the default path, <code>undo</code> trims the log, resets storage and replays retained commands without logging them again. Supplying existing conversation IDs disables the reset-on-start flag, so that path can replay into an existing conversation instead. These wrapper behaviours were checked offline with fake conversations, without contacting a model.</p><p class="doc-paragraph">This differs from <a href="https://www.postgresql.org/docs/current/wal-intro.html" rel="noreferrer" class="glossary-link" title="Recording changes in a durable log before writing the corresponding data pages, enabling recovery after a crash." data-glossary-description="Recording changes in a durable log before writing the corresponding data pages, enabling recovery after a crash." data-glossary-term="write-ahead logging">write-ahead logging</a>: PostgreSQL requires the relevant WAL records to reach permanent storage before the corresponding data-file changes. The two conversations do not provide that durability rule. <a href="https://www.postgresql.org/docs/current/wal-intro.html" rel="noreferrer">PostgreSQL's WAL introduction</a> explains the difference.</p><p class="doc-paragraph">For comparison, this ordinary PostgreSQL example uses synthetic sample counts. It runs during the website build and does not execute ChatDB:</p><figure class="doc-code" data-term data-sql-example="chatdb_postgres_key_values"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-23814f05dc44db69-4" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-23814f05dc44db69-4" class="language-sql">UPDATE sample_counts SET value = 11
+WHERE key = 'sample_A';
+
+SELECT jsonb_object_agg(key, value ORDER BY key) AS stored_values,
+       sum(value) AS total
+FROM sample_counts;</code></pre></figure><p class="doc-paragraph"><em>UPDATE 1</em> — 1 row affected</p><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">stored_values<br><code>jsonb</code></th><th scope="col">total<br><code>bigint</code></th></tr></thead><tbody><tr><td>&#123;"sample_A": 11, "sample_B": 5&#125;</td><td>16</td></tr></tbody></table></div><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">The total is 16. PostgreSQL also provides <a href="https://www.postgresql.org/docs/current/tutorial-transactions.html" rel="noreferrer" class="glossary-link" title="A group of database operations committed together or rolled back as one unit." data-glossary-description="A group of database operations committed together or rolled back as one unit." data-glossary-term="transaction">transactions</a> and savepoints for grouping changes and undoing work within a transaction, with defined behaviour rather than a replay request to a conversation. <a href="https://www.postgresql.org/docs/current/tutorial-transactions.html" rel="noreferrer">The transaction tutorial</a> describes those operations.</p></div>
+          <footer class="blog-article-footer">
+            <span class="blog-eyebrow">Topics</span>
+            <ul class="blog-keywords" aria-label="Topics"><li>PostgreSQL</li><li>databases</li><li>ChatDB</li><li>ChatGPT</li><li>key-value store</li><li>transaction log</li><li>SQL</li><li>experiments</li></ul>
+          </footer>
+          <aside class="blog-cta" aria-labelledby="blog-cta-title">
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <h2 id="blog-cta-title">Try it yourself now!</h2>
+            <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+            <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
+          </aside>
+        </div>
+        <aside class="blog-toc" aria-label="On this page"><p class="blog-eyebrow">On this page</p><div id="toc-list"><a data-toc-link data-level="2" href="#a-simple-key-value-store">A simple key-value store</a><a data-toc-link data-level="2" href="#natural-language-and-a-python-wrapper">Natural language and a Python wrapper</a><a data-toc-link data-level="2" href="#bonus-time">Bonus time!</a><a data-toc-link data-level="2" href="#final-notes-from-2022">Final notes from 2022</a><a data-toc-link data-level="2" href="#notes-added-in-2026">Notes added in 2026</a></div></aside>
+      </div>
+    </article>
+  </main>
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation home</a><a href="/v0.1/reference/" class="dd-s0250 dd-h009">API reference</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 BioseqDB Piotr Styczyński</span>
+        <nav class="site-footer-links dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
+          <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+</div>
+
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"Probably the worst database ever — but hey it can write poems!","description":"My December 2022 ChatDB experiment, republished with its original wording, a new diagram and a separate note checking the old implementation.","url":"https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png","headline":"Probably the worst database ever — but hey it can write poems!","mainEntityOfPage":"https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","databases","ChatDB","ChatGPT","key-value store","transaction log","SQL","experiments"],"articleSection":"others","timeRequired":"PT7M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"Probably the worst database ever — but hey it can write poems!","item":"/blog/chatdb-a-database-that-can-write-poems/"}]}]}</script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-init.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-languages.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.js"></script>
+<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-math.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/main.js"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/site-header.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/announcement.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/docs-design.mjs"></script>
+<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/blog.mjs"></script>
+</body>
+</html>

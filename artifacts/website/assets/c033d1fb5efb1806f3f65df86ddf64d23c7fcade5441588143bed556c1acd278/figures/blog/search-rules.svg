@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="470" viewBox="0 0 640 470" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">A search rule with an explanation</title>
+<desc id="desc">The stored note becomes a search document. Visitor input becomes a typed query. PostgreSQL matches them, then returns the specimen identifier and the reason it matched.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker></defs>
+<g font-family="Inter, Arial, sans-serif">
+  <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+    <rect x="12" y="12" width="616" height="110" rx="18"/>
+    <rect x="12" y="154" width="616" height="110" rx="18"/>
+    <rect x="12" y="316" width="616" height="140" rx="18"/>
+  </g>
+  <g font-size="24" font-weight="600" fill="var(--theme-eef4f9, #eef4f9)">
+    <text x="36" y="48">Stored note</text><text x="344" y="48">Search document</text>
+    <text x="36" y="190">Visitor input</text><text x="344" y="190">Typed query</text>
+    <text x="36" y="356">Match, then explain the result</text>
+  </g>
+  <g font-size="20" fill="var(--theme-a9bccb, #a9bccb)">
+    <text x="36" y="84">Low coverage…</text><text x="344" y="84">tsvector + GIN</text>
+    <text x="36" y="226">“low coverage”</text><text x="344" y="226">phrase → tsquery</text>
+    <text x="36" y="394">Specimen S-11</text>
+  </g>
+  <g fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2.5" marker-end="url(#arrow)">
+    <path d="M270 72H318"/><path d="M270 214H318"/><path d="M320 276V302"/>
+  </g>
+  <rect x="34" y="410" width="322" height="30" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity=".12"/>
+  <text x="46" y="432" font-size="19" fill="var(--theme-74c8a8, #74c8a8)">coverage_match = true</text>
+</g>
+</svg>

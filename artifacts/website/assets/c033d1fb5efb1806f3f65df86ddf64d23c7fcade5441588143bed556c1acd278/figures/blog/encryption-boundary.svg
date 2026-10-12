@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="676" viewBox="0 0 640 676" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">Where storage encryption sits</title>
+  <desc id="desc">Readable SQL rows pass through database memory. pg_tde encrypts selected files below the storage boundary. An external principal key protects internal keys, which encrypt the table, index and TOAST files. Connection encryption and database permissions remain separate.</desc>
+  <defs><marker id="flow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker></defs>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+      <rect x="20" y="16" width="600" height="112" rx="18"/>
+      <rect x="20" y="174" width="600" height="112" rx="18"/>
+      <rect x="20" y="350" width="600" height="126" rx="18"/>
+      <rect x="20" y="538" width="270" height="118" rx="18"/>
+      <rect x="350" y="538" width="270" height="118" rx="18"/>
+    </g>
+    <g fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2.5" marker-end="url(#flow)">
+      <path d="M320 137 V164"/>
+      <path d="M320 295 V339"/>
+      <path d="M300 590 H340"/>
+      <path d="M486 528 V487"/>
+    </g>
+    <path d="M28 318 H290 M350 318 H612" stroke="var(--theme-f4894f, #f4894f)" stroke-width="2" stroke-dasharray="7 7"/>
+    <g fill="var(--theme-eef4f9, #eef4f9)" font-size="28" font-weight="600">
+      <text x="48" y="61">Application / SQL session</text>
+      <text x="48" y="219">PostgreSQL memory</text>
+      <text x="48" y="398">Encrypted stored files</text>
+    </g>
+    <g fill="var(--theme-a9bccb, #a9bccb)" font-size="24">
+      <text x="48" y="100">Readable rows returned by SELECT</text>
+      <text x="48" y="258">Values available while queries run</text>
+      <text x="48" y="438">Selected table + indexes + TOAST</text>
+    </g>
+    <g fill="var(--theme-74c8a8, #74c8a8)" font-size="25" font-weight="600">
+      <text x="42" y="579">Principal key</text>
+      <text x="373" y="579">Internal keys</text>
+    </g>
+    <g fill="var(--theme-a9bccb, #a9bccb)" font-size="22">
+      <text x="42" y="614">External key service</text>
+      <text x="42" y="641">Protects internal keys</text>
+      <text x="373" y="614">Encrypt file contents</text>
+      <text x="373" y="641">Stored encrypted</text>
+    </g>
+    <text x="26" y="516" fill="var(--theme-f4894f, #f4894f)" font-size="23">Keys are a separate recovery dependency</text>
+  </g>
+</svg>

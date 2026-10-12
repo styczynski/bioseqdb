@@ -4,6 +4,7 @@ slug: introducing-bioseqdb
 description: Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.
 date: '2026-10-01'
 author: Piotr Styczyński
+category: bioseqdb
 keywords: [BioseqDB, PostgreSQL, SQL, sequence alignment, genomic data, FASTA, FASTQ, minimap2, bioinformatics]
 cover: /static/figures/blog/sequence-letters.svg
 image_alt: Rows of softly coloured A, C, T and G letters in small translucent boxes.
@@ -14,7 +15,7 @@ BioseqDB is a PostgreSQL extension for storing, indexing and searching biologica
 
 I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns.
 
-![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/figures/blog/sequences-in-sql.svg)
+![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequences-in-sql.svg)
 
 ## How it started
 
