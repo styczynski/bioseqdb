@@ -2139,6 +2139,34 @@ def _compare_design_style(page, actual_selector: str, reference: dict,
     _check(not mismatches, f"{description}: supplied design style mismatch {mismatches}")
 
 
+def _check_rail_header_geometry(page, selector: str, description: str) -> None:
+    """Rails occupy the viewport below the complete, configurable site header.
+
+    The original prototypes assume a 64px header. The release announcement and
+    responsive header rows change that height, while the rail's sticky position
+    and remaining viewport height must still agree with what readers see.
+    """
+    geometry = page.evaluate("""selector => {
+      const header = document.querySelector('[data-site-header]');
+      const rail = document.querySelector(selector);
+      if (!header || !rail) return null;
+      const headerBox = header.getBoundingClientRect();
+      const railBox = rail.getBoundingClientRect();
+      const style = getComputedStyle(rail);
+      return {headerTop:headerBox.top, headerHeight:headerBox.height,
+        railTop:parseFloat(style.top), railHeight:railBox.height,
+        viewportHeight:innerHeight};
+    }""", selector)
+    _check(geometry is not None, f"{description}: header or rail is missing")
+    _check(abs(geometry["headerTop"]) <= 1 and geometry["headerHeight"] > 0,
+           f"{description}: shared header is not at the viewport top: {geometry}")
+    _check(abs(geometry["railTop"] - geometry["headerHeight"]) <= 1,
+           f"{description}: sticky offset does not clear the shared header: {geometry}")
+    _check(geometry["railHeight"] > 0 and abs(
+        geometry["railTop"] + geometry["railHeight"] - geometry["viewportHeight"]) <= 1,
+        f"{description}: rail does not fill the remaining viewport height: {geometry}")
+
+
 def _exercise_design_style_parity(page, label: str, design: dict) -> None:
     # The requested common header intentionally replaces the three prototypes;
     # all page-specific content retains its original design declarations.
@@ -2194,9 +2222,10 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
             ("display", "alignItems"), "benchmark body grid")
         _compare_design_style(
             page, "[data-bnav]", records["data-bnav:first"],
-            ("position", "top", "height", "overflowY",
+            ("position", "overflowY",
              "borderRightWidth", "borderRightColor"),
             "benchmark navigation rail")
+        _check_rail_header_geometry(page, "[data-bnav]", "benchmark navigation rail")
         _compare_design_style(
             page, "[data-ctrls]", records["data-ctrls:first"],
             ("display", "marginTop", "borderTopWidth", "borderRadius"),
@@ -2213,9 +2242,10 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
         ("display", "alignItems"), "docs body grid")
     _compare_design_style(
         page, "#sidebar", records["id:sidebar"],
-        ("position", "top", "height", "overflowY", "paddingTop",
+        ("position", "overflowY", "paddingTop",
          "paddingBottom", "borderRightWidth", "borderRightColor"),
         "docs sidebar")
+    _check_rail_header_geometry(page, "#sidebar", "docs sidebar")
     _compare_design_style(
         page, "[data-search-box]", records["data-search-box:first"],
         ("display", "alignItems", "gap", "height", "borderRadius",
