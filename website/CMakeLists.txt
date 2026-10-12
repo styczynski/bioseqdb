@@ -1122,6 +1122,13 @@ add_custom_command(
           --model "${_site_model}" --site "${_staging_dir}"
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py" --check
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_traceheap_sources.py" --check
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_traceheap.py"
+          --pg-config "${PostgreSQL_CONFIG}"
+          --stage-root "${_stage_root}"
+          --output-dir "${_output_root}/traceheap-validation"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
@@ -1131,6 +1138,10 @@ add_custom_command(
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/blog/writing-a-dna-read-mapper-in-python.md"
           "${_static_dir}/examples/python-aligner.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_traceheap_sources.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_traceheap.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/blog/writing-a-postgres-table-access-method-in-cpp.md"
+          "${_static_dir}/examples/traceheap.tar.gz"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -1295,6 +1306,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND ${_website_features_contract_command}
   COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_python_aligner.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_traceheap_sources.py" --check
   DEPENDS "${_venv_stamp}" "${_source_dir}/tests/contract/test_theme_palette.py"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "website: check imported author content and benchmark observations"

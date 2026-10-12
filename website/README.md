@@ -227,6 +227,15 @@ a subprocess with a time limit. Other Python fences are highlighted without
 being executed. The course charts have CSV inputs and provenance under
 `website/blog/data/python-aligner/`; their generator is
 `website/tools/generate_python_aligner_figures.py` (requires Matplotlib).
+
+The C++ table-method tutorial has its own complete example under
+`website/static/examples/traceheap/`. Run
+`python3 website/tools/check_traceheap_sources.py` after editing it to refresh
+the deterministic download archive; `--check` also checks the article's marked
+excerpts against those files. Publication compiles and runs its SQL smoke checks
+in a disposable copy of the staged PostgreSQL 17 installation. The example is
+pinned to PostgreSQL 17; builds configured for another major version report
+that the compile check was skipped. It is separate from the BioseqDB SQL model.
 Without JavaScript, the index keeps links to all published posts available.
 
 ## Stable public assets
