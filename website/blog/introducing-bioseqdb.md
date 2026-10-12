@@ -4,6 +4,7 @@ slug: introducing-bioseqdb
 description: Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.
 date: '2026-10-01'
 author: Piotr Styczyński
+category: bioseqdb
 keywords: [BioseqDB, PostgreSQL, SQL, sequence alignment, genomic data, FASTA, FASTQ, minimap2, bioinformatics]
 cover: /static/figures/blog/sequence-letters.svg
 image_alt: Rows of softly coloured A, C, T and G letters in small translucent boxes.

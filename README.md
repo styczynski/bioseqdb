@@ -1,4 +1,4 @@
-<p align="center"><img src="https://bioseqdb.com/assets/1059dd74d26a3f4b8efcfb12a2e871a12d9323d70fc3963a1ffe7e03ed4805b4/bioseq-mark.svg" alt="BioseqDB" width="180"></p>
+<p align="center"><img src="https://bioseqdb.com/bioseq-mark.svg" alt="BioseqDB" width="180"></p>
 
 # BioseqDB
 

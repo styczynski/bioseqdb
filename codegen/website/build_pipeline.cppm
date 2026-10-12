@@ -230,6 +230,7 @@ void bind_public_manifest_identity(
 void verify_reference_pipeline();
 namespace {
 void verify_blog_pipeline();
+void verify_stable_assets();
 void rewrite_entity_link_routes(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
@@ -249,6 +250,7 @@ void decorate_code_entity_ranges(
 /// templates with, small examples. PostgreSQL execution is tested  separately.
 void verify_website_pipeline() {
     verify_blog_pipeline();
+    verify_stable_assets();
     const auto algorithm = parse_markdown_content(
         "```pseudocode\nRequire: $x$\nFor $i$\n  If $x_i$\n    Return `score` // saved score\n  End If\nEnd For\n```\n");
     const auto algorithm_html = render_content_html(algorithm.children);
@@ -1857,6 +1859,23 @@ void validate_landing_result(const landing_example_view& view) {
     return output;
 }
 
+[[nodiscard]] std::string blog_search_text(const std::vector<content_node>& nodes) {
+    std::string text;
+    const auto collect = [&text](const auto& list, auto&& self) -> void {
+        for (const auto& node : list) {
+            if (node.kind == content_node_kind::raw_html
+                || node.kind == content_node_kind::image) continue;
+            if (!node.text.empty()) {
+                if (!text.empty()) text += ' ';
+                text += node.text;
+            }
+            self(node.children, self);
+        }
+    };
+    collect(nodes, collect);
+    return text;
+}
+
 [[nodiscard]] std::uint32_t blog_reading_minutes(const std::vector<content_node>& nodes) {
     std::size_t words = 0;
     const auto count = [&words](const std::vector<content_node>& items, auto&& self) -> void {
@@ -1965,10 +1984,15 @@ void verify_blog_pipeline() {
     const auto metadata = parse_blog_metadata(
         "title: Introducing BioseqDB!\ndescription: Sequence queries\ndate: 2026-10-01\nkeywords: [SQL, DNA]\n",
         "blog.md");
-    expect(metadata.slug == "introducing-bioseqdb" && metadata.publication_date == "2026-10-01",
-           "blog routes derive from titles and dates retain ISO form");
+    expect(metadata.slug == "introducing-bioseqdb" && metadata.publication_date == "2026-10-01"
+        && metadata.category == "bioseqdb",
+           "blog routes derive from titles, dates retain ISO form and category defaults to bioseqdb");
+    const auto other_metadata = parse_blog_metadata(
+        "title: General notes\ndescription: Postgres notes\ndate: 2026-10-01\nkeywords: [SQL]\ncategory: others\n",
+        "others.md");
+    expect(other_metadata.category == "others", "general database posts retain their separate category");
     for (const auto& extra : {"date: 2026-02-30\n", "date: tomorrow\n", "date: 2026-10-01\nslug: ../escape\n",
-                              "date: 2026-10-01\ntitle: duplicate\n"}) {
+                              "date: 2026-10-01\ntitle: duplicate\n", "date: 2026-10-01\ncategory: unknown\n"}) {
         bool rejected = false;
         try { (void)parse_blog_metadata(std::string("title: Test\ndescription: Test\nkeywords: [SQL]\n") + extra, "bad.md"); }
         catch (const std::exception&) { rejected = true; }
@@ -1979,6 +2003,27 @@ void verify_blog_pipeline() {
     const auto published = blog_public_markdown(raw);
     expect(published == "Before\n\n~~~~sql\nSELECT 42;\n~~~~\nAfter\n",
            "raw blog Markdown preserves prose and visible SQL without hidden fixtures");
+    auto search_nodes = parse_markdown_content(raw).children;
+    strip_runnable_fence_hidden_sql(search_nodes);
+    const auto searchable = blog_search_text(search_nodes);
+    expect(searchable.contains("Before") && searchable.contains("SELECT 42;")
+        && searchable.contains("After") && !searchable.contains("hidden_fixture"),
+        "blog body search includes visible examples but excludes hidden database fixtures");
+    tutorial category_round_trip;
+    category_round_trip.metadata = other_metadata;
+    category_round_trip.search_text = searchable;
+    site_model category_model;
+    category_model.schema = "bioseq.website.site_model";
+    category_model.schema_revision = 1;
+    category_model.parser_identity = "bioseq.website.parser";
+    category_model.parser_revision = 1;
+    category_model.binding_schema = "bioseq.website.bindings";
+    category_model.binding_schema_revision = 1;
+    category_model.version = {"v0.1", {0, 1}};
+    category_model.blog_posts.push_back(std::move(category_round_trip));
+    const auto restored = deserialize_site_model(serialize_site_model(category_model)).blog_posts.front();
+    expect(restored.metadata.category == "others" && restored.search_text == searchable,
+        "category and visible search body survive the executed model round trip");
     for (const auto& nested : {
         std::string("> ```sql runnable id=quoted\n> -- bioseq:setup\n> SELECT 'hidden';\n> -- bioseq:visible\n> SELECT 42;\n> -- bioseq:teardown\n> SELECT 'hidden';\n> ```\n"),
         std::string("- > ```sql runnable id=mixed\n  > -- bioseq:setup\n  > SELECT 'hidden';\n  > -- bioseq:visible\n  > SELECT 42;\n  > -- bioseq:teardown\n  > SELECT 'hidden';\n  > ```\n"),
@@ -2181,6 +2226,7 @@ void verify_blog_pipeline() {
         process_annotations(item.content, item.source_path);
         strip_runnable_fence_hidden_sql(item.content);
         item.metadata.reading_minutes = blog_reading_minutes(item.content);
+        item.search_text = blog_search_text(item.content);
         item.public_markdown = blog_public_markdown(markdown);
         autolink_blog_keywords(item.content, glossary);
         posts.push_back(std::move(item));
@@ -3859,6 +3905,69 @@ struct static_asset {
     return assets;
 }
 
+[[nodiscard]] std::vector<std::pair<std::string, const static_asset*>> resolve_stable_assets(
+    const std::map<std::string, std::string, std::less<>>& aliases,
+    const std::vector<static_asset>& assets,
+    const std::map<std::string, std::string, std::less<>>& published) {
+    std::vector<std::pair<std::string, const static_asset*>> resolved;
+    std::set<std::string> routes;
+    for (const auto& [route, hash] : published) routes.insert(route);
+    for (const auto& [destination, source] : aliases) {
+        const auto asset = std::ranges::find(assets, source, &static_asset::relative_path);
+        if (asset == assets.end())
+            throw std::runtime_error("stable asset source was not found under static/: " + source);
+        const auto route = "/" + destination;
+        for (const auto& existing : routes) {
+            if (route == existing || route.starts_with(existing + "/") || existing.starts_with(route + "/"))
+                throw std::runtime_error("stable asset path collides with published content: " + destination);
+        }
+        routes.insert(route);
+        resolved.emplace_back(destination, &*asset);
+    }
+    return resolved;
+}
+
+void verify_stable_assets() {
+    const std::string config_yaml =
+        "title: BioseqDB\nshort_description: Sequences\ncanonical_origin: https://bioseqdb.com\n"
+        "default_base_path: /mounted/\nrepository_url: https://github.com/styczynski/bioseqdb\n"
+        "source_url_template: https://github.com/styczynski/bioseqdb/blob/{revision}/{path}#L{line}\n"
+        "default_social_image: static/media/social_card.png\ncopyright_holder: BioseqDB\ncopyright_year: 2026\n"
+        "navigation: {documentation: Docs, tutorials: Tutorials, reference: Reference}\n"
+        "cpp_public_modules: [{module: test, primary_interface: test.cppm}]\n"
+        "required_documentation_entities: []\n";
+    const auto config = parse_site_configuration(config_yaml
+        + "stable_assets: {bioseq-mark.svg: bioseq-mark.svg}\n", "site.yaml");
+    const std::vector<static_asset> assets{{"bioseq-mark.svg", "<svg/>", "hash"}};
+    const auto aliases = resolve_stable_assets(config.stable_assets, assets, {{"/assets/hash/bioseq-mark.svg", "hash"}});
+    expect(aliases.size() == 1 && aliases.front().first == "bioseq-mark.svg"
+        && aliases.front().second->content == "<svg/>" && config.default_base_path == "/mounted/",
+        "stable asset alias preserves source bytes beside the hashed bundle and uses a deployment-relative route");
+    for (const auto& mapping : {"../escape.svg: bioseq-mark.svg", "/absolute.svg: bioseq-mark.svg",
+             "mark.svg: ../outside.svg", "assets/mark.svg: bioseq-mark.svg",
+             "site-manifest.json: bioseq-mark.svg", "mark.svg?query: bioseq-mark.svg",
+             "nested//mark.svg: bioseq-mark.svg"}) {
+        bool rejected = false;
+        try { (void)parse_site_configuration(config_yaml + "stable_assets: {" + mapping + "}\n", "bad.yaml"); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "stable assets reject traversal, absolute paths, reserved routes and invalid URL paths");
+    }
+    bool missing_rejected = false;
+    try { (void)resolve_stable_assets({{"missing.svg", "missing.svg"}}, assets, {}); }
+    catch (const std::exception&) { missing_rejected = true; }
+    expect(missing_rejected, "stable asset source must exist in the collected bundle");
+    for (const auto& occupied : {"/bioseq-mark.svg", "/bioseq-mark.svg/child"}) {
+        bool rejected = false;
+        try { (void)resolve_stable_assets(config.stable_assets, assets, {{occupied, "hash"}}); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "stable aliases cannot overwrite or shadow generated publication routes");
+    }
+    bool nested_rejected = false;
+    try { (void)resolve_stable_assets({{"parent", "bioseq-mark.svg"}, {"parent/mark.svg", "bioseq-mark.svg"}}, assets, {}); }
+    catch (const std::exception&) { nested_rejected = true; }
+    expect(nested_rejected, "stable alias paths cannot shadow one another");
+}
+
 // Collect file routes for comparison with, the site manifest. Reject
 // symlinks and special files so every listed output is a regular file.
 void collect_site_files(const fs::path& root, std::set<std::string>& routes) {
@@ -4901,6 +5010,8 @@ void decorate_code_entity_ranges(
         page["canonical"] = escaped(canonical(rel));
         page["url"] = escaped(url(relative));
         page["page_type"] = "blog";
+        page["category"] = item.metadata.category;
+        page["search_text"] = escaped(item.search_text);
         page["date"] = item.metadata.publication_date;
         const auto& date = item.metadata.publication_date;
         page["date_label"] = std::to_string(std::stoi(date.substr(8, 2))) + " "
@@ -4963,6 +5074,10 @@ void decorate_code_entity_ranges(
             "  Content-Type: text/plain; charset=utf-8\n"
             "  Content-Disposition: inline\n"
             "  Link: <" + canonical(rel) + ">; rel=\"canonical\"\n\n";
+    }
+    for (const auto& [destination, source] : config.stable_assets) {
+        markdown_headers += url(destination) + "\n"
+            "  Cache-Control: public, max-age=300, must-revalidate\n\n";
     }
     writer.emit(route("_headers"), markdown_headers);
     boost::json::object blog_index_page;
@@ -5239,8 +5354,9 @@ void decorate_code_entity_ranges(
         entry.route = url("blog/" + item.metadata.slug + "/");
         entry.summary = item.metadata.description;
         entry.name_source = item.metadata.title;
+        entry.name_source += " " + item.metadata.category;
         for (const auto& keyword : item.metadata.keywords) entry.name_source += " " + keyword;
-        entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
+        entry.text_source = item.metadata.description + " " + item.search_text;
         search_entries.push_back(std::move(entry));
     }
     const auto add_page_entry = [&search_entries, &url](
@@ -5310,6 +5426,12 @@ void decorate_code_entity_ranges(
     }
     sitemap += "</urlset>\n";
     writer.emit(route("sitemap.xml"), sitemap);
+
+    // Stable aliases are additional publications of the same bytes; internal
+    // URLs continue using the content-addressed bundle. Resolve after pages so
+    // a configuration mistake cannot replace generated content.
+    for (const auto& [destination, asset] : resolve_stable_assets(config.stable_assets, assets, writer.manifest))
+        writer.emit(route(destination), asset->content);
 
     // Write the manifest after all outputs, then check that its routes match
     // the files in staging. PostgreSQL version data comes from the saved model.

@@ -139,6 +139,7 @@ title: "A new way to query sequences"
 description: "A short description of what the reader will learn."
 date: "2026-10-01"
 keywords: [BioseqDB, PostgreSQL, sequence alignment]
+category: bioseqdb
 draft: false
 ---
 
@@ -161,7 +162,8 @@ RESET max_parallel_workers_per_gather;
 use `YYYY-MM-DD`. The title becomes a readable route such as
 `/blog/a-new-way-to-query-sequences/`; set an explicit `slug` of lowercase words
 separated by hyphens to keep the URL stable when editing a title. Slugs must be
-unique. Optional fields are `author` (defaults to Piotr Styczyński), `cover`,
+unique. `category` accepts `bioseqdb` (the default) or `others`; use `others` for
+general PostgreSQL and database posts. Optional fields are `author` (defaults to Piotr Styczyński), `cover`,
 `image_alt`, `social_image` and `draft`. A cover uses a bundled `/static/...`
 asset; `image_alt` describes it. `social_image` can supply a bundled raster image
 for sharing previews, otherwise the site's default is used. Remote images are
@@ -209,3 +211,26 @@ are left intact. Use separate entries for distinct concepts, keep aliases
 unique across the file, and choose a specific, reliable HTTPS source. Entries
 need not appear in any current post. The initial glossary includes 69 topics
 covering sequence biology, public archives, alignment tools and PostgreSQL.
+
+The blog index has its own search, keyword filter, sorting and pagination. Its
+category choice is remembered in the browser, with BioseqDB selected on a first
+visit. The dedicated search filters blog posts; the header search includes the
+whole website and ranks blog matches after documentation and code matches.
+Without JavaScript, the index keeps links to all published posts available.
+
+## Stable public assets
+
+Assets used inside the website keep their content-hashed URLs. For external
+references, add aliases to `stable_assets` in `website/site.yaml`:
+
+```yaml
+stable_assets:
+  bioseq-mark.svg: bioseq-mark.svg
+```
+
+Each key is an output path relative to the deployment root; its value is a file
+relative to `website/static/`. The generator publishes and tracks these copies
+alongside the hashed bundle. The logo is therefore available at
+`https://bioseqdb.com/bioseq-mark.svg`, which is the URL used by the repository
+README. Generated hosting headers give stable aliases a short cache lifetime
+so a logo update does not leave an immutable cached copy behind.

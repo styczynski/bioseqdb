@@ -991,6 +991,7 @@ namespace {
     object["keywords"] = std::move(keywords);
     object["draft"] = item.metadata.draft;
     object["publication_date"] = item.metadata.publication_date;
+    object["category"] = item.metadata.category;
     object["author"] = item.metadata.author;
     object["cover"] = item.metadata.cover;
     object["image_alt"] = item.metadata.image_alt;
@@ -998,6 +999,7 @@ namespace {
     object["social_image"] = item.metadata.social_image
         ? boost::json::value(*item.metadata.social_image) : boost::json::value(nullptr);
     object["public_markdown"] = item.public_markdown;
+    object["search_text"] = item.search_text;
     object["source_path"] = item.source_path;
     object["previous_slug"] =
         item.previous_slug ? boost::json::value(*item.previous_slug) : boost::json::value(nullptr);
@@ -1566,10 +1568,16 @@ namespace {
         return value && value->is_string() ? std::string(value->as_string()) : std::string{};
     };
     item.metadata.publication_date = optional_text("publication_date");
+    if (const auto* category = object.if_contains("category")) {
+        item.metadata.category = std::string(category->as_string());
+        if (item.metadata.category != "bioseqdb" && item.metadata.category != "others")
+            throw std::runtime_error("serialized blog category must be bioseqdb or others");
+    }
     item.metadata.author = optional_text("author");
     item.metadata.cover = optional_text("cover");
     item.metadata.image_alt = optional_text("image_alt");
     item.public_markdown = optional_text("public_markdown");
+    item.search_text = optional_text("search_text");
     if (const auto* minutes = object.if_contains("reading_minutes"))
         item.metadata.reading_minutes = minutes->to_number<std::uint32_t>();
     if (const auto* social = object.if_contains("social_image"))
@@ -2237,6 +2245,8 @@ namespace {
             primary["author"] = boost::json::object{
                 {"@type", "Person"}, {"name", page_object_ref.at("structured_author")}};
             primary["keywords"] = page_object_ref.at("structured_keywords");
+            if (page_object_ref.contains("category"))
+                primary["articleSection"] = page_object_ref.at("category");
             primary["timeRequired"] = "PT" + std::to_string(
                 page_object_ref.at("reading_minutes").to_number<std::uint32_t>()) + "M";
             if (page_object_ref.contains("social_image_url"))

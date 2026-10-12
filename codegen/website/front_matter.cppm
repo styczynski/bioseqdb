@@ -270,7 +270,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
     if (!root.IsMap()) throw std::runtime_error("blog frontmatter must be a mapping: " + std::string(path));
     const std::set<std::string> allowed{
         "title", "description", "date", "keywords", "slug", "author", "cover",
-        "image_alt", "social_image", "draft"};
+        "image_alt", "social_image", "draft", "category"};
     for (const auto& entry : root) {
         const auto key = entry.first.as<std::string>();
         if (!allowed.contains(key))
@@ -284,6 +284,9 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
     metadata.title = text("title");
     metadata.description = text("description");
     metadata.publication_date = text("date");
+    if (root["category"]) metadata.category = text("category");
+    if (metadata.category != "bioseqdb" && metadata.category != "others")
+        throw std::runtime_error("blog category must be bioseqdb or others: " + std::string(path));
     metadata.slug = root["slug"] ? text("slug") : blog_title_slug(metadata.title);
     if (metadata.slug.empty() || blog_title_slug(metadata.slug) != metadata.slug)
         throw std::runtime_error("blog slug must use lowercase words separated by hyphens: " + std::string(path));
@@ -383,6 +386,8 @@ struct site_configuration {
     std::string repository_url;
     std::string source_url_template;
     std::string default_social_image;
+    // Published URL path -> path relative to website/static. Hashed copies remain.
+    std::map<std::string, std::string, std::less<>> stable_assets;
     std::optional<std::string> status_label;
     std::string copyright_holder;
     std::uint32_t copyright_year{};
@@ -426,6 +431,28 @@ using landing_content = std::map<
 }
 
 namespace {
+
+void validate_asset_path(std::string_view value, std::string_view field,
+                         std::string_view path) {
+    bool valid = !value.empty() && value.front() != '/' && value.back() != '/';
+    std::size_t start = 0;
+    while (valid && start < value.size()) {
+        const auto end = value.find('/', start);
+        const auto part = value.substr(start, end == std::string_view::npos ? end : end - start);
+        valid = !part.empty() && part != "." && part != "..";
+        for (const unsigned char character : part) {
+            valid = valid && ((character >= 'a' && character <= 'z')
+                || (character >= 'A' && character <= 'Z')
+                || (character >= '0' && character <= '9')
+                || character == '-' || character == '_' || character == '.' || character == '~');
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    if (!valid)
+        throw std::runtime_error(std::string(field) + " must be a relative URL-safe asset path without dot segments: "
+            + std::string(path));
+}
 
 void validate_base_path(std::string_view value, std::string_view path) {
     if (value == "/") {
@@ -506,7 +533,7 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
         "title", "short_description", "canonical_origin", "default_base_path",
         "repository_url", "source_url_template", "default_social_image",
         "status_label", "copyright_holder", "copyright_year", "navigation",
-        "cpp_public_modules", "required_documentation_entities"});
+        "cpp_public_modules", "required_documentation_entities", "stable_assets"});
     for (const auto& entry : root) {
         const auto key = entry.first.as<std::string>();
         bool known = false;
@@ -557,6 +584,19 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
     reject_placeholder_origin(config.source_url_template, "source_url_template");
     config.default_social_image =
         require_scalar(root["default_social_image"], "default_social_image", path);
+    if (const auto stable = root["stable_assets"]) {
+        if (!stable.IsMap())
+            throw std::runtime_error("stable_assets must map published paths to static asset paths: " + std::string(path));
+        for (const auto& entry : stable) {
+            const auto destination = require_scalar(entry.first, "stable_assets destination", path);
+            const auto source = require_scalar(entry.second, "stable_assets source", path);
+            validate_asset_path(destination, "stable_assets destination", path);
+            validate_asset_path(source, "stable_assets source", path);
+            if (destination == "site-manifest.json" || destination == "assets" || destination.starts_with("assets/"))
+                throw std::runtime_error("stable_assets destination uses a reserved publication path: " + destination);
+            config.stable_assets.emplace(destination, source);
+        }
+    }
     if (root["status_label"]) {
         config.status_label = require_scalar(root["status_label"], "status_label", path);
     }
@@ -595,7 +635,7 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
     const YAML::Node required = root["required_documentation_entities"];
     if (!required || !required.IsSequence()) {
         throw std::runtime_error("required_documentation_entities is required and "
-                                 "must be a sequence (only status_label is optional)");
+                                 "must be a sequence");
     }
     std::set<std::string> seen_entities;
     for (const auto& item : required) {

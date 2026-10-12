@@ -8,6 +8,9 @@ default_base_path: /
 repository_url: https://github.com/styczynski/bioseqdb
 source_url_template: https://github.com/styczynski/bioseqdb/blob/{revision}/{path}#L{line}
 default_social_image: static/media/social_card.png
+# Stable public URLs for README files and external pages. Sources are under static/.
+stable_assets:
+  bioseq-mark.svg: bioseq-mark.svg
 status_label: Alpha
 copyright_holder: BioseqDB Piotr Styczyński
 copyright_year: 2026

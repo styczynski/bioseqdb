@@ -70,6 +70,7 @@ struct tutorial_metadata {
     bool draft{};
     // Blog metadata is empty for versioned tutorials.
     std::string publication_date;
+    std::string category{"bioseqdb"};
     std::string author;
     std::string cover;
     std::string image_alt;
@@ -118,6 +119,7 @@ struct tutorial {
     std::optional<std::string> previous_slug;
     std::optional<std::string> next_slug;
     std::string public_markdown;  // blog source with execution-only SQL removed
+    std::string search_text;  // authored visible blog text, before SQL results are appended
 };
 
 /// @brief An input path and content hash recorded in the site  plan.
