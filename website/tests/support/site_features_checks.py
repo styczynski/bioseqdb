@@ -38,7 +38,7 @@ def _header_geometry(page, width):
     geometry = page.evaluate("""() => {
       const header = document.querySelector('[data-site-header]');
       const selectors = '.site-brand,.site-navigation a,#doc-search,.site-version-button,' +
-        '.site-github,[data-theme-toggle],a[href$="/contact/"]';
+        '.site-github,[data-theme-toggle],[data-contact-link]';
       const controls = [...header.querySelectorAll(selectors)].filter(node => {
         const style = getComputedStyle(node), box = node.getBoundingClientRect();
         return style.visibility !== 'hidden' && style.display !== 'none' && box.width && box.height;
@@ -170,7 +170,7 @@ def exercise_site_features(browser, server, base_path, version, artifact_dir: Pa
     for name, route in routes.items():
         page.goto(server.url_for(route), wait_until="networkidle")
         _theme(page, "light")
-        _check(page.locator('[data-site-header] a[href$="/contact/"]').count() == 1,
+        _check(page.locator('[data-site-header] [data-contact-link]').count() == 1,
                f"{name}: header is missing Contact me")
         for width in WIDTHS:
             page.set_viewport_size({"width": width, "height": 1000})

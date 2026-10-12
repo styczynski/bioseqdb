@@ -1,0 +1,347 @@
+"""Offline acceptance checks for Markdown blogs and the shared release banner."""
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+from xml.etree import ElementTree
+
+from support.site_features_checks import GOOGLE_TAG_URL, _header_geometry, _light_readability
+
+
+WIDTHS = (320, 420, 568, 666, 768, 1024, 1300, 1600, 1920, 2560)
+
+
+def _check(value, message):
+    if not value:
+        raise AssertionError(message)
+
+
+def _settle(page):
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+
+
+def _wait_scroll(page, window, after):
+    deadline = time.monotonic() + 6.5
+    while time.monotonic() < deadline:
+        current = window.evaluate('node => node.scrollLeft')
+        _check(current >= after - 1, 'announcement jumped back after a manual scroll or pause')
+        if current > after + 2:
+            return
+        page.wait_for_timeout(80)
+    raise AssertionError('overflowing announcement did not begin scrolling')
+
+
+def _layout(page, width, label):
+    _header_geometry(page, width)
+    _check(page.locator('[data-site-header] .site-github').is_visible(),
+           f"{label}: mobile header lost its GitHub action")
+    geometry = page.evaluate("""() => {
+      const box = selector => {
+        const node = document.querySelector(selector);
+        if (!node) return null;
+        const b = node.getBoundingClientRect(), s = getComputedStyle(node);
+        if (!b.width || !b.height || s.display === 'none') return null;
+        return {x:b.x,y:b.y,right:b.right,bottom:b.bottom,width:b.width,height:b.height};
+      };
+      return {header:box('[data-site-header]'),search:box('.site-search-wrap'),actions:box('.site-actions'),
+        main:box('main'),hero:box('.blog-hero'),
+        title:box('h1'),description:box('.blog-description'),meta:box('.blog-hero .blog-meta'),
+        body:box('.blog-reading-column'),toc:box('.blog-toc'),tools:box('.blog-tools'),
+        prose:box('.blog-content'),intro:box('.blog-index-intro'),cards:box('.blog-posts'),
+        overflow:document.documentElement.scrollWidth-innerWidth,
+        images:[...document.querySelectorAll('main img')].every(i=>i.complete&&i.naturalWidth>0)};
+    }""")
+    _check(geometry["overflow"] <= 1, f"{label}: document scrolls horizontally")
+    _check(geometry["images"], f"{label}: blog image failed to load")
+    if width <= 768:
+        search, actions = geometry['search'], geometry['actions']
+        _check(abs(search['y'] + search['height'] / 2 - actions['y'] - actions['height'] / 2) <= 1,
+               f'{label}: mobile search and actions waste a third header row')
+    _check(geometry["main"]["y"] >= geometry["header"]["bottom"] - 1,
+           f"{label}: main content overlaps the header/banner")
+    for key in ("title", "description", "meta", "body", "toc", "cards"):
+        rect = geometry[key]
+        if rect:
+            _check(rect["x"] >= -1 and rect["right"] <= width + 1,
+                   f"{label}: {key} escapes the viewport: {rect}")
+    for above, below in (("title", "description"), ("description", "meta"),
+                         ("hero", "tools"), ("tools", "prose"), ("intro", "cards")):
+        a, b = geometry[above], geometry[below]
+        if a and b:
+            _check(a["bottom"] <= b["y"] + 1, f"{label}: {above} overlaps {below}")
+    if geometry["toc"]:
+        _check(geometry["body"]["right"] <= geometry["toc"]["x"] + 1,
+               f"{label}: table of contents overlaps the article")
+    return geometry
+
+
+def _tooltip_bounds(page, tooltip, label):
+    bounds = tooltip.bounding_box()
+    viewport = page.viewport_size
+    _check(bounds and bounds["x"] >= 0 and bounds["y"] >= 0
+           and bounds["x"] + bounds["width"] <= viewport["width"] + 1
+           and bounds["y"] + bounds["height"] <= viewport["height"] + 1,
+           f"{label}: tooltip is outside the viewport: {bounds}")
+
+
+def _tooltips(page, output, theme):
+    from playwright.sync_api import expect
+
+    page.set_viewport_size({"width": 420, "height": 900})
+    terms = page.locator('.blog-content a[data-glossary-term]').evaluate_all(
+        'nodes => nodes.map(n => n.dataset.glossaryTerm)')
+    _check(len(terms) == len(set(terms)), "glossary decorates more than the first occurrence of a term")
+    glossary = page.locator('.blog-content a[data-glossary-description]').first
+    _check(glossary.count() == 1, "blog has no automatically linked glossary terms")
+    term = glossary.get_attribute("data-glossary-term")
+    description = glossary.get_attribute("data-glossary-description")
+    tip = page.locator('#blog-glossary-tip')
+    glossary.hover()
+    tip.wait_for(state="visible")
+    _check(term in tip.inner_text() and description in tip.inner_text(),
+           "glossary hover lost its authored term or description")
+    _tooltip_bounds(page, tip, "glossary hover")
+    page.mouse.move(2, 890)
+    tip.wait_for(state="hidden")
+    glossary.focus()
+    tip.wait_for(state="visible")
+    _check(glossary.get_attribute('aria-describedby') == tip.get_attribute('id'),
+           "glossary focus lacks its accessible description")
+    _tooltip_bounds(page, tip, "glossary focus")
+    page.screenshot(path=str(output / f"glossary-{theme}-420.png"), animations="disabled")
+    page.keyboard.press('Escape')
+    tip.wait_for(state="hidden")
+    _check(not glossary.get_attribute('aria-describedby'), "Escape left a stale glossary description")
+    glossary.blur()
+    glossary.focus()
+    tip.wait_for(state='visible')
+    page.mouse.wheel(0, 1800)
+    tip.wait_for(state='hidden')
+    _check(not glossary.get_attribute('aria-describedby'),
+           'offscreen glossary anchor left a detached visible description')
+
+    # Both prose code and highlighted runnable code use generated SQL entities.
+    for name in ('mmsearch', 'bioseq.cigar', 'bioseq.score'):
+        refs = page.locator('.blog-content a.entity-ref[data-entity-id]').filter(
+            has_text=re.compile(r'^' + re.escape(name) + r'(?:\(\))?$'))
+        _check(refs.count() >= 2, f"{name}: missing SQL links in prose or runnable code")
+        code_ref = refs.locator('xpath=ancestor::code').count()
+        _check(code_ref > 0, f"{name}: SQL code has no linked reference")
+        ref = refs.last
+        ref.scroll_into_view_if_needed()
+        if name == 'mmsearch':
+            ref.hover()
+            page.locator('#entity-pop').wait_for(state="visible")
+            _check(name in page.locator('#entity-pop').inner_text(), "SQL hover tooltip has wrong content")
+            page.keyboard.press('Escape')
+            page.locator('#entity-pop').wait_for(state="hidden")
+        ref.focus()
+        entity_tip = page.locator('#entity-pop')
+        entity_tip.wait_for(state="visible")
+        expect(entity_tip).to_have_css('opacity', '1')
+        _check(name in entity_tip.inner_text(), f"{name}: SQL tooltip has wrong content")
+        _tooltip_bounds(page, entity_tip, name)
+        page.keyboard.press('Escape')
+        entity_tip.wait_for(state="hidden")
+
+
+def _publication(page, context, server, path):
+    _check(page.locator('main article.blog-article').count() == 1, "post has no semantic article")
+    _check(page.locator('h1').count() == 1, "post needs one title")
+    meta = page.locator('.blog-hero .blog-meta')
+    _check(meta.locator('time').get_attribute('datetime') == '2026-10-01', "first post has wrong publication date")
+    reading = re.search(r'\b([1-9][0-9]*) min read\b', meta.inner_text())
+    _check(reading and int(reading[1]) <= 15, "reading time is missing or counts hidden fixture SQL")
+    keywords = page.locator('meta[name="keywords"]').get_attribute('content') or ''
+    _check('PostgreSQL' in keywords and 'sequence alignment' in keywords, "authored SEO keywords are missing")
+    linked_data = page.locator('script[type="application/ld+json"]').evaluate_all(
+        'nodes => nodes.flatMap(n => { const d=JSON.parse(n.textContent); return d["@graph"] || [d]; })')
+    article = next((item for item in linked_data if item.get('@type') == 'BlogPosting'), None)
+    _check(article and article.get('datePublished') == '2026-10-01'
+           and article.get('timeRequired') == f'PT{reading[1]}M', "BlogPosting metadata does not match the visible post")
+    canonical = page.locator('link[rel="canonical"]').get_attribute('href')
+    sitemap = context.request.get(server.url_for(path('sitemap.xml')))
+    _check(sitemap.ok, "sitemap is unavailable")
+    locations = {node.text for node in ElementTree.fromstring(sitemap.text()).iter()
+                 if node.tag.endswith('}loc')}
+    _check(canonical in locations, "blog entry is missing from the sitemap")
+
+    markdown = page.locator('.blog-markdown')
+    _check(markdown.inner_text().strip() == 'Markdown', "post Markdown button is missing")
+    url = markdown.get_attribute('href')
+    _check(url and url.startswith(path('blog/')) and url.endswith('.md'), "Markdown link is outside the mounted blog")
+    _check(page.locator('link[rel="alternate"][type="text/markdown"]').get_attribute('href') == url,
+           "Markdown alternate and visible link disagree")
+    response = context.request.get(server.url_for(url))
+    text = response.text()
+    _check(response.ok and 'Introducing BioseqDB' in text and 'SELECT t.patient_name' in text,
+           "published Markdown is not readable post content")
+    _check('<!doctype' not in text.lower() and '-- bioseq:setup' not in text
+           and 'SET bioseq.' not in text and 'DROP TABLE samples' not in text,
+           "public Markdown contains HTML or hidden database fixtures")
+    _check(response.headers.get('content-type', '').startswith('text/plain'),
+           "Markdown must be served as plain text for an inline browser view")
+    downloads = []
+    on_download = lambda download: downloads.append(download)
+    page.on('download', on_download)
+    post_url = page.url
+    markdown.click()
+    page.wait_for_url(server.url_for(url))
+    _check(not downloads and 'Introducing BioseqDB' in page.locator('body').inner_text()
+           and page.locator('article').count() == 0,
+           "Markdown action did not open the plain text document in the browser")
+    page.remove_listener('download', on_download)
+    # Return to the article for the remaining interaction and layout checks.
+    page.goto(post_url, wait_until='networkidle')
+    rows = page.locator('.blog-content .result-table tbody tr')
+    _check(rows.count() == 5, "first post did not render its two executed SQL results")
+    _check(all(cell.strip() and cell.strip() != 'NULL'
+               for cell in page.locator('.blog-content .result-table tbody td').all_text_contents()),
+           "blog SQL results contain NULL or empty cells")
+    _check(page.locator('.blog-cta a[href*="/tutorials/"]').count() >= 1,
+           "post footer has no documentation call to action")
+    search = page.locator('#doc-search')
+    search.fill('Introducing BioseqDB')
+    result = page.locator('#search-dd a[data-search-result][href$="/blog/introducing-bioseqdb/"]')
+    result.wait_for(state='visible')
+    _check('Blog' in result.inner_text(), 'blog search result does not identify its content type')
+    search.fill('')
+    page.keyboard.press('Escape')
+    search.blur()
+
+
+def _banner(page):
+    page.set_viewport_size({"width": 1920, "height": 900})
+    page.evaluate('scrollTo(0,0)')
+    _settle(page)
+    banner = page.locator('[data-announcement]')
+    _check(banner.count() == 1 and banner.is_visible(), "shared release announcement is missing")
+    _check(banner.get_attribute('data-overflow') == 'false', "wide release banner unnecessarily scrolls")
+    _check(page.locator('[data-announcement-toggle]').is_hidden(), "wide release banner has an unnecessary pause button")
+    page.set_viewport_size({"width": 320, "height": 900})
+    _settle(page)
+    _check(banner.get_attribute('data-overflow') == 'true', "narrow release banner did not detect overflowing text")
+    window = page.locator('[data-announcement-window]')
+    button = page.locator('[data-announcement-toggle]')
+    _check(button.is_visible(), "scrolling banner has no pause control")
+    page.mouse.move(2, 890)
+    page.evaluate('document.activeElement.blur()')
+    _wait_scroll(page, window, 0)
+    button.click()
+    _check(button.get_attribute('aria-pressed') == 'true' and 'Resume' in button.get_attribute('aria-label'),
+           "announcement pause control does not announce its paused state")
+    page.mouse.move(2, 890)
+    page.evaluate('document.activeElement.blur()')
+    frozen = window.evaluate('node => node.scrollLeft')
+    page.wait_for_timeout(300)
+    _check(abs(window.evaluate('node => node.scrollLeft') - frozen) <= 1, "paused announcement kept moving")
+    button.click()
+    _check(button.get_attribute('aria-pressed') == 'false', "announcement did not resume")
+    page.mouse.move(2, 890)
+    _check(button.evaluate('node => document.activeElement === node'),
+           'resume check must preserve keyboard focus on the button')
+    _wait_scroll(page, window, frozen)
+
+    # Native wheel scrolling happens after the listener. Automatic scrolling
+    # must continue from that final position when the interaction hold ends.
+    window.hover()
+    before_wheel = window.evaluate('node => node.scrollLeft')
+    page.mouse.wheel(140, 0)
+    page.wait_for_timeout(150)
+    after_wheel = window.evaluate('node => node.scrollLeft')
+    _check(after_wheel > before_wheel + 50, 'wheel check did not manually scroll the banner')
+    page.mouse.move(2, 890)
+    _wait_scroll(page, window, after_wheel)
+
+    # Native focus must reveal links outside the clipped announcement window.
+    window.focus()
+    for suffix in ('/issues', '/contact/'):
+        page.keyboard.press('Tab')
+        focused = page.locator(':focus')
+        _check((focused.get_attribute('href') or '').endswith(suffix),
+               f"announcement link {suffix} is not reachable in keyboard order")
+        rect = focused.bounding_box()
+        clip = window.bounding_box()
+        _check(rect['x'] >= clip['x'] - 1 and rect['x'] + rect['width'] <= clip['x'] + clip['width'] + 1,
+               f"focused announcement link {suffix} remained clipped")
+    frozen = window.evaluate('node => node.scrollLeft')
+    page.wait_for_timeout(300)
+    _check(abs(window.evaluate('node => node.scrollLeft') - frozen) <= 1,
+           "announcement moves while a reader focuses its links")
+
+
+def exercise_blog(browser, server, base_path, artifact_dir: Path):
+    """Exercise actual generated pages, preserving network isolation of the main suite."""
+    root = base_path.rstrip('/')
+    path = lambda suffix='': root + '/' + suffix.lstrip('/')
+    output = Path(artifact_dir) / 'blog'
+    output.mkdir(parents=True, exist_ok=True)
+    reports, errors, unexpected_requests = [], [], []
+
+    def offline(route):
+        host = urlsplit(route.request.url).hostname
+        if host in ('127.0.0.1', 'localhost', server._host):
+            route.continue_()
+        elif route.request.url == GOOGLE_TAG_URL:
+            route.fulfill(status=200, content_type='application/javascript', body='/* offline analytics */')
+        else:
+            unexpected_requests.append(route.request.url)
+            route.abort()
+
+    context = browser.new_context(viewport={'width': 1600, 'height': 1000})
+    context.route('**/*', offline)
+    page = context.new_page()
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    for theme in ('dark', 'light'):
+        for name, route in (('index', path('blog/')), ('post', path('blog/introducing-bioseqdb/'))):
+            page.goto(server.url_for(route), wait_until='networkidle')
+            if page.locator('html').get_attribute('data-theme') != theme:
+                page.locator('[data-theme-toggle]').click()
+                page.mouse.move(2, 990)
+                page.locator('[data-theme-toggle]').blur()
+            _check(page.locator('[data-site-header] .site-navigation a[href$="/blog/"]').count() == 1,
+                   'Blog is missing from the unified header')
+            if name == 'index':
+                _check(page.locator('.blog-card h2 a[href$="/introducing-bioseqdb/"]').count() == 1,
+                       'first post is missing from the blog index')
+            else:
+                _publication(page, context, server, path)
+            for width in WIDTHS:
+                page.set_viewport_size({'width': width, 'height': 1000})
+                page.evaluate('scrollTo(0,0)')
+                _settle(page)
+                label = f'{name}/{theme}/{width}'
+                report = {'page': name, 'theme': theme, 'width': width, 'geometry': _layout(page, width, label)}
+                if width in (420, 1600):
+                    screenshot = output / f'{name}-{theme}-{width}.png'
+                    page.screenshot(path=str(screenshot), full_page=True, animations='disabled')
+                    report['screenshot'] = screenshot.name
+                    if theme == 'light':
+                        report['contrast'] = _light_readability(page, label)
+                reports.append(report)
+            if name == 'post':
+                _tooltips(page, output, theme)
+    _banner(page)
+    _check(not errors, f'blog or banner raised browser errors: {errors}')
+    context.close()
+
+    reduced = browser.new_context(viewport={'width': 320, 'height': 900}, reduced_motion='reduce')
+    reduced.route('**/*', offline)
+    page = reduced.new_page()
+    page.goto(server.url_for(path('blog/')), wait_until='networkidle')
+    _check(page.locator('[data-announcement-toggle]').is_hidden(), 'reduced-motion banner shows a motion control')
+    window = page.locator('[data-announcement-window]')
+    page.wait_for_timeout(2500)
+    _check(window.evaluate('node => node.scrollLeft') == 0, 'reduced-motion banner auto-scrolls')
+    window.focus()
+    page.keyboard.press('Tab')
+    page.keyboard.press('Tab')
+    _check((page.locator(':focus').get_attribute('href') or '').endswith('/contact/'),
+           'reduced-motion reader cannot reach the contact link')
+    _check(window.evaluate('node => node.scrollLeft') > 0, 'reduced-motion banner hides focused links')
+    reduced.close()
+    _check(not unexpected_requests, f'blog depended on unexpected network requests: {unexpected_requests}')
+    (output / 'report.json').write_text(json.dumps({'layouts': reports}, indent=2) + '\n')

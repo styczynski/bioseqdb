@@ -46,6 +46,7 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".xml": "application/xml",
     ".txt": "text/plain; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
     ".woff2": "font/woff2",
     ".png": "image/png",
     ".webp": "image/webp",

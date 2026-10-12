@@ -80,6 +80,7 @@ from support.site_features_checks import (  # noqa: E402
     GOOGLE_TAG_URL,
     exercise_site_features,
 )
+from support.blog_checks import exercise_blog  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -2984,6 +2985,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
         context.close()
         try:
             exercise_site_features(browser, server, base_path, version, artifact_dir)
+            exercise_blog(browser, server, base_path, artifact_dir)
         except AssertionError as error:
             raise AssertionFail(str(error)) from error
         browser.close()
