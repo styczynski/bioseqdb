@@ -42,7 +42,14 @@ def validate(model_path: Path, site: Path) -> dict[str, int]:
     sitemap = ET.parse(site / "sitemap.xml")
     locations = {item.text for item in sitemap.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")}
     index = (site / "blog/index.html").read_text()
+    index_page = Page(index)
     headers = (site / "_headers").read_text()
+    manifest = json.loads((site / "site-manifest.json").read_text())
+    logo = site / "bioseq-mark.svg"
+    hashed_logo = site / "assets" / manifest["asset_bundle_sha256"] / "bioseq-mark.svg"
+    assert logo.read_bytes() == hashed_logo.read_bytes(), "stable logo differs from its bundled source"
+    assert "/bioseq-mark.svg" in manifest["outputs"], "stable logo missing from publication manifest"
+    assert "bioseq-mark.svg\n  Cache-Control: public, max-age=300, must-revalidate" in headers
     search = json.loads((site / model["version"]["label"] / "search-index.json").read_text())
     # Search serialization is an object with records; keep this assertion tied
     # to its public format, not a duplicated search implementation.
@@ -79,6 +86,11 @@ def validate(model_path: Path, site: Path) -> dict[str, int]:
         graphs = [item for structured in page.structured
                   for item in structured.get("@graph", [structured])]
         article = next(item for item in graphs if item.get("@type") == "BlogPosting")
+        assert post["category"] in {"bioseqdb", "others"}
+        assert article["articleSection"] == post["category"]
+        assert any(tag == "article" and attrs.get("data-blog-category") == post["category"]
+                   and attrs.get("data-blog-title") == post["title"]
+                   for tag, attrs in index_page.tags), post["slug"]
         assert article["datePublished"] == post["publication_date"]
         assert article["headline"] == post["title"]
         assert article["author"]["name"] == post["author"]

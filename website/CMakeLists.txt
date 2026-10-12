@@ -1261,7 +1261,8 @@ if(_website_node_executable)
     "${_source_dir}/tests/contract/test_project_benchmarks.mjs")
   set(_website_search_contract_command
     "${_website_node_executable}" --test
-    "${_source_dir}/tests/contract/test_search_ranking.mjs")
+    "${_source_dir}/tests/contract/test_search_ranking.mjs"
+    "${_source_dir}/tests/contract/test_blog_index.mjs")
   set(_website_features_contract_command
     "${_website_node_executable}" --test
     "${_source_dir}/tests/contract/test_theme_runtime.mjs"

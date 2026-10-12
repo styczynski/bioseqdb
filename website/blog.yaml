@@ -1,9 +1,35 @@
 # Shared blog copy. Post content and metadata live in blog/*.md.
 index:
   title: The BioseqDB blog
-  description: Notes on building a sequence database, the ideas behind it, and things you can try with SQL.
+  description: Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.
   empty: New posts will appear here.
   read_post: Read the post
+categories:
+  label: Category
+  bioseqdb: BioseqDB
+  others: Others
+  bioseqdb_description: Building and using BioseqDB.
+  others_description: PostgreSQL and databases in general.
+filters:
+  label: Find a blog post
+  search: Search posts
+  placeholder: Search titles, topics, and post content
+  keyword: Keyword
+  all_keywords: All keywords
+  sort: Sort by
+  newest: Newest first
+  oldest: Oldest first
+  title: Title, A–Z
+  reset: Reset filters
+  results: '{count} posts · {category}'
+  result: '{count} post · {category}'
+  no_results: No posts match these filters.
+  no_results_hint: Try another keyword or a shorter search, or reset the filters.
+pagination:
+  label: Blog pages
+  previous: Previous
+  next: Next
+  page: 'Page {page} of {pages}'
 post:
   all_posts: All posts
   reading_time: min read

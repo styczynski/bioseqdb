@@ -6,20 +6,43 @@
   {% include "site-header.html.j2" %}
   <main id="doc-main" class="blog-shell blog-index">
     <header class="blog-index-intro"><p class="blog-eyebrow">BioseqDB</p><h1>{{ blog.index.title }}</h1><p>{{ blog.index.description }}</p></header>
-    <div class="blog-posts">
+    <section class="blog-browser" data-blog-browser data-page-size="6" data-results="{{ blog.filters.results }}" data-result="{{ blog.filters.result }}" data-page-label="{{ blog.pagination.page }}" aria-label="{{ blog.filters.label }}">
+    <div class="blog-filter-panel" data-blog-controls hidden>
+      <div class="blog-category-row">
+        <div class="blog-categories" role="group" aria-label="{{ blog.categories.label }}">
+          <button type="button" data-blog-category-button="bioseqdb" aria-pressed="true">{{ blog.categories.bioseqdb }}</button>
+          <button type="button" data-blog-category-button="others" aria-pressed="false">{{ blog.categories.others }}</button>
+        </div>
+        <p class="blog-category-description" data-blog-category-description="bioseqdb">{{ blog.categories.bioseqdb_description }}</p>
+        <p class="blog-category-description" data-blog-category-description="others" hidden>{{ blog.categories.others_description }}</p>
+      </div>
+      <form class="blog-filters" role="search" aria-label="{{ blog.filters.label }}">
+        <label class="blog-search-field"><span>{{ blog.filters.search }}</span><input data-blog-search type="search" name="q" placeholder="{{ blog.filters.placeholder }}" autocomplete="off"></label>
+        <label><span>{{ blog.filters.keyword }}</span><select data-blog-keyword-select name="keyword"><option value="">{{ blog.filters.all_keywords }}</option></select></label>
+        <label><span>{{ blog.filters.sort }}</span><select data-blog-sort name="sort"><option value="newest">{{ blog.filters.newest }}</option><option value="oldest">{{ blog.filters.oldest }}</option><option value="title">{{ blog.filters.title }}</option></select></label>
+      </form>
+      <div class="blog-results-summary"><p data-blog-result-count role="status" aria-live="polite" aria-atomic="true"></p><button class="blog-reset" type="button" data-blog-reset>{{ blog.filters.reset }}</button></div>
+    </div>
+    <div class="blog-posts" data-blog-posts>
       {% if page.posts %}{% for post in page.posts %}
-      <article class="blog-card">
+      <article class="blog-card" data-blog-card data-blog-category="{{ post.category }}" data-blog-date="{{ post.date }}" data-blog-title="{{ post.title }}" data-blog-search-text="{{ post.search_text }}">
         {% if post.cover_url %}<div class="blog-card-cover"><img src="{{ post.cover_url }}" alt="{{ post.image_alt }}" width="1200" height="240"></div>{% endif %}
         <div class="blog-card-content">
+          <p class="blog-card-category">{% if post.category == "others" %}{{ blog.categories.others }}{% else %}{{ blog.categories.bioseqdb }}{% endif %}</p>
           <div class="blog-meta"><time datetime="{{ post.date }}">{{ post.date_label }}</time><span aria-hidden="true">·</span><span>{{ post.reading_minutes }} {{ blog.post.reading_time }}</span></div>
           <h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
           <p>{{ post.description }}</p>
+          <ul class="blog-card-keywords" aria-label="{{ blog.post.keywords }}">{% for keyword in post.keywords %}<li data-blog-keyword>{{ keyword }}</li>{% endfor %}</ul>
           <a class="blog-action" href="{{ post.url }}">{{ blog.index.read_post }} <span aria-hidden="true">→</span></a>
         </div>
       </article>
       {% endfor %}{% else %}<p>{{ blog.index.empty }}</p>{% endif %}
     </div>
+    <div class="blog-empty-state" data-blog-empty hidden><h2>{{ blog.filters.no_results }}</h2><p>{{ blog.filters.no_results_hint }}</p></div>
+    <nav class="blog-pagination" data-blog-pagination aria-label="{{ blog.pagination.label }}" hidden><button type="button" data-blog-previous>{{ blog.pagination.previous }}</button><span data-blog-page-number aria-live="polite" aria-atomic="true"></span><button type="button" data-blog-next>{{ blog.pagination.next }}</button></nav>
+    </section>
   </main>
   {% include "site-footer.html.j2" %}
 </div>
 {% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/blog-index.mjs"></script>{% endblock %}

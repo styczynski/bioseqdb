@@ -11,13 +11,18 @@ const setting = record("sql:guc:bioseq.index.insert_maintenance.enabled", "setti
     summary: "Update indexes during INSERT using the older index format.",
   });
 
-test("blog posts have their own label and rank with documentation above C++", () => {
+test("blog posts have their own label and rank after SQL, documentation, and C++", () => {
   const blog = record("blog:sequences", "blog", "Sequences in SQL", "blog");
   const cpp = record("cpp:function:sequences", "function", "Sequences", "C++");
   const sql = record("sql:type:seq", "sql_type", "seq", "SQL", { summary: "Sequences" });
   assert.equal(searchType(blog), "Blog");
   assert.equal(searchDomain(blog), "Documentation");
-  assert.deepEqual(rankedSearch([cpp, blog, sql], "sequences"), [sql, blog, cpp]);
+  const tutorial = record("tutorial:sequences", "tutorial", "Sequences", "Tutorials");
+  assert.deepEqual(rankedSearch([cpp, blog, sql, tutorial], "sequences"), [sql, tutorial, cpp, blog]);
+  const exactBlog = record("blog:exact", "blog", "Sequences", "blog");
+  const broadCpp = record("cpp:function:broad", "function", "other", "C++", { summary: "Sequences" });
+  assert.deepEqual(rankedSearch([exactBlog, broadCpp], "sequences"), [broadCpp, exactBlog]);
+  assert.deepEqual(rankedSearch([exactBlog, broadCpp], "sequences", 1), [broadCpp]);
 });
 
 test("GUC path fragments and full names return the Setting record", () => {

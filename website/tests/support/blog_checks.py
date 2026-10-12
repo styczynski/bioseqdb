@@ -273,6 +273,153 @@ def _banner(page):
            "announcement moves while a reader focuses its links")
 
 
+def _blog_browser(browser, server, path, output, offline):
+    """Exercise real controls against enough fixture posts to cross page boundaries."""
+    from playwright.sync_api import expect
+
+    index_url = server.url_for(path('blog/'))
+    context = browser.new_context(viewport={'width': 1600, 'height': 1000})
+    context.route('**/*', offline)
+    errors = []
+
+    def fixture(route):
+        if urlsplit(route.request.url).path != path('blog/'):
+            route.fallback()
+            return
+        response = route.fetch()
+        html = response.text()
+        articles = list(re.finditer(r'<article class="blog-card"[^>]*>.*?</article>', html, re.S))
+        # Keep one real BioseqDB post and add 14 isolated database posts. This
+        # tests paging even while the real site has fewer than seven entries.
+        _check(articles, 'blog paging fixture could not find a generated card')
+        original = articles[0].group()
+        bioseq = re.sub(r'data-blog-category="[^"]*"', 'data-blog-category="bioseqdb"', original)
+        copies = [bioseq]
+        for number in range(1, 15):
+            title = f'Fixture post {number:02d}'
+            card = re.sub(r'data-blog-category="[^"]*"', 'data-blog-category="others"', original)
+            card = re.sub(r'data-blog-date="[^"]*"', f'data-blog-date="2026-09-{number:02d}"', card)
+            card = re.sub(r'data-blog-title="[^"]*"', f'data-blog-title="{title}"', card)
+            card = re.sub(r'data-blog-search-text="[^"]*"',
+                          'data-blog-search-text="quasar in full text"' if number == 8 else 'data-blog-search-text="ordinary storage notes"', card)
+            card = re.sub(r'(<h2><a\b[^>]*>).*?(</a></h2>)', lambda m: m[1] + title + m[2], card, flags=re.S)
+            topic = 'Fixture even' if number % 2 == 0 else 'Fixture odd'
+            card = re.sub(r'(<ul class="blog-card-keywords"[^>]*>).*?(</ul>)',
+                          lambda m: m[1] + f'<li data-blog-keyword>{topic}</li>' + m[2], card, flags=re.S)
+            copies.append(card)
+        html = html[:articles[0].start()] + '\n'.join(copies) + html[articles[-1].end():]
+        route.fulfill(response=response, body=html)
+
+    context.route('**/*', fixture)
+    page = context.new_page()
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(index_url, wait_until='networkidle')
+    expect(page.locator('[data-blog-browser]')).to_have_attribute('data-blog-ready', 'true')
+    visible = page.locator('[data-blog-card]:visible')
+    expect(visible).to_have_count(1)
+    expect(page.locator('[data-blog-category-button="bioseqdb"]')).to_have_attribute('aria-pressed', 'true')
+    page.locator('[data-blog-category-button="others"]').click()
+    expect(visible).to_have_count(6)
+    expect(page.locator('[data-blog-result-count]')).to_have_text('14 posts · Others')
+    expect(page.locator('[data-blog-page-number]')).to_have_text('Page 1 of 3')
+    _check(visible.first.get_attribute('data-blog-title') == 'Fixture post 14', 'newest sorting is incorrect')
+    _check(page.evaluate('localStorage.getItem("bioseq-blog-category")') == 'others', 'category was not saved')
+    page.goto(index_url, wait_until='networkidle')
+    expect(page.locator('[data-blog-category-button="others"]')).to_have_attribute('aria-pressed', 'true')
+    expect(visible).to_have_count(6)
+    page.locator('[data-blog-sort]').select_option('oldest')
+    _check(visible.first.get_attribute('data-blog-title') == 'Fixture post 01', 'oldest sorting is incorrect')
+    page.locator('[data-blog-sort]').select_option('title')
+    page.locator('[data-blog-next]').click()
+    expect(page.locator('[data-blog-page-number]')).to_have_text('Page 2 of 3')
+    _check(visible.first.get_attribute('data-blog-title') == 'Fixture post 07', 'second page starts at wrong post')
+    page.locator('[data-blog-next]').click()
+    expect(visible).to_have_count(2)
+    expect(page.locator('[data-blog-next]')).to_be_disabled()
+    page.locator('[data-blog-previous]').click()
+    expect(visible).to_have_count(6)
+    expect(page.locator('[data-blog-page-number]')).to_have_text('Page 2 of 3')
+    page.locator('[data-blog-keyword-select]').select_option('Fixture even')
+    expect(page.locator('[data-blog-page-number]')).to_have_text('Page 1 of 2')
+    expect(page.locator('[data-blog-result-count]')).to_have_text('7 posts · Others')
+    page.locator('[data-blog-search]').fill('quasar')
+    expect(visible).to_have_count(1)
+    _check(visible.first.get_attribute('data-blog-title') == 'Fixture post 08', 'dedicated search omitted the authored body')
+    _check(page.locator('#doc-search').input_value() == '', 'blog search changed the shared header search')
+    page.locator('[data-blog-search]').fill('this-does-not-exist')
+    expect(visible).to_have_count(0)
+    expect(page.locator('[data-blog-empty]')).to_be_visible()
+    expect(page.locator('[data-blog-pagination]')).to_be_hidden()
+    page.locator('[data-blog-reset]').click()
+    expect(page.locator('[data-blog-search]')).to_be_focused()
+    expect(page.locator('[data-blog-category-button="others"]')).to_have_attribute('aria-pressed', 'true')
+    expect(visible).to_have_count(6)
+
+    # A category change in another tab follows the same storage event contract
+    # as the theme preference, without throwing away this tab's search text.
+    sibling = context.new_page()
+    sibling.goto(index_url, wait_until='networkidle')
+    sibling.locator('[data-blog-category-button="bioseqdb"]').click()
+    expect(page.locator('[data-blog-category-button="bioseqdb"]')).to_have_attribute('aria-pressed', 'true')
+    expect(visible).to_have_count(1)
+    sibling.locator('[data-blog-category-button="others"]').click()
+    expect(visible).to_have_count(6)
+    sibling.close()
+    page.goto(index_url + '?category=others&q=quasar&sort=oldest&page=999', wait_until='networkidle')
+    expect(visible).to_have_count(1)
+    expect(page.locator('[data-blog-search]')).to_have_value('quasar')
+    expect(page.locator('[data-blog-page-number]')).to_have_text('Page 1 of 1')
+    page.locator('[data-blog-reset]').click()
+
+    layouts = []
+    for theme in ('dark', 'light'):
+        if page.locator('html').get_attribute('data-theme') != theme:
+            page.locator('[data-theme-toggle]').click()
+            page.locator('[data-theme-toggle]').blur()
+        for width in WIDTHS:
+            page.set_viewport_size({'width': width, 'height': 1000})
+            page.evaluate('scrollTo(0,0)')
+            _settle(page)
+            label = f'filtered-index/{theme}/{width}'
+            report = {'theme': theme, 'width': width, 'geometry': _layout(page, width, label)}
+            controls = page.locator('.blog-filters :is(input,select)').evaluate_all('nodes => nodes.map(node => { const r=node.getBoundingClientRect(); return {left:r.left,right:r.right,width:r.width}; })')
+            _check(all(box['left'] >= 0 and box['right'] <= width and box['width'] >= 90 for box in controls),
+                   f'{label}: a blog filter is clipped or too narrow')
+            if width in (420, 1600):
+                page.screenshot(path=str(output / f'filters-{theme}-{width}.png'), full_page=True, animations='disabled')
+                if theme == 'light':
+                    report['contrast'] = _light_readability(page, label)
+            layouts.append(report)
+    _check(not errors, f'blog controls raised browser errors: {errors}')
+    context.close()
+
+    blocked = browser.new_context()
+    blocked.route('**/*', offline)
+    blocked.add_init_script("""for (const method of ['getItem','setItem']) {
+      const original = Storage.prototype[method];
+      Storage.prototype[method] = function(key, ...args) {
+        if (key === 'bioseq-blog-category') throw new DOMException('Storage unavailable', 'SecurityError');
+        return original.call(this, key, ...args);
+      };
+    }""")
+    page = blocked.new_page()
+    page.goto(index_url, wait_until='networkidle')
+    expect(page.locator('[data-blog-category-button="bioseqdb"]')).to_have_attribute('aria-pressed', 'true')
+    page.locator('[data-blog-category-button="others"]').click()
+    expect(page.locator('[data-blog-category-button="others"]')).to_have_attribute('aria-pressed', 'true')
+    blocked.close()
+
+    nojs = browser.new_context(java_script_enabled=False)
+    nojs.route('**/*', offline)
+    page = nojs.new_page()
+    page.goto(index_url, wait_until='networkidle')
+    _check(page.locator('[data-blog-card]').count() == page.locator('[data-blog-card]:visible').count(),
+           'server-rendered posts disappear without JavaScript')
+    expect(page.locator('[data-blog-controls]')).to_be_hidden()
+    nojs.close()
+    (output / 'filters-report.json').write_text(json.dumps({'layouts': layouts}, indent=2) + '\n')
+
+
 def exercise_blog(browser, server, base_path, artifact_dir: Path):
     """Exercise actual generated pages, preserving network isolation of the main suite."""
     root = base_path.rstrip('/')
@@ -327,6 +474,7 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
     _banner(page)
     _check(not errors, f'blog or banner raised browser errors: {errors}')
     context.close()
+    _blog_browser(browser, server, path, output, offline)
 
     reduced = browser.new_context(viewport={'width': 320, 'height': 900}, reduced_motion='reduce')
     reduced.route('**/*', offline)
