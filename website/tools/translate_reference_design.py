@@ -850,10 +850,14 @@ def replace_header(markup: str, old_id: str, replacement: str) -> str:
 
 
 def add_footer_profile_links(markup: str) -> str:
-    """Add small profile links after style extraction, preserving design hooks."""
+    """Bind footer copy and add profile links without changing design hooks."""
     footer_at = markup.index("<footer")
     footer_end = markup.index("</footer>", footer_at)
     footer = markup[footer_at:footer_end]
+    # Keep the key derived from the original export for existing landing.yaml
+    # files; its editable value identifies the project's current license.
+    footer = footer.replace(
+        ">License (MIT)</a>", ">" + landing_text("footer", "License (MIT)") + "</a>")
     versions = re.search(
         r'<a\b[^>]*href="\{\{ site\.versions_page_url \}\}"[^>]*>.*?</a>',
         footer, re.S)

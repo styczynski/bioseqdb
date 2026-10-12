@@ -30,6 +30,9 @@ def validate(root: Path = ROOT) -> dict[str, int]:
     bindings = set()
     for template in templates:
         bindings.update(re.findall(r"landing\.([a-z0-9_]+)\.([a-z0-9_]+)", template.read_text()))
+    for name in ("landing.html.j2", "benchmarks.html.j2", "site-footer.html.j2"):
+        assert "{{ landing.footer.license_mit }}" in (root / "templates" / name).read_text(), \
+            f"footer license must use editable landing copy: {name}"
     # Metadata is inserted by the native renderer, rather than by body markup.
     bindings.update({("meta", "title"), ("meta", "description")})
     assert keys == bindings, f"landing copy mismatch: missing={bindings-keys}, unused={keys-bindings}"
