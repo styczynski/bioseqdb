@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="511.2pt" viewBox="0 0 504 511.2" xmlns="http://www.w3.org/2000/svg" version="1.1" role="img" aria-labelledby="figure-title figure-desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="figure-title">Local BWT implementation comparison</title>
+<desc id="figure-desc">Exact recorded mean timings from experiments_data.json, as compared in the project slides. 20Ma: Naive 5.48 ms, Skew / lists 7.43 ms, Skew / NumPy 10.59 ms; 20Mb: Naive 2.51 ms, Skew / lists 4.51 ms, Skew / NumPy 7.70 ms. These are calls within one historical profiling run, not repeated benchmark trials. The variants differ in their suffix-array implementation and representation.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB chart generator</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 511.2 
+L 504 511.2 
+L 504 0 
+L 0 0 
+L 0 511.2 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 161.28 233.741793 
+L 428.4 233.741793 
+L 428.4 122.688 
+L 161.28 122.688 
+L 161.28 233.741793 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 161.28 233.741793 
+L 161.28 122.688 
+" clip-path="url(#p026f407037)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="161.28" y="251.859918" transform="rotate(-0 161.28 251.859918)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 250.32 233.741793 
+L 250.32 122.688 
+" clip-path="url(#p026f407037)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="250.32" y="251.859918" transform="rotate(-0 250.32 251.859918)">4</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 339.36 233.741793 
+L 339.36 122.688 
+" clip-path="url(#p026f407037)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="339.36" y="251.859918" transform="rotate(-0 339.36 251.859918)">8</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 428.4 233.741793 
+L 428.4 122.688 
+" clip-path="url(#p026f407037)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="428.4" y="251.859918" transform="rotate(-0 428.4 251.859918)">12</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_9"/>
+     <g id="text_5">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="144.097087" transform="rotate(-0 152.28 144.097087)">Naive</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_10"/>
+     <g id="text_6">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="183.533803" transform="rotate(-0 152.28 183.533803)">Skew / lists</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_11"/>
+     <g id="text_7">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="222.970519" transform="rotate(-0 152.28 222.970519)">Skew / NumPy</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 161.28 127.7359 
+L 283.2648 127.7359 
+L 283.2648 149.820461 
+L 161.28 149.820461 
+z
+" clip-path="url(#p026f407037)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 161.28 167.172616 
+L 326.6718 167.172616 
+L 326.6718 189.257177 
+L 161.28 189.257177 
+z
+" clip-path="url(#p026f407037)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 161.28 206.609332 
+L 397.0134 206.609332 
+L 397.0134 228.693893 
+L 161.28 228.693893 
+z
+" clip-path="url(#p026f407037)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="287.7168" y="142.917243" transform="rotate(-0 287.7168 142.917243)">5.48</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="331.1238" y="182.353959" transform="rotate(-0 331.1238 182.353959)">7.43</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="401.4654" y="221.790675" transform="rotate(-0 401.4654 221.790675)">10.59</text>
+   </g>
+   <g id="text_11">
+    <text style="font-weight: 700; font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="161.28" y="109.688" transform="rotate(-0 161.28 109.688)">20Ma</text>
+   </g>
+  </g>
+  <g id="axes_2">
+   <g id="patch_6">
+    <path d="M 161.28 444.744 
+L 428.4 444.744 
+L 428.4 333.690207 
+L 161.28 333.690207 
+L 161.28 444.744 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_3">
+    <g id="xtick_5">
+     <g id="line2d_12">
+      <path d="M 161.28 444.744 
+L 161.28 333.690207 
+" clip-path="url(#pc60f2c87ae)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_13"/>
+     <g id="text_12">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="161.28" y="462.862125" transform="rotate(-0 161.28 462.862125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_14">
+      <path d="M 250.32 444.744 
+L 250.32 333.690207 
+" clip-path="url(#pc60f2c87ae)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_15"/>
+     <g id="text_13">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="250.32" y="462.862125" transform="rotate(-0 250.32 462.862125)">4</text>
+     </g>
+    </g>
+    <g id="xtick_7">
+     <g id="line2d_16">
+      <path d="M 339.36 444.744 
+L 339.36 333.690207 
+" clip-path="url(#pc60f2c87ae)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_17"/>
+     <g id="text_14">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="339.36" y="462.862125" transform="rotate(-0 339.36 462.862125)">8</text>
+     </g>
+    </g>
+    <g id="xtick_8">
+     <g id="line2d_18">
+      <path d="M 428.4 444.744 
+L 428.4 333.690207 
+" clip-path="url(#pc60f2c87ae)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_19"/>
+     <g id="text_15">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="428.4" y="462.862125" transform="rotate(-0 428.4 462.862125)">12</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_4">
+    <g id="ytick_4">
+     <g id="line2d_20"/>
+     <g id="text_16">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="355.099293" transform="rotate(-0 152.28 355.099293)">Naive</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_21"/>
+     <g id="text_17">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="394.53601" transform="rotate(-0 152.28 394.53601)">Skew / lists</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_22"/>
+     <g id="text_18">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="152.28" y="433.972726" transform="rotate(-0 152.28 433.972726)">Skew / NumPy</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_7">
+    <path d="M 161.28 338.738107 
+L 217.1526 338.738107 
+L 217.1526 360.822668 
+L 161.28 360.822668 
+z
+" clip-path="url(#pc60f2c87ae)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 161.28 378.174823 
+L 261.6726 378.174823 
+L 261.6726 400.259384 
+L 161.28 400.259384 
+z
+" clip-path="url(#pc60f2c87ae)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 161.28 417.611539 
+L 332.682 417.611539 
+L 332.682 439.6961 
+L 161.28 439.6961 
+z
+" clip-path="url(#pc60f2c87ae)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="221.6046" y="353.91945" transform="rotate(-0 221.6046 353.91945)">2.51</text>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="266.1246" y="393.356166" transform="rotate(-0 266.1246 393.356166)">4.51</text>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="337.134" y="432.792882" transform="rotate(-0 337.134 432.792882)">7.70</text>
+   </g>
+   <g id="text_22">
+    <text style="font-weight: 700; font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="161.28" y="320.690207" transform="rotate(-0 161.28 320.690207)">20Mb</text>
+   </g>
+  </g>
+  <g id="text_23">
+   <text style="font-weight: 700; font-size: 21px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="25.2" y="33.848719" transform="rotate(-0 25.2 33.848719)">The small BWT routine</text>
+  </g>
+  <g id="text_24">
+   <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="51.12" transform="rotate(-0 25.2 51.12)">Mean milliseconds per recorded call</text>
+  </g>
+  <g id="text_25">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="77.7024" transform="rotate(-0 25.2 77.7024)">Earlier v10 profiles · lower is faster</text>
+  </g>
+  <g id="text_26">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="483.084" transform="rotate(-0 25.2 483.084)">20Ma: 1,000 calls. 20Mb: 1,001 calls.</text>
+  </g>
+  <g id="text_27">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="500.976" transform="rotate(-0 25.2 500.976)">No repeated-run variance was recorded.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p026f407037">
+   <rect x="161.28" y="122.688" width="267.12" height="111.053793"/>
+  </clipPath>
+  <clipPath id="pc60f2c87ae">
+   <rect x="161.28" y="333.690207" width="267.12" height="111.053793"/>
+  </clipPath>
+ </defs>
+</svg>

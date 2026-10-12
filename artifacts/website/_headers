@@ -28,6 +28,16 @@
   Content-Disposition: inline
   Link: <https://bioseqdb.com/blog/where-postgres-table-storage-can-change/>; rel="canonical"
 
+/blog/writing-a-dna-read-mapper-in-python/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/writing-a-dna-read-mapper-in-python/>; rel="canonical"
+
+/blog/writing-a-postgres-table-access-method-in-cpp/index.md
+  Content-Type: text/plain; charset=utf-8
+  Content-Disposition: inline
+  Link: <https://bioseqdb.com/blog/writing-a-postgres-table-access-method-in-cpp/>; rel="canonical"
+
 /blog/introducing-bioseqdb/index.md
   Content-Type: text/plain; charset=utf-8
   Content-Disposition: inline

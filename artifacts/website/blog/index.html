@@ -6,34 +6,34 @@
 <title>The BioseqDB blog</title>
 <meta name="description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <link rel="canonical" href="https://bioseqdb.com/blog/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/theme.js"></script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/analytics.js"></script>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/theme.js"></script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="The BioseqDB blog">
 <meta property="og:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/blog/">
-<meta property="og:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="The BioseqDB blog">
 <meta name="twitter:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png">
-<link rel="icon" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/media/social_card.png">
+<link rel="icon" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/favicon.svg">
 
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/docs-design.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/code-theme.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-content.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-header.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/responsive.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/site-controls.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/announcement.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/theme.css">
-<link rel="stylesheet" href="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/css/blog.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/site.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/docs-design.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/code-theme.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/project-content.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/site-header.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/responsive.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/site-controls.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/announcement.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/theme.css">
+<link rel="stylesheet" href="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -43,7 +43,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -137,7 +137,7 @@ WHERE key = &#39;sample_A&#39;;
 SELECT jsonb_object_agg(key, value ORDER BY key) AS stored_values,
        sum(value) AS total
 FROM sample_counts; The total is 16. PostgreSQL also provides transactions and savepoints for grouping changes and undoing work within a transaction, with defined behaviour rather than a replay request to a conversation.  The transaction tutorial  describes those operations.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>7 min read</span></div>
@@ -181,7 +181,7 @@ SELECT note_id, round(sum(weight), 6) AS fused_score
 FROM contributions
 GROUP BY note_id
 ORDER BY sum(weight) DESC, note_id; Note 24 wins because it appears near the top of both lists. Note 31 still appears even though the lexical search did not find it.  UNION ALL  is intentional: each list provides its own contribution. Within each input list, however, a note must occur only once; otherwise joins that duplicate rows would accidentally give it extra votes. This is a useful place to stop and inspect the candidates. Fusion cannot recover a note absent from both lists, and asking each method for only two candidates may remove a note that would have done well in the combined ranking. I would choose candidate limits separately from the number of results displayed to the reader. What I would measure For each test query I would keep the eligible IDs, each candidate list and the final ordering, together with the query time. This makes a missing result traceable: was it excluded by the study filter, absent from retrieval, or just ranked too low? A single response-time number cannot answer that. I would also include awkward cases: a rare study, a note containing an exact sample identifier, two notes with tied scores, and a query with no lexical match. The occasional empty answer is less suprising when those cases are part of the test data from the beginning. The tiny datasets here are a way to inspect the decisions in SQL before choosing an index or a larger retrieval setup.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>6 min read</span></div>
@@ -226,7 +226,7 @@ ORDER BY id; The result tells me which branch accepted each note, which is more 
     }
 end
  This scope is an integration example, not an implementation of the two-branch rule above. For that rule I would keep the SQL explicit and bind the inputs. Rails&#39;  query parameter guidance  matters here: parsing search text is different from safely passing that text to SQL. An input string still belongs in a parameter, not inside an interpolated SQL expression. The harder maintenance question appears when a search document includes another table. A  generated column  cannot reach across rows to follow an association, so I would first decide which change owns the refresh, then test updates to both the parent and the child. Searching stale text is a correctness problem even if the index makes it very quick. Finally, a highlighted excerpt is presentation, not proof of a match.  ts_headline  needs the original text and its output is not automatically safe HTML; the  highlighting documentation  explains the limitations. I would keep the matching booleans for debugging, and render excerpts through the application&#39;s escaping or sanitizing rules rather than marking arbitrary output as safe.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -257,7 +257,7 @@ CREATE TABLE encrypted_specimen_notes (
 
 SELECT pg_tde_is_encrypted(&#39;encrypted_specimen_notes&#39;);
  These calls follow the  function reference . They do not encrypt the earlier  specimen_notes  table merely because another table now uses TDE. A local file provider can help with a disposable experiment, but its key file is unencrypted; the  keyring guide  recommends proper key management for production. WAL and recovery need their own plan Table encryption alone does not settle the write-ahead log. WAL encryption became generally available in  pg_tde 2.0 , after some early introductions were written. It has a separate server-wide configuration, covers writes from all databases in the cluster, and needs a restart when enabled. Existing plaintext WAL does not become encrypted retrospectively. Follow the current  WAL instructions , including their required archive and restore wrappers. A logical dump is another copy of readable data:  pg_dump  reads through PostgreSQL&#39;s client interface, rather than preserving encrypted relation files. Protect the resulting dump separately. The  SQL dump documentation  explains that distinction in how the backup is made. For physical backups, I would make recovery the acceptance test: restore elsewhere, recover the required keys, replay WAL, and check the specimen rows. Percona&#39;s  backup procedure  specifies the encryption metadata and provider files needed, and warns against rotating keys during a backup. It is a seperate operational dependency worth rehearsing before there is an incident.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -288,7 +288,7 @@ SELECT &#39;[0.2,0.4,0.6]&#39;::vector(3)
  Here  &lt;-&gt;  means Euclidean distance for those operand types. Choosing a distance and generating comparable inputs remain separate from storing the values. The  pgvector reference  lists the supported operators. In an actual experiment I would record the embedding model and preprocessing alongside the data, so a later model change cannot quietly mix incompatible representations. The same operator can describe a different distance A point on a two-dimensional laboratory drawing does not need an embedding extension. PostgreSQL already has geometric types, including  point , and the point-to-point distance operator is also written  &lt;-&gt; : SELECT point(2, 3) AS storage_position,
        point(5, 7) AS workbench_position,
        point(2, 3) &lt;-&gt; point(5, 7) AS drawing_distance; This returns a distance of five drawing units. The type tells PostgreSQL which operation to perform, even though the operator spelling is shared with the previous example. These built-in coordinates describe a plane; they do not carry a geographic coordinate reference system.  Geometric types  and  their operators  specify the available operations. Vector graphics add another use of the word. The illustration above consists of shapes and text, while an SVG path can describe a shape through drawing commands and coordinates. The browser paints that description at the requested size. Those coordinates are instructions for an image, not a search representation of its meaning.  The SVG path specification  explains that format. A vector can also span many rows Vectorized execution refers to how a database processes data internally. For example, DuckDB&#39;s execution format passes batches of values through operators, and a batch can contain ordinary integers or strings. Its documentation distinguishes several physical representations, including flat and constant vectors. The SQL column does not have to contain embeddings for this execution method to be useful. DuckDB describes these representations in its  execution-format documentation . That distinction prevents an occassional misunderstanding: adding a  vector  column to a PostgreSQL table does not, by itself, turn the query executor into a batch-processing engine. A stored value&#39;s type and the way an executor moves through rows answer different questions. When reading about a vector feature, I therefore try to identify the stored value, the operation and the execution method separately. For the specimen example those questions lead to fairly ordinary choices: retain the note, define the measurements, name the coordinate system and test the search behaviour. The shared vocabulary becomes much less troublesome once those choices are written down.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -299,7 +299,7 @@ SELECT &#39;[0.2,0.4,0.6]&#39;::vector(3)
         </div>
       </article>
       
-      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Where PostgreSQL table storage can change" data-blog-search-text="When I look at a slow query, I usually start with the query and its indexes, because those are the parts I can change without asking awkward questions about where the rows actually live. PostgreSQL also has a place to change that last part: a table access method. For this post I wanted to start with an ordinary table and a question I can answer from SQL: which part owns its storage, and which part helps me find a row? Two meanings of access method The  pg_am catalog  records both table and index access methods. Its  amtype  column distinguishes them, which is useful because  USING  appears in both table and index definitions and can make the two choices look more similar than they are. SELECT amname,
+      <article class="blog-card" data-blog-card data-blog-category="others" data-blog-date="2026-10-12" data-blog-title="Where PostgreSQL table storage can change" data-blog-search-text="When I look at a slow query, I usually start with the query and its indexes, because those are the parts I can change without asking awkward questions about where the rows actually live. PostgreSQL also has a place to change that last part: a table access method. For this post I wanted to start with an ordinary table and a question I can answer from SQL: which part owns its storage, and which part helps me find a row? For a working extension to compile and inspect, continue with  writing a small table access method in C++ . Two meanings of access method The  pg_am catalog  records both table and index access methods. Its  amtype  column distinguishes them, which is useful because  USING  appears in both table and index definitions and can make the two choices look more similar than they are. SELECT amname,
   CASE amtype
     WHEN &#39;t&#39; THEN &#39;table&#39;
     WHEN &#39;i&#39; THEN &#39;index&#39;
@@ -326,7 +326,7 @@ ORDER BY object_name; There are two objects here with two different jobs, even t
 FROM lab_observations
 WHERE needs_review
 ORDER BY read_count DESC, specimen; The expected result is small enough to check by eye. From there I would add updates, rollbacks, deleted rows and overlapping readers, keeping the expected answers seperate from the engine&#39;s implementation. A faster result is useful only after I know it is the right result. Reclaiming obsolete data also needs attention. PostgreSQL&#39;s heap requires  routine vacuuming ; a different storage design still needs a clear account of when old information can be removed. I would include a long-running reader in that experiment, because reclaiming something too early is harder to notice than retaining it too long. The part that survives a restart Write-ahead logging  provides the ordering needed to recover logged changes after a crash. A custom method needs its own coherent recovery story; PostgreSQL&#39;s table interface permits its WAL facilities or another implementation. An in-memory demonstration should not be mistaken for durable storage just because it accepts familiar SQL. There is an operational boundary too. In PostgreSQL 17, changing an existing table with  ALTER TABLE ... SET ACCESS METHOD  rewrites it and requires an  ACCESS EXCLUSIVE  lock. I would plan that as a migration, with room for the rewrite and a tested way back, rather than treat it as an inexpensive setting. The version-specific  ALTER TABLE documentation  is the place to check before doing it. What interests me here is the amount of PostgreSQL I can keep while investigating a different storage layout. The SQL examples above deliberately stay with heap; they establish the boundary and a few expected results, leaving the larger implementation questions visible instead of hiding them behind a successful demo.">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -337,7 +337,323 @@ ORDER BY read_count DESC, specimen; The expected result is small enough to check
         </div>
       </article>
       
-      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-01" data-blog-title="Introducing BioseqDB" data-blog-search-text="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL. Combine genomic matches with relational data using compact sequence types and columnar storage! I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns. How it started This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research. 2021–2022:  Working with large GISAID datasets made FASTA files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected BWA-MEM to PostgreSQL in May 2022. 2023–2024:  I wrote a Python aligner and then improved it, learning how the algorithms work along the way. December 2025–2026:  The current BioseqDB began with minimap2 and columnar storage. Custom seeding and chaining, indexes, sequence slices and end-to-end benchmarks followed. The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The  introduction and full timeline  have more of the story. Two queries to get a feel for it These examples use the three synthetic samples from the  SQL walkthrough . The  samples  table has ordinary metadata columns and a  bioseq.seq  column.  USING bioseq  selects the sequence-aware storage. First, read metadata and a small piece of DNA.  bioseq.len  gives the sequence length;  [:16]  takes its first sixteen bases. SELECT patient_name, bioseq.len(seq) AS bases,
+      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-12" data-blog-title="Learning to map DNA reads by writing an aligner in Python" data-blog-search-text="Before the current BioseqDB, I wrote a read mapper in Python. It was an assignment for  Algorithms for Analysis of Genomic Data at MIMUW , and a useful excuse to stop treating an aligner as a black box. I wanted to understand how a short, imperfect sequence can find its place in a much longer one without comparing it with every possible position. Python suited what I wanted to learn. A poor algorithm has fewer places to hide when every unnecessary iteration is expensive. A quadratic loop that looks harmless on a tiny sequence becomes a serious problem on millions of nucleotides, and I had a time limit to meet. Moving the same loop into a NumPy-looking expression did not always help either. This tutorial follows that experiment, but starts with a smaller program you can run and understand. We will build seeds, turn them into matching coordinates, connect those coordinates and check a promising region with dynamic programming. Then I will explain the less tidy parts of the submitted program: distance cutoffs, endpoint searches, memory compromises and the measurements which made me keep or remove an optimization. The  historical mapper.py  is 938 lines. This is the last version before the research directory was removed, and it is identical to the earlier version linked from my notes. The short implementation below is a teaching version, with a few mistakes in the old representation deliberately corrected. It does not reproduce the competition timings. The task and its rather concrete limits The assignment was to map reads of roughly 1,000 bases onto a reference of at most 20 million bases. Reads came from the reference, but contained substitutions and single-base insertions or deletions, with an error probability between 5% and 10%. The requested output was just a read identifier and its two reference coordinates, separated by tabs. The rules matter here. This was a Python 3 task. NumPy, SciPy, Biopython and suffix-array construction code were allowed; an existing mapper or alignment library, multiprocessing, JIT compilation and calling a program written in another language were not. The program had to stay below 1 GB of memory. Its runtime allowance was  5 + r/10  minutes for  r  reads: 105 minutes for 1,000 reads, which I remembered as roughly two hours. At least 80% of reads had to be mapped, with no more than 1% incorrect mappings. A reported endpoint could be at most 20 bases away from the true endpoint and still count as correct. That last condition is quite different from asking for a complete, base-by-base alignment with a CIGAR string. I optimized the program around finding one useful region for a read. The assignment itself did not promise that the reference had no repeats, or that every read had only one possible placement. The old implementation also searches the forward strand only. Those are limitations of the experiment, not properties of genomic data. 1. What are we trying to align? An alignment places two sequences in columns. A column can contain two equal bases, two different bases, or a base opposite a gap. Gaps let us explain insertions and deletions instead of shifting every remaining comparison after the first difference. For example, the following query is missing one base from the reference fragment: reference fragment  A C G T A C G T
+query               A C G - A C G T
+ Mapping asks where the read belongs. Alignment explains the differences at that location. The two problems are related, but the first can often be answered without computing every alignment column. BioseqDB can expose those columns through  bioseq.cigar ; this early mapper only returned coordinates. A dynamic-programming matrix for a query of length  m  and a reference of length  n  needs  O(mn)  work. For one 1,000-base read and a 20-million-base reference, that is about 20 billion cells before considering the other reads. The useful question is therefore: can we cheaply find a small region which deserves that work? This is the idea behind  seed-and-extend . Find short exact matches, use their positions to propose a region, and spend the expensive work there. 2. Run the small version The Python blocks below belong to one file and use only the standard library. Copy them in order, or  download the complete Python example  and run: python3 python-aligner.py
+ The website build extracts these blocks into that download, executes them and checks the algorithms against small independent examples. This makes the displayed program and the downloadable one the same source. It is an educational mapper for small inputs; use the historical file to study the original experiment. We use zero-based, half-open coordinates:  [start, end)  includes  start  and excludes  end . Seed positions below are  starts  of k-mers. The historical file used their  ends , so mixing coordinates from the two programs would introduce an offset. First, make the alphabet explicit. Rejecting an ambiguous base is acceptable for this little example; a general mapper needs a deliberate policy for it. The reverse-complement helper shows the other strand, although we will only map the forward strand here. from bisect import bisect_left
+from collections import defaultdict
+from itertools import product
+from random import Random
+
+def dna(text):
+    text = text.upper()
+    if set(text) - set(&quot;ACGT&quot;):
+        raise ValueError(&quot;This small example accepts A, C, G and T only&quot;)
+    return text
+
+def reverse_complement(text):
+    return dna(text).translate(str.maketrans(&quot;ACGT&quot;, &quot;TGCA&quot;))[::-1]
+ 3. Turn overlapping k-mers into integers A k-mer is a run of  k  bases.  ACGTAC  has four 3-mers:  ACG ,  CGT ,  GTA  and  TAC . Keeping all of them as newly allocated Python strings works, but it is unnecessary. Use two bits per base: A is 0, C is 1, G is 2 and T is 3. Shift the previous value two bits left, append the new base, then mask away everything older than  k  bases. The mask has exactly  2*k  bits. def rolling_kmers(text, k):
+    if k &lt; 1:
+        raise ValueError(&quot;k must be positive&quot;)
+    codes = {base: code for code, base in enumerate(&quot;ACGT&quot;)}
+    mask = (1 &lt;&lt; (2 * k)) - 1
+    value = 0
+    result = []
+    for end, base in enumerate(dna(text)):
+        value = ((value &lt;&lt; 2) | codes[base]) &amp; mask
+        if end &gt;= k - 1:
+            result.append((value, end - k + 1))
+    return result
+ For  ACGTAC  with  k=3 , this gives  (6, 0), (27, 1), (44, 2), (49, 3) : integer key followed by start position. Leading A bases are fine because the length is fixed. Python integers also have enough bits for a 17-mer; a 32-bit integer does not, because 17 bases need 34 bits. There is an awkward detail in my original code. It encoded C, A, T and G as 1, 2, 3 and 4, then used two-bit shifts. Four needs three bits, so different strings can produce the same key:  AG  and  TG  both become 12. The original mask also retained more bits than intended, and selected keys were eventually cast to  uint32 . The code could still find useful candidates, but that is not an exact two-bit encoding. The version above fixes those details rather than asking you to repeat them. These integers preserve lexicographic order. They are not the mixed hash values used by a production minimizer sketch. That choice is useful for seeing what happens by hand, and it also biases which strings become minima. 4. Keep minimizers instead of every k-mer The reference index does not need a separate entry for every overlapping k-mer. Take a window of  w  consecutive k-mers and select its smallest key. Move the window one position and repeat. If the same occurrence remains the minimum, store it once. Here  k  is measured in bases and  w  in k-mers. A complete minimizer window covers  k+w-1  bases. With  k=3  and  w=2 , our four keys produce three windows. Their minima are 6, 27 and 44. def minimizers(text, k, w):
+    if w &lt; 1:
+        raise ValueError(&quot;w must be positive&quot;)
+    kmers = rolling_kmers(text, k)
+    result = []
+    for start in range(len(kmers) - w + 1):
+        selected = min(kmers[start:start + w])
+        if not result or selected != result[-1]:
+            result.append(selected)
+    return result
+ The tuple comparison makes ties choose the leftmost position. On a run of A bases, moving the window removes the old leftmost minimum and selects the next one, so repeated sequence can still produce many seeds. Sparse sampling does not make repeats disappear. This implementation scans each window directly and therefore uses  O(nw)  work for fixed-size keys, plus  O(n)  stored k-mers. It is intentionally short. A monotonic deque can maintain the window minimum with amortized constant work per incoming key; the  minimizer chapter  goes further into the design choices. If two sequences contain the same unchanged window of bases, this deterministic rule chooses a shared seed from it. An error may disrupt several adjacent k-mers, so larger  k  makes exact seeds harder to preserve. Smaller  k  creates more accidental matches. In the final historical program I used  k=17  and  w=8 ; the tiny examples here use smaller values so we can inspect them. 5. Join seed positions to get anchors Build a dictionary from a seed key to all of its reference positions. Sketch the query with the same parameters. Every shared key gives pairs  (reference_position, query_position) , which I will call anchors. def seed_index(text, k, w):
+    index = defaultdict(list)
+    for key, position in minimizers(text, k, w):
+        index[key].append(position)
+    return dict(index)
+
+def shared_anchors(reference, query, k, w):
+    ref = seed_index(reference, k, w)
+    qry = seed_index(query, k, w)
+    anchors = [
+        (r, q)
+        for key in ref.keys() &amp; qry.keys()
+        for r, q in product(ref[key], qry[key])
+    ]
+    # Descending q for equal r prevents a strict LIS from using one r twice.
+    return sorted(set(anchors), key=lambda anchor: (anchor[0], -anchor[1]))
+ A key occurring three times in the reference and twice in the query creates six anchors. This cross product matters: even if the whole read has one useful placement, its short fragments can be common. The original program allocated these products with NumPy, and a frequent seed could make them large. Our example has no frequency cap either, so it is not suitable for a repeat-rich genome. At the correct location, anchors tend to form a rising line. A substitution removes some matches; an insertion or deletion shifts the diagonal. Random matches make scattered points elsewhere. We want to connect points which look like parts of the same read. 6. Start with a longest increasing subsequence After sorting anchors by reference position, look for a strictly increasing sequence of query positions. This is the  longest increasing subsequence , or LIS. It maximizes the number of compatible anchors. For each chain length, keep the smallest query coordinate which can end a chain of that length. A smaller endpoint leaves more room for later anchors. Binary search locates the length to extend; parent pointers let us recover the chosen chain after the scan. def lis_chain(anchors):
+    anchors = sorted(set(anchors), key=lambda anchor: (anchor[0], -anchor[1]))
+    tail_values, tail_indices = [], []
+    parents = [-1] * len(anchors)
+    for i, (_, q) in enumerate(anchors):
+        length = bisect_left(tail_values, q)
+        if length:
+            parents[i] = tail_indices[length - 1]
+        if length == len(tail_values):
+            tail_values.append(q)
+            tail_indices.append(i)
+        else:
+            tail_values[length] = q
+            tail_indices[length] = i
+    chain = []
+    current = tail_indices[-1] if tail_indices else -1
+    while current != -1:
+        chain.append(anchors[current])
+        current = parents[current]
+    return chain[::-1]
+ Sorting equal reference coordinates by descending query coordinate is deliberate. A strictly increasing query subsequence can then use at most one anchor at a particular reference coordinate. Sorting both coordinates ascending would allow an impossible chain through two points at the same reference position. The core loop costs  O(a log a)  for  a  anchors. This is a considerable improvement over comparing every anchor with every earlier anchor, but the optimization target is still quite crude. LIS counts points. It does not know whether the gap between two points is ten bases or ten million. 7. Stop distant anchors from taking over the chain A global LIS can spend its length on a weak region before reaching the useful one. The slides from the project show why I started looking for several local candidates instead of trusting one globally increasing path. In the submitted code, I modified the binary search itself. If a stored reference endpoint was too far behind the current anchor, the search stopped early. The cutoff was approximately  1.3 * query_length  reference bases. def historical_cutoff_chain(anchors, max_diff):
+    anchors = sorted(set(anchors), key=lambda anchor: (anchor[0], -anchor[1]))
+    tails = [-1] * (len(anchors) + 1)
+    parents = [-1] * len(anchors)
+    longest = 0
+    for i, (r, q) in enumerate(anchors):
+        low, high = 1, longest
+        while low &lt;= high:
+            middle = (low + high) // 2
+            # This uses tails[low], exactly as the historical source does.
+            if anchors[tails[low]][0] + max_diff &lt; r:
+                break
+            if anchors[tails[middle]][1] &gt;= q:
+                high = middle - 1
+            else:
+                low = middle + 1
+        parents[i] = tails[low - 1]
+        tails[low] = i
+        longest = max(longest, low)
+    chain = []
+    current = tails[longest] if longest else -1
+    while current != -1:
+        chain.append(anchors[current])
+        current = parents[current]
+    return chain[::-1]
+ Notice that the distance test uses  tails[low] , not  tails[middle] . That is what the historical file does. Once this early break is added, the tail array no longer necessarily stores the smallest possible endpoint for every chain length. The parent chain still increases in query coordinates, but the heuristic can miss a longer chain. Treat it as a way to propose local windows, not as a new proof of an optimal LIS algorithm. For example, ordinary LIS connects  (0, 0)  and  (100, 10) . With a distance cutoff of 30, the modified version keeps only  (100, 10) . It gives up the longer chain to avoid crossing that reference gap. The intent is easier to read as a short outline: For each anchor in reference order
+    search the stored chain endings
+        If the old reference position is too far away
+            stop searching and replace an earlier ending
+        Else compare query coordinates as in LIS
+    remember the predecessor
+reconstruct the backbone
+inspect local windows of that backbone
+keep a few promising windows for refinement
+ This was useful for the assignment, but today I would separate candidate-region selection from the ordinary LIS data structure more clearly. A shortcut hidden inside binary search is difficult to reason about, especially when it changes the invariant which justified that search. Score covered distance, and charge for gaps The next question is which local window deserves refinement. The historical score rewards the smaller of the reference and query spans and subtracts half of the larger uncovered-gap total. A gap between seed starts contributes  max(distance-k, 0)  uncovered bases. def window_score(chain, query_length, k):
+    if len(chain) &lt; 2 or query_length &lt;= 0:
+        return 0.0
+    r, q = zip(*chain)
+    if any(b &lt;= a for a, b in zip(r, r[1:])):
+        raise ValueError(&quot;Reference coordinates must strictly increase&quot;)
+    if any(b &lt;= a for a, b in zip(q, q[1:])):
+        raise ValueError(&quot;Score a monotone local segment, not a restart&quot;)
+    gaps_r = sum(max(b - a - k, 0) for a, b in zip(r, r[1:]))
+    gaps_q = sum(max(b - a - k, 0) for a, b in zip(q, q[1:]))
+    return (min(r[-1] - r[0], q[-1] - q[0])
+            - max(gaps_r, gaps_q) / 2) / query_length
+ For four anchors spaced ten bases apart on both axes,  k=17  and a 100-base query, the score is  0.3 . Stretch the reference gaps to thirty bases while keeping the query gaps at ten and it drops to  0.105 . This is a ranking heuristic, not percentage identity or a probability that the mapping is correct. The readable function recomputes one monotone window directly. The old code maintained rolling gap totals and searched for local maxima; its bookkeeping has edge cases I would not use as a teaching definition. Its candidate selection kept scores strictly above  0.1 , required more than three anchors in that branch, and retained at most five candidates. When no candidate survived, it tried ordinary LIS with a different local-window score. When several survived, dynamic programming helped choose between them. 8. Refine a small region with dynamic programming A seed at reference position  r  and query position  q  suggests that the read starts near  r-q . The first and last chain anchors therefore give rough bounds. Add some padding because errors near the ends can move those estimates. def candidate_region(chain, reference_length, query_length, k, padding=9):
+    if not chain:
+        raise ValueError(&quot;Need at least one anchor&quot;)
+    r0, q0 = chain[0]
+    r1, q1 = chain[-1]
+    start = max(0, r0 - q0 - padding)
+    # These are START coordinates; +k cancels between query and reference.
+    end = min(reference_length, r1 + k + query_length - (q1 + k) + padding)
+    return start, end
+ We now align the full query against a substring of that small reference window. This is a semiglobal edit-distance problem: unmatched reference bases before or after the read are free, but every query base must be accounted for. A substitution, insertion or deletion costs one. Initialize the first row to zero, allowing the alignment to begin anywhere in the target. Initialize the first column to the cost of deleting the query prefix. At the end, choose the cheapest cell in the last row, rather than insisting that the alignment reaches the final target base. def align_substring(query, target):
+    query, target = dna(query), dna(target)
+    rows, cols = len(query), len(target)
+    matrix = [[0] * (cols + 1) for _ in range(rows + 1)]
+    for i in range(1, rows + 1):
+        matrix[i][0] = i
+        for j in range(1, cols + 1):
+            matrix[i][j] = min(
+                matrix[i - 1][j - 1] + (query[i - 1] != target[j - 1]),
+                matrix[i - 1][j] + 1,
+                matrix[i][j - 1] + 1,
+            )
+    end = min(range(cols + 1), key=matrix[rows].__getitem__)
+    score = matrix[rows][end]
+    i, j = rows, end
+    query_line, target_line = [], []
+    while i:
+        if j and matrix[i][j] == matrix[i - 1][j - 1] + (query[i - 1] != target[j - 1]):
+            query_line.append(query[i - 1]); target_line.append(target[j - 1])
+            i -= 1; j -= 1
+        elif matrix[i][j] == matrix[i - 1][j] + 1:
+            query_line.append(query[i - 1]); target_line.append(&quot;-&quot;)
+            i -= 1
+        else:
+            query_line.append(&quot;-&quot;); target_line.append(target[j - 1])
+            j -= 1
+    return score, j, end, &quot;&quot;.join(query_line[::-1]), &quot;&quot;.join(target_line[::-1])
+ For  ACGTT  against  GGACGCTAA , the result begins  (1, 2, 7) : one edit, starting at reference position 2 and ending before position 7. The remaining return values show the aligned strings. When several alignments have the same cost, this implementation consistently chooses one; it does not enumerate all alternatives. The matrix still costs  O(mL)  time and memory, where  L  is the candidate-window length. That is acceptable for a small demonstration. It would be wasteful to keep a Python matrix for every read against an entire genome, and even a bad chain can make this toy window much too large. Production implementations use additional limits and more compact alignment techniques. 9. Put the pieces together Our small mapper follows one ordinary LIS chain, requires four anchors, extracts a candidate and aligns the whole query there. It deliberately leaves out the historical multi-candidate and BWT paths so the first working program is easy to follow. def toy_map(reference, query, k=7, w=4):
+    chain = lis_chain(shared_anchors(reference, query, k, w))
+    if len(chain) &lt; 4:
+        return None
+    start, end = candidate_region(chain, len(reference), len(query), k)
+    score, left, right, query_line, target_line = align_substring(query, reference[start:end])
+    return score, start + left, start + right, query_line, target_line
+ Use a deterministic synthetic reference and delete one base from a fragment. The expected coordinates are known because we chose them ourselves: rng = Random(41)
+reference = &quot;&quot;.join(rng.choices(&quot;ACGT&quot;, k=500))
+query = reference[180:260]
+query = query[:35] + query[36:]
+result = toy_map(reference, query)
+assert result is not None
+assert result[:3] == (1, 180, 260)
+assert result[3].replace(&quot;-&quot;, &quot;&quot;) == query
+assert result[4].replace(&quot;-&quot;, &quot;&quot;) == reference[180:260]
+print(&quot;edits, start, end:&quot;, result[:3])
+ edits, start, end: (1, 180, 260)
+ The reference interval spans 80 bases; the query contains 79. The gap in the returned alignment explains the difference. Change the example to a substitution or an insertion and inspect both the coordinates and the alignment strings, not just the score. This program can also return  None  if it finds fewer than four anchors. It does not try the reverse complement, rank all repeated placements, assign mapping quality or reject a high edit score. In other words, we have built the core of a small mapper, not a replacement for minimap2. The independent build checks include short sequences, repeated minima, equal-coordinate anchors and edit-distance comparisons against exhaustive substring searches. 10. Why the historical mapper also used BWT The assignment only needed approximate endpoints. Running a full alignment for every candidate was not always necessary, so the original program tried to locate short fragments from the beginning and end of the read using a Burrows–Wheeler-transform index over small target windows. BWT backward search represents the current matches as an interval in suffix-array order. Extending the query one character to the left narrows that interval using character counts. Here is a tiny  exact  version to make that operation visible: def bwt_index(text):
+    text = dna(text) + &quot;$&quot;
+    suffix_array = sorted(range(len(text)), key=lambda i: text[i:])
+    bwt = &quot;&quot;.join(text[(i - 1) % len(text)] for i in suffix_array)
+    alphabet = sorted(set(text))
+    first = {base: sum(c &lt; base for c in text) for base in alphabet}
+    counts = {base: [0] for base in alphabet}
+    for char in bwt:
+        for base in alphabet:
+            counts[base].append(counts[base][-1] + (base == char))
+    return suffix_array, bwt, first, counts
+
+def bwt_exact_positions(text, query):
+    suffix_array, bwt, first, counts = bwt_index(text)
+    low, high = 0, len(bwt)
+    for base in reversed(dna(query)):
+        if base not in first:
+            return []
+        low = first[base] + counts[base][low]
+        high = first[base] + counts[base][high]
+        if low == high:
+            return []
+    return sorted(suffix_array[low:high])
+
+assert bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;) == [3, 10]
+ bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;)  returns  [3, 10] . The suffix sorting above materializes strings, so it is intentionally for small examples. The historical search added insertion, deletion and substitution branches and pruning, and could stop after a successful branch. It was not an exhaustive guarantee of the best approximate alignment. The final mapper used fragments covering about 10% of each query end, with an error budget of about 10% of that fragment length. If endpoint estimates were poor, a dynamic-programming fallback searched a larger suffix fragment, about 40% of the query. It also checked the resulting interval length and could retry before omitting a read. There was a surprising practical result here. On these small endpoint windows, sorting suffixes in a straightforward way could beat a more sophisticated suffix-array construction with more temporary objects. A better asymptotic bound does not remove setup costs. It also does not justify using this suffix sorter for the whole reference. Where minimap2 goes further Minimap2 follows a seed–chain–align design, but its chaining is not plain LIS. It rewards new seed coverage and penalizes gaps and differences between reference and query distances. Backtracking identifies candidate chains, and base alignment can fill the gaps and extend their ends. It also handles alternative placements and strand information. The  minimap2 paper  describes this architecture. Its  sketch implementation  also differs from our little minimizer function: it tracks forward and reverse-complement encodings, records strand and endpoint information, mixes the selected encoding into a hash and has its own tie handling. Our leftmost lexicographic minimum is a teaching choice, not a byte-compatible reimplementation. The  chaining implementation  searches earlier anchors with limits on how much work it performs. This is the more general direction: reward useful coverage, penalize implausible gaps, and bound the search. My Python cutoff was a much rougher attempt to keep distant matches from dominating a candidate. NumPy was useful, but not everywhere I used NumPy extensively in the prototype: compact base arrays, bulk comparisons, sorting, selecting window minima and joining seed positions. But some of the most interesting experiments were the ones where putting data into an array made the program slower. The original rolling-key computation used  frompyfunc  around a Python lambda and accumulated into an object array.  NumPy documents that object-array result . The expression looks like an array operation, but the callback still executes Python code. Converting the result with  astype , stacking columns, sorting and converting back to lists add allocations and representation changes. A sliding-window view is different: it shares memory with the source array rather than copying every window. The later reduction still has work to do. For a direct minimum across every window, that work grows with both the sequence length and the window width;  the NumPy documentation  explicitly discusses that cost. The local experiment files contain comparisons of list-based and NumPy-based dynamic programming. They belong to an  earlier v10 configuration with k=16 and w=7 , not the final  mapper.py  with k=17 and w=8. Keep them separate from the course results below. Only four or five DP calls were measured in each of these runs. The NumPy variant spent about 2.2–2.3 times as long in that phase. That is evidence about these implementations and inputs, not a general rule that lists beat NumPy. A Python loop which indexes one array cell at a time can pay scalar-conversion and indexing costs without getting the benefit of a compiled bulk operation. The BWT comparison tells a similar, size-dependent story. These were small local windows, where a simple implementation had little setup to pay for. The experiment changes more than one representation, so the whole-program timing cannot tell us exactly how much time was caused by allocation, copying or the suffix-array algorithm itself. The useful habit I took from this was to measure the phase I was changing. If reference indexing dominates a run, a large relative improvement in a rarely used fallback may barely change the total. If the next stage immediately converts an array back into Python objects, I need to include that conversion in the comparison. The final course results The course report was updated on 18 December 2024. It compared eleven anonymous submission codes on six datasets, each containing 1,000 reads of roughly 1,000 bases. The references were a 1 Mb yeast fragment, a 5 Mb bacterial fragment and a 20 Mb yeast fragment. Suffix  a  denotes about 5% read errors and  b  about 10%; 20% of those errors were indels.  PS  is my submission. The published PDF contains plots rather than a numeric runtime table. The redrawn runtime and memory values below are  approximate readings of those plots ; the downloadable data records that limitation. The mapping counts are read from the corresponding count plots. These are course-server measurements, not a controlled comparison with modern production aligners. PS was one of the two fastest submissions. It was tens to hundreds of times faster than the nine slower submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads. MB was faster in five tests; the two were too close to rank confidently from the plotted points in the 20M/a test. The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left  zero reads unmapped  and had  eight incorrect mappings out of 6,000 : 1, 3, 0, 0, 4 and 0 in the report&#39;s order. That is about 99.87% correctly mapped overall under the assignment&#39;s endpoint tolerance. It does not mean every base of those reads was perfectly aligned. The memory chart also matters. PS approached the 1 GB limit on the 20 Mb reference, so this was not a design with unlimited room to grow. The reference was processed in roughly 800,000-base chunks while building the sketch, but the program still retained reference data. Chunking reduced temporary work; it did not turn the mapper into a constant-memory streaming algorithm. The old chunk boundaries had no overlap, so seeds crossing a boundary could be lost. The reference sketch also skipped selected singleton seed groups after a counter threshold was reached. Those were practical compromises in this implementation, and they should be visible when interpreting its measurements rather than hidden behind the final runtime. The  measurement data and provenance  describe the chart inputs. The  course results report  may require a university login; I used my downloaded copy. Local profiling data and the slides are in  the project sources . What I kept for BioseqDB The exercise made the stages much less mysterious. Seeds reduce the search space. Chaining asks whether their positions tell a plausible story. Refinement checks the details which exact fragments cannot explain. Each stage needs a useful limit, because a repetitive seed or an overlong candidate can undo all the savings from the previous stage. I also learned to be suspicious of optimizations which only look fast in the source. Python made that lesson fairly immediate: object arrays still contain objects, a suffix-array algorithm still has setup costs, and converting between representations is work even when it occupies one line. The current BioseqDB is a separate implementation with a much broader job: storing sequences alongside relational data and making alignment available through SQL. If you want to follow that next step, start with the  alignment foundations , then the  chaining chapter , or run the  SQL walkthrough . The Python mapper was an early way to learn the mechanics well enough to start asking those larger questions.">
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Small translucent DNA letter tiles in the BioseqDB colours." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">BioseqDB</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>26 min read</span></div>
+          <h2><a href="/blog/writing-a-dna-read-mapper-in-python/">Learning to map DNA reads by writing an aligner in Python</a></h2>
+          <p>Build a small read mapper step by step, from rolling k-mers and minimizers to chaining and local alignment, then examine the code and measurements from my early BioseqDB prototype.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>BioseqDB</li><li data-blog-keyword>Python</li><li data-blog-keyword>NumPy</li><li data-blog-keyword>sequence alignment</li><li data-blog-keyword>read mapping</li><li data-blog-keyword>minimizers</li><li data-blog-keyword>k-mers</li><li data-blog-keyword>chaining</li><li data-blog-keyword>longest increasing subsequence</li><li data-blog-keyword>dynamic programming</li><li data-blog-keyword>Burrows-Wheeler transform</li><li data-blog-keyword>minimap2</li><li data-blog-keyword>bioinformatics</li></ul>
+          <a class="blog-action" href="/blog/writing-a-dna-read-mapper-in-python/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-12" data-blog-title="Writing a small PostgreSQL table access method in C++" data-blog-search-text="When I started changing PostgreSQL storage for BioseqDB, the interesting question was not how to parse  CREATE TABLE . PostgreSQL already knows how to do that. I needed to understand which functions it would call after the table existed, what those functions had to return, and how much work was hidden behind a successful  INSERT . The  earlier storage overview  describes that boundary from the SQL side. Here I want to cross it and compile something. We will build  traceheap , a small C++ extension which uses PostgreSQL&#39;s heap storage but counts selected table callbacks. It lets us see a scan visiting four rows even though the query returns only two, distinguish an ordinary insert from a bulk insert, and check what happens to our own state after a transaction rolls back. Phil Eaton&#39;s introduction to table access methods  is useful background for getting into this part of PostgreSQL. The experiment below takes a different route: it starts with working heap operations, then makes the delegation and its limits visible. The implementation, examples and diagrams here were made for this tutorial. This is an educational method for  PostgreSQL 17 , tested with  17.10 . It does not implement BioseqDB&#39;s columnar format, and it deliberately rejects user indexes and  VACUUM FULL . Those are quite important limitations, so we will reach them through actual commands rather than leave them in a footnote. 1. Get a small extension to build Download the  complete traceheap example . It contains the C++ source, the extension files and  test.sql . You can also read the  source file  directly. You need a C++ compiler,  make , and the server development files for the PostgreSQL 17 installation you will run. Check  pg_config --version ; an unrelated  pg_config  earlier in  PATH  is an easy way to compile against the wrong headers. Use a disposable local database for this experiment. Installing an extension puts executable code inside the server process. tar -xzf traceheap.tar.gz
+cd traceheap
+pg_config --version
+make PG_CONFIG=/path/to/postgresql-17/bin/pg_config
+make PG_CONFIG=/path/to/postgresql-17/bin/pg_config install
+ Replace the path with your installation&#39;s  pg_config . The installation step needs permission to write that installation&#39;s extension and library directories. These SQL examples use the extension you just built. The Makefile is short because  PGXS  supplies the PostgreSQL build rules: EXTENSION = traceheap
+MODULE_big = traceheap
+OBJS = traceheap.o
+DATA = traceheap--1.0.sql
+PG_CONFIG ?= pg_config
+PG_CXXFLAGS += -std=c++17 -fno-exceptions -fno-rtti
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)
+ MODULE_big  produces one loadable library from the object files. The control file names version  1.0 , and the SQL installation file creates the handler, the access method and two functions for reading and clearing counters. There is no server restart or preload setting in this example: PostgreSQL loads the library when a function in it is first needed. 2. Connect a SQL name to a callback table The installation SQL contains this binding: CREATE FUNCTION traceheap.handler(internal)
+RETURNS table_am_handler
+AS &#39;MODULE_PATHNAME&#39;, &#39;traceheap_handler&#39;
+LANGUAGE C STRICT;
+
+CREATE ACCESS METHOD traceheap TYPE TABLE HANDLER traceheap.handler;
+ MODULE_PATHNAME  is replaced during extension installation. The SQL name  traceheap.handler  and the exported symbol  traceheap_handler  are different names for different sides of the boundary. The function returns a pointer to a  TableAmRoutine , whose members tell PostgreSQL how to scan, insert, update, maintain and inspect a table.  CREATE ACCESS METHOD  documents the registration command; creating an access method requires superuser privileges. The source starts by giving the PostgreSQL declarations C linkage: extern &quot;C&quot; {
+#include &quot;postgres.h&quot;
+#include &quot;fmgr.h&quot;
+#include &quot;access/tableam.h&quot;
+#include &quot;catalog/pg_am_d.h&quot;
+#include &quot;utils/builtins.h&quot;
+#include &quot;utils/jsonb.h&quot;
+}
+ The exported functions also use  extern &quot;C&quot; , and  PG_FUNCTION_INFO_V1  declares their PostgreSQL calling convention. This stops C++ name mangling from hiding the symbol that the SQL declaration asks PostgreSQL to load.  PG_MODULE_MAGIC  supplies the module compatibility information. These are parts of the server interface, not ordinary functions which take SQL values as C++ arguments. For the initial callback table, the handler copies  *GetHeapamTableAmRoutine()  into a static  TableAmRoutine . It then replaces selected members. Both the copy and the pointer to the original heap routine live for the backend&#39;s lifetime; returning a pointer to a local stack variable would leave PostgreSQL holding invalid memory after the handler returned. The distinction between the two pointers matters: heap_methods = GetHeapamTableAmRoutine();
+methods = *heap_methods;
+methods.scan_begin = traced_begin;
+methods.scan_end = traced_end;
+methods.scan_rescan = traced_rescan;
+methods.scan_getnextslot = traced_next;
+methods.tuple_insert = traced_insert;
+ Our wrappers call  heap_methods , which still points at the original routine. Calling  methods.scan_getnextslot  from  traced_next  would call the wrapper again until the backend ran out of stack. The complete handler in the download installs the other wrappers and the explicit restrictions discussed below. 3. Follow one scan through its lifetime Let&#39;s create the extension and a table. There is deliberately no primary key yet. CREATE EXTENSION traceheap;
+SET max_parallel_workers_per_gather = 0;
+
+CREATE TABLE specimens (
+  id integer NOT NULL,
+  label text NOT NULL,
+  read_count integer NOT NULL
+) USING traceheap;
+
+INSERT INTO specimens VALUES
+  (1, &#39;soil&#39;, 120), (2, &#39;river&#39;, 900),
+  (3, &#39;leaf&#39;, 480), (4, &#39;air&#39;, 60);
+ The  USING  clause selects our table method. It does not select an index method. We disable parallel query for the counter experiment because each backend process has its own copy of our static variables, including each parallel worker. A sequential scan begins with  scan_begin , asks repeatedly for another row through  scan_getnextslot , and finishes with  scan_end . The beginning callback receives the relation, the snapshot, scan keys, parallel state and option flags. Our wrapper passes every argument through unchanged: TableScanDesc traced_begin(Relation rel, Snapshot snapshot, int nkeys,
+                           ScanKeyData* key, ParallelTableScanDesc parallel,
+                           uint32 flags) {
+    auto scan = heap_methods-&gt;scan_begin(rel, snapshot, nkeys, key, parallel, flags);
+    ++counters.scans_started;
+    return scan;
+}
+ The returned descriptor is heap&#39;s scan state. We do not cast it to a home-made structure or free it ourselves; the delegated  scan_end  releases it. A method with its own storage would need state appropriate to that storage and matching cleanup. The  table access API  is the starting point, while the comments in the installed  access/tableam.h  describe each callback&#39;s contract. The row callback is similarly small: bool traced_next(TableScanDesc scan, ScanDirection direction, TupleTableSlot* slot) {
+    const bool found = heap_methods-&gt;scan_getnextslot(scan, direction, slot);
+    if (found) ++counters.scan_rows;
+    return found;
+}
+ The slot is where the executor receives a row. Returning  true  without putting a valid row in that slot would be a broken implementation, even if the count happened to increase. Returning  false  ends this scan direction. We count successful row deliveries, not the final unsuccessful request after the last row. Because the copied routine keeps heap&#39;s slot operations, the slot representation agrees with the delegated scanner. This is not a place where I would replace one callback and guess that all the neighbouring callbacks still understand its data. A slot may refer to memory or a buffer owned elsewhere; a pointer into that row should not be kept after the slot is cleared or reused. 4. Count scanned rows, not just returned rows Now run the query and inspect the counter in a separate statement: SELECT traceheap.reset();
+
+SELECT id, label
+FROM specimens
+WHERE read_count &gt;= 400
+ORDER BY id;
+
+SELECT traceheap.stats()-&gt;&gt;&#39;scan_rows&#39; AS rows_delivered_by_am;
+ The query returns  2, river  and  3, leaf . The counter returns  4 . In this plan the table method supplies the visible rows and the executor applies  read_count &gt;= 400  afterwards, so delivering a row from the access method does not imply that the row survives the SQL filter. Try  EXPLAIN (ANALYZE, COSTS OFF)  on the same query. It executes the query and therefore changes the counters too. Keeping the measurement query separate from the query being measured avoids an awkward evaluation-order question, and resetting immediately before each experiment makes the results easier to read. The download also wraps  scan_rescan . A rescan is a request to restart an existing scan with the supplied options; it is not always a new  scan_begin . This distinction becomes useful once a table is on the inner side of a join. I would check the actual plan before trying to predict a rescan count from the SQL text alone. These counters are a way to inspect a few call paths. They are not a replacement for  EXPLAIN , an I/O counter, or a count of every possible way PostgreSQL can read a row. The inherited sampling and maintenance paths have their own callbacks. 5. Add writes without losing their result codes For an ordinary insert the wrapper delegates first, then records that the call completed: void traced_insert(Relation rel, TupleTableSlot* slot, CommandId cid,
+                   int options, BulkInsertStateData* state) {
+    heap_methods-&gt;tuple_insert(rel, slot, cid, options, state);
+    ++counters.inserts;
+}
+ COPY  can insert a batch through  multi_insert , so the example counts its  nslots  argument separately as  bulk_rows . Wrapping only  tuple_insert  and calling the result “all inserted rows” would miss that path. Speculative insertion has separate callbacks too; this example does not claim to count it. Updates and deletes return  TM_Result . The wrapper preserves that result and only increments its success counter when the result is  TM_Ok . It also preserves the snapshot, waiting behaviour, failure information and index-update output parameters. Replacing every result with success would tell the executor that an operation succeeded even when the underlying method reported a conflict or another outcome. SELECT traceheap.reset();
+UPDATE specimens SET read_count = read_count + 1 WHERE id = 1;
+DELETE FROM specimens WHERE id = 4;
+SELECT traceheap.stats()-&gt;&gt;&#39;updates&#39; AS updates,
+       traceheap.stats()-&gt;&gt;&#39;deletes&#39; AS deletes;
+ Both counters are  1 . The download&#39;s test also performs a three-row  COPY  and checks  bulk_rows = 3 , rather than assuming that the bulk and ordinary insert paths happen to be the same. There is a separate issue with the counters themselves: SELECT traceheap.reset();
+BEGIN;
+INSERT INTO specimens VALUES (99, &#39;rolled back&#39;, 0);
+ROLLBACK;
+SELECT count(*) FROM specimens WHERE id = 99;
+SELECT traceheap.stats()-&gt;&gt;&#39;inserts&#39;;
+ The row count is  0 , but  inserts  is  1 . PostgreSQL rolled back the row change; it did not roll back an integer in our process. That behaviour is intentional here. It would be a serious mistake if this integer were the only record of a storage allocation, a persistent index entry or some other change which had to agree with the transaction. 6. Find where copying heap stops being enough The first version of this experiment copied the heap routine and added counters. Creating a table with a primary key failed with  only heap AM is supported . Removing the primary key was not sufficient for a table with an unrestricted  text  column, because creating its TOAST table also involves an index. There are two separate assumptions behind those failures. First, the PostgreSQL 17 heap index builder calls  heap_getnext() , which checks that the relation has the original heap routine pointer. Our copied routine has a different address. Copying the function pointer did not remove the assumption inside the function. The relevant checks are in PostgreSQL&#39;s  heap scan implementation  and its  table callback implementation . The download replaces the index-build and validation callbacks with a clear  FEATURE_NOT_SUPPORTED  error. This includes primary keys and unique constraints which need an index. I did not change PostgreSQL&#39;s relation pointer temporarily to trick the heap check: that would obscure the exact boundary this experiment is supposed to explain. CREATE INDEX specimens_reads ON specimens(read_count);
+-- ERROR: traceheap does not implement index creation
+ Second, heap&#39;s TOAST-method callback returns the parent relation&#39;s access-method OID. For our parent relation that would be  traceheap , whose indexes we just rejected. The example therefore explicitly chooses ordinary heap for the auxiliary TOAST table: Oid toast_method(Relation) {
+    return HEAP_TABLE_AM_OID;
+}
+ This keeps the teaching table on  traceheap  while its TOAST table uses heap and the auxiliary TOAST index uses an ordinary B-tree. The test inserts and reads back a 32,000-character value assembled from many MD5 strings; it checks the exact returned value, rather than merely checking that table creation succeeded. The  TOAST documentation  explains why long values involve an auxiliary relation at all. 7. Test maintenance and visibility as separate operations Ordinary  VACUUM  has a relation callback which the example wraps.  ANALYZE  uses the inherited analysis callbacks; it is not counted as another ordinary vacuum.  VACUUM FULL  follows the table-rewrite path, and our  relation_copy_for_cluster  replacement rejects that path explicitly. ANALYZE specimens;
+VACUUM specimens;
+VACUUM FULL specimens;
+-- ERROR: traceheap does not implement VACUUM FULL or a table rewrite
+--        through the clustering callback
+ For this PostgreSQL 17.10 build, I also tested  ALTER TABLE ... SET ACCESS METHOD heap  on a separate six-row table. The conversion succeeded and preserved all six rows. That does not mean every  ALTER TABLE  or rewrite operation has been tested. The useful distinction is the operation and the path it actually takes, not whether its name sounds similar to another working command. The supplied smoke checks can be run in a fresh database with: psql -X -v ON_ERROR_STOP=1 -d your_disposable_database -f test.sql
+ They check ordinary writes, rollback, bulk insertion, rejected indexes and primary keys, analysis, ordinary vacuum, a large text value and truncation. An assertion failure stops the script. During preparation I additionally checked two simultaneous connections: a repeatable-read transaction continued to see  121  while another session changed the row to  777 , both before and after that writer committed; a new transaction then saw  777 . The counters in the reader and writer remained independent. A clean server restart preserved the six rows and the committed value. This was a clean-restart check, not a crash-recovery test or a claim that a new storage implementation gets recovery for free. Our actual tuple operations still use heap. If those operations change, the evidence from this example no longer establishes their correctness. 8. Keep the C++ boundary deliberately boring The wrappers use plain pointers, scalar values and a trivial counter structure. They do not keep a  std::vector  or a file stream alive across a PostgreSQL call that may raise an error. PostgreSQL&#39;s error machinery can jump out of the call without running ordinary C++ destructors. Disabling C++ exceptions does not change that behaviour. This is why the example does not present RAII as automatic protection around every server API call. A real extension needs a deliberate boundary between PostgreSQL error handling, its memory contexts and any C++ objects which need cleanup.  PostgreSQL&#39;s C++ integration notes  are relevant here even if the first source file compiles without a warning. Our counter reset is intentionally simple, and the JSON returned by  traceheap.stats()  is allocated through PostgreSQL&#39;s allocation functions. The state is backend-local, covers all  traceheap  tables visited by that backend, is not transactional, and disappears when the process exits. Those properties make it useful for this tutorial and unsuitable as a database-wide monitoring system. Where this meets BioseqDB The part I want to carry into a larger storage engine is the habit of following each callback&#39;s inputs, output and lifetime. A successful  CREATE TABLE  tells us very little about updates, snapshots, large values or maintenance. Even this small heap-based experiment found two assumptions which were invisible in a copied  TableAmRoutine  declaration. BioseqDB&#39;s  table callback registration  binds its own columnar scan, write and maintenance functions instead of copying heap&#39;s routine. Its  storage chapter  explains the larger storage layout, and the  custom scan chapter  follows the separate path used for sequence-search execution. A table method and a custom scan solve related but different problems. For a next experiment, I would change one observable behaviour and keep the current SQL checks beside it. If that change requires a different slot representation or persistent layout, I would write down which other callbacks now have to agree with it before adding another feature. That gives me a callback I can exercise with a small query and a result I can inspect.">
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">BioseqDB</p>
+          <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>14 min read</span></div>
+          <h2><a href="/blog/writing-a-postgres-table-access-method-in-cpp/">Writing a small PostgreSQL table access method in C++</a></h2>
+          <p>Build a PostgreSQL 17 extension, follow scans and writes through its callbacks, and find the places where copying the heap routine is not enough.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>C++</li><li data-blog-keyword>table access methods</li><li data-blog-keyword>storage</li><li data-blog-keyword>heap</li><li data-blog-keyword>tuple slots</li><li data-blog-keyword>MVCC</li><li data-blog-keyword>TOAST</li><li data-blog-keyword>VACUUM</li><li data-blog-keyword>BioseqDB</li></ul>
+          <a class="blog-action" href="/blog/writing-a-postgres-table-access-method-in-cpp/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-01" data-blog-title="Introducing BioseqDB" data-blog-search-text="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL. Combine genomic matches with relational data using compact sequence types and columnar storage! I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns. How it started This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research. 2021–2022:  Working with large GISAID datasets made FASTA files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected BWA-MEM to PostgreSQL in May 2022. 2023–2024:  I wrote a  Python aligner  and then improved it, learning how the algorithms work along the way. December 2025–2026:  The current BioseqDB began with minimap2 and columnar storage. Custom seeding and chaining, indexes, sequence slices and end-to-end benchmarks followed. The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The  introduction and full timeline  have more of the story. Two queries to get a feel for it These examples use the three synthetic samples from the  SQL walkthrough . The  samples  table has ordinary metadata columns and a  bioseq.seq  column.  USING bioseq  selects the sequence-aware storage. First, read metadata and a small piece of DNA.  bioseq.len  gives the sequence length;  [:16]  takes its first sixteen bases. SELECT patient_name, bioseq.len(seq) AS bases,
   seq[:16]::text AS prefix
 FROM samples
 WHERE age &gt;= 30
@@ -355,7 +671,7 @@ ORDER BY t.id, start; Anna has two occurrences and Ben has one. These are exact 
  Wait until PostgreSQL is ready, then open its SQL prompt: until docker exec bioseqdb-demo pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
 docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
  Follow the  walkthrough  to create the sample table, load a FASTA file and try the queries above. I would like to hear how it works with your data:  open an issue  or  contact me .">
-        <div class="blog-card-cover"><img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-01">1 October 2026</time><span aria-hidden="true">·</span><span>4 min read</span></div>
@@ -378,7 +694,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -420,7 +736,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
       <div class="dd-s0255">
         <span class="dd-s0256">&copy; 2026 BioseqDB Piotr Styczyński</span>
         <nav class="site-footer-links dd-s0257">
-          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (Apache 2.0)</a>
           <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
           <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
           <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
@@ -434,17 +750,17 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/media/social_card.png"}</script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-init.js"></script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/prism/prism.min.js"></script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/prism-languages.js"></script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/vendor/katex/katex.min.js"></script>
-<script src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-math.js"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/main.js"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/site-header.mjs"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/announcement.mjs"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/docs-design.mjs"></script>
-<script type="module" src="/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/js/blog-index.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/media/social_card.png"}</script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/prism-init.js"></script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/vendor/prism/prism.min.js"></script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/prism-languages.js"></script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/vendor/katex/katex.min.js"></script>
+<script src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/project-math.js"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/main.js"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/site-header.mjs"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/announcement.mjs"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/docs-design.mjs"></script>
+<script type="module" src="/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/js/blog-index.mjs"></script>
 </body>
 </html>

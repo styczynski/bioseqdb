@@ -118,7 +118,7 @@ I thought to myself: Can we store somewhere logs of operations so we can revert 
 
 We will submitt all commands to the logging ChatGTP instance and we can use SHOW to recreate fresh instance of the database in the existing state. We just ask for commands, spawn new ChatGPT and redo all operations or we can previously use UNDO to undo specific number of operations.
 
-![The Python wrapper sends commands concurrently to a storage conversation and a log conversation. Undo shortens the log, resets the default storage conversation and replays the retained commands.](/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/chatdb-conversations.svg)
+![The Python wrapper sends commands concurrently to a storage conversation and a log conversation. Undo shortens the log, resets the default storage conversation and replays the retained commands.](/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/chatdb-conversations.svg)
 
 That’s a nice architecture! Imagine creating a party, inviting two guests and telling them to behave like a KV storage and log respecitvely. That must be REAL GOOD PARTY. Altough, I hope chatGPT is not annoyed too much by doing those tedious data manipulation tasks.
 

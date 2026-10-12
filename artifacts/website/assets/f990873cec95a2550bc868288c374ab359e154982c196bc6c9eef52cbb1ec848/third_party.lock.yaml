@@ -14,7 +14,7 @@ schema_revision: 1
 
 # Prism syntax highlighter (§12.6): the committed prism.min.js is the minimal core
 # concatenated with exactly the language grammars the site highlights, in
-# dependency order (clike -> c -> cpp; bash, sql, cmake, json, yaml). The bundle's
+# dependency order (clike -> c -> cpp; bash, sql, cmake, json, yaml, python). The bundle's
 # own SHA-256 is what the build verifies; the component list records the upstream
 # provenance of each concatenated part so the bundle can be reproduced byte-for-byte.
 prism:
@@ -26,7 +26,7 @@ prism:
   homepage: https://prismjs.com/
   bundle:
     path: vendor/prism/prism.min.js
-    sha256: a45c26906ba7f7661c9d7721fd7adb67936a159bc6106be1d451d33e795c9696
+    sha256: 6ea74cf4c8a59741b7e1e924694add4a8d08acef8f32cabde258fd7e2ea4b13d
     components:  # upstream file + SHA-256, concatenated in this exact order
       - { file: components/prism-core.min.js,  sha256: 6caad316dd991f24f8004e0b9c19c055cb5829ff65e973fbee406f96d81b8e7e }
       - { file: components/prism-clike.min.js, sha256: c76ba4e240932bdc75546be30e550f5ba5e13815ff71511c76e9e27ac3072444 }
@@ -37,6 +37,7 @@ prism:
       - { file: components/prism-cmake.min.js, sha256: 396b5dbd10b253da47571a76be989ee39aa4bfc41ecd2436ab08294d2205476d }
       - { file: components/prism-json.min.js,  sha256: 956d86baa5ae7ec4106758f354ac2d140bdcd7fc103dece02f73ed12b8d663e4 }
       - { file: components/prism-yaml.min.js,  sha256: 719c8e8b8c344dc9de510c729f65ba840b1502a0a8e7e25e2ad19ee715f65c02 }
+      - { file: components/prism-python.min.js, sha256: ed4385685bcf2d4935c8dbbab4bde16603da1329e092d2bf36c3dadd67e9a85c }
   theme:
     path: vendor/prism/prism.min.css
     upstream_file: themes/prism-tomorrow.min.css

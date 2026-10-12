@@ -1,0 +1,59 @@
+/* Shields stay independent of the hero copy and its entrance animation. */
+.landing-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 30px;
+}
+.landing-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 28px;
+  max-width: 100%;
+  text-decoration: none;
+}
+.landing-badge img { display: block; width: auto; height: 20px; max-width: 100%; }
+.landing-badge:focus-visible { outline: 2px solid var(--theme-46b8de, #46b8de); outline-offset: 4px; }
+.landing-badge-fallback {
+  display: none;
+  padding: 4px 7px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--theme-dbe6f0, #dbe6f0);
+  background: var(--theme-142b3c, #142b3c);
+  border: 1px solid var(--theme-46b8de, #46b8de);
+}
+.landing-badge[data-unavailable] img { display: none; }
+.landing-badge[data-unavailable] .landing-badge-fallback { display: block; }
+@media (max-width: 420px) {
+  .landing-badges { gap: 4px 7px; margin-bottom: 25px; }
+}
+@media (min-width: 568px) { .landing-badges { column-gap: 10px; } }
+@media (min-width: 666px) { .landing-badges { max-width: 620px; } }
+@media (min-width: 768px) { .landing-badges { max-width: 720px; margin-bottom: 36px; } }
+@media (min-width: 1024px) {
+  .landing-design-page .ld-s0018 { position: static; }
+  .landing-design-page .ld-s0019 { position: relative; z-index: 2; }
+  .landing-badges {
+    position: absolute;
+    z-index: 3;
+    top: 93px; /* The original hero begins 73px behind the header. */
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
+    max-width: var(--landing-width);
+    padding-inline: var(--page-gutter);
+    justify-content: flex-end;
+    margin: 0;
+  }
+}
+@media (min-width: 1300px) { .landing-badges { top: 97px; gap: 12px; } }
+@media (min-width: 1600px) {
+  .landing-badges { top: 101px; gap: 14px; }
+  .landing-badge { min-height: 32px; }
+  .landing-badge img { height: 28px; }
+  .landing-badge-fallback { font-size: 12px; padding: 6px 10px; }
+}

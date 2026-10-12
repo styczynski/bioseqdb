@@ -15,14 +15,14 @@ BioseqDB is a PostgreSQL extension for storing, indexing and searching biologica
 
 I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns.
 
-![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/c033d1fb5efb1806f3f65df86ddf64d23c7fcade5441588143bed556c1acd278/figures/blog/sequences-in-sql.svg)
+![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/f990873cec95a2550bc868288c374ab359e154982c196bc6c9eef52cbb1ec848/figures/blog/sequences-in-sql.svg)
 
 ## How it started
 
 This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research.
 
 - **2021–2022:** Working with large GISAID datasets made FASTA files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected BWA-MEM to PostgreSQL in May 2022.
-- **2023–2024:** I wrote a Python aligner and then improved it, learning how the algorithms work along the way.
+- **2023–2024:** I wrote a [Python aligner](/blog/writing-a-dna-read-mapper-in-python/) and then improved it, learning how the algorithms work along the way.
 - **December 2025–2026:** The current BioseqDB began with minimap2 and columnar storage. Custom seeding and chaining, indexes, sequence slices and end-to-end benchmarks followed.
 
 The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The [introduction and full timeline](/v0.1/tutorials/project_introduction/#sec-introduction-timeline) have more of the story.

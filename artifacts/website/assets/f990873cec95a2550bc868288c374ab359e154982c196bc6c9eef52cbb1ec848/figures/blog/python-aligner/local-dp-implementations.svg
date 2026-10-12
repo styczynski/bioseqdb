@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="482.4pt" viewBox="0 0 504 482.4" xmlns="http://www.w3.org/2000/svg" version="1.1" role="img" aria-labelledby="figure-title figure-desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="figure-title">Local dynamic-programming implementation comparison</title>
+<desc id="figure-desc">Exact total DP timings from experiments_data.json converted from milliseconds to seconds. 20Ma: lists 1.59440 seconds, NumPy 3.69492 seconds, 4 calls; 20Mb: lists 0.99080 seconds, NumPy 2.20659 seconds, 5 calls. Both implementations were called only a few times. The chart does not isolate allocation, copying, or scalar-operation costs.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB chart generator</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 482.4 
+L 504 482.4 
+L 504 0 
+L 0 0 
+L 0 482.4 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 110.88 225.12 
+L 423.36 225.12 
+L 423.36 125.424 
+L 110.88 125.424 
+L 110.88 225.12 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 110.88 225.12 
+L 110.88 125.424 
+" clip-path="url(#pdb729805e3)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="110.88" y="243.238125" transform="rotate(-0 110.88 243.238125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 185.28 225.12 
+L 185.28 125.424 
+" clip-path="url(#pdb729805e3)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="185.28" y="243.238125" transform="rotate(-0 185.28 243.238125)">1</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 259.68 225.12 
+L 259.68 125.424 
+" clip-path="url(#pdb729805e3)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="259.68" y="243.238125" transform="rotate(-0 259.68 243.238125)">2</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 334.08 225.12 
+L 334.08 125.424 
+" clip-path="url(#pdb729805e3)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="334.08" y="243.238125" transform="rotate(-0 334.08 243.238125)">3</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 408.48 225.12 
+L 408.48 125.424 
+" clip-path="url(#pdb729805e3)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_10"/>
+     <g id="text_5">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="408.48" y="243.238125" transform="rotate(-0 408.48 243.238125)">4</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_11"/>
+     <g id="text_6">
+      <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="101.88" y="151.139841" transform="rotate(-0 101.88 151.139841)">Lists</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_12"/>
+     <g id="text_7">
+      <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="101.88" y="211.561659" transform="rotate(-0 101.88 211.561659)">NumPy</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 110.88 129.955636 
+L 229.50336 129.955636 
+L 229.50336 160.166545 
+L 110.88 160.166545 
+z
+" clip-path="url(#pdb729805e3)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 110.88 190.377455 
+L 385.782048 190.377455 
+L 385.782048 220.588364 
+L 110.88 220.588364 
+z
+" clip-path="url(#pdb729805e3)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="235.45536" y="149.200153" transform="rotate(-0 235.45536 149.200153)">1.59 s</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="391.734048" y="209.621972" transform="rotate(-0 391.734048 209.621972)">3.69 s</text>
+   </g>
+   <g id="text_10">
+    <text style="font-weight: 700; font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="110.88" y="111.424" transform="rotate(-0 110.88 111.424)">20Ma · 4 DP calls</text>
+   </g>
+  </g>
+  <g id="axes_2">
+   <g id="patch_5">
+    <path d="M 110.88 424.512 
+L 423.36 424.512 
+L 423.36 324.816 
+L 110.88 324.816 
+L 110.88 424.512 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_3">
+    <g id="xtick_6">
+     <g id="line2d_13">
+      <path d="M 110.88 424.512 
+L 110.88 324.816 
+" clip-path="url(#p27a4bba812)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_14"/>
+     <g id="text_11">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="110.88" y="442.630125" transform="rotate(-0 110.88 442.630125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_7">
+     <g id="line2d_15">
+      <path d="M 185.28 424.512 
+L 185.28 324.816 
+" clip-path="url(#p27a4bba812)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_16"/>
+     <g id="text_12">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="185.28" y="442.630125" transform="rotate(-0 185.28 442.630125)">1</text>
+     </g>
+    </g>
+    <g id="xtick_8">
+     <g id="line2d_17">
+      <path d="M 259.68 424.512 
+L 259.68 324.816 
+" clip-path="url(#p27a4bba812)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_18"/>
+     <g id="text_13">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="259.68" y="442.630125" transform="rotate(-0 259.68 442.630125)">2</text>
+     </g>
+    </g>
+    <g id="xtick_9">
+     <g id="line2d_19">
+      <path d="M 334.08 424.512 
+L 334.08 324.816 
+" clip-path="url(#p27a4bba812)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_20"/>
+     <g id="text_14">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="334.08" y="442.630125" transform="rotate(-0 334.08 442.630125)">3</text>
+     </g>
+    </g>
+    <g id="xtick_10">
+     <g id="line2d_21">
+      <path d="M 408.48 424.512 
+L 408.48 324.816 
+" clip-path="url(#p27a4bba812)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_22"/>
+     <g id="text_15">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="408.48" y="442.630125" transform="rotate(-0 408.48 442.630125)">4</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_4">
+    <g id="ytick_3">
+     <g id="line2d_23"/>
+     <g id="text_16">
+      <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="101.88" y="350.531841" transform="rotate(-0 101.88 350.531841)">Lists</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_24"/>
+     <g id="text_17">
+      <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="101.88" y="410.953659" transform="rotate(-0 101.88 410.953659)">NumPy</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_6">
+    <path d="M 110.88 329.347636 
+L 184.59552 329.347636 
+L 184.59552 359.558545 
+L 110.88 359.558545 
+z
+" clip-path="url(#p27a4bba812)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 110.88 389.769455 
+L 275.050296 389.769455 
+L 275.050296 419.980364 
+L 110.88 419.980364 
+z
+" clip-path="url(#p27a4bba812)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="190.54752" y="348.592153" transform="rotate(-0 190.54752 348.592153)">0.99 s</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="281.002296" y="409.013972" transform="rotate(-0 281.002296 409.013972)">2.21 s</text>
+   </g>
+   <g id="text_20">
+    <text style="font-weight: 700; font-size: 17px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="110.88" y="310.816" transform="rotate(-0 110.88 310.816)">20Mb · 5 DP calls</text>
+   </g>
+  </g>
+  <g id="text_21">
+   <text style="font-weight: 700; font-size: 19px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="25.2" y="31.321031" transform="rotate(-0 25.2 31.321031)">NumPy did not help this DP loop</text>
+  </g>
+  <g id="text_22">
+   <text style="font-size: 16px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="53.064" transform="rotate(-0 25.2 53.064)">Total time in the fallback routine</text>
+  </g>
+  <g id="text_23">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="82.008" transform="rotate(-0 25.2 82.008)">Earlier v10 profiles · seconds · lower is faster</text>
+  </g>
+  <g id="text_24">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="465.516" transform="rotate(-0 25.2 465.516)">The sample is small; this is not a general NumPy ranking.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pdb729805e3">
+   <rect x="110.88" y="125.424" width="312.48" height="99.696"/>
+  </clipPath>
+  <clipPath id="p27a4bba812">
+   <rect x="110.88" y="324.816" width="312.48" height="99.696"/>
+  </clipPath>
+ </defs>
+</svg>

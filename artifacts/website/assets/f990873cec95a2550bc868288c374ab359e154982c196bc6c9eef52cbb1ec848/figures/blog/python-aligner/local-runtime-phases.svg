@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="648pt" viewBox="0 0 504 648" xmlns="http://www.w3.org/2000/svg" version="1.1" role="img" aria-labelledby="figure-title figure-desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="figure-title">Local recorded runtime phases</title>
+<desc id="figure-desc">Exact phase totals from the solution variant of experiments_data.json. 20Ma: Reference index 20.01987 seconds, Read indexes 2.10915 seconds, LIS routine 4.43512 seconds, Candidate scoring 1.96198 seconds, BWT ends 5.48561 seconds, DP fallback 1.59440 seconds; 20Mb: Reference index 19.91390 seconds, Read indexes 2.00959 seconds, LIS routine 2.65579 seconds, Candidate scoring 1.21079 seconds, BWT ends 2.51869 seconds, DP fallback 0.99080 seconds. Phase bars are shown independently. They do not sum to the complete runtime and should not be treated as a full accounting of time.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB chart generator</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 648 
+L 504 648 
+L 504 0 
+L 0 0 
+L 0 648 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 176.4 308.205 
+L 423.36 308.205 
+L 423.36 136.08 
+L 176.4 136.08 
+L 176.4 308.205 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 176.4 308.205 
+L 176.4 136.08 
+" clip-path="url(#p78316e8fb7)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="176.4" y="326.323125" transform="rotate(-0 176.4 326.323125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 283.773913 308.205 
+L 283.773913 136.08 
+" clip-path="url(#p78316e8fb7)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="283.773913" y="326.323125" transform="rotate(-0 283.773913 326.323125)">10</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 391.147826 308.205 
+L 391.147826 136.08 
+" clip-path="url(#p78316e8fb7)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="391.147826" y="326.323125" transform="rotate(-0 391.147826 326.323125)">20</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_7"/>
+     <g id="text_4">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="156.722998" transform="rotate(-0 167.4 156.722998)">Reference index</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_8"/>
+     <g id="text_5">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="184.866393" transform="rotate(-0 167.4 184.866393)">Read indexes</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_9"/>
+     <g id="text_6">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="213.009787" transform="rotate(-0 167.4 213.009787)">LIS routine</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_10"/>
+     <g id="text_7">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="241.153182" transform="rotate(-0 167.4 241.153182)">Candidate scoring</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_11"/>
+     <g id="text_8">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="269.296576" transform="rotate(-0 167.4 269.296576)">BWT ends</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_12"/>
+     <g id="text_9">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="297.43997" transform="rotate(-0 167.4 297.43997)">DP fallback</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 176.4 143.903864 
+L 391.361178 143.903864 
+L 391.361178 159.664164 
+L 176.4 159.664164 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 176.4 172.047258 
+L 199.046769 172.047258 
+L 199.046769 187.807559 
+L 176.4 187.807559 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 176.4 200.190652 
+L 224.021619 200.190652 
+L 224.021619 215.950953 
+L 176.4 215.950953 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 176.4 228.334047 
+L 197.466547 228.334047 
+L 197.466547 244.094348 
+L 176.4 244.094348 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 176.4 256.477441 
+L 235.301141 256.477441 
+L 235.301141 272.237742 
+L 176.4 272.237742 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 176.4 284.620836 
+L 193.519697 284.620836 
+L 193.519697 300.381136 
+L 176.4 300.381136 
+z
+" clip-path="url(#p78316e8fb7)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="395.656135" y="155.371202" transform="rotate(-0 395.656135 155.371202)">20.02</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="203.341725" y="183.514596" transform="rotate(-0 203.341725 183.514596)">2.11</text>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="228.316575" y="211.65799" transform="rotate(-0 228.316575 211.65799)">4.44</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="201.761504" y="239.801385" transform="rotate(-0 201.761504 239.801385)">1.96</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="239.596098" y="267.944779" transform="rotate(-0 239.596098 267.944779)">5.49</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="197.814653" y="296.088173" transform="rotate(-0 197.814653 296.088173)">1.59</text>
+   </g>
+   <g id="text_16">
+    <text style="font-weight: 700; font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="176.4" y="122.08" transform="rotate(-0 176.4 122.08)">20Ma · 39.18 s whole run</text>
+   </g>
+  </g>
+  <g id="axes_2">
+   <g id="patch_9">
+    <path d="M 176.4 576.72 
+L 423.36 576.72 
+L 423.36 404.595 
+L 176.4 404.595 
+L 176.4 576.72 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_3">
+    <g id="xtick_4">
+     <g id="line2d_13">
+      <path d="M 176.4 576.72 
+L 176.4 404.595 
+" clip-path="url(#pda3a4aa7f4)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_14"/>
+     <g id="text_17">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="176.4" y="594.838125" transform="rotate(-0 176.4 594.838125)">0</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_15">
+      <path d="M 283.773913 576.72 
+L 283.773913 404.595 
+" clip-path="url(#pda3a4aa7f4)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_16"/>
+     <g id="text_18">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="283.773913" y="594.838125" transform="rotate(-0 283.773913 594.838125)">10</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_17">
+      <path d="M 391.147826 576.72 
+L 391.147826 404.595 
+" clip-path="url(#pda3a4aa7f4)" style="fill: none; stroke: var(--theme-20364a, #20364a); stroke-linecap: square"/>
+     </g>
+     <g id="line2d_18"/>
+     <g id="text_19">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="391.147826" y="594.838125" transform="rotate(-0 391.147826 594.838125)">20</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_4">
+    <g id="ytick_7">
+     <g id="line2d_19"/>
+     <g id="text_20">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="425.237998" transform="rotate(-0 167.4 425.237998)">Reference index</text>
+     </g>
+    </g>
+    <g id="ytick_8">
+     <g id="line2d_20"/>
+     <g id="text_21">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="453.381393" transform="rotate(-0 167.4 453.381393)">Read indexes</text>
+     </g>
+    </g>
+    <g id="ytick_9">
+     <g id="line2d_21"/>
+     <g id="text_22">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="481.524787" transform="rotate(-0 167.4 481.524787)">LIS routine</text>
+     </g>
+    </g>
+    <g id="ytick_10">
+     <g id="line2d_22"/>
+     <g id="text_23">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="509.668182" transform="rotate(-0 167.4 509.668182)">Candidate scoring</text>
+     </g>
+    </g>
+    <g id="ytick_11">
+     <g id="line2d_23"/>
+     <g id="text_24">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="537.811576" transform="rotate(-0 167.4 537.811576)">BWT ends</text>
+     </g>
+    </g>
+    <g id="ytick_12">
+     <g id="line2d_24"/>
+     <g id="text_25">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-eef4f9, #eef4f9)" x="167.4" y="565.95497" transform="rotate(-0 167.4 565.95497)">DP fallback</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_10">
+    <path d="M 176.4 412.418864 
+L 390.223337 412.418864 
+L 390.223337 428.179164 
+L 176.4 428.179164 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 176.4 440.562258 
+L 197.977754 440.562258 
+L 197.977754 456.322559 
+L 176.4 456.322559 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 176.4 468.705652 
+L 204.916256 468.705652 
+L 204.916256 484.465953 
+L 176.4 484.465953 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 176.4 496.849047 
+L 189.400726 496.849047 
+L 189.400726 512.609348 
+L 176.4 512.609348 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 176.4 524.992441 
+L 203.44416 524.992441 
+L 203.44416 540.752742 
+L 176.4 540.752742 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 176.4 553.135836 
+L 187.038607 553.135836 
+L 187.038607 568.896136 
+L 176.4 568.896136 
+z
+" clip-path="url(#pda3a4aa7f4)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="text_26">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="394.518293" y="423.886202" transform="rotate(-0 394.518293 423.886202)">19.91</text>
+   </g>
+   <g id="text_27">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="202.272711" y="452.029596" transform="rotate(-0 202.272711 452.029596)">2.01</text>
+   </g>
+   <g id="text_28">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="209.211213" y="480.17299" transform="rotate(-0 209.211213 480.17299)">2.66</text>
+   </g>
+   <g id="text_29">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="193.695683" y="508.316385" transform="rotate(-0 193.695683 508.316385)">1.21</text>
+   </g>
+   <g id="text_30">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="207.739117" y="536.459779" transform="rotate(-0 207.739117 536.459779)">2.52</text>
+   </g>
+   <g id="text_31">
+    <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="191.333564" y="564.603173" transform="rotate(-0 191.333564 564.603173)">0.99</text>
+   </g>
+   <g id="text_32">
+    <text style="font-weight: 700; font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="176.4" y="390.595" transform="rotate(-0 176.4 390.595)">20Mb · 32.60 s whole run</text>
+   </g>
+  </g>
+  <g id="text_33">
+   <text style="font-weight: 700; font-size: 21px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="25.2" y="38.636719" transform="rotate(-0 25.2 38.636719)">Where the local runtime went</text>
+  </g>
+  <g id="text_34">
+   <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="60.264" transform="rotate(-0 25.2 60.264)">Seconds spent in each recorded phase</text>
+  </g>
+  <g id="text_35">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="89.424" transform="rotate(-0 25.2 89.424)">Independent timers; not a complete partition.</text>
+  </g>
+  <g id="text_36">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="25.2" y="625.32" transform="rotate(-0 25.2 625.32)">Earlier v10 profiles; separate from the course measurements.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p78316e8fb7">
+   <rect x="176.4" y="136.08" width="246.96" height="172.125"/>
+  </clipPath>
+  <clipPath id="pda3a4aa7f4">
+   <rect x="176.4" y="404.595" width="246.96" height="172.125"/>
+  </clipPath>
+ </defs>
+</svg>
