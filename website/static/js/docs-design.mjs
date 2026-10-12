@@ -596,10 +596,12 @@ function copyButtons() {
     button.dataset.copyLabel = original;
     button.textContent = copied ? "Copied" : "Copy failed";
     button.style.background = copied ? "var(--theme-8fd6ba, #8fd6ba)" : "var(--theme-e8a19b, #e8a19b)";
+    button.style.color = "var(--theme-0e1a10, #0e1a10)";
     window.clearTimeout(timers.get(button));
     timers.set(button, window.setTimeout(() => {
       button.textContent = original;
-      button.style.background = "var(--theme-e9f1f8, #e9f1f8)";
+      button.style.removeProperty("background");
+      button.style.removeProperty("color");
     }, 1400));
   });
 }

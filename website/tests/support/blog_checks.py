@@ -88,6 +88,51 @@ def _tooltip_bounds(page, tooltip, label):
            f"{label}: tooltip is outside the viewport: {bounds}")
 
 
+def _copy_buttons(page, theme):
+    """Copied/error feedback must return to readable theme CSS, not stale inline colors."""
+    from playwright.sync_api import expect
+
+    button = page.locator('.blog-content .doc-code [data-copy]').first
+    page.evaluate("""() => {
+      window.__copyOriginal = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      window.__copyExecOriginal = document.execCommand;
+    }""")
+    try:
+        for success in (True, False):
+            page.evaluate("""success => {
+              Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{
+                writeText:async () => { if (!success) throw new Error('clipboard unavailable'); }
+              }});
+              document.execCommand = () => false;
+            }""", success)
+            button.click()
+            expect(button).to_have_text('Copied' if success else 'Copy failed')
+            for state in ('feedback', 'restored'):
+                if state == 'restored':
+                    expect(button).to_have_text('Copy')
+                    _check(button.evaluate("node => !node.style.background && !node.style.color"),
+                           f'{theme}: copied button kept inline colors after reset')
+                page.wait_for_timeout(180)  # Let the authored 150 ms color transition finish.
+                contrast = button.evaluate("""node => {
+                  const luminance = color => color.match(/[\\d.]+/g).slice(0,3)
+                    .map(Number).map(x=>x/255)
+                    .map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4)
+                    .reduce((sum,x,i)=>sum+x*[.2126,.7152,.0722][i],0);
+                  const s=getComputedStyle(node), a=luminance(s.color), b=luminance(s.backgroundColor);
+                  return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+                }""")
+                _check(contrast >= 4.5,
+                       f'{theme}: copy button {state} contrast is only {contrast:.2f}:1')
+    finally:
+        page.evaluate("""() => {
+          if (window.__copyOriginal) Object.defineProperty(navigator, 'clipboard', window.__copyOriginal);
+          else delete navigator.clipboard;
+          document.execCommand = window.__copyExecOriginal;
+          delete window.__copyOriginal;
+          delete window.__copyExecOriginal;
+        }""")
+
+
 def _tooltips(page, output, theme):
     from playwright.sync_api import expect
 
@@ -473,6 +518,7 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
                         report['contrast'] = _light_readability(page, label)
                 reports.append(report)
             if name == 'post':
+                _copy_buttons(page, theme)
                 _tooltips(page, output, theme)
     _banner(page)
     _check(not errors, f'blog or banner raised browser errors: {errors}')
