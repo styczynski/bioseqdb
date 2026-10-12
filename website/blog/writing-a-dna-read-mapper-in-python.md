@@ -52,7 +52,7 @@ This is the idea behind [seed-and-extend](/v0.1/tutorials/project_alignment_foun
 
 ## 2. Run the small version
 
-All numbered Python blocks below belong to one file and use only the standard library. Copy them in order, or [download the complete Python example](/static/examples/python-aligner.py) and run:
+The Python blocks below belong to one file and use only the standard library. Copy them in order, or [download the complete Python example](/static/examples/python-aligner.py) and run:
 
 ```sh
 python3 python-aligner.py
@@ -165,7 +165,7 @@ At the correct location, anchors tend to form a rising line. A substitution remo
 
 ## 6. Start with a longest increasing subsequence
 
-After sorting anchors by reference position, look for a strictly increasing sequence of query positions. This is the **longest increasing subsequence**, or LIS. It is “longest”, not “least”: we are maximizing the number of compatible anchors.
+After sorting anchors by reference position, look for a strictly increasing sequence of query positions. This is the **longest increasing subsequence**, or LIS. It maximizes the number of compatible anchors.
 
 For each chain length, keep the smallest query coordinate which can end a chain of that length. A smaller endpoint leaves more room for later anchors. Binary search locates the length to extend; parent pointers let us recover the chosen chain after the scan.
 
@@ -239,11 +239,11 @@ For example, ordinary LIS connects `(0, 0)` and `(100, 10)`. With a distance cut
 The intent is easier to read as a short outline:
 
 ```pseudocode
-for each anchor in reference order
+For each anchor in reference order
     search the stored chain endings
-        if the old reference position is too far away
+        If the old reference position is too far away
             stop searching and replace an earlier ending
-        otherwise compare query coordinates as in LIS
+        Else compare query coordinates as in LIS
     remember the predecessor
 reconstruct the backbone
 inspect local windows of that backbone
@@ -448,7 +448,7 @@ The published PDF contains plots rather than a numeric runtime table. The redraw
 
 ![Course runtimes for the same submissions and reference sizes at approximately ten percent read errors.](/static/figures/blog/python-aligner/course-runtime-b.svg)
 
-PS was one of the two fastest submissions. It was tens to hundreds of times faster than the nine slower submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads including the work represented by the course timing. MB was faster in five tests; the two were too close to rank confidently from the plotted points in the 20M/a test. It would be misleading to turn that chart into a claim that PS won every runtime comparison.
+PS was one of the two fastest submissions. It was tens to hundreds of times faster than the nine slower submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads. MB was faster in five tests; the two were too close to rank confidently from the plotted points in the 20M/a test.
 
 The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left **zero reads unmapped** and had **eight incorrect mappings out of 6,000**: 1, 3, 0, 0, 4 and 0 in the report's order. That is about 99.87% correctly mapped overall under the assignment's endpoint tolerance. It does not mean every base of those reads was perfectly aligned.
 
