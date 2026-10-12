@@ -74,6 +74,7 @@ struct code_language_view {
     const std::string lowered = to_ascii_lower(raw);
     if (lowered == "bash" || lowered == "shell" || lowered == "sh") return {"bash", "Bash"};
     if (lowered == "sql") return {"sql", "SQL"};
+    if (lowered == "python" || lowered == "py") return {"python", "Python"};
     if (lowered == "plan" || lowered == "pgsql-plan" || lowered == "explain") {
         return {"pgsql-plan", "PostgreSQL plan"};
     }
