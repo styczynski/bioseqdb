@@ -770,7 +770,7 @@ def shared_header() -> str:
         "loading": "Loading search index…", "no-matches": "No matches for",
         "unavailable": "Search index is unavailable.",
         "error": "Search is temporarily unavailable.",
-        "tutorial": "Tutorial", "function": "Function", "class": "Class",
+        "tutorial": "Tutorial", "blog": "Blog post", "function": "Function", "class": "Class",
         "type": "Type", "setting": "Setting", "sql": "SQL object",
         "domain-sql": "SQL", "domain-documentation": "Documentation", "domain-cpp": "C++",
     }
@@ -788,6 +788,7 @@ def shared_header() -> str:
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
       <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
+      <a href="{{ site.base_path }}blog/">Blog</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -820,7 +821,24 @@ def shared_header() -> str:
       </button>
     </div>
   </div>
+  {% if landing.announcement.enabled == "true" %}
+  <section class="site-announcement" data-announcement aria-label="{{ landing.announcement.label }}">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>{{ landing.announcement.title }}</strong> {{ landing.announcement.message }} <a href="{{ site.repository_url }}/issues">{{ landing.announcement.issues }}</a> {{ landing.announcement.and }} <a href="{{ site.base_path }}contact/">{{ landing.announcement.contact }}</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="{{ landing.announcement.pause }}" data-pause-label="{{ landing.announcement.pause }}" data-resume-label="{{ landing.announcement.resume }}" title="{{ landing.announcement.pause }}"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  {% endif %}
 </header>'''
+    LANDING_DEFAULT_COPY["announcement"] = {
+        "enabled": "true", "label": "Release announcement",
+        "title": "BioseqDB first version released!",
+        "message": "Note that this is experimental software that still contains bugs. Feel free to provide feedback via",
+        "issues": "GitHub issues", "and": "and", "contact": "contact",
+        "pause": "Pause release announcement", "resume": "Resume release announcement",
+    }
     markup = markup.replace("__DARK_LABEL__", dark_label).replace("__LIGHT_LABEL__", light_label)
     return localize_landing_markup(markup.replace("data-site-header>", f"data-site-header {labels}>"), "header")
 
@@ -1033,6 +1051,9 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
 
 def base_template(markup: str) -> str:
     markup = add_footer_profile_links(markup)
+    footer_start = markup.index("<footer")
+    footer_begin, footer_end = element_span(markup, footer_start, "footer")
+    markup = markup[:footer_begin] + '{% include "site-footer.html.j2" %}' + markup[footer_end:]
     markup = replace_header(markup, "dnav", '{% include "site-header.html.j2" %}')
     pop_start = markup.index('<div id="entity-pop"')
     pop_begin, pop_end = element_span(markup, pop_start)
@@ -1051,14 +1072,15 @@ def base_template(markup: str) -> str:
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="{{{{ page.title }}}}">
 <meta property="og:description" content="{{{{ page.description }}}}">
-<meta property="og:type" content="website">
+<meta property="og:type" content="{{% if page.page_type == \"blog\" %}}article{{% else %}}website{{% endif %}}">
 <meta property="og:url" content="{{{{ page.canonical }}}}">
-<meta property="og:image" content="{{{{ site.social_image_url }}}}">
+<meta property="og:image" content="{{% if page.social_image_url %}}{{{{ page.social_image_url }}}}{{% else %}}{{{{ site.social_image_url }}}}{{% endif %}}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{{{ page.title }}}}">
 <meta name="twitter:description" content="{{{{ page.description }}}}">
-<meta name="twitter:image" content="{{{{ site.social_image_url }}}}">
+<meta name="twitter:image" content="{{% if page.social_image_url %}}{{{{ page.social_image_url }}}}{{% else %}}{{{{ site.social_image_url }}}}{{% endif %}}">
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
+{{% block extra_head %}}{{% endblock %}}
 <link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/docs-design.css">{{% endblock %}}
@@ -1069,7 +1091,9 @@ def base_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/announcement.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/theme.css">
+{{% block extra_css %}}{{% endblock %}}
 </head>
 <body id="page-top" class="{{% block body_class %}}docs-design-page{{% endblock %}}">
 {{% block skip_link %}}<a class="skip-link" href="#doc-main">Skip to main content</a>{{% endblock %}}
@@ -1086,6 +1110,7 @@ def base_template(markup: str) -> str:
 <script type="module" src="{{{{ site.assets_base_url }}}}js/project-benchmarks.mjs"></script>
 <script type="module" src="{{{{ site.js_url }}}}"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/announcement.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
 {{% block design_script %}}{{% endblock %}}
 </body>
@@ -1148,6 +1173,7 @@ def benchmarks_template(markup: str) -> str:
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/announcement.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/theme.css">
 </head>
 <body id="page-top" class="benchmarks-design-page">
@@ -1173,6 +1199,7 @@ def benchmarks_template(markup: str) -> str:
 <script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
 <script type="module" src="{{{{ site.js_url }}}}"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/announcement.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/benchmarks-design.mjs"></script>
 </body>
@@ -1568,6 +1595,10 @@ def write_generated() -> None:
         raise RuntimeError("prototype runtime token survived translation")
 
     (WEBSITE / "templates" / "site-header.html.j2").write_text(shared_header() + "\n", encoding="utf-8")
+    footer_markup = add_footer_profile_links(docs)
+    footer_begin, footer_end = element_span(footer_markup, footer_markup.index("<footer"), "footer")
+    (WEBSITE / "templates" / "site-footer.html.j2").write_text(
+        footer_markup[footer_begin:footer_end] + "\n", encoding="utf-8")
     (WEBSITE / "templates" / "landing.html.j2").write_text(
         re.sub(r"[ \t]+(?=\n)", "", landing_template(landing)).rstrip() + "\n",
         encoding="utf-8")
@@ -1653,6 +1684,7 @@ GENERATED_PATHS = (
     "static/css/project-benchmarks.css",
     "templates/base.html.j2",
     "templates/site-header.html.j2",
+    "templates/site-footer.html.j2",
     "templates/benchmarks.html.j2",
     "templates/landing.html.j2",
     "static/css/benchmarks-design.css",

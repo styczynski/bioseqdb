@@ -18,6 +18,7 @@ header:
   main_navigation: Main navigation
   docs: Docs
   benchmarks: Benchmarks
+  blog: Blog
   search_documentation: Search documentation
   search_docs_functions_types: Search docs, functions, types…
   symbol: /
@@ -29,6 +30,17 @@ header:
   contact_the_bioseqdb_maintainer: Contact the BioseqDB maintainer
   dark_mode_switch_to_light_mode: Dark mode. Switch to light mode.
   light_mode_switch_to_dark_mode: Light mode. Switch to dark mode.
+# Set enabled to the quoted string 'false' to hide this bar on every page.
+announcement:
+  enabled: 'true'
+  label: Release announcement
+  title: BioseqDB first version released!
+  message: Note that this is experimental software that still contains bugs. Feel free to provide feedback via
+  issues: GitHub issues
+  and: and
+  contact: contact
+  pause: Pause release announcement
+  resume: Resume release announcement
 hero:
   sql_native_sequence_search: SQL sequence search (alignments)
   search_biological_sequences_with_plain: Search biological sequences with plain
@@ -326,6 +338,7 @@ search:
   search_index_is_unavailable: Search index is unavailable.
   search_is_temporarily_unavailable: Search is temporarily unavailable.
   tutorial: Tutorial
+  blog_post: Blog post
   function: Function
   class: Class
   type: Type

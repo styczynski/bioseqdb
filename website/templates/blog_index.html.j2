@@ -1,0 +1,25 @@
+{% extends "base.html.j2" %}
+{% block body_class %}docs-design-page blog-page{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/blog.css">{% endblock %}
+{% block page %}
+<div data-screen-label="BioseqDB documentation">
+  {% include "site-header.html.j2" %}
+  <main id="doc-main" class="blog-shell blog-index">
+    <header class="blog-index-intro"><p class="blog-eyebrow">BioseqDB</p><h1>{{ blog.index.title }}</h1><p>{{ blog.index.description }}</p></header>
+    <div class="blog-posts">
+      {% if page.posts %}{% for post in page.posts %}
+      <article class="blog-card">
+        {% if post.cover_url %}<div class="blog-card-cover"><img src="{{ post.cover_url }}" alt="{{ post.image_alt }}" width="1200" height="240"></div>{% endif %}
+        <div class="blog-card-content">
+          <div class="blog-meta"><time datetime="{{ post.date }}">{{ post.date_label }}</time><span aria-hidden="true">·</span><span>{{ post.reading_minutes }} {{ blog.post.reading_time }}</span></div>
+          <h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
+          <p>{{ post.description }}</p>
+          <a class="blog-action" href="{{ post.url }}">{{ blog.index.read_post }} <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      {% endfor %}{% else %}<p>{{ blog.index.empty }}</p>{% endif %}
+    </div>
+  </main>
+  {% include "site-footer.html.j2" %}
+</div>
+{% endblock %}

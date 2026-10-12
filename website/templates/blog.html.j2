@@ -1,0 +1,48 @@
+{% extends "base.html.j2" %}
+{% block body_class %}docs-design-page blog-page{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/blog.css">{% endblock %}
+{% block extra_head %}
+<link rel="alternate" type="text/markdown" href="{{ page.markdown_url }}" title="{{ page.title }}">
+<meta name="keywords" content="{{ page.keywords_text }}">
+<meta name="author" content="{{ page.author }}">
+<meta property="article:published_time" content="{{ page.date }}">
+{% for keyword in page.keywords %}<meta property="article:tag" content="{{ keyword }}">{% endfor %}
+{% endblock %}
+{% block page %}
+<div data-screen-label="BioseqDB documentation">
+  {% include "site-header.html.j2" %}
+  <main id="doc-main" class="blog-shell">
+    <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="{{ site.base_path }}blog/">← {{ blog.post.all_posts }}</a></nav>
+    <article class="blog-article">
+      <header class="blog-hero">
+        {% if page.cover_url %}<img class="blog-cover" src="{{ page.cover_url }}" alt="{{ page.image_alt }}" fetchpriority="high">{% endif %}
+        <div class="blog-hero-copy">
+          <p class="blog-eyebrow">{{ landing.header.blog }}</p>
+          <h1>{{ page.title }}</h1>
+          <p class="blog-description">{{ page.description }}</p>
+          <div class="blog-meta"><time datetime="{{ page.date }}">{{ page.date_label }}</time><span aria-hidden="true">·</span><span>{{ page.reading_minutes }} {{ blog.post.reading_time }}</span><span aria-hidden="true">·</span><span>{{ page.author }}</span></div>
+        </div>
+      </header>
+      <div class="blog-layout">
+        <div class="blog-reading-column">
+          <div class="blog-tools"><a class="blog-markdown" href="{{ page.markdown_url }}" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>{{ blog.post.markdown }}</a></div>
+          <div class="docs-content tutorial-body blog-content">{{ page.body_html }}</div>
+          <footer class="blog-article-footer">
+            <span class="blog-eyebrow">{{ blog.post.keywords }}</span>
+            <ul class="blog-keywords" aria-label="{{ blog.post.keywords }}">{% for keyword in page.keywords %}<li>{{ keyword }}</li>{% endfor %}</ul>
+          </footer>
+          <aside class="blog-cta" aria-labelledby="blog-cta-title">
+            <a class="blog-cta-brand" href="{{ nav.documentation }}"><img src="{{ site.assets_base_url }}bioseq-mark.svg" width="42" height="42" alt=""><span>{{ landing.footer.bioseqdb }}</span></a>
+            <h2 id="blog-cta-title">{{ blog.cta.title }}</h2>
+            <p>{{ landing.footer.sql_native_search_for_biological_sequence_data }}</p>
+            <a class="blog-action" href="{{ nav.documentation }}">{{ blog.cta.docs }} <span aria-hidden="true">→</span></a>
+          </aside>
+        </div>
+        <aside class="blog-toc" aria-label="{{ blog.post.on_this_page }}"><p class="blog-eyebrow">{{ blog.post.on_this_page }}</p><div id="toc-list">{% for heading in page.on_this_page %}<a data-toc-link data-level="{{ heading.level }}" href="#{{ heading.anchor }}">{{ heading.text }}</a>{% endfor %}</div></aside>
+      </div>
+    </article>
+  </main>
+  {% include "site-footer.html.j2" %}
+</div>
+{% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/blog.mjs"></script>{% endblock %}

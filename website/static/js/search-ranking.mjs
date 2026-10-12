@@ -6,6 +6,7 @@ export const MAX_SEARCH_RESULTS = 40;
 export function searchType(record) {
   const kind = String(record.kind || "").toLowerCase();
   const group = String(record.group || "").toLowerCase();
+  if (kind === "blog") return "Blog";
   if (kind === "setting") return "Setting";
   if (kind === "sql_object") return "SQL";
   if (group === "tutorials" || group === "pages" ||
@@ -21,7 +22,7 @@ export function searchDomain(record) {
   const group = String(record.group || "").toLowerCase();
   if (group === "sql" || String(record.id || "").startsWith("sql:") ||
       kind.startsWith("sql_") || kind === "setting") return "SQL";
-  if (group === "tutorials" || group === "pages" ||
+  if (group === "tutorials" || group === "pages" || group === "blog" || kind === "blog" ||
       kind === "tutorial" || kind === "page") return "Documentation";
   return "C++";
 }

@@ -1,4 +1,4 @@
-<header id="dnav" class="site-header" data-site-header data-search-loading="{{ landing.search.loading_search_index }}" data-search-no-matches="{{ landing.search.no_matches_for }}" data-search-unavailable="{{ landing.search.search_index_is_unavailable }}" data-search-error="{{ landing.search.search_is_temporarily_unavailable }}" data-search-tutorial="{{ landing.search.tutorial }}" data-search-function="{{ landing.search.function }}" data-search-class="{{ landing.search.class }}" data-search-type="{{ landing.search.type }}" data-search-setting="{{ landing.search.setting }}" data-search-sql="{{ landing.search.sql_object }}" data-search-domain-sql="{{ landing.search.sql }}" data-search-domain-documentation="{{ landing.search.documentation }}" data-search-domain-cpp="{{ landing.search.c }}">
+<header id="dnav" class="site-header" data-site-header data-search-loading="{{ landing.search.loading_search_index }}" data-search-no-matches="{{ landing.search.no_matches_for }}" data-search-unavailable="{{ landing.search.search_index_is_unavailable }}" data-search-error="{{ landing.search.search_is_temporarily_unavailable }}" data-search-tutorial="{{ landing.search.tutorial }}" data-search-blog="{{ landing.search.blog_post }}" data-search-function="{{ landing.search.function }}" data-search-class="{{ landing.search.class }}" data-search-type="{{ landing.search.type }}" data-search-setting="{{ landing.search.setting }}" data-search-sql="{{ landing.search.sql_object }}" data-search-domain-sql="{{ landing.search.sql }}" data-search-domain-documentation="{{ landing.search.documentation }}" data-search-domain-cpp="{{ landing.search.c }}">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="{{ landing.header.documentation_menu }}"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="{{ site.base_path }}" aria-label="{{ landing.header.bioseqdb_home }}">
@@ -8,6 +8,7 @@
     <nav data-topnav class="site-navigation" aria-label="{{ landing.header.main_navigation }}">
       <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">{{ landing.header.docs }}</a>
       <a href="{{ site.base_path }}benchmarks/">{{ landing.header.benchmarks }}</a>
+      <a href="{{ site.base_path }}blog/">{{ landing.header.blog }}</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -40,4 +41,14 @@
       </button>
     </div>
   </div>
+  {% if landing.announcement.enabled == "true" %}
+  <section class="site-announcement" data-announcement aria-label="{{ landing.announcement.label }}">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>{{ landing.announcement.title }}</strong> {{ landing.announcement.message }} <a href="{{ site.repository_url }}/issues">{{ landing.announcement.issues }}</a> {{ landing.announcement.and }} <a href="{{ site.base_path }}contact/">{{ landing.announcement.contact }}</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="{{ landing.announcement.pause }}" data-pause-label="{{ landing.announcement.pause }}" data-resume-label="{{ landing.announcement.resume }}" title="{{ landing.announcement.pause }}"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  {% endif %}
 </header>

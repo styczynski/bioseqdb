@@ -1,0 +1,17 @@
+/* The release banner has an explicit yellow palette in both themes. */
+.site-announcement { color: #f9e4a0; background: #302816; border-top: 1px solid #5b4a24; font-size: 12px; line-height: 1.5; }
+html[data-theme="light"] .site-announcement { color: #45320b; background: #fff1bb; border-color: #ecd383; }
+.site-announcement-inner { display: flex; align-items: center; gap: 10px; max-width: 1600px; padding: 0 26px; margin: 0 auto; min-width: 0; }
+.site-announcement-window { min-width: 0; flex: 1; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.site-announcement-window::-webkit-scrollbar { display: none; }
+.site-announcement-window p { width: max-content; min-width: 100%; margin: 0; padding: 8px 0; text-align: center; white-space: nowrap; font: inherit; color: inherit; }
+.site-announcement-window strong { font-weight: 600; }
+.site-announcement a { color: inherit; text-decoration: underline; text-underline-offset: 3px; font-weight: 600; }
+.site-announcement :focus-visible { outline: 2px solid currentColor; outline-offset: -2px; border-radius: 3px; }
+.site-announcement button { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: inherit; border: 1px solid currentColor; background: transparent; border-radius: 6px; cursor: pointer; opacity: .85; }
+.site-announcement button[hidden] { display: none; }
+.site-announcement button:hover { opacity: 1; }
+.announcement-play, [data-announcement-toggle][aria-pressed="true"] .announcement-pause { display: none; }
+[data-announcement-toggle][aria-pressed="true"] .announcement-play { display: block; }
+@media (max-width: 768px) { .site-announcement-inner { padding: 0 14px; gap: 8px; } }
+@media (max-width: 420px) { .site-announcement-inner { padding: 0 10px; } .site-announcement { font-size: 11px; } }

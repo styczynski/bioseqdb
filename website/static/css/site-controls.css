@@ -1,6 +1,6 @@
 /* Shared header actions keep theme and contact within reach on every page. */
 .site-actions { display: flex; align-items: center; gap: 8px; flex: none; }
-.site-actions .site-github { display: inline-flex; align-items: center; gap: 8px; }
+.site-actions .site-github { display: inline-flex !important; align-items: center; gap: 8px; }
 .site-actions .site-github svg { flex: none; }
 .site-icon-button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 38px; height: 38px; padding: 0 11px; border: 1px solid var(--theme-ffffff-a0_14, rgba(255,255,255,.14)); border-radius: 10px; background: var(--theme-ffffff-a0_04, rgba(255,255,255,.04)); color: var(--theme-cbd8e4, #cbd8e4); font: inherit; font-size: 13px; cursor: pointer; }
 .site-icon-button svg { flex: none; }
@@ -16,8 +16,8 @@ html[data-theme="light"] .theme-moon { display: block; }
   .site-actions .site-github { padding: 0; width: 38px; height: 38px; justify-content: center; }
   .site-github-label { display: none; }
 }
-@media (max-width: 759px) {
-  .site-search-wrap { order: 5; flex: 1 1 calc(100% - 122px); width: 0; }
+@media (max-width: 768px) {
+  .site-search-wrap { order: 5; flex: 1 1 calc(100% - 132px); width: 0; }
   .site-actions { order: 6; margin-left: auto; }
   .site-icon-button, .site-actions .site-github { min-width: 34px; width: 34px; height: 36px; padding: 0; }
   .site-actions { gap: 5px; }

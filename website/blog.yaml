@@ -1,0 +1,16 @@
+# Shared blog copy. Post content and metadata live in blog/*.md.
+index:
+  title: The BioseqDB blog
+  description: Notes on building a sequence database, the ideas behind it, and things you can try with SQL.
+  empty: New posts will appear here.
+  read_post: Read the post
+post:
+  all_posts: All posts
+  reading_time: min read
+  markdown: Markdown
+  on_this_page: On this page
+  keywords: Topics
+  published: Published
+cta:
+  title: Try it yourself now!
+  docs: Read the docs

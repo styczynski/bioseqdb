@@ -19,7 +19,7 @@ from pathlib import Path
 WEBSITE = Path(__file__).resolve().parents[1]
 COLOR = r"#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{4}\b|#[0-9a-fA-F]{3}\b|rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+(?:\s*,\s*[\d.]+)?\s*\)"
 COLOR_RE = re.compile(COLOR)
-TOKEN_RE = re.compile(r"var\(--theme-[\w-]+,\s*(?:" + COLOR + r")\)|" + COLOR)
+TOKEN_RE = re.compile(r"url\([^)]*\)|var\(--theme-[\w-]+,\s*(?:" + COLOR + r")\)|" + COLOR)
 PAINT_ATTRIBUTE = re.compile(r"(?P<head>\b(?:fill|stroke|stop-color|flood-color|style)\s*=\s*)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)", re.S)
 SVG_THEME_RE = re.compile(r"\n?<style id=[\"']bioseq-light-palette[\"']>.*?</style>\n?", re.S)
 
@@ -96,7 +96,7 @@ def light_color(value: str) -> str:
 def tokenize_colors(content: str) -> str:
     def replace(match: re.Match[str]) -> str:
         value = match.group()
-        if value.startswith("var("):
+        if value.startswith(("var(", "url(")):
             return value
         return f"var({token_name(value)}, {value})"
     return TOKEN_RE.sub(replace, content)
@@ -120,7 +120,11 @@ def theme_svg(content: str) -> str:
 
 
 def variables_for(content: str) -> dict[str, str]:
-    return dict(sorted({token_name(m.group()): light_color(m.group()) for m in COLOR_RE.finditer(content)}.items()))
+    # A fragment identifier such as #fade-x is an SVG paint-server reference,
+    # not the four-digit hex color #fade. Preserve these URLs in both passes.
+    values = [COLOR_RE.search(m.group()).group() for m in TOKEN_RE.finditer(content)
+              if not m.group().startswith("url(")]
+    return dict(sorted({token_name(value): light_color(value) for value in values}.items()))
 
 
 def apply_theme_palette(website_root: Path = WEBSITE, *, include_shared_header: bool = True) -> list[Path]:
@@ -132,7 +136,10 @@ def apply_theme_palette(website_root: Path = WEBSITE, *, include_shared_header: 
     paths += [website_root / "static/js" / name for name in scripts]
     paths += sorted((website_root / "templates").glob("*.html.j2"))
     paths += sorted((website_root / "static/figures").rglob("*.svg"))
-    paths = [p for p in paths if p.is_file() and p.name not in ("theme.css", "contact.css")]
+    # New authored components define explicit paired palettes; literal design
+    # exports and figures still use the reversible automatic palette below.
+    paths = [p for p in paths if p.is_file() and p.name not in
+             ("theme.css", "contact.css", "blog.css", "announcement.css")]
     changed = []
     palettes = {}
     for path in paths:

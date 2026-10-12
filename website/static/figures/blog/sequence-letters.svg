@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="184" viewBox="0 0 1440 184" role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid slice">
-<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-c9a8ff:#735091;--theme-f4894f:#b44d1c;--theme-ffaadd-a0_93333:rgba(163,20,106,0.93333);--theme-ffffff:#173247;}}</style>
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-c9a8ff:#735091;--theme-f4894f:#b44d1c;--theme-ffffff:#173247;}}</style>
 <title id="title">A field of DNA letters</title>
 <desc id="desc">Small translucent boxes contain rows of colourful A, C, T and G letters. The background is transparent and the pattern fades at the edges.</desc>
 <defs>
@@ -48,7 +48,7 @@
 </g>
 </pattern>
 <linearGradient id="fade-x"><stop stop-color="var(--theme-ffffff, #ffffff)" stop-opacity=".15"/><stop offset=".16" stop-color="var(--theme-ffffff, #ffffff)" stop-opacity=".64"/><stop offset=".75" stop-color="var(--theme-ffffff, #ffffff)" stop-opacity=".85"/><stop offset="1" stop-color="var(--theme-ffffff, #ffffff)" stop-opacity=".25"/></linearGradient>
-<mask id="soft-edges" mask-type="alpha"><rect width="1440" height="184" fill="url(var(--theme-ffaadd-a0_93333, #fade)-x)"/></mask>
+<mask id="soft-edges" mask-type="alpha"><rect width="1440" height="184" fill="url(#fade-x)"/></mask>
 </defs>
 <rect width="1440" height="184" fill="url(#bases)" mask="url(#soft-edges)"/>
 </svg>
