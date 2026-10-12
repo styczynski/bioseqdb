@@ -10,6 +10,13 @@ inline styles and SQL annotation hooks. The design translator never overwrites
 this file. Global project URLs, release information and copyright stay in
 `site.yaml`.
 
+The yellow release bar is configured in `landing.yaml` under `announcement`.
+Edit its title, message and link labels, or set `enabled: 'false'` to hide it.
+Keep the enable value quoted, like the other text settings. The bar scrolls
+only when its text is wider than the screen; visitors can pause it, use its
+links with the keyboard, or scroll it manually. Reduced-motion preferences
+disable the automatic movement.
+
 Contact and confirmation-page wording lives in `contact.yaml`. The form posts
 name, email and message to the public Formserve endpoint and includes an empty
 `_honeypot` field. JavaScript adds inline success/error feedback; a successful
@@ -116,3 +123,89 @@ also documented and labeled; importing their documentation does not install
 their SQL objects or expand runnable-example grants. The website build checks
 setting metadata, examples, operator links and field descriptions against the
 source manifests, including links in the imported configuration tables.
+
+## Writing blog posts
+
+Add a Markdown file anywhere under `website/blog/`. The generator discovers
+posts recursively, lists published posts at `/blog/` with the newest first, and
+adds each post to search and the sitemap. Blog pages use the same Markdown
+renderer, SQL runner, reference links and dark/light themes as tutorials.
+
+Start each file with YAML front matter:
+
+````markdown
+---
+title: "A new way to query sequences"
+description: "A short description of what the reader will learn."
+date: "2026-10-01"
+keywords: [BioseqDB, PostgreSQL, sequence alignment]
+draft: false
+---
+
+## Start with a question
+
+Write the post here. Link to the [SQL walkthrough](/v0.1/tutorials/getting_started/)
+and use inline code for names such as `mmsearch` and `bioseq.cigar`.
+
+```sql runnable id=first_post_query timeout=30s
+-- bioseq:setup
+SET max_parallel_workers_per_gather = 0;
+-- bioseq:visible
+SELECT 1 AS example;
+-- bioseq:teardown
+RESET max_parallel_workers_per_gather;
+```
+````
+
+`title`, `description`, `date` and a nonempty `keywords` list are required. Dates
+use `YYYY-MM-DD`. The title becomes a readable route such as
+`/blog/a-new-way-to-query-sequences/`; set an explicit `slug` of lowercase words
+separated by hyphens to keep the URL stable when editing a title. Slugs must be
+unique. Optional fields are `author` (defaults to Piotr Styczyński), `cover`,
+`image_alt`, `social_image` and `draft`. A cover uses a bundled `/static/...`
+asset; `image_alt` describes it. `social_image` can supply a bundled raster image
+for sharing previews, otherwise the site's default is used. Remote images are
+not supported by the site's content policy. Drafts
+are excluded unless the generator is run with `--include-drafts`.
+
+Start body headings at `##`: the template supplies the page's main title. Write
+site links from the root, such as `/v0.1/tutorials/project_alignment_foundations/`,
+so they also work when the site is built under a path prefix. Use the existing
+tutorial reference shorthand and SQL fences for entity links and runnable
+examples. Each runnable fence needs a unique `id` within the post. The build
+executes hidden setup and teardown SQL and displays only the visible section
+with its measured results. Inline SQL names and SQL code keep their generated
+reference links and hover descriptions.
+
+Reading time is calculated from visible content at 200 words per minute,
+rounded up with a minimum of one minute. Hidden database fixtures do not count.
+The Markdown button opens `/blog/<slug>/index.md` in the exported site. This
+readable copy preserves the authored front matter and prose; runnable fences
+become ordinary SQL fences containing only their visible SQL, with setup and
+teardown omitted. Keep editing the original file under `website/blog/`, where
+the complete runnable example remains available to the build.
+
+The generated `_headers` file serves blog `index.md` files as
+`text/plain; charset=utf-8`, with `Content-Disposition: inline` and a `Link`
+header pointing to the canonical HTML post on compatible static hosts. For
+other hosts, configure equivalent response headers so the Markdown button
+opens readable text; a host's default Markdown MIME type may trigger a download.
+
+Edit shared blog labels and the final callout in `website/blog.yaml`. Background
+reading links and short tooltip descriptions live in `website/blog_keywords.yaml`:
+
+```yaml
+keywords:
+  - term: alignment
+    aliases: [sequence alignment, alignments]
+    url: https://en.wikipedia.org/wiki/Sequence_alignment
+    description: "Arranging biological sequences to compare corresponding positions."
+```
+
+The first eligible occurrence of a term or any of its aliases is linked once
+per post. Matching ignores letter case, requires word boundaries and prefers
+the longest matching phrase. Headings, existing links, code, raw HTML and math
+are left intact. Use separate entries for distinct concepts, keep aliases
+unique across the file, and choose a specific, reliable HTTPS source. Entries
+need not appear in any current post. The initial glossary includes 69 topics
+covering sequence biology, public archives, alignment tools and PostgreSQL.

@@ -1,0 +1,271 @@
+# External background reading for blog prose. The first occurrence of a term or
+# any of its aliases is linked once per post; code keeps the SQL reference links.
+# Prefer the maintained source, specification or original paper for each topic.
+keywords:
+  # Biological foundations and public sequence collections.
+  - term: alignment
+    aliases: [sequence alignment, sequence alignments, alignments]
+    url: https://en.wikipedia.org/wiki/Sequence_alignment
+    description: "Arranging DNA, RNA or protein sequences to compare corresponding positions, with gaps where needed."
+  - term: genomic data
+    url: https://www.ncbi.nlm.nih.gov/sra/docs/
+    description: "Sequence data and related information. NCBI's Sequence Read Archive preserves raw sequencing data and alignment information."
+  - term: bioinformatics
+    url: https://www.genome.gov/genetics-glossary/Bioinformatics
+    description: "Using computational methods to collect, store and interpret biological data."
+  - term: genomics
+    url: https://www.genome.gov/genetics-glossary/genomics
+    description: "The study of genomes, including their sequences, functions and interactions."
+  - term: DNA
+    aliases: [deoxyribonucleic acid]
+    url: https://www.genome.gov/genetics-glossary/Deoxyribonucleic-Acid-DNA
+    description: "The molecule that carries genetic information, written using the bases A, C, G and T."
+  - term: RNA
+    aliases: [ribonucleic acid]
+    url: https://www.genome.gov/genetics-glossary/Ribonucleic-Acid-RNA
+    description: "A nucleic acid with roles in carrying and using genetic information; RNA uses U in place of DNA's T."
+  - term: nucleotide
+    aliases: [nucleotides]
+    url: https://www.genome.gov/genetics-glossary/Nucleotide
+    description: "A building block of DNA or RNA, made from a base, a sugar and a phosphate group."
+  - term: base pair
+    aliases: [base pairs]
+    url: https://www.genome.gov/genetics-glossary/Base-Pair
+    description: "Two complementary DNA bases joined across the two strands: A with T, or C with G."
+  - term: genome
+    aliases: [genomes]
+    url: https://www.genome.gov/genetics-glossary/Genome
+    description: "The complete set of genetic information in an organism."
+  - term: gene
+    aliases: [genes]
+    url: https://www.genome.gov/genetics-glossary/Gene
+    description: "A DNA region whose information contributes to a functional product, such as a protein or RNA."
+  - term: chromosome
+    aliases: [chromosomes]
+    url: https://www.genome.gov/genetics-glossary/Chromosome
+    description: "A structure that packages a long DNA molecule and its associated proteins."
+  - term: DNA sequencing
+    aliases: [sequencing]
+    url: https://www.genome.gov/genetics-glossary/DNA-Sequencing
+    description: "Determining the order of nucleotide bases in a DNA molecule."
+  - term: protein
+    aliases: [proteins]
+    url: https://www.genome.gov/genetics-glossary/Protein
+    description: "A molecule built from amino acids that performs structural, chemical or regulatory work in cells."
+  - term: amino acid
+    aliases: [amino acids]
+    url: https://www.genome.gov/genetics-glossary/Amino-Acids
+    description: "One of the molecular building blocks joined together to form proteins."
+  - term: codon
+    aliases: [codons]
+    url: https://www.genome.gov/genetics-glossary/Codon
+    description: "A group of three nucleotides that specifies an amino acid or a stop signal during protein synthesis."
+  - term: mutation
+    aliases: [mutations]
+    url: https://www.genome.gov/genetics-glossary/Mutation
+    description: "A change in a DNA sequence."
+  - term: SNP
+    aliases: [SNPs, single nucleotide polymorphism, single nucleotide polymorphisms]
+    url: https://www.genome.gov/genetics-glossary/Single-Nucleotide-Polymorphisms-SNPs
+    description: "A variation at one nucleotide position among individuals."
+  - term: SRA
+    aliases: [Sequence Read Archive]
+    url: https://www.ncbi.nlm.nih.gov/sra/docs/
+    description: "NCBI's public archive for raw high-throughput sequencing data and alignment information."
+  - term: GenBank
+    url: https://www.ncbi.nlm.nih.gov/genbank/
+    description: "NCBI's public collection of nucleotide sequences and their annotations."
+  - term: RefSeq
+    url: https://www.ncbi.nlm.nih.gov/refseq/
+    description: "NCBI's maintained reference collection of genomic, transcript and protein sequences."
+  - term: ENA
+    aliases: [European Nucleotide Archive]
+    url: https://ena-docs.readthedocs.io/en/latest/
+    description: "EMBL-EBI's archive for nucleotide sequencing data, from raw reads to assemblies and annotations."
+  - term: DDBJ
+    aliases: [DNA Data Bank of Japan]
+    url: https://www.ddbj.nig.ac.jp/about/index-e.html
+    description: "Japan's nucleotide sequence archive, which exchanges data with GenBank and ENA."
+
+  # File formats, sequence search and alignment methods.
+  - term: FASTA
+    aliases: [FASTA format]
+    url: https://www.ncbi.nlm.nih.gov/genbank/fastaformat/
+    description: "A text format with a greater-than header line followed by a biological sequence."
+  - term: FASTQ
+    aliases: [FASTQ format]
+    url: https://www.ncbi.nlm.nih.gov/sra/docs/submitformats/
+    description: "A text format that stores each sequencing read together with a quality score for each base."
+  - term: CIGAR
+    aliases: [CIGAR string, CIGAR strings]
+    url: https://samtools.github.io/hts-specs/SAMv1.pdf
+    description: "A compact sequence of counted alignment operations, such as matches, insertions and deletions, defined by the SAM specification."
+  - term: SAM
+    aliases: [SAM format]
+    url: https://samtools.github.io/hts-specs/SAMv1.pdf
+    description: "Sequence Alignment/Map: a tab-delimited format for sequence alignments and associated metadata."
+  - term: BAM
+    aliases: [BAM format]
+    url: https://samtools.github.io/hts-specs/SAMv1.pdf
+    description: "The compressed binary representation of the SAM alignment format."
+  - term: CRAM
+    aliases: [CRAM format]
+    url: https://samtools.github.io/hts-specs/CRAMv3.pdf
+    description: "A compressed alignment format that can use a reference sequence to reduce stored data."
+  - term: BLAST
+    url: https://blast.ncbi.nlm.nih.gov/Blast.cgi
+    description: "NCBI's Basic Local Alignment Search Tool finds regions of similarity between biological sequences."
+  - term: minimap2
+    url: https://github.com/lh3/minimap2
+    description: "Heng Li's sequence mapper for DNA and RNA, including long-read and spliced alignment."
+  - term: MMseqs2
+    url: https://github.com/soedinglab/MMseqs2
+    description: "A software suite for searching and clustering large protein and nucleotide sequence sets."
+  - term: BWA-MEM
+    aliases: [BWA]
+    url: https://github.com/lh3/bwa
+    description: "An alignment algorithm in the Burrows-Wheeler Aligner suite for mapping reads to a reference genome."
+  - term: KSW2
+    url: https://github.com/lh3/ksw2
+    description: "Heng Li's library for global alignment and alignment extension with affine gap scoring."
+  - term: Block Aligner
+    aliases: [block-aligner]
+    url: https://github.com/Daniel-Liu-c0deb0t/block-aligner
+    description: "An adaptive block-based, SIMD-accelerated alignment library supporting affine gap penalties."
+  - term: wavefront alignment
+    aliases: [WFA, WFA2]
+    url: https://github.com/smarco/WFA2-lib
+    description: "An alignment method that advances score-indexed wavefronts; WFA2 provides implementations for several distance models."
+  - term: k-mer
+    aliases: [k-mers, kmer, kmers]
+    url: https://sourmash.readthedocs.io/en/latest/kmers-and-minhash.html
+    description: "A consecutive sequence fragment of length k, often used as a building block for sequence comparison."
+  - term: minimizer
+    aliases: [minimizers]
+    url: https://pubmed.ncbi.nlm.nih.gov/15256412/
+    description: "A representative k-mer selected from each sliding window, reducing the seeds stored for sequence search."
+  - term: seed and extend
+    aliases: [seed-and-extend]
+    url: https://pubmed.ncbi.nlm.nih.gov/15256412/
+    description: "Find short matching sequence fragments first, then extend promising matches into longer alignments."
+  - term: chaining
+    aliases: [seed chaining, seed-and-chain]
+    url: https://github.com/lh3/minimap2
+    description: "Joining compatible seed matches into a candidate alignment before comparing individual bases."
+  - term: Smith-Waterman
+    aliases: [Smith–Waterman, Smith-Waterman algorithm, Smith–Waterman algorithm]
+    url: https://pubmed.ncbi.nlm.nih.gov/7265238/
+    description: "A dynamic programming algorithm that finds an optimal local alignment under a chosen scoring model."
+  - term: Needleman-Wunsch
+    aliases: [Needleman–Wunsch, Needleman-Wunsch algorithm, Needleman–Wunsch algorithm]
+    url: https://pubmed.ncbi.nlm.nih.gov/5420325/
+    description: "A dynamic programming approach to aligning two complete sequences globally."
+  - term: affine gap
+    aliases: [affine gaps, affine gap penalty, affine gap penalties, affine gap cost, affine gap costs]
+    url: https://pubmed.ncbi.nlm.nih.gov/7166760/
+    description: "A scoring model with a cost for opening a gap and a separate cost for extending it."
+  - term: dynamic programming
+    url: https://xlinux.nist.gov/dads/HTML/dynamicprog.html
+    description: "Solving a problem through reusable solutions to smaller subproblems, as in many alignment algorithms."
+  - term: edit distance
+    aliases: [Levenshtein distance]
+    url: https://xlinux.nist.gov/dads/HTML/Levenshtein.html
+    description: "The fewest single-character insertions, deletions and substitutions needed to turn one sequence into another."
+  - term: Hamming distance
+    url: https://xlinux.nist.gov/dads/HTML/HammingDistance.html
+    description: "The number of differing positions in two sequences of equal length."
+  - term: hash table
+    aliases: [hash tables, hash map, hash maps]
+    url: https://xlinux.nist.gov/dads/HTML/hashtab.html
+    description: "A lookup structure that uses a hash function to map keys to storage locations."
+  - term: ntHash
+    url: https://github.com/BirolLab/ntHash
+    description: "A rolling hash implementation designed for consecutive k-mers in DNA and RNA sequences."
+  - term: SIMD
+    aliases: [single instruction multiple data]
+    url: https://github.com/google/highway
+    description: "Applying one instruction to several data values at once. Highway provides portable SIMD operations across processor architectures."
+
+  # PostgreSQL concepts used by the extension and its SQL examples.
+  - term: PostgreSQL
+    aliases: [Postgres]
+    url: https://www.postgresql.org/about/
+    description: "An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations."
+  - term: SQL
+    aliases: [Structured Query Language]
+    url: https://www.postgresql.org/docs/current/tutorial-sql.html
+    description: "The language used to define, query and change data in relational databases."
+  - term: relational database
+    aliases: [relational databases]
+    url: https://www.postgresql.org/docs/current/tutorial-concepts.html
+    description: "A database that represents data as tables of rows and named columns."
+  - term: PostgreSQL extension
+    aliases: [Postgres extension, PostgreSQL extensions, Postgres extensions]
+    url: https://www.postgresql.org/docs/current/extend-extensions.html
+    description: "A package of related database objects, such as types and functions, installed together in PostgreSQL."
+  - term: transaction
+    aliases: [transactions]
+    url: https://www.postgresql.org/docs/current/tutorial-transactions.html
+    description: "A group of database operations committed together or rolled back as one unit."
+  - term: MVCC
+    aliases: [multiversion concurrency control, multi-version concurrency control]
+    url: https://www.postgresql.org/docs/current/mvcc-intro.html
+    description: "PostgreSQL's concurrency model, which gives statements a snapshot of database rows while other sessions make changes."
+  - term: write-ahead logging
+    aliases: [WAL, write ahead logging]
+    url: https://www.postgresql.org/docs/current/wal-intro.html
+    description: "Recording changes in a durable log before writing the corresponding data pages, enabling recovery after a crash."
+  - term: TOAST
+    url: https://www.postgresql.org/docs/current/storage-toast.html
+    description: "PostgreSQL's mechanism for compressing large field values or storing them outside the main row."
+  - term: custom scan
+    aliases: [custom scans, custom scan provider, custom scan providers]
+    url: https://www.postgresql.org/docs/current/custom-scan.html
+    description: "A PostgreSQL extension interface for adding custom ways to scan or process data within a query plan."
+  - term: table access method
+    aliases: [table access methods]
+    url: https://www.postgresql.org/docs/current/tableam.html
+    description: "The PostgreSQL interface through which a storage implementation reads and writes table data."
+  - term: query planner
+    aliases: [query optimizer, query optimiser, planner/optimizer]
+    url: https://www.postgresql.org/docs/current/planner-optimizer.html
+    description: "The PostgreSQL component that compares possible execution plans and chooses how to run a query."
+  - term: EXPLAIN
+    aliases: [EXPLAIN ANALYZE]
+    url: https://www.postgresql.org/docs/current/using-explain.html
+    description: "A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements."
+  - term: database index
+    aliases: [database indexes, database indices]
+    url: https://www.postgresql.org/docs/current/indexes-intro.html
+    description: "An auxiliary data structure that can speed up finding selected rows, with storage and maintenance costs."
+  - term: B-tree
+    aliases: [B-trees]
+    url: https://www.postgresql.org/docs/current/indexes-types.html
+    description: "An ordered index structure that PostgreSQL uses for equality and range lookups on sortable values."
+  - term: GUC
+    aliases: [GUCs]
+    url: https://www.postgresql.org/docs/current/config-setting.html
+    description: "A PostgreSQL configuration parameter, inspected with SHOW and changed with SET when its scope and permissions allow."
+  - term: join
+    aliases: [joins, SQL join, SQL joins]
+    url: https://www.postgresql.org/docs/current/tutorial-join.html
+    description: "Combining rows from tables according to a condition, such as matching sample identifiers."
+  - term: aggregate function
+    aliases: [aggregate functions]
+    url: https://www.postgresql.org/docs/current/tutorial-agg.html
+    description: "A SQL function that summarizes a set of input rows, such as COUNT, SUM or AVG."
+  - term: data type
+    aliases: [data types, SQL type, SQL types]
+    url: https://www.postgresql.org/docs/current/datatype.html
+    description: "A definition of the values a column or expression can hold and the operations available for those values."
+  - term: SQL function
+    aliases: [SQL functions]
+    url: https://www.postgresql.org/docs/current/sql-createfunction.html
+    description: "A named database operation that accepts arguments and returns a value or set of rows."
+  - term: parallel query
+    aliases: [parallel queries]
+    url: https://www.postgresql.org/docs/current/parallel-query.html
+    description: "A PostgreSQL query that distributes supported execution work across multiple worker processes."
+  - term: Docker
+    url: https://docs.docker.com/get-started/docker-overview/
+    description: "A platform for packaging and running software in containers with its required environment."
