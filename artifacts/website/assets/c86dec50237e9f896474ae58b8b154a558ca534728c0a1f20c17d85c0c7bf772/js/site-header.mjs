@@ -3,7 +3,7 @@ import { normalizeSearchText } from "./search_tokens.mjs";
 import { rankedSearch, searchDomain, searchType } from "./search-ranking.mjs";
 
 const root = document.querySelector("[data-site-header]");
-const SEARCH_GLYPHS = { Tutorial: "❯", Function: "ƒ", Class: "◇", Type: "T", Setting: "S", SQL: "S" };
+const SEARCH_GLYPHS = { Tutorial: "❯", Blog: "B", Function: "ƒ", Class: "◇", Type: "T", Setting: "S", SQL: "S" };
 
 function appendHighlight(target, text, query) {
   const display = String(text || "");
@@ -61,6 +61,7 @@ function search() {
   const url = firstDataUrl([input, dropdown, wrap, source, root], ["searchIndex"]);
   const labels = {
     Tutorial: root.dataset.searchTutorial, Function: root.dataset.searchFunction,
+    Blog: root.dataset.searchBlog,
     Class: root.dataset.searchClass, Type: root.dataset.searchType,
     Setting: root.dataset.searchSetting, SQL: root.dataset.searchSql,
   };

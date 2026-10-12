@@ -7,30 +7,33 @@
 <meta name="description" content="bioseq::io::reader_backend::parallel_gzip">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/theme.js"></script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/analytics.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/theme.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="bioseq::io::reader_backend::parallel_gzip">
 <meta property="og:description" content="bioseq::io::reader_backend::parallel_gzip">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/">
-<meta property="og:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bioseq::io::reader_backend::parallel_gzip">
 <meta name="twitter:description" content="bioseq::io::reader_backend::parallel_gzip">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png">
-<link rel="icon" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/favicon.svg">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/docs-design.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/code-theme.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-content.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-header.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/responsive.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/site-controls.css">
-<link rel="stylesheet" href="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/css/theme.css">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
+<link rel="icon" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/favicon.svg">
+
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/docs-design.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/code-theme.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-content.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-header.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/responsive.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-controls.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/announcement.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/theme.css">
+
 </head>
 <body id="page-top" class="docs-design-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -38,16 +41,17 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
+      <a href="/blog/">Blog</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -80,6 +84,16 @@
       </button>
     </div>
   </div>
+  
+  <section class="site-announcement" data-announcement aria-label="Release announcement">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>BioseqDB first version released!</strong> Note that this is experimental software that still contains bugs. Feel free to provide feedback via <a href="https://github.com/styczynski/bioseqdb/issues">GitHub issues</a> and <a href="/contact/">contact</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="Pause release announcement" data-pause-label="Pause release announcement" data-resume-label="Resume release announcement" title="Pause release announcement"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  
 </header>
 
 
@@ -146,7 +160,7 @@
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/4ef3cd32a4bf8d0cbe6ea451dd83fe63afe25921/bioseq/io/reader/types.cppm#L27" rel="noreferrer">bioseq.io.reader:types</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/a7ed30b8368307421c0f5aa44c66c542cc870c07/bioseq/io/reader/types.cppm#L27" rel="noreferrer">bioseq.io.reader:types</a></p>
   
   
 </article>
@@ -171,7 +185,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -226,6 +240,7 @@
     </div>
   </footer>
 
+
   <div data-backdrop class="dd-s0259"></div>
 
   <!-- ===== ENTITY POPOVER ===== -->
@@ -234,16 +249,17 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq::io::reader_backend::parallel_gzip","description":"bioseq::io::reader_backend::parallel_gzip","url":"https://bioseqdb.com/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"C++","item":"/v0.1/reference/cpp/"},{"@type":"ListItem","position":5,"name":"bioseq::io::reader_backend::parallel_gzip","item":"/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/"}]}]}</script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-init.js"></script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/prism/prism.min.js"></script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/prism-languages.js"></script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/vendor/katex/katex.min.js"></script>
-<script src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-math.js"></script>
-<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/main.js"></script>
-<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/site-header.mjs"></script>
-<script type="module" src="/assets/3784316d2d5935942948bc80d5cceaf172943481f41441b7c93410dfd70df6cf/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"bioseq::io::reader_backend::parallel_gzip","description":"bioseq::io::reader_backend::parallel_gzip","url":"https://bioseqdb.com/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"C++","item":"/v0.1/reference/cpp/"},{"@type":"ListItem","position":5,"name":"bioseq::io::reader_backend::parallel_gzip","item":"/v0.1/reference/cpp/enumerator/reader-backend-parallel-gzip-211674fcb31a9b97/"}]}]}</script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-init.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-languages.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-math.js"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/main.js"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/site-header.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/announcement.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/docs-design.mjs"></script>
 
 </body>
 </html>

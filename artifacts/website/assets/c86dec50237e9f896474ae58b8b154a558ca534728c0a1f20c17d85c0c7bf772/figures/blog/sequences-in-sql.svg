@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="556" viewBox="0 0 640 556" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-46b8de:#117899;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c9a8ff:#735091;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">Sequences and metadata, one SQL query</title>
+  <desc id="desc">Three connected steps: load FASTA or FASTQ alongside sample metadata; store names, ages and DNA in a BioseqDB table; search using SQL filters and mmsearch to return alignment scores, positions and CIGAR strings.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10" fill="var(--theme-65b9dd, #65b9dd)"/></marker>
+  </defs>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g fill="var(--theme-0a1826, #0a1826)" stroke="var(--theme-20364a, #20364a)" stroke-width="2">
+      <rect x="12" y="12" width="616" height="154" rx="18"/>
+      <rect x="12" y="202" width="616" height="154" rx="18"/>
+      <rect x="12" y="392" width="616" height="152" rx="18"/>
+    </g>
+    <g stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M 320 174 V 194"/>
+      <path d="M 320 364 V 384"/>
+    </g>
+    <g fill="var(--theme-46b8de, #46b8de)" fill-opacity=".13" stroke="var(--theme-46b8de, #46b8de)" stroke-opacity=".35">
+      <circle cx="49" cy="50" r="21"/>
+      <circle cx="49" cy="240" r="21"/>
+      <circle cx="49" cy="430" r="21"/>
+    </g>
+    <g fill="var(--theme-65b9dd, #65b9dd)" text-anchor="middle" font-size="22" font-weight="600">
+      <text x="49" y="58">1</text>
+      <text x="49" y="248">2</text>
+      <text x="49" y="438">3</text>
+    </g>
+    <g fill="var(--theme-eef4f9, #eef4f9)" font-size="28" font-weight="600">
+      <text x="86" y="59">Load sequences + metadata</text>
+      <text x="86" y="249">Keep them in one table</text>
+      <text x="86" y="439">Search with ordinary SQL</text>
+    </g>
+    <text x="86" y="91" fill="var(--theme-a9bccb, #a9bccb)" font-size="22">FASTA / FASTQ + dates, names, IDs</text>
+    <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="22" text-anchor="middle">
+      <g fill="var(--theme-f4894f, #f4894f)"><rect x="86" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="103.5" y="131">A</text></g>
+      <g fill="var(--theme-65b9dd, #65b9dd)"><rect x="128" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="145.5" y="131">C</text></g>
+      <g fill="var(--theme-74c8a8, #74c8a8)"><rect x="170" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="187.5" y="131">G</text></g>
+      <g fill="var(--theme-c9a8ff, #c9a8ff)"><rect x="212" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="229.5" y="131">T</text></g>
+      <g fill="var(--theme-f4894f, #f4894f)"><rect x="254" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="271.5" y="131">A</text></g>
+      <g fill="var(--theme-74c8a8, #74c8a8)"><rect x="296" y="106" width="35" height="35" rx="6" fill-opacity=".12"/><text x="313.5" y="131">G</text></g>
+    </g>
+    <text x="356" y="132" fill="var(--theme-a9bccb, #a9bccb)" font-size="22">+ sample details</text>
+    <g stroke="var(--theme-20364a, #20364a)" fill="none"><path d="M 86 299 H 598 M 86 334 H 598 M 294 268 V 334 M 385 268 V 334"/></g>
+    <g fill="var(--theme-a9bccb, #a9bccb)" font-size="21"><text x="86" y="288">patient_name</text><text x="314" y="288">age</text><text x="408" y="288">seq</text></g>
+    <g fill="var(--theme-eef4f9, #eef4f9)" font-size="22"><text x="86" y="325">Anna</text><text x="314" y="325">34</text></g>
+    <text x="408" y="325" fill="var(--theme-74c8a8, #74c8a8)" font-size="22" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">ACGTAG…</text>
+    <text x="86" y="479" fill="var(--theme-a9bccb, #a9bccb)" font-size="22">metadata filters + <tspan fill="var(--theme-f4894f, #f4894f)" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">mmsearch</tspan></text>
+    <text x="86" y="517" fill="var(--theme-74c8a8, #74c8a8)" font-size="22">→ score · positions · CIGAR</text>
+  </g>
+</svg>

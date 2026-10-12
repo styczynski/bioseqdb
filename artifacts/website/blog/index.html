@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The BioseqDB blog</title>
+<meta name="description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
+<link rel="canonical" href="https://bioseqdb.com/blog/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/theme.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/analytics.js"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<meta property="og:title" content="The BioseqDB blog">
+<meta property="og:description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bioseqdb.com/blog/">
+<meta property="og:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The BioseqDB blog">
+<meta name="twitter:description" content="Notes on building a sequence database, the ideas behind it, and things you can try with SQL.">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png">
+<link rel="icon" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/favicon.svg">
+
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/docs-design.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/code-theme.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-content.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-header.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/responsive.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/site-controls.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/announcement.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/theme.css">
+<link rel="stylesheet" href="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/css/blog.css">
+</head>
+<body id="page-top" class="docs-design-page blog-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB documentation">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+      <a href="/blog/">Blog</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="/contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="Dark mode. Switch to light mode." data-light-label="Light mode. Switch to dark mode." aria-label="Dark mode. Switch to light mode." title="Dark mode. Switch to light mode.">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">Dark mode. Switch to light mode.</span>
+      </button>
+    </div>
+  </div>
+  
+  <section class="site-announcement" data-announcement aria-label="Release announcement">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>BioseqDB first version released!</strong> Note that this is experimental software that still contains bugs. Feel free to provide feedback via <a href="https://github.com/styczynski/bioseqdb/issues">GitHub issues</a> and <a href="/contact/">contact</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="Pause release announcement" data-pause-label="Pause release announcement" data-resume-label="Resume release announcement" title="Pause release announcement"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  
+</header>
+
+  <main id="doc-main" class="blog-shell blog-index">
+    <header class="blog-index-intro"><p class="blog-eyebrow">BioseqDB</p><h1>The BioseqDB blog</h1><p>Notes on building a sequence database, the ideas behind it, and things you can try with SQL.</p></header>
+    <div class="blog-posts">
+      
+      <article class="blog-card">
+        <div class="blog-card-cover"><img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <div class="blog-meta"><time datetime="2026-10-01">1 October 2026</time><span aria-hidden="true">·</span><span>4 min read</span></div>
+          <h2><a href="/blog/introducing-bioseqdb/">Introducing BioseqDB</a></h2>
+          <p>Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.</p>
+          <a class="blog-action" href="/blog/introducing-bioseqdb/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
+      
+    </div>
+  </main>
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation home</a><a href="/v0.1/reference/" class="dd-s0250 dd-h009">API reference</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 BioseqDB Piotr Styczyński</span>
+        <nav class="site-footer-links dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
+          <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+</div>
+
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on building a sequence database, the ideas behind it, and things you can try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/media/social_card.png"}</script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-init.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/prism/prism.min.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/prism-languages.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/vendor/katex/katex.min.js"></script>
+<script src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-math.js"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/main.js"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/site-header.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/announcement.mjs"></script>
+<script type="module" src="/assets/c86dec50237e9f896474ae58b8b154a558ca534728c0a1f20c17d85c0c7bf772/js/docs-design.mjs"></script>
+
+</body>
+</html>

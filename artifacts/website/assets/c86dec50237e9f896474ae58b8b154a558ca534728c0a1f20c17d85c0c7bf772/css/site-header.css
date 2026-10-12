@@ -42,7 +42,7 @@
 .benchmark-methodology>p,.benchmark-methodology>ul,.benchmark-methodology>ol{max-width:80ch}
 .benchmark-methodology>h2:first-child{margin-top:0}
 @media(max-width:1100px){.site-header .site-version-wrap,.site-header .site-github{display:none}}
-@media(max-width:759px){
+@media(max-width:768px){
   :root{--site-header-height:112px}
   .site-header-inner{flex-wrap:wrap;gap:10px;padding:10px 14px;min-height:111px}
   .site-navigation{margin-left:auto;gap:16px}
@@ -60,7 +60,7 @@
 .site-header .doc-search-result{display:flex;align-items:flex-start;gap:11px;padding:9px 15px;text-decoration:none;transition:background .12s}
 .site-header .doc-search-result:hover,.site-header .doc-search-result[aria-selected="true"]{background:var(--theme-46b8de-a0_09, rgba(70,184,222,.09))}
 .site-header .doc-search-badge{flex:none;display:flex;align-items:center;justify-content:center;width:22px;height:22px;margin-top:1px;border-radius:6px;font-family:'IBM Plex Mono';font-size:12px;font-weight:600}
-.site-header .doc-search-tutorial,.site-header .doc-search-page{color:var(--theme-46b8de, #46b8de);background:var(--theme-46b8de-a0_12, rgba(70,184,222,.12));border:1px solid var(--theme-46b8de-a0_3, rgba(70,184,222,.3))}
+.site-header .doc-search-tutorial,.site-header .doc-search-page,.site-header .doc-search-blog{color:var(--theme-46b8de, #46b8de);background:var(--theme-46b8de-a0_12, rgba(70,184,222,.12));border:1px solid var(--theme-46b8de-a0_3, rgba(70,184,222,.3))}
 .site-header .doc-search-function{color:var(--theme-7fcbe8, #7fcbe8);background:var(--theme-46b8de-a0_1, rgba(70,184,222,.1));border:1px solid var(--theme-46b8de-a0_26, rgba(70,184,222,.26))}
 .site-header .doc-search-class{color:var(--theme-f4894f, #f4894f);background:var(--theme-f26522-a0_1, rgba(242,101,34,.1));border:1px solid var(--theme-f26522-a0_28, rgba(242,101,34,.28))}
 .site-header .doc-search-type{color:var(--theme-8fd6ba, #8fd6ba);background:var(--theme-74c8a8-a0_1, rgba(116,200,168,.1));border:1px solid var(--theme-74c8a8-a0_28, rgba(116,200,168,.28))}
