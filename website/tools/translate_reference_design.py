@@ -867,17 +867,21 @@ def add_footer_profile_links(markup: str) -> str:
     if not link_class:
         raise RuntimeError("footer versions link has no design class")
     profiles = (
-        ("crunchbase_url", "Crunchbase"),
-        ("medium_url", "Medium"),
-        ("linkedin_url", "BioseqDB LinkedIn"),
-        ("author_linkedin_url", "LinkedIn"),
-        ("author_github_url", "Author GitHub"),
+        ("crunchbase_url", "https://www.crunchbase.com/organization/bioseq-db", "Crunchbase"),
+        ("medium_url", "https://medium.com/@styczynski", "Medium"),
+        ("linkedin_url", "https://www.linkedin.com/company/bioseqdb/", "BioseqDB LinkedIn"),
+        ("author_linkedin_url", "https://www.linkedin.com/in/piotrstyczynski", "LinkedIn"),
+        ("author_github_url", "https://github.com/styczynski", "Author GitHub"),
     )
+    # Register defaults alongside their bindings, as for editable text. Existing
+    # landing.yaml values remain the render authority and are never overwritten.
+    LANDING_DEFAULT_COPY.setdefault("social", {}).update(
+        (key, url) for key, url, _ in profiles)
     additions = "".join(
         '\n          <a href="{{ landing.social.' + key + ' }}" rel="noreferrer" class="'
         + link_class.group(1) + ' site-footer-profile">'
         + landing_text("footer", label) + "</a>"
-        for key, label in profiles)
+        for key, _, label in profiles)
     footer = footer[:versions.end()] + additions + footer[versions.end():]
     nav_at = footer.rfind("<nav", 0, versions.start())
     if nav_at < 0:
