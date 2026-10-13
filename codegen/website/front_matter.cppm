@@ -417,7 +417,10 @@ using landing_content = std::map<
         auto& entries = content[group];
         for (const auto& entry : section.second) {
             const auto key = entry.first.as<std::string>();
-            if (!is_lower_snake(key)) {
+            const bool post_destinations = group == "medium_posts" || group == "linkedin_posts";
+            const bool valid_key = post_destinations
+                ? !key.empty() && blog_title_slug(key) == key : is_lower_snake(key);
+            if (!valid_key) {
                 throw std::runtime_error("invalid landing content key: " + group + "." + key);
             }
             auto value = require_scalar(entry.second, group + "." + key, path);

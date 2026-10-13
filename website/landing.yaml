@@ -356,8 +356,16 @@ footer:
   versions: Versions
   back_to_top: Back to top
   crunchbase: Crunchbase
-  linkedin: LinkedIn
+  linkedin: Author LinkedIn
   author_github: Author GitHub
+  medium: Medium
+  bioseqdb_linkedin: BioseqDB LinkedIn
+social:
+  crunchbase_url: https://www.crunchbase.com/organization/bioseq-db
+  author_linkedin_url: https://www.linkedin.com/in/piotrstyczynski
+  author_github_url: https://github.com/styczynski
+  medium_url: https://medium.com/@styczynski
+  linkedin_url: https://www.linkedin.com/company/bioseqdb/
 accessibility:
   skip_to_content: Skip to content
 actions:

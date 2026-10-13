@@ -37,6 +37,20 @@ post:
   on_this_page: On this page
   keywords: Topics
   published: Published
+social:
+  label: Follow BioseqDB
+  medium_label: BioseqDB author on Medium
+  medium_profile_tooltip: Read Piotr’s posts on Medium
+  medium_post_tooltip: Read this article on Medium
+  linkedin_label: BioseqDB on LinkedIn
+  linkedin_profile_tooltip: Follow the BioseqDB page on LinkedIn
+  linkedin_post_tooltip: Join the discussion about this article on LinkedIn
+# Optional article destinations override the profile links from landing.yaml.
+# Only add public URLs; omit posts that have not been published yet.
+# medium_posts:
+#   introducing-bioseqdb: https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d
+# linkedin_posts:
+#   introducing-bioseqdb: https://www.linkedin.com/feed/update/urn:li:activity:...
 cta:
   title: Try it yourself now!
   docs: Read the docs

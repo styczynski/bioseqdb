@@ -380,10 +380,20 @@ void verify_website_pipeline() {
                    + json_text(landing_copy_fixture.at("hero").at("title")) + "}}}")
                == "A human title &amp; &lt;test&gt;",
            "landing copy is escaped as text rather than interpreted as HTML");
+    const auto blog_social_fixture = parse_landing_content(
+        "medium_posts:\n  introducing-bioseqdb: https://medium.com/@styczynski/article\n"
+        "linkedin_posts:\n  introducing-bioseqdb: https://www.linkedin.com/feed/update/urn:li:activity:123\n",
+        "blog.yaml");
+    expect(blog_social_fixture.at("medium_posts").contains("introducing-bioseqdb")
+               && blog_social_fixture.at("linkedin_posts").contains("introducing-bioseqdb"),
+           "blog social destinations accept the documented article slugs");
     for (const std::string invalid : {
              "hero:\n  title: one\n  title: two\n",
              "hero: [title]\n", "hero:\n  title: null\n",
-             "hero:\n  title: [one, two]\n"}) {
+             "hero:\n  title: [one, two]\n",
+             "hero:\n  introducing-bioseqdb: wrong-group\n",
+             "medium_posts:\n  ../article: https://medium.com/article\n",
+             "linkedin_posts:\n  wrong_slug: https://www.linkedin.com/article\n"}) {
         bool rejected = false;
         try { (void)parse_landing_content(invalid, "landing.yaml"); }
         catch (const std::exception&) { rejected = true; }
@@ -5007,6 +5017,13 @@ void decorate_code_entity_ranges(
         const auto value = group->second.find(key);
         return value == group->second.end() ? fallback : value->second;
     };
+    const auto social_text = [](const landing_content& copy, std::string_view section,
+                                std::string_view key) -> std::string {
+        const auto group = copy.find(section);
+        if (group == copy.end()) return {};
+        const auto value = group->second.find(key);
+        return value == group->second.end() ? std::string{} : value->second;
+    };
     boost::json::array blog_posts;
     std::string markdown_headers;
     const std::array<std::string_view, 12> month_names{
@@ -5042,6 +5059,30 @@ void decorate_code_entity_ranges(
             ? escaped(config.canonical_origin + blog_asset(*item.metadata.social_image))
             : escaped(site.social_image_url);
         page["markdown_url"] = escaped(url(relative + "index.md"));
+        boost::json::array social_links;
+        for (const std::string network : {"medium", "linkedin"}) {
+            const auto post_url = social_text(blog_copy, network + "_posts", item.metadata.slug);
+            const auto destination = post_url.empty()
+                ? social_text(landing_copy, "social", network + "_url") : post_url;
+            if (destination.empty()) continue;
+            if (!destination.starts_with("https://") || destination.size() <= 8
+                || std::ranges::any_of(destination, [](unsigned char value) {
+                    return value <= 32 || value == 127;
+                })) {
+                throw std::runtime_error("blog social link must be an HTTPS URL: "
+                    + network + " for " + item.metadata.slug);
+            }
+            const auto label = social_text(blog_copy, "social", network + "_label");
+            const auto tooltip = social_text(blog_copy, "social",
+                network + (post_url.empty() ? "_profile_tooltip" : "_post_tooltip"));
+            if (label.empty() || tooltip.empty()) {
+                throw std::runtime_error("blog social link needs a label and tooltip: " + network);
+            }
+            social_links.push_back(boost::json::object{
+                {"network", network}, {"url", escaped(destination)},
+                {"label", escaped(label)}, {"tooltip", escaped(tooltip)}});
+        }
+        page["social_links"] = std::move(social_links);
         page["breadcrumb"] = boost::json::parse(breadcrumb_json({
             {"Home", url("")}, {"Blog", url("blog/")}, {item.metadata.title, url(relative)}}));
         boost::json::array keywords;

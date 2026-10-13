@@ -26,7 +26,16 @@
       </header>
       <div class="blog-layout">
         <div class="blog-reading-column">
-          <div class="blog-tools"><a class="blog-markdown" href="{{ page.markdown_url }}" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>{{ blog.post.markdown }}</a></div>
+          <div class="blog-tools">
+            <nav class="blog-social-links" aria-label="{{ blog.social.label }}">
+              {% for link in page.social_links %}
+              <a class="blog-social-link" href="{{ link.url }}" rel="noreferrer" aria-label="{{ link.label }}" title="{{ link.tooltip }}" data-social-label="{{ link.label }}" data-social-description="{{ link.tooltip }}" data-social-network="{{ link.network }}">
+                {% if link.network == "medium" %}<svg width="24" height="20" viewBox="0 0 28 20" fill="currentColor" aria-hidden="true"><ellipse cx="8" cy="10" rx="8" ry="8"></ellipse><ellipse cx="20" cy="10" rx="4" ry="7.5"></ellipse><ellipse cx="26.5" cy="10" rx="1.5" ry="6.5"></ellipse></svg>{% else %}<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.45 2H3.55C2.69 2 2 2.68 2 3.52v16.96c0 .84.69 1.52 1.55 1.52h16.9c.86 0 1.55-.68 1.55-1.52V3.52c0-.84-.69-1.52-1.55-1.52ZM7.93 18.75H4.97V9.2h2.96Zm-1.48-10.85a1.72 1.72 0 1 1 0-3.44 1.72 1.72 0 0 1 0 3.44Zm12.3 10.85h-2.96V14.1c0-1.11-.02-2.54-1.55-2.54-1.55 0-1.79 1.21-1.79 2.46v4.73H9.49V9.2h2.84v1.31h.04c.39-.74 1.36-1.52 2.79-1.52 2.99 0 3.54 1.97 3.54 4.53Z"></path></svg>{% endif %}
+              </a>
+              {% endfor %}
+            </nav>
+            <a class="blog-markdown" href="{{ page.markdown_url }}" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>{{ blog.post.markdown }}</a>
+          </div>
           <div class="docs-content tutorial-body blog-content">{{ page.body_html }}</div>
           <footer class="blog-article-footer">
             <span class="blog-eyebrow">{{ blog.post.keywords }}</span>

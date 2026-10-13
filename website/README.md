@@ -212,6 +212,22 @@ unique across the file, and choose a specific, reliable HTTPS source. Entries
 need not appear in any current post. The initial glossary includes 69 topics
 covering sequence biology, public archives, alignment tools and PostgreSQL.
 
+Every blog article has Medium and LinkedIn icon links beside the Markdown
+button, with descriptions on hover and keyboard focus. Profile URLs live under
+`social` in `landing.yaml`; these also supply the shared footer links. The
+Medium destination is the author's profile, while LinkedIn points to the
+BioseqDB company page. Labels and tooltip wording are editable under `social`
+in `blog.yaml`. To link an icon to a particular published article or discussion,
+add its slug to `medium_posts` or `linkedin_posts` in that file:
+
+```yaml
+medium_posts:
+  introducing-bioseqdb: https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d
+```
+
+Only use public HTTPS URLs. Posts without an override keep the corresponding
+profile destination; unpublished draft links should not be added.
+
 The blog index has its own search, keyword filter, sorting and pagination. Its
 category choice is remembered in the browser, with BioseqDB selected on a first
 visit. The dedicated search filters blog posts; the header search includes the
