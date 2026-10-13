@@ -1,0 +1,35 @@
+{
+  "slug": "what-does-vector-mean-in-postgres",
+  "editor_url": "https://medium.com/p/8a61d0c92c3b/edit",
+  "snapshot_sha256": "b13aeb9a1a569e050088c2e9fc2491e57b405953f8170728114b857b8fc50af7",
+  "expected_body_sha256": "d1149b0e7dfba8955daa2123c71d13182bffbd8613b1ee6dee6a4916e70302cb",
+  "passed": true,
+  "checks": {
+    "export_ready": true,
+    "title": true,
+    "ordered_prose_headings_captions": true,
+    "code_bytes_and_order": true,
+    "links_text_targets_and_order": true,
+    "image_count": true,
+    "images_loaded": true,
+    "image_alt_and_order": true,
+    "images_on_medium_cdn": true,
+    "distinct_figure_uploads": true,
+    "no_bioseqdb_image_hashes": true,
+    "no_image_markers": true,
+    "requested_footer": true,
+    "full_canonical_backlink": true,
+    "no_originally_posted_footer": true
+  },
+  "details": {
+    "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+    "counts": {
+      "prose_blocks": 30,
+      "code_and_output_blocks": 7,
+      "images": 2,
+      "links": 11
+    },
+    "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+    "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+  }
+}

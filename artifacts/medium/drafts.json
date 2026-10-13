@@ -1,0 +1,158 @@
+[
+  {
+    "slug": "postgres-encryption-at-rest",
+    "title": "What PostgreSQL encryption at rest actually protects",
+    "url": "https://medium.com/p/325c21028091/edit",
+    "canonical_url": "https://bioseqdb.com/blog/postgres-encryption-at-rest/",
+    "topics": [
+      "PostgreSQL",
+      "Encryption",
+      "Database Security",
+      "Cybersecurity",
+      "Databases"
+    ],
+    "status": "ready_draft",
+    "content_verified": true,
+    "images": [
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*QWPS39nxJONmNqV8ImQibg.png",
+        "alt": "A quiet pattern of coloured sequence letters."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*R9RPONUdDCvNmZuagATW4A.png",
+        "alt": "SQL clients receive readable rows; PostgreSQL processes them in memory, while pg_tde encrypts selected stored files. A principal key in a separate key service protects the internal keys used for those files."
+      }
+    ],
+    "publication_blocker": "Medium refused publishing and scheduling after its 24-hour limit was reached."
+  },
+  {
+    "slug": "chatdb-a-database-that-can-write-poems",
+    "title": "Probably the worst database ever — but hey it can write poems!",
+    "url": "https://medium.com/p/dbe1a6565b8f/edit",
+    "canonical_url": "https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/",
+    "topics": [
+      "PostgreSQL",
+      "Databases",
+      "ChatGPT",
+      "Python",
+      "Artificial Intelligence"
+    ],
+    "status": "ready_draft",
+    "content_verified": true,
+    "images": [
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*QWPS39nxJONmNqV8ImQibg.png",
+        "alt": "Coloured DNA letters in small translucent boxes."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*rwoIBajEMJSvgKwJaivORw.png",
+        "alt": "The Python wrapper sends commands concurrently to a storage conversation and a log conversation. Undo shortens the log, resets the default storage conversation and replays the retained commands."
+      }
+    ],
+    "publication_blocker": "Medium refused publishing and scheduling after its 24-hour limit was reached."
+  },
+  {
+    "slug": "writing-a-dna-read-mapper-in-python",
+    "title": "Learning to map DNA reads by writing an aligner in Python",
+    "url": "https://medium.com/p/11bdfd7f548a/edit",
+    "canonical_url": "https://bioseqdb.com/blog/writing-a-dna-read-mapper-in-python/",
+    "topics": [
+      "Python",
+      "Bioinformatics",
+      "Genomics",
+      "Algorithms",
+      "NumPy"
+    ],
+    "status": "ready_draft",
+    "content_verified": true,
+    "images": [
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*QWPS39nxJONmNqV8ImQibg.png",
+        "alt": "Small translucent DNA letter tiles in the BioseqDB colours."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*72gIUtPVtacfkNJUsi9lOg.png",
+        "alt": "The historical mapping pipeline goes from reference chunks and shared seeds through candidate regions to endpoint refinement and coordinates."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*PSQYvUMnzZF8AaR70iae7w.png",
+        "alt": "An illustrative alignment shows a substitution, an inserted base and a deleted base in separate columns."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*JroNO2GKJNr8ksnVkwZaYg.png",
+        "alt": "Overlapping three-base windows become two-bit integer keys; shifting and masking retains the latest three bases."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*Vica2yEwVEPybDgGl4uIjw.png",
+        "alt": "Three overlapping windows select three minima from the keys 6, 27, 44 and 49."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*E_2GSC6tJmzWJVJa6IjsGA.png",
+        "alt": "An anchor plot contrasts a long increasing path across distant regions with a compact local cluster."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*mjwngwo24Gj0oEF4-kNRNQ.png",
+        "alt": "Two four-anchor windows with the same query span receive different scores because the sparse window has uncovered reference gaps."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*CLYRvsiVMNU_NeHW7IYI5w.png",
+        "alt": "Local dynamic-programming timings compare lists and NumPy for two datasets, with the small number of calls shown."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*cuopDs8n6Lh0sx0RsGW90w.png",
+        "alt": "Local endpoint-search measurements compare straightforward suffix sorting with list and NumPy variants of skew suffix-array construction."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*AXnuZUpsVDPSDY779qS_fg.png",
+        "alt": "Recorded local phase totals show where time went in the earlier prototype."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*M1Uj3TXw-cyDzMDwp27rkQ.png",
+        "alt": "Course runtimes for ten eligible submissions across three reference sizes at approximately five percent read errors; PS is the fastest and is highlighted."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*5LOPT2HIm2NWoMmaJYlwoA.png",
+        "alt": "Course runtimes for the same submissions and reference sizes at approximately ten percent read errors."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*btwWMaayiPicwgh81AY0rg.png",
+        "alt": "PS maps all six thousand reads, with per-dataset incorrect counts of one, three, zero, zero, four and zero."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*I7cQsSXxufOPyIPgp4NJag.png",
+        "alt": "PS reported memory rises with reference size and approaches the assignment’s one-gigabyte limit."
+      }
+    ],
+    "publication_blocker": "Medium refused publishing and scheduling after its 24-hour limit was reached."
+  },
+  {
+    "slug": "writing-a-postgres-table-access-method-in-cpp",
+    "title": "Writing a small PostgreSQL table access method in C++",
+    "url": "https://medium.com/p/a82cfa82d3b4/edit",
+    "canonical_url": "https://bioseqdb.com/blog/writing-a-postgres-table-access-method-in-cpp/",
+    "topics": [
+      "PostgreSQL",
+      "Database",
+      "Software Engineering",
+      "Open Source",
+      "Programming"
+    ],
+    "status": "ready_draft",
+    "content_verified": true,
+    "images": [
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*QWPS39nxJONmNqV8ImQibg.png",
+        "alt": "Coloured DNA letters in a shallow grid."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*WjzfCyX_CQLJSr5eOmSvPA.png",
+        "alt": "The traceheap handler returns a callback table. Selected callbacks count operations and delegate to heap, while unsupported index and rewrite paths stop with an explicit error."
+      },
+      {
+        "src": "https://cdn-images-1.medium.com/max/800/1*IAAugirsTFghp82XTZPRvA.png",
+        "alt": "Four rows pass through the scan callback. The executor filters out soil and air, leaving river and leaf, so the table callback counter is four and the final result count is two."
+      }
+    ],
+    "publication_blocker": "Medium refused publishing and scheduling after its 24-hour limit was reached."
+  }
+]

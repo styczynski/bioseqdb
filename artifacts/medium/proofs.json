@@ -1,0 +1,83 @@
+[
+  {
+    "slug": "introducing-bioseqdb",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d",
+    "file": "proofs/introducing-bioseqdb-published.png",
+    "sha256": "425270d9c4948eb22d8dc1564be57c246c3fe797d366adc73fe30e98af8775ee",
+    "bytes": 100946,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "combining-search-results-in-postgres",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/combining-search-results-in-postgresql-ed17f4b9480a",
+    "file": "proofs/combining-search-results-in-postgres-published.png",
+    "sha256": "5b8946be82791ca65b7b0dc2c0d836b0a0652697341fa23fb75a32342b40fd12",
+    "bytes": 102783,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "what-does-vector-mean-in-postgres",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/what-does-vector-mean-in-postgresql-8a61d0c92c3b",
+    "file": "proofs/what-does-vector-mean-in-postgres-published.png",
+    "sha256": "01d83acd5461dc13be1292c2672472aceea68fb05e9beac22cecadeab17a1d7f",
+    "bytes": 101867,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "full-text-search-rules-in-sql",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/full-text-search-rules-i-can-explain-in-sql-f5bca1e87390",
+    "file": "proofs/full-text-search-rules-in-sql-published.png",
+    "sha256": "48b27cbfb1efcc4c4636de7e8b917db4b1a0e38115e83ed2a22a0d6d8d2f0171",
+    "bytes": 105403,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "where-postgres-table-storage-can-change",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/where-postgresql-table-storage-can-change-baafaca11b01",
+    "file": "proofs/where-postgres-table-storage-can-change-published.png",
+    "sha256": "15f4f990bf05a1b0279b7fc848497eca6d41ca9e8b02b87991fc909bf14ad769",
+    "bytes": 102411,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "postgres-encryption-at-rest",
+    "status": "ready_draft",
+    "url": "https://medium.com/p/325c21028091/edit",
+    "file": "proofs/postgres-encryption-at-rest-draft.png",
+    "sha256": "b8aad4d5e26ad59083a3bc1443f879306ddaeaba576e87b2dccb0010322b1b29",
+    "bytes": 104513,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "chatdb-a-database-that-can-write-poems",
+    "status": "ready_draft",
+    "url": "https://medium.com/p/dbe1a6565b8f/edit",
+    "file": "proofs/chatdb-a-database-that-can-write-poems-draft.png",
+    "sha256": "2a01d37e0f708bb01facb9af624633e6325a11173c2e099971829eb50877697b",
+    "bytes": 93221,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "writing-a-dna-read-mapper-in-python",
+    "status": "ready_draft",
+    "url": "https://medium.com/p/11bdfd7f548a/edit",
+    "file": "proofs/writing-a-dna-read-mapper-in-python-draft.png",
+    "sha256": "4cfdb5e18e3338500705523858b7fab14c66de8ddee2116c81bbbb17b91761f7",
+    "bytes": 105057,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "writing-a-postgres-table-access-method-in-cpp",
+    "status": "ready_draft",
+    "url": "https://medium.com/p/a82cfa82d3b4/edit",
+    "file": "proofs/writing-a-postgres-table-access-method-in-cpp-draft.png",
+    "sha256": "0d31ee0b8a3dfca71118c0956765fe6ec015b21a01eab67092b585e8702e4f7e",
+    "bytes": 99362,
+    "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  }
+]

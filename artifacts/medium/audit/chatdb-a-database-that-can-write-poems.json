@@ -1,0 +1,35 @@
+{
+  "slug": "chatdb-a-database-that-can-write-poems",
+  "editor_url": "https://medium.com/p/dbe1a6565b8f/edit",
+  "snapshot_sha256": "06b932b8338f7a7920f17734665755088a62acfc7b794f39eb4736aa13d235d1",
+  "expected_body_sha256": "05c5413e337ac04aecee839ee16a1228fb087292d8ed07e1e63a02f42aee3b43",
+  "passed": true,
+  "checks": {
+    "export_ready": true,
+    "title": true,
+    "ordered_prose_headings_captions": true,
+    "code_bytes_and_order": true,
+    "links_text_targets_and_order": true,
+    "image_count": true,
+    "images_loaded": true,
+    "image_alt_and_order": true,
+    "images_on_medium_cdn": true,
+    "distinct_figure_uploads": true,
+    "no_bioseqdb_image_hashes": true,
+    "no_image_markers": true,
+    "requested_footer": true,
+    "full_canonical_backlink": true,
+    "no_originally_posted_footer": true
+  },
+  "details": {
+    "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+    "counts": {
+      "prose_blocks": 54,
+      "code_and_output_blocks": 6,
+      "images": 2,
+      "links": 15
+    },
+    "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+    "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+  }
+}

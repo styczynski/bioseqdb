@@ -1,0 +1,320 @@
+{
+  "passed": true,
+  "reports": [
+    {
+      "slug": "chatdb-a-database-that-can-write-poems",
+      "editor_url": "https://medium.com/p/dbe1a6565b8f/edit",
+      "snapshot_sha256": "06b932b8338f7a7920f17734665755088a62acfc7b794f39eb4736aa13d235d1",
+      "expected_body_sha256": "05c5413e337ac04aecee839ee16a1228fb087292d8ed07e1e63a02f42aee3b43",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 54,
+          "code_and_output_blocks": 6,
+          "images": 2,
+          "links": 15
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "combining-search-results-in-postgres",
+      "editor_url": "https://medium.com/p/ed17f4b9480a/edit",
+      "snapshot_sha256": "cf62e81b6a0d4c09c3984056496fb4706fdd9bb03f424e1763fc807b4cc4b640",
+      "expected_body_sha256": "837154b779bec17582a808c75c53bc2c3517a9bc9ca81fedd252577f16714804",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 28,
+          "code_and_output_blocks": 4,
+          "images": 2,
+          "links": 10
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "full-text-search-rules-in-sql",
+      "editor_url": "https://medium.com/p/f5bca1e87390/edit",
+      "snapshot_sha256": "451375d346505cb7f58961a04e4d56b75b71345714fbf22f261ac1aaf1cf5f08",
+      "expected_body_sha256": "d20385a3945efc576226add0a7db8c2d6225f33ad2734f9e86f71c59687a53a4",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 28,
+          "code_and_output_blocks": 6,
+          "images": 2,
+          "links": 14
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "introducing-bioseqdb",
+      "editor_url": "https://medium.com/p/28587b24fa5d/edit",
+      "snapshot_sha256": "d0696e2870e38d5bbe5c4b7c1e03e9c09b9319c308bae0222efe35bd6d92227b",
+      "expected_body_sha256": "b9ea8c238ec8434e68236e8b1f65e392d10fcf6addaf713aab5156a0d409eec0",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 35,
+          "code_and_output_blocks": 6,
+          "images": 2,
+          "links": 35
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "postgres-encryption-at-rest",
+      "editor_url": "https://medium.com/p/325c21028091/edit",
+      "snapshot_sha256": "be1abf758c4f53b5bb1dde605e9f15d09af862f54e7c5614de5d2075ab0f395c",
+      "expected_body_sha256": "a5d75bed20190e97fdce62b906d12823f03c5282ce042d1e5cf89a6d7514b05b",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 25,
+          "code_and_output_blocks": 3,
+          "images": 2,
+          "links": 17
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "what-does-vector-mean-in-postgres",
+      "editor_url": "https://medium.com/p/8a61d0c92c3b/edit",
+      "snapshot_sha256": "b13aeb9a1a569e050088c2e9fc2491e57b405953f8170728114b857b8fc50af7",
+      "expected_body_sha256": "d1149b0e7dfba8955daa2123c71d13182bffbd8613b1ee6dee6a4916e70302cb",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 30,
+          "code_and_output_blocks": 7,
+          "images": 2,
+          "links": 11
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "where-postgres-table-storage-can-change",
+      "editor_url": "https://medium.com/p/baafaca11b01/edit",
+      "snapshot_sha256": "a1b65725cb67fb663192b359bed9ccdaea201b30810bbebd6913c4b81ca081f1",
+      "expected_body_sha256": "48552d7f22a08404dc98541882d2526cc27a966702b723bd857df18e24b0ea25",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 33,
+          "code_and_output_blocks": 7,
+          "images": 2,
+          "links": 19
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "writing-a-dna-read-mapper-in-python",
+      "editor_url": "https://medium.com/p/11bdfd7f548a/edit",
+      "snapshot_sha256": "61dd537f4541194b01b891e0bc4d3a92b434f0a51a791f44b83af6bd68e2de91",
+      "expected_body_sha256": "51243e6c348e8eacf5ff00644d2e48cc48396e84a9c606398c9ac28fb1faa00b",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 109,
+          "code_and_output_blocks": 16,
+          "images": 14,
+          "links": 30
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    },
+    {
+      "slug": "writing-a-postgres-table-access-method-in-cpp",
+      "editor_url": "https://medium.com/p/a82cfa82d3b4/edit",
+      "snapshot_sha256": "fbb595cb35a078ef601cc144fcd1b6456ae468370aecd01525f748f895672624",
+      "expected_body_sha256": "f0f3a9c39573fa4dbd9137ee80829c518d8c9099413cc601d8e12b8bbea84a68",
+      "passed": true,
+      "checks": {
+        "export_ready": true,
+        "title": true,
+        "ordered_prose_headings_captions": true,
+        "code_bytes_and_order": true,
+        "links_text_targets_and_order": true,
+        "image_count": true,
+        "images_loaded": true,
+        "image_alt_and_order": true,
+        "images_on_medium_cdn": true,
+        "distinct_figure_uploads": true,
+        "no_bioseqdb_image_hashes": true,
+        "no_image_markers": true,
+        "requested_footer": true,
+        "full_canonical_backlink": true,
+        "no_originally_posted_footer": true
+      },
+      "details": {
+        "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+        "counts": {
+          "prose_blocks": 65,
+          "code_and_output_blocks": 16,
+          "images": 3,
+          "links": 24
+        },
+        "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+        "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "slug": "full-text-search-rules-in-sql",
+  "editor_url": "https://medium.com/p/f5bca1e87390/edit",
+  "snapshot_sha256": "451375d346505cb7f58961a04e4d56b75b71345714fbf22f261ac1aaf1cf5f08",
+  "expected_body_sha256": "d20385a3945efc576226add0a7db8c2d6225f33ad2734f9e86f71c59687a53a4",
+  "passed": true,
+  "checks": {
+    "export_ready": true,
+    "title": true,
+    "ordered_prose_headings_captions": true,
+    "code_bytes_and_order": true,
+    "links_text_targets_and_order": true,
+    "image_count": true,
+    "images_loaded": true,
+    "image_alt_and_order": true,
+    "images_on_medium_cdn": true,
+    "distinct_figure_uploads": true,
+    "no_bioseqdb_image_hashes": true,
+    "no_image_markers": true,
+    "requested_footer": true,
+    "full_canonical_backlink": true,
+    "no_originally_posted_footer": true
+  },
+  "details": {
+    "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+    "counts": {
+      "prose_blocks": 28,
+      "code_and_output_blocks": 6,
+      "images": 2,
+      "links": 14
+    },
+    "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+    "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "slug": "writing-a-dna-read-mapper-in-python",
+  "editor_url": "https://medium.com/p/11bdfd7f548a/edit",
+  "snapshot_sha256": "61dd537f4541194b01b891e0bc4d3a92b434f0a51a791f44b83af6bd68e2de91",
+  "expected_body_sha256": "51243e6c348e8eacf5ff00644d2e48cc48396e84a9c606398c9ac28fb1faa00b",
+  "passed": true,
+  "checks": {
+    "export_ready": true,
+    "title": true,
+    "ordered_prose_headings_captions": true,
+    "code_bytes_and_order": true,
+    "links_text_targets_and_order": true,
+    "image_count": true,
+    "images_loaded": true,
+    "image_alt_and_order": true,
+    "images_on_medium_cdn": true,
+    "distinct_figure_uploads": true,
+    "no_bioseqdb_image_hashes": true,
+    "no_image_markers": true,
+    "requested_footer": true,
+    "full_canonical_backlink": true,
+    "no_originally_posted_footer": true
+  },
+  "details": {
+    "canonical_setting": "Not included in editor snapshot; verify advanced settings separately. Exact article backlink verified here.",
+    "counts": {
+      "prose_blocks": 109,
+      "code_and_output_blocks": 16,
+      "images": 14,
+      "links": 30
+    },
+    "code_policy": "Compared bytes exactly, normalizing trailing newlines and ASCII-space-only blank lines only; real code-line whitespace remains significant.",
+    "prose_policy": "Compared ordered block boundaries, normalizing whitespace and Medium smart punctuation only."
+  }
+}

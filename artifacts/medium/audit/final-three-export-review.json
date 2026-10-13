@@ -1,0 +1,41 @@
+{
+  "passed": true,
+  "reports": [
+    {
+      "slug": "chatdb-a-database-that-can-write-poems",
+      "passed": true,
+      "checks": {
+        "all_images_match_sha256": true,
+        "all_images_with_alt": true,
+        "all_figures_have_captions": true,
+        "no_duplicate_figure_files": true
+      },
+      "visually_inspected_body_figures": 1,
+      "visual_result": "Readable light-theme text and data labels, no clipping or overlap; tall course charts preserve full panels and eligibility labels."
+    },
+    {
+      "slug": "writing-a-dna-read-mapper-in-python",
+      "passed": true,
+      "checks": {
+        "all_images_match_sha256": true,
+        "all_images_with_alt": true,
+        "all_figures_have_captions": true,
+        "no_duplicate_figure_files": true
+      },
+      "visually_inspected_body_figures": 13,
+      "visual_result": "Readable light-theme text and data labels, no clipping or overlap; tall course charts preserve full panels and eligibility labels."
+    },
+    {
+      "slug": "writing-a-postgres-table-access-method-in-cpp",
+      "passed": true,
+      "checks": {
+        "all_images_match_sha256": true,
+        "all_images_with_alt": true,
+        "all_figures_have_captions": true,
+        "no_duplicate_figure_files": true
+      },
+      "visually_inspected_body_figures": 2,
+      "visual_result": "Readable light-theme text and data labels, no clipping or overlap; tall course charts preserve full panels and eligibility labels."
+    }
+  ]
+}

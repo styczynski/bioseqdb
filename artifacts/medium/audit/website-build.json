@@ -1,0 +1,15 @@
+{
+  "result": "PASS",
+  "source_revision": "679dcb0ed81e83b61a5d5631340eb9ba1aed304a",
+  "files": 887,
+  "html_pages": 630,
+  "blog_posts": 9,
+  "sitemap_urls": 629,
+  "manifest_hashes": "PASS",
+  "site_and_audited_fixture_byte_parity": "PASS",
+  "tutorial_downloads": "PASS",
+  "eligible_runtime_rows": 60,
+  "unchanged_eligible_source_values": "PASS",
+  "PS_quality": "8 incorrect of 6000, 0 unmapped",
+  "medium_source_parity": "PASS"
+}

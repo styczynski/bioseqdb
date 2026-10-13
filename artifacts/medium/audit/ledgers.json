@@ -1,0 +1,172 @@
+{
+  "passed": true,
+  "records": [
+    {
+      "slug": "introducing-bioseqdb",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "combining-search-results-in-postgres",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "what-does-vector-mean-in-postgres",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "full-text-search-rules-in-sql",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "where-postgres-table-storage-can-change",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "postgres-encryption-at-rest",
+      "ledger": "drafts.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "chatdb-a-database-that-can-write-poems",
+      "ledger": "drafts.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "writing-a-dna-read-mapper-in-python",
+      "ledger": "drafts.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    },
+    {
+      "slug": "writing-a-postgres-table-access-method-in-cpp",
+      "ledger": "drafts.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true
+      }
+    }
+  ],
+  "issues": [],
+  "coverage": {
+    "present": 9,
+    "all_source_posts": 9
+  }
+}
