@@ -440,15 +440,15 @@ The useful habit I took from this was to measure the phase I was changing. If re
 
 ## The final course results
 
-The course report was updated on 18 December 2024. It compared eleven anonymous submission codes on six datasets, each containing 1,000 reads of roughly 1,000 bases. The references were a 1 Mb yeast fragment, a 5 Mb bacterial fragment and a 20 Mb yeast fragment. Suffix `a` denotes about 5% read errors and `b` about 10%; 20% of those errors were indels. `PS` is my submission.
+The course report was updated on 18 December 2024. The comparison below covers ten submissions I considered valid general-purpose implementations under the course rules. Each was tested on six datasets containing 1,000 reads of roughly 1,000 bases. The references were a 1 Mb yeast fragment, a 5 Mb bacterial fragment and a 20 Mb yeast fragment. Suffix `a` denotes about 5% read errors and `b` about 10%; 20% of those errors were indels. `PS` is my submission.
 
 The published PDF contains plots rather than a numeric runtime table. The redrawn runtime and memory values below are **approximate readings of those plots**; the downloadable data records that limitation. The mapping counts are read from the corresponding count plots. These are course-server measurements, not a controlled comparison with modern production aligners.
 
-![Course runtimes for all eleven submissions across three reference sizes at approximately five percent read errors; PS is highlighted.](/static/figures/blog/python-aligner/course-runtime-a.svg)
+![Course runtimes for ten eligible submissions across three reference sizes at approximately five percent read errors; PS is the fastest and is highlighted.](/static/figures/blog/python-aligner/course-runtime-a.svg)
 
 ![Course runtimes for the same submissions and reference sizes at approximately ten percent read errors.](/static/figures/blog/python-aligner/course-runtime-b.svg)
 
-PS was one of the two fastest submissions. It was tens to hundreds of times faster than the nine slower submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads. MB was faster in five tests; the two were too close to rank confidently from the plotted points in the 20M/a test.
+PS was the fastest eligible submission on all six tests. It was tens to hundreds of times faster than the other nine submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads.
 
 The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left **zero reads unmapped** and had **eight incorrect mappings out of 6,000**: 1, 3, 0, 0, 4 and 0 in the report's order. That is about 99.87% correctly mapped overall under the assignment's endpoint tolerance. It does not mean every base of those reads was perfectly aligned.
 

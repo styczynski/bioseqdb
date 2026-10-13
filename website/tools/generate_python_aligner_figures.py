@@ -68,11 +68,12 @@ def save(fig, filename: str, title: str, description: str):
 
 def course_runtime():
     records = rows('course-runtime.csv')
-    order = ['PS', 'MB', 'BS_WG', 'DZ', 'LO', 'MC', 'MD', 'MJ_HG_SP', 'AS_JD', 'AG_SP_FS', 'MS_ZB']
+    source = json.loads((DATA / 'sources.json').read_text())['course_results']
+    order = source['eligible_submission_codes']
     for error, rate in [('a', '5%'), ('b', '10%')]:
         fig, axes = plt.subplots(3, 1, figsize=(6.4, 15.1))
         fig.subplots_adjust(left=.29, right=.83, top=.92, bottom=.052, hspace=.43)
-        fig.text(.05, .975, f'Course runtime · {rate} read errors', size=19, weight='bold', va='top')
+        fig.text(.05, .975, f'Eligible submissions · {rate} read errors', size=19, weight='bold', va='top')
         fig.text(.05, .947, 'Minutes · log scale · approximate PDF values', size=13, color=COLORS['muted'])
         details=[]
         for ax, genome in zip(axes, ['1M', '5M', '20M']):
@@ -89,14 +90,14 @@ def course_runtime():
             ax.set_title(f'{genome} bases · 1,000 reads', loc='left', pad=11, size=16, weight='bold', color=COLORS['text'])
             for i,code in enumerate(order):
                 val=values[code]
-                col=COLORS['orange' if code=='PS' else 'cyan' if code=='MB' else 'muted']
+                col=COLORS['orange' if code=='PS' else 'muted']
                 ax.plot([.05,val],[i,i], color=col, linewidth=2, alpha=.45)
                 ax.scatter([val],[i],color=col,s=75 if code=='PS' else 40,zorder=3)
                 ax.text(1.045,i,f'~{val:g}',transform=ax.get_yaxis_transform(),va='center',size=16,color=col)
                 details.append(f'{case} {code}: approximately {val:g} minutes')
-        fig.text(.05,.014,'PS = this prototype. Codes identify other student solutions.',size=12,color=COLORS['muted'])
-        save(fig,f'course-runtime-{error}.svg',f'Course runtime for {rate} error reads',
-             'Historical course report, page 7. Runtime values digitized from a raster plot and rounded; close rankings are uncertain. '+ '; '.join(details)+'.')
+        fig.text(.05,.014,'PS = this prototype. Eligibility assessed by the author.',size=12,color=COLORS['muted'])
+        save(fig,f'course-runtime-{error}.svg',f'Eligible submission runtimes for {rate} error reads',
+             'Historical course report, page 7. '+source['comparison_scope']+' Runtime values digitized from a raster plot and rounded; close rankings are uncertain. '+ '; '.join(details)+'.')
 
 
 def course_quality():

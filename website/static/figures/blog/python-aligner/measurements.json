@@ -8,10 +8,23 @@
       "pages": 8,
       "original_url": "https://moodle.mimuw.edu.pl/pluginfile.php/330449/mod_page/content/7/results_rmap1.pdf",
       "access": "The author supplied the downloaded PDF; the Moodle URL may require a course login. The PDF is not redistributed here.",
+      "comparison_scope": "The public runtime comparison covers ten submissions the author considered valid general-purpose implementations under the course rules. Eligibility is the author's assessment; the supplied report itself does not give an eligibility ranking.",
+      "eligible_submission_codes": [
+        "PS",
+        "BS_WG",
+        "DZ",
+        "LO",
+        "MC",
+        "MD",
+        "MJ_HG_SP",
+        "AS_JD",
+        "AG_SP_FS",
+        "MS_ZB"
+      ],
       "measurement_notes": [
         "The PDF contains raster plots, not original numeric result tables. Runtime and memory CSVs are approximate digitizations, not exact raw measurements.",
         "The logarithmic runtime axis is in minutes, and the logarithmic memory axis is in MB.",
-        "PS identifies Piotr Styczynski; all other labels retain the anonymous student/team codes from the report.",
+        "PS identifies Piotr Styczynski; the other included labels retain the anonymous student/team codes from the report. The runtime export contains only the eligible submissions listed above, not every series from the original PDF.",
         "Runtime markers partly overlap; affected values were estimated from the adjoining line segments. Rounding may change very close rankings.",
         "All six tests are plotted for every runtime series. No timeout or missing-result marker is shown; no missing values were converted to zero.",
         "The report contains no total score or final league table. Its plots alone cannot verify an overall course ranking.",
@@ -266,48 +279,6 @@
       "student_code": "LO",
       "dataset": "20M/b",
       "runtime_minutes_approx": "22",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "1M/a",
-      "runtime_minutes_approx": "0.095",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "5M/a",
-      "runtime_minutes_approx": "0.07",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "20M/a",
-      "runtime_minutes_approx": "0.56",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "1M/b",
-      "runtime_minutes_approx": "0.061",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "5M/b",
-      "runtime_minutes_approx": "0.069",
-      "source_page": "7",
-      "precision": "approximately two significant figures; raster digitization"
-    },
-    {
-      "student_code": "MB",
-      "dataset": "20M/b",
-      "runtime_minutes_approx": "0.3",
       "source_page": "7",
       "precision": "approximately two significant figures; raster digitization"
     },
