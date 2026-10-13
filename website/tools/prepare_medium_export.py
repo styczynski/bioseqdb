@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
 import hashlib
 from html import escape
 from html.parser import HTMLParser
@@ -351,11 +350,8 @@ class Exporter:
         cover = document.find(lambda n: n.has("blog-cover"))
         body = Node("root", children=[self.image(cover.attrs["src"], meta.get("image_alt", ""), "cover")])
         body.children += [result for child in content.children for result in self.convert(child)]
-        day = date.fromisoformat(str(meta["date"]))
-        display_date = f"{day.day} {day.strftime('%B %Y')}"
         body.children.append(Node("p", children=[Node("em", children=[
-            "Originally published on ", Node("a", {"href": canonical}, ["BioseqDB"]),
-            f" on {display_date}."])]))
+            "Please check my OS project - ", Node("a", {"href": canonical}, ["BioseqDB"])])]))
         body_html = html(body)
         if re.search(r"-- bioseq:(setup|visible|teardown)", body_html):
             raise ValueError(f"Hidden SQL fixture leaked: {slug}")
