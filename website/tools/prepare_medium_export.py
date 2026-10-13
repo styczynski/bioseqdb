@@ -97,7 +97,14 @@ def html(node):
         return "".join(html(c) for c in node.children)
     attrs = "".join(f' {k}="{escape(v, quote=True)}"' for k, v in node.attrs.items())
     start = f"<{node.tag}{attrs}>"
-    return start if node.tag in VOID else start + "".join(html(c) for c in node.children) + f"</{node.tag}>"
+    if node.tag in VOID:
+        return start
+    content = "".join(html(c) for c in node.children)
+    if node.tag == "pre":
+        # Medium splits pasted code at empty lines. HTML alone gets one ASCII
+        # space on interior blank lines; raw code and Markdown stay unchanged.
+        content = re.sub(r"(?<=\n)(?=\n)", " ", content)
+    return start + content + f"</{node.tag}>"
 
 
 def sha(path):
@@ -506,6 +513,9 @@ def build_bundle(args):
         "article.md is clean publication Markdown with displayed SQL results. source.md is a byte-exact\n"
         "ARCHIVE of the authored Markdown, including hidden database fixtures; do not paste source.md\n"
         "into Medium. website.md is the generated public Markdown before this export conversion.\n\n"
+        "Import HTML replaces each empty interior code line with one ASCII space because Medium's\n"
+        "rich-text paste otherwise splits the code block. Markdown and metadata retain exact raw\n"
+        "code; no nonempty code line, indentation or displayed result is changed.\n\n"
         "All original article paragraphs, code and result values are retained. Site navigation, buttons,\n"
         "scripts and tooltip metadata are omitted. SQL results become aligned text; the prose comparison\n"
         "table becomes linked paragraphs because Medium does not document native HTML-table support.\n"
