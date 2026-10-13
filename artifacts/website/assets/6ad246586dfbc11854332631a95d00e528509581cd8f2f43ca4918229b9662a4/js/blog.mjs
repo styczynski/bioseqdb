@@ -1,5 +1,5 @@
-// Glossary definitions share one accessible popover, keeping prose uncluttered.
-const anchors = [...document.querySelectorAll('a[data-glossary-description]')];
+// Glossary definitions and profile actions share an accessible, bounded popover.
+const anchors = [...document.querySelectorAll('a[data-glossary-description], a[data-social-description]')];
 if (anchors.length) {
   const tip = document.createElement('div');
   tip.id = 'blog-glossary-tip';
@@ -33,9 +33,9 @@ if (anchors.length) {
     hide();
     active = anchor;
     const title = document.createElement('strong');
-    title.textContent = anchor.dataset.glossaryTerm;
+    title.textContent = anchor.dataset.glossaryTerm || anchor.dataset.socialLabel;
     const description = document.createElement('span');
-    description.textContent = anchor.dataset.glossaryDescription;
+    description.textContent = anchor.dataset.glossaryDescription || anchor.dataset.socialDescription;
     tip.replaceChildren(title, description);
     tip.hidden = false;
     anchor.setAttribute('aria-describedby', tip.id);

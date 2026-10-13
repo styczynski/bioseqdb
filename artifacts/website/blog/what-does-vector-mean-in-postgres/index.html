@@ -7,19 +7,19 @@
 <meta name="description" content="Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.">
 <link rel="canonical" href="https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/theme.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/analytics.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/theme.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="What does vector mean in PostgreSQL?">
 <meta property="og:description" content="Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/">
-<meta property="og:image" content="https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="What does vector mean in PostgreSQL?">
 <meta name="twitter:description" content="Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png">
-<link rel="icon" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png">
+<link rel="icon" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/favicon.svg">
 
 <link rel="alternate" type="text/markdown" href="/blog/what-does-vector-mean-in-postgres/index.md" title="What does vector mean in PostgreSQL?">
 <meta name="keywords" content="PostgreSQL, SQL, vector, tsvector, pgvector, arrays, vectorized execution">
@@ -28,19 +28,19 @@
 <meta property="article:section" content="others">
 <meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="vector"><meta property="article:tag" content="tsvector"><meta property="article:tag" content="pgvector"><meta property="article:tag" content="arrays"><meta property="article:tag" content="vectorized execution">
 
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/docs-design.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/code-theme.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/project-content.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site-header.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/responsive.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site-controls.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/announcement.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/theme.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/blog.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/docs-design.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/code-theme.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/project-content.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site-header.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/responsive.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site-controls.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/announcement.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/theme.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
@@ -50,7 +50,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -105,7 +105,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." fetchpriority="high">
+        <img class="blog-cover" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=others">Others</a></p>
           <h1>What does vector mean in PostgreSQL?</h1>
@@ -115,8 +115,21 @@
       </header>
       <div class="blog-layout">
         <div class="blog-reading-column">
-          <div class="blog-tools"><a class="blog-markdown" href="/blog/what-does-vector-mean-in-postgres/index.md" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>Markdown</a></div>
-          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">If a database feature says it supports vectors, I still need to ask what I can put into it and which operations it supports. A vector might be a value stored in one row, a collection of values being processed together, or the outline of an illustration on this page. Those uses can appear in the same application without sharing an implementation.</p><p class="doc-paragraph">I find it easier to start with a sample record than with the word itself. Imagine a specimen with a free-text note, three measurements and a position on a laboratory diagram. All three belong to the sample, but searching the note, comparing measurements and drawing its position are separate tasks.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/figures/blog/vector-meanings.svg"><img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/figures/blog/vector-meanings.svg" alt="Three representations of a specimen record: searchable terms, numeric measurements and a geometric location. A separate row shows execution batches operating across records." loading="lazy"></a></p><h2 class="hx" id="the-vector-made-of-words" data-toc data-title="The vector made of words">The vector made of words<a data-hash href="#the-vector-made-of-words" aria-label="Link to this section">#</a></h2><p class="doc-paragraph"><a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a>'s <code>tsvector</code> stores lexemes, which are the normalized terms used by full-text search, with optional positions and weights. It is not a list of embedding coordinates. I can inspect the difference using a note that mentions the same thing twice:</p><figure class="doc-code" data-term data-sql-example="vector_text_terms"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-cbbe80bfa8cf86a3-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-cbbe80bfa8cf86a3-0" class="language-sql">WITH note AS (
+          <div class="blog-tools">
+            <nav class="blog-social-links" aria-label="Follow BioseqDB">
+              
+              <a class="blog-social-link" href="https://medium.com/@styczynski" rel="noreferrer" aria-label="BioseqDB author on Medium" title="Read Piotr’s posts on Medium" data-social-label="BioseqDB author on Medium" data-social-description="Read Piotr’s posts on Medium" data-social-network="medium">
+                <svg width="24" height="20" viewBox="0 0 28 20" fill="currentColor" aria-hidden="true"><ellipse cx="8" cy="10" rx="8" ry="8"></ellipse><ellipse cx="20" cy="10" rx="4" ry="7.5"></ellipse><ellipse cx="26.5" cy="10" rx="1.5" ry="6.5"></ellipse></svg>
+              </a>
+              
+              <a class="blog-social-link" href="https://www.linkedin.com/company/bioseqdb/" rel="noreferrer" aria-label="BioseqDB on LinkedIn" title="Follow the BioseqDB page on LinkedIn" data-social-label="BioseqDB on LinkedIn" data-social-description="Follow the BioseqDB page on LinkedIn" data-social-network="linkedin">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.45 2H3.55C2.69 2 2 2.68 2 3.52v16.96c0 .84.69 1.52 1.55 1.52h16.9c.86 0 1.55-.68 1.55-1.52V3.52c0-.84-.69-1.52-1.55-1.52ZM7.93 18.75H4.97V9.2h2.96Zm-1.48-10.85a1.72 1.72 0 1 1 0-3.44 1.72 1.72 0 0 1 0 3.44Zm12.3 10.85h-2.96V14.1c0-1.11-.02-2.54-1.55-2.54-1.55 0-1.79 1.21-1.79 2.46v4.73H9.49V9.2h2.84v1.31h.04c.39-.74 1.36-1.52 2.79-1.52 2.99 0 3.54 1.97 3.54 4.53Z"></path></svg>
+              </a>
+              
+            </nav>
+            <a class="blog-markdown" href="/blog/what-does-vector-mean-in-postgres/index.md" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>Markdown</a>
+          </div>
+          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">If a database feature says it supports vectors, I still need to ask what I can put into it and which operations it supports. A vector might be a value stored in one row, a collection of values being processed together, or the outline of an illustration on this page. Those uses can appear in the same application without sharing an implementation.</p><p class="doc-paragraph">I find it easier to start with a sample record than with the word itself. Imagine a specimen with a free-text note, three measurements and a position on a laboratory diagram. All three belong to the sample, but searching the note, comparing measurements and drawing its position are separate tasks.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/vector-meanings.svg"><img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/vector-meanings.svg" alt="Three representations of a specimen record: searchable terms, numeric measurements and a geometric location. A separate row shows execution batches operating across records." loading="lazy"></a></p><h2 class="hx" id="the-vector-made-of-words" data-toc data-title="The vector made of words">The vector made of words<a data-hash href="#the-vector-made-of-words" aria-label="Link to this section">#</a></h2><p class="doc-paragraph"><a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a>'s <code>tsvector</code> stores lexemes, which are the normalized terms used by full-text search, with optional positions and weights. It is not a list of embedding coordinates. I can inspect the difference using a note that mentions the same thing twice:</p><figure class="doc-code" data-term data-sql-example="vector_text_terms"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-cbbe80bfa8cf86a3-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-cbbe80bfa8cf86a3-0" class="language-sql">WITH note AS (
   SELECT to_tsvector('english',
     'Samples were frozen; the second sample thawed.') AS terms
 )
@@ -141,7 +154,7 @@ SELECT '[0.2,0.4,0.6]'::vector(3)
             <ul class="blog-keywords" aria-label="Topics"><li>PostgreSQL</li><li>SQL</li><li>vector</li><li>tsvector</li><li>pgvector</li><li>arrays</li><li>vectorized execution</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -158,7 +171,7 @@ SELECT '[0.2,0.4,0.6]'::vector(3)
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -203,7 +216,9 @@ SELECT '[0.2,0.4,0.6]'::vector(3)
           <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (Apache 2.0)</a>
           <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
           <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
-          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
+          <a href="https://medium.com/@styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Medium</a>
+          <a href="https://www.linkedin.com/company/bioseqdb/" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">BioseqDB LinkedIn</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author LinkedIn</a>
           <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
           <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
         </nav>
@@ -214,17 +229,17 @@ SELECT '[0.2,0.4,0.6]'::vector(3)
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"What does vector mean in PostgreSQL?","description":"Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.","url":"https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png","headline":"What does vector mean in PostgreSQL?","mainEntityOfPage":"https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","SQL","vector","tsvector","pgvector","arrays","vectorized execution"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"What does vector mean in PostgreSQL?","item":"/blog/what-does-vector-mean-in-postgres/"}]}]}</script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/prism-init.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/prism/prism.min.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/prism-languages.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/katex/katex.min.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/project-math.js"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/main.js"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/site-header.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/announcement.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/docs-design.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/blog.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"What does vector mean in PostgreSQL?","description":"Text-search vectors, embeddings, arrays, geometric points and execution batches share a word but have different jobs. A few small SQL queries help tell them apart.","url":"https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png","headline":"What does vector mean in PostgreSQL?","mainEntityOfPage":"https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","SQL","vector","tsvector","pgvector","arrays","vectorized execution"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"What does vector mean in PostgreSQL?","item":"/blog/what-does-vector-mean-in-postgres/"}]}]}</script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/prism-init.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/prism/prism.min.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/prism-languages.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/katex/katex.min.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/project-math.js"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/main.js"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/site-header.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/announcement.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/docs-design.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/blog.mjs"></script>
 </body>
 </html>

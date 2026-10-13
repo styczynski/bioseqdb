@@ -7,32 +7,32 @@
 <meta name="description" content="Test BIGINT left &lt; INTEGER right.">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/theme.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/analytics.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/theme.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
 <meta property="og:title" content="public.vint84lt">
 <meta property="og:description" content="Test BIGINT left &lt; INTEGER right.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/">
-<meta property="og:image" content="https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png">
+<meta property="og:image" content="https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="public.vint84lt">
 <meta name="twitter:description" content="Test BIGINT left &lt; INTEGER right.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png">
-<link rel="icon" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png">
+<link rel="icon" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/favicon.svg">
 
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/docs-design.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/code-theme.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/project-content.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site-header.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/responsive.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/site-controls.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/announcement.css">
-<link rel="stylesheet" href="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/css/theme.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/docs-design.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/code-theme.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/project-content.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/project-benchmarks.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site-header.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/responsive.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/site-controls.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/announcement.css">
+<link rel="stylesheet" href="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/css/theme.css">
 
 </head>
 <body id="page-top" class="docs-design-page">
@@ -45,7 +45,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -171,7 +171,7 @@ ROLLBACK;</code></pre></figure></div>
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/679dcb0ed81e83b61a5d5631340eb9ba1aed304a/bioseq/backend/pg/vectorization/types/int.cppm#L1131" rel="noreferrer">bioseq.postgres.vectorization.types.integer</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/a3a364a4defabe6a26fe831911b7e20345feafd6/bioseq/backend/pg/vectorization/types/int.cppm#L1131" rel="noreferrer">bioseq.postgres.vectorization.types.integer</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema public · PostgreSQL 17.10</p>
   
 </article>
@@ -196,7 +196,7 @@ ROLLBACK;</code></pre></figure></div>
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -243,7 +243,9 @@ ROLLBACK;</code></pre></figure></div>
           <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (Apache 2.0)</a>
           <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
           <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
-          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">LinkedIn</a>
+          <a href="https://medium.com/@styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Medium</a>
+          <a href="https://www.linkedin.com/company/bioseqdb/" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">BioseqDB LinkedIn</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author LinkedIn</a>
           <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
           <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
         </nav>
@@ -260,17 +262,17 @@ ROLLBACK;</code></pre></figure></div>
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"public.vint84lt","description":"Test BIGINT left \u0026lt; INTEGER right.","url":"https://bioseqdb.com/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"public.vint84lt","item":"/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/"}]}]}</script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/prism-init.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/prism/prism.min.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/prism-languages.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/vendor/katex/katex.min.js"></script>
-<script src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/project-math.js"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/main.js"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/site-header.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/announcement.mjs"></script>
-<script type="module" src="/assets/86eb7bb3b18104b3b9ba4a25d0916e7075faef2dc75e4392d6d1bc8a52c93d73/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"public.vint84lt","description":"Test BIGINT left \u0026lt; INTEGER right.","url":"https://bioseqdb.com/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"public.vint84lt","item":"/v0.1/reference/sql/function/extension-vint84lt-69f1dfe68c8e131f/"}]}]}</script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/prism-init.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/prism/prism.min.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/prism-languages.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/vendor/katex/katex.min.js"></script>
+<script src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/project-math.js"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/project-benchmarks.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/main.js"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/site-header.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/announcement.mjs"></script>
+<script type="module" src="/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/js/docs-design.mjs"></script>
 
 </body>
 </html>
