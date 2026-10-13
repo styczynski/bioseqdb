@@ -50,5 +50,13 @@
     ],
     "approved": false,
     "note": "Both remain published unless the user authorizes removal."
+  },
+  "resume_instructions": {
+    "medium_publication_ledger": "artifacts/medium/publications.json",
+    "before_each_linkedin_post": "Check the corresponding Medium publication ledger entry. If its article is public, replace the clearly labelled author-profile fallback with that published article URL and label it Read on Medium.",
+    "medium_first_preferred": "Prefer publishing the corresponding queued Medium draft first when the Medium 24-hour publication cap clears.",
+    "no_private_links": "Never use a Medium draft or editor URL in LinkedIn copy.",
+    "fallback_if_medium_remains_unpublished": "Keep the clearly labelled Author on Medium link to https://medium.com/@styczynski.",
+    "limits": "Publish at most three new LinkedIn posts per day and per batch. No automatic scheduling has been created."
   }
 }

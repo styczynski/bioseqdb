@@ -8,6 +8,8 @@ The planned next batch contains the Python aligner tutorial, C++ table access me
 
 The fourth and fifth published posts remain live while awaiting the user’s decision about removal. They have not been deleted.
 
+Before each queued LinkedIn post, check [the Medium publication ledger](../medium/publications.json). Prefer publishing its queued Medium draft first when the 24-hour cap clears. If the matching article is public, replace the current “Author on Medium” profile fallback with that article’s URL and the label “Read on Medium”. Never use a draft or editor URL. If it is still unpublished, keep the clearly labelled public-profile fallback. The limit remains three new LinkedIn posts per batch and per day; nothing is automatically scheduled.
+
 Each post has a dedicated explanatory PNG for native upload and authored alt text in `posts.json`. These are copies of the reviewed Medium exports, so changing the website asset hash does not affect an uploaded image.
 
 Five posts link to their published Medium articles. Four use a clearly labelled public author-profile link while their corresponding Medium articles await publication. No private Medium draft links appear in the post text.
