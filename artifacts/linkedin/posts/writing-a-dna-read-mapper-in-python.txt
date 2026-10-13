@@ -1,0 +1,12 @@
+Before the current BioseqDB, I wrote a read mapper in Python to learn how aligners work.
+
+The tutorial builds a small version step by step: rolling k-mers, minimizers, matching coordinates, a longest increasing subsequence and local alignment. The Python snippets form a complete runnable example.
+
+Then I return to the course submission: its distance cutoffs, endpoint searches, memory compromises and the places where NumPy made a phase slower. Across six course datasets it mapped every read, with eight incorrect mappings out of 6,000 under the assignment's endpoint tolerance.
+
+The teaching program and the historical measurements are kept separate, so you can see what each result actually describes.
+
+Read on BioseqDB: https://bioseqdb.com/blog/writing-a-dna-read-mapper-in-python/
+Author on Medium: https://medium.com/@styczynski
+
+#BioseqDB #Python #Bioinformatics #Genomics #Algorithms

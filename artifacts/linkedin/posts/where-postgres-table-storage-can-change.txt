@@ -1,0 +1,10 @@
+Choosing a B-tree index does not turn a PostgreSQL table into a B-tree table.
+
+A table access method owns the table's rows; an index access method helps locate candidates. The SQL examples in this post inspect both through pg_am and pg_class, then follow the boundary into scans, snapshots and tuple callbacks.
+
+Returning the first row is only the beginning of a storage experiment. Updates, overlapping readers, VACUUM and recovery still need answers. This is the SQL-side introduction to the longer C++ table access method tutorial.
+
+Read on BioseqDB: https://bioseqdb.com/blog/where-postgres-table-storage-can-change/
+Read on Medium: https://medium.com/@styczynski/where-postgresql-table-storage-can-change-baafaca11b01
+
+#PostgreSQL #DatabaseInternals #Storage #SQL #OpenSource

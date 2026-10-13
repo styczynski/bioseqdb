@@ -1,0 +1,12 @@
+“The database is encrypted” leaves quite a few questions unanswered.
+
+What happens to query results, temporary files, WAL and backups? Where are the keys, and can a restored database recover them?
+
+This post follows a specimen record from SQL into storage and describes the protection offered by pg_tde 2.2.2 on Percona Server for PostgreSQL. It keeps the boundaries visible: authorised sessions still read plaintext, WAL needs separate configuration, and a logical dump is another readable copy to protect.
+
+It is a general PostgreSQL example, not a compatibility claim for BioseqDB's table access method.
+
+Read on BioseqDB: https://bioseqdb.com/blog/postgres-encryption-at-rest/
+Author on Medium: https://medium.com/@styczynski
+
+#PostgreSQL #DatabaseSecurity #Encryption #Backups #OpenSource

@@ -1,0 +1,168 @@
+{
+  "result": "PASS_WITH_DOCUMENTED_SCREENSHOT_LIMITS",
+  "recorded_publications": 5,
+  "snapshot_note": "Root reports five publications completed before the latest stop/limit steering. Further posting is stopped; possible removal of posts 4 and 5 awaits the user decision. This review takes no posting, scheduling, deletion or browser action.",
+  "url_evidence": "The five URLs and verified flags come from the root-owned publication ledger. This reviewer verified syntax, mapping and copy parity but did not independently open the URLs.",
+  "missing_or_stale_proofs": [],
+  "all_ledger_parity_checks_pass": true,
+  "posts": [
+    {
+      "slug": "introducing-bioseqdb",
+      "url": "https://www.linkedin.com/feed/update/urn:li:share:7515810728616955904?actorCompanyId=145288758",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/introducing-bioseqdb.png",
+      "proof_sha256": "510135109c27a598c514dd1087e3d4d65b552257456b962fbb11721767f5444d",
+      "proof_size": [
+        2036,
+        792
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "Published post detail",
+      "screenshot_visible": [
+        "BioseqDB author identity",
+        "Matching post opening",
+        "Matching native-uploaded image top",
+        "Full approved body text",
+        "Two shortened outbound links",
+        "Five hashtags"
+      ],
+      "screenshot_limits": [
+        "Outbound links are shortened; destination not independently established by screenshot",
+        "Image extends below viewport; full image not shown",
+        "Image alt text is not visible",
+        "Browser address bar not included"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "alt_matches_approved_bundle": true,
+        "public_linkedin_share_url": true
+      }
+    },
+    {
+      "slug": "combining-search-results-in-postgres",
+      "url": "https://www.linkedin.com/feed/update/urn:li:share:7515811589825110016?actorCompanyId=145288758",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/combining-search-results-in-postgres.png",
+      "proof_sha256": "9812026fbb8fd93c260aa6594e522713a79bb25ae108bfec5c2e92b4ca97196f",
+      "proof_size": [
+        2036,
+        792
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "BioseqDB admin Page posts with Published tab selected",
+      "screenshot_visible": [
+        "BioseqDB author identity",
+        "Matching post opening",
+        "Matching native-uploaded image top"
+      ],
+      "screenshot_limits": [
+        "Post body collapsed behind more",
+        "Outbound links, hashtags and image alt not visible",
+        "Image extends below viewport; full image not shown",
+        "Browser address bar not included"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "alt_matches_approved_bundle": true,
+        "public_linkedin_share_url": true
+      }
+    },
+    {
+      "slug": "what-does-vector-mean-in-postgres",
+      "url": "https://www.linkedin.com/feed/update/urn:li:share:7515811900052545537?actorCompanyId=145288758",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/what-does-vector-mean-in-postgres.png",
+      "proof_sha256": "97713216608b927d213697e2ffc3ce87e7bd8417499b48e7603a7029bd934bd8",
+      "proof_size": [
+        2036,
+        792
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "BioseqDB admin Page posts with Published tab selected",
+      "screenshot_visible": [
+        "BioseqDB author identity",
+        "Matching post opening",
+        "Matching native-uploaded image top"
+      ],
+      "screenshot_limits": [
+        "Post body collapsed behind more",
+        "Outbound links, hashtags and image alt not visible",
+        "Image extends below viewport; full image not shown",
+        "Browser address bar not included"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "alt_matches_approved_bundle": true,
+        "public_linkedin_share_url": true
+      }
+    },
+    {
+      "slug": "full-text-search-rules-in-sql",
+      "url": "https://www.linkedin.com/feed/update/urn:li:share:7515812004822118400?actorCompanyId=145288758",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/full-text-search-rules-in-sql.png",
+      "proof_sha256": "8cc3fd64dd4a8ff0ebfcca33fbf631356bc145ab36da4202bf36b9584052dced",
+      "proof_size": [
+        2036,
+        792
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "BioseqDB admin Page posts with Published tab selected",
+      "screenshot_visible": [
+        "BioseqDB author identity",
+        "Matching post opening",
+        "Matching native-uploaded image top"
+      ],
+      "screenshot_limits": [
+        "Post body collapsed behind more",
+        "Outbound links, hashtags and image alt not visible",
+        "Image extends below viewport; full image not shown",
+        "Browser address bar not included"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "alt_matches_approved_bundle": true,
+        "public_linkedin_share_url": true
+      }
+    },
+    {
+      "slug": "where-postgres-table-storage-can-change",
+      "url": "https://www.linkedin.com/feed/update/urn:li:share:7515812167032516608?actorCompanyId=145288758",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/where-postgres-table-storage-can-change.png",
+      "proof_sha256": "717efb2c8cce4f35098476f6ac2d2f85cd0524fdcf65d5dffc961e17ca1b5bca",
+      "proof_size": [
+        2036,
+        792
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "BioseqDB admin Page posts with Published tab selected",
+      "screenshot_visible": [
+        "BioseqDB author identity",
+        "Matching post opening",
+        "Matching native-uploaded image top"
+      ],
+      "screenshot_limits": [
+        "Post body collapsed behind more",
+        "Outbound links, hashtags and image alt not visible",
+        "Image extends below viewport; full image not shown",
+        "Browser address bar not included"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "alt_matches_approved_bundle": true,
+        "public_linkedin_share_url": true
+      }
+    }
+  ]
+}

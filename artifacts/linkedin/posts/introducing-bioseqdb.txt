@@ -1,0 +1,10 @@
+BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.
+
+I wanted to keep sequences and their metadata together. An organism, collection date or patient identifier can be an ordinary column beside its DNA, and sequence alignment can sit in the same query as a filter or join.
+
+The introduction has two small SQL examples, the history of the project, a comparison with existing aligners and a Docker quick start. This first release is experimental software; I would like to hear how it works with your data.
+
+Read on BioseqDB: https://bioseqdb.com/blog/introducing-bioseqdb/
+Read on Medium: https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d
+
+#BioseqDB #PostgreSQL #Bioinformatics #Genomics #SQL

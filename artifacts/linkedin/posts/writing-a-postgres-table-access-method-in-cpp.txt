@@ -1,0 +1,12 @@
+What does PostgreSQL call after CREATE TABLE ... USING your_method?
+
+This tutorial builds traceheap, a small C++ extension for PostgreSQL 17. It delegates storage to heap and counts selected callbacks, so we can follow scans, ordinary and bulk inserts, updates and rollbacks.
+
+One query returns two rows while the table callback visits four. Another rolls back an inserted row but leaves the process-local counter incremented. Those small differences make the interface easier to understand.
+
+The complete source and tests are included. The tutorial also explains why copying heap's callback table is not enough for indexes, TOAST or every rewrite path; the example explicitly rejects unsupported operations.
+
+Read on BioseqDB: https://bioseqdb.com/blog/writing-a-postgres-table-access-method-in-cpp/
+Author on Medium: https://medium.com/@styczynski
+
+#BioseqDB #PostgreSQL #CPP #DatabaseInternals #OpenSource

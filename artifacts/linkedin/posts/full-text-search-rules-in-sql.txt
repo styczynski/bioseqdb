@@ -1,0 +1,10 @@
+I find search easier to work on when I can point at a row and explain why it belongs in the result.
+
+This example starts with a small rule: find a specimen note containing the phrase “low coverage”, or both “repeat” and “extraction”. The query returns the matching reason beside each row.
+
+From there, the post builds a stored tsvector document, adds a GIN index and shows how the Rails pg_search gem can use that column. The gem and the separate PostgreSQL extension named pg_search are different projects; this example uses the gem.
+
+Read on BioseqDB: https://bioseqdb.com/blog/full-text-search-rules-in-sql/
+Read on Medium: https://medium.com/@styczynski/full-text-search-rules-i-can-explain-in-sql-f5bca1e87390
+
+#PostgreSQL #SQL #FullTextSearch #RubyOnRails #Databases

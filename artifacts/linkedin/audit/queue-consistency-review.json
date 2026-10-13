@@ -1,0 +1,30 @@
+{
+  "result": "PASS",
+  "scope": "Local evidence and queue consistency only; no browser, publication, scheduling, deletion or website changes.",
+  "publication_state": "Five published posts remain recorded as live. Removal of posts four and five awaits the user decision. Four posts are prepared but unpublished.",
+  "subsequent_batch_limit": 3,
+  "automatic_schedule_created": false,
+  "next_prepared_batch": [
+    "writing-a-dna-read-mapper-in-python",
+    "writing-a-postgres-table-access-method-in-cpp",
+    "chatdb-a-database-that-can-write-poems"
+  ],
+  "subsequent_prepared_batch": [
+    "postgres-encryption-at-rest"
+  ],
+  "requested_resume_date": "2026-10-14",
+  "resume_date_is_schedule": false,
+  "checks": {
+    "five_publications_recorded": true,
+    "queue_matches_publication_ledger": true,
+    "four_unpublished_prepared_posts": true,
+    "no_duplicate_or_missing_posts": true,
+    "publication_stopped": true,
+    "no_automatic_scheduling_recorded": true,
+    "new_execution_required": true,
+    "maximum_three_per_new_batch_and_day": true,
+    "planned_batches_cover_unpublished_queue": true,
+    "removal_decision_pending": true
+  },
+  "privacy": "Copied only review JSON with public publication metadata and source/proof file checks. No browser DOM, cookies, storage, session, profile data, or preview ownership files included."
+}

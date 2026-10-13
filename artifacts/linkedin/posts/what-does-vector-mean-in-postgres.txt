@@ -1,0 +1,10 @@
+What does “vector” mean in PostgreSQL?
+
+A tsvector contains searchable terms. An embedding contains coordinates from a chosen representation. An array can hold measurements, while vectorized execution describes how a database processes batches of values.
+
+Those are different jobs, even when they share a word. This post follows one specimen record through small SQL examples, including why the same <-> operator can mean different things for different operand types.
+
+Read on BioseqDB: https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/
+Read on Medium: https://medium.com/@styczynski/what-does-vector-mean-in-postgresql-8a61d0c92c3b
+
+#PostgreSQL #SQL #Pgvector #VectorSearch #Databases

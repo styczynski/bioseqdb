@@ -1,0 +1,54 @@
+{
+  "status": "stopped_at_user_request",
+  "recorded_date": "2026-10-13",
+  "publication_count_at_stop": 5,
+  "published_slugs": [
+    "introducing-bioseqdb",
+    "combining-search-results-in-postgres",
+    "what-does-vector-mean-in-postgres",
+    "full-text-search-rules-in-sql",
+    "where-postgres-table-storage-can-change"
+  ],
+  "policy": {
+    "maximum_new_posts_per_batch": 3,
+    "maximum_new_posts_per_day": 3,
+    "automatic_scheduling_created": false,
+    "resume_requires_new_execution": true
+  },
+  "requested_resume_date": "2026-10-14",
+  "queued_slugs": [
+    "writing-a-dna-read-mapper-in-python",
+    "writing-a-postgres-table-access-method-in-cpp",
+    "chatdb-a-database-that-can-write-poems",
+    "postgres-encryption-at-rest"
+  ],
+  "planned_batches": [
+    {
+      "batch": 1,
+      "requested_date": "2026-10-14",
+      "slugs": [
+        "writing-a-dna-read-mapper-in-python",
+        "writing-a-postgres-table-access-method-in-cpp",
+        "chatdb-a-database-that-can-write-poems"
+      ],
+      "status": "prepared_not_scheduled"
+    },
+    {
+      "batch": 2,
+      "requested_date": null,
+      "slugs": [
+        "postgres-encryption-at-rest"
+      ],
+      "status": "prepared_not_scheduled"
+    }
+  ],
+  "pending_user_decision": {
+    "action": "Whether to remove the fourth and fifth already-published posts",
+    "slugs": [
+      "full-text-search-rules-in-sql",
+      "where-postgres-table-storage-can-change"
+    ],
+    "approved": false,
+    "note": "Both remain published unless the user authorizes removal."
+  }
+}

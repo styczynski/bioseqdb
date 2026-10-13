@@ -1,0 +1,10 @@
+A search can lose the right row before ranking has even finished.
+
+In this small PostgreSQL experiment, applying LIMIT before a study filter leaves only one result when two eligible notes exist. Then I combine text and vector candidate lists with reciprocal rank fusion, without adding scores that mean different things.
+
+The examples use invented distances and ranks, so you can inspect each decision in ordinary SQL without an embedding model. The useful distinction is which rows enter the answer, then how to order them.
+
+Read on BioseqDB: https://bioseqdb.com/blog/combining-search-results-in-postgres/
+Read on Medium: https://medium.com/@styczynski/combining-search-results-in-postgresql-ed17f4b9480a
+
+#PostgreSQL #SQL #HybridSearch #VectorSearch #Search

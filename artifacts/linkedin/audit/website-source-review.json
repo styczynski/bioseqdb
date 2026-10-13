@@ -1,0 +1,29 @@
+{
+  "scope": "Independent review of source implementation and destinations. Browser layout checks and CMake build are handled by root/source agent.",
+  "result": "PASS",
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "codegen/website/front_matter.cppm:420",
+      "summary": "Per-article override keys documented as hyphenated blog slugs are rejected by the existing snake_case-only content parser.",
+      "impact": "Uncommenting the example medium_posts entry causes a website build failure.",
+      "requested_fix": "Accept validated blog slugs specifically in medium_posts/linkedin_posts mappings and add a smoke fixture for the documented override.",
+      "status": "fixed_and_reviewed",
+      "resolution": "Parser now applies the existing blog_title_slug validator only to medium_posts and linkedin_posts keys. Added positive smoke fixtures for both groups and negative fixtures for traversal, underscore slugs, and hyphenated keys in ordinary groups."
+    }
+  ],
+  "passed_checks": [
+    "Both social icons have explicit accessible link names and decorative aria-hidden SVGs.",
+    "Hover and keyboard focus expose bounded tooltip text; Escape dismisses it and no-JavaScript title remains available.",
+    "New icon controls reuse paired dark/light blog palette tokens, currentColor SVGs, and existing focus outlines.",
+    "Control row and footer navigation wrap; controls have 40px targets.",
+    "Medium author profile and LinkedIn company destinations are accurately distinguished in labels and editable YAML.",
+    "Article overrides select article-specific tooltips; missing overrides retain public profile URLs.",
+    "HTML values pass through the existing escaping path; article destinations require HTTPS and reject whitespace.",
+    "All three generated footer templates preserve the author links and add public Medium/company LinkedIn links.",
+    "git diff --check passes; parser fix follows the same slug rules as article metadata."
+  ],
+  "pending": [
+    "CMake build and browser verification"
+  ]
+}

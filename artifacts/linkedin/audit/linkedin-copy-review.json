@@ -1,0 +1,117 @@
+{
+  "scope": "Independent source, publication-link, copy, and image-file review; live LinkedIn upload and website browser checks remain root responsibilities.",
+  "result": "PASS",
+  "post_count": 9,
+  "public_medium_articles": 5,
+  "profile_fallbacks": 4,
+  "visual_images_inspected": 9,
+  "editorial_findings": [],
+  "notes": [
+    "Each post accurately summarizes its authored blog source without inventing experiences or performance claims.",
+    "All five published Medium URLs match the publication ledger; the other four links explicitly say Author on Medium.",
+    "No private drafts or hashed image URLs appear in public post text. PNGs are intended for native LinkedIn upload.",
+    "The full-text-search post identifies pg_search as the Rails gem; the encryption post does not claim BioseqDB compatibility; Python measurements stay distinct from the teaching program; traceheap remains an educational heap delegate.",
+    "Each diagram was visually inspected: readable labels, adequate contrast, no clipping or overlaps in the source PNG."
+  ],
+  "checks": [
+    {
+      "slug": "introducing-bioseqdb",
+      "result": "PASS",
+      "characters": 754,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        2400,
+        2085
+      ],
+      "failures": []
+    },
+    {
+      "slug": "combining-search-results-in-postgres",
+      "result": "PASS",
+      "characters": 760,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        2400,
+        2010
+      ],
+      "failures": []
+    },
+    {
+      "slug": "what-does-vector-mean-in-postgres",
+      "result": "PASS",
+      "characters": 696,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        2400,
+        2228
+      ],
+      "failures": []
+    },
+    {
+      "slug": "full-text-search-rules-in-sql",
+      "result": "PASS",
+      "characters": 772,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        2400,
+        1763
+      ],
+      "failures": []
+    },
+    {
+      "slug": "where-postgres-table-storage-can-change",
+      "result": "PASS",
+      "characters": 780,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        2400,
+        2333
+      ],
+      "failures": []
+    },
+    {
+      "slug": "postgres-encryption-at-rest",
+      "result": "PASS",
+      "characters": 793,
+      "medium_link_kind": "author_profile",
+      "image_dimensions": [
+        2400,
+        2535
+      ],
+      "failures": []
+    },
+    {
+      "slug": "chatdb-a-database-that-can-write-poems",
+      "result": "PASS",
+      "characters": 786,
+      "medium_link_kind": "author_profile",
+      "image_dimensions": [
+        2400,
+        2303
+      ],
+      "failures": []
+    },
+    {
+      "slug": "writing-a-dna-read-mapper-in-python",
+      "result": "PASS",
+      "characters": 894,
+      "medium_link_kind": "author_profile",
+      "image_dimensions": [
+        2400,
+        3069
+      ],
+      "failures": []
+    },
+    {
+      "slug": "writing-a-postgres-table-access-method-in-cpp",
+      "result": "PASS",
+      "characters": 908,
+      "medium_link_kind": "author_profile",
+      "image_dimensions": [
+        2400,
+        2205
+      ],
+      "failures": []
+    }
+  ]
+}

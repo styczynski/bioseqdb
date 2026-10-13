@@ -1,0 +1,52 @@
+[
+  {
+    "slug": "introducing-bioseqdb",
+    "title": "Introducing BioseqDB",
+    "url": "https://www.linkedin.com/feed/update/urn:li:share:7515810728616955904?actorCompanyId=145288758",
+    "text": "BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.\n\nI wanted to keep sequences and their metadata together. An organism, collection date or patient identifier can be an ordinary column beside its DNA, and sequence alignment can sit in the same query as a filter or join.\n\nThe introduction has two small SQL examples, the history of the project, a comparison with existing aligners and a Docker quick start. This first release is experimental software; I would like to hear how it works with your data.\n\nRead on BioseqDB: https://bioseqdb.com/blog/introducing-bioseqdb/\nRead on Medium: https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d\n\n#BioseqDB #PostgreSQL #Bioinformatics #Genomics #SQL",
+    "website_url": "https://bioseqdb.com/blog/introducing-bioseqdb/",
+    "medium_url": "https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d",
+    "image_alt": "Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.",
+    "verified": true
+  },
+  {
+    "slug": "combining-search-results-in-postgres",
+    "title": "Combining search results in PostgreSQL",
+    "url": "https://www.linkedin.com/feed/update/urn:li:share:7515811589825110016?actorCompanyId=145288758",
+    "text": "A search can lose the right row before ranking has even finished.\n\nIn this small PostgreSQL experiment, applying LIMIT before a study filter leaves only one result when two eligible notes exist. Then I combine text and vector candidate lists with reciprocal rank fusion, without adding scores that mean different things.\n\nThe examples use invented distances and ranks, so you can inspect each decision in ordinary SQL without an embedding model. The useful distinction is which rows enter the answer, then how to order them.\n\nRead on BioseqDB: https://bioseqdb.com/blog/combining-search-results-in-postgres/\nRead on Medium: https://medium.com/@styczynski/combining-search-results-in-postgresql-ed17f4b9480a\n\n#PostgreSQL #SQL #HybridSearch #VectorSearch #Search",
+    "website_url": "https://bioseqdb.com/blog/combining-search-results-in-postgres/",
+    "medium_url": "https://medium.com/@styczynski/combining-search-results-in-postgresql-ed17f4b9480a",
+    "image_alt": "Study eligibility is applied separately to text and vector candidates before their ranked results are combined.",
+    "verified": true
+  },
+  {
+    "slug": "what-does-vector-mean-in-postgres",
+    "title": "What does vector mean in PostgreSQL?",
+    "url": "https://www.linkedin.com/feed/update/urn:li:share:7515811900052545537?actorCompanyId=145288758",
+    "text": "What does “vector” mean in PostgreSQL?\n\nA tsvector contains searchable terms. An embedding contains coordinates from a chosen representation. An array can hold measurements, while vectorized execution describes how a database processes batches of values.\n\nThose are different jobs, even when they share a word. This post follows one specimen record through small SQL examples, including why the same <-> operator can mean different things for different operand types.\n\nRead on BioseqDB: https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/\nRead on Medium: https://medium.com/@styczynski/what-does-vector-mean-in-postgresql-8a61d0c92c3b\n\n#PostgreSQL #SQL #Pgvector #VectorSearch #Databases",
+    "website_url": "https://bioseqdb.com/blog/what-does-vector-mean-in-postgres/",
+    "medium_url": "https://medium.com/@styczynski/what-does-vector-mean-in-postgresql-8a61d0c92c3b",
+    "image_alt": "Three representations of a specimen record: searchable terms, numeric measurements and a geometric location. A separate row shows execution batches operating across records.",
+    "verified": true
+  },
+  {
+    "slug": "full-text-search-rules-in-sql",
+    "title": "Full-text search rules I can explain in SQL",
+    "url": "https://www.linkedin.com/feed/update/urn:li:share:7515812004822118400?actorCompanyId=145288758",
+    "text": "I find search easier to work on when I can point at a row and explain why it belongs in the result.\n\nThis example starts with a small rule: find a specimen note containing the phrase “low coverage”, or both “repeat” and “extraction”. The query returns the matching reason beside each row.\n\nFrom there, the post builds a stored tsvector document, adds a GIN index and shows how the Rails pg_search gem can use that column. The gem and the separate PostgreSQL extension named pg_search are different projects; this example uses the gem.\n\nRead on BioseqDB: https://bioseqdb.com/blog/full-text-search-rules-in-sql/\nRead on Medium: https://medium.com/@styczynski/full-text-search-rules-i-can-explain-in-sql-f5bca1e87390\n\n#PostgreSQL #SQL #FullTextSearch #RubyOnRails #Databases",
+    "website_url": "https://bioseqdb.com/blog/full-text-search-rules-in-sql/",
+    "medium_url": "https://medium.com/@styczynski/full-text-search-rules-i-can-explain-in-sql-f5bca1e87390",
+    "image_alt": "A note and a search query are parsed separately, matched in PostgreSQL, and returned with an explanation.",
+    "verified": true
+  },
+  {
+    "slug": "where-postgres-table-storage-can-change",
+    "title": "Where PostgreSQL table storage can change",
+    "url": "https://www.linkedin.com/feed/update/urn:li:share:7515812167032516608?actorCompanyId=145288758",
+    "text": "Choosing a B-tree index does not turn a PostgreSQL table into a B-tree table.\n\nA table access method owns the table's rows; an index access method helps locate candidates. The SQL examples in this post inspect both through pg_am and pg_class, then follow the boundary into scans, snapshots and tuple callbacks.\n\nReturning the first row is only the beginning of a storage experiment. Updates, overlapping readers, VACUUM and recovery still need answers. This is the SQL-side introduction to the longer C++ table access method tutorial.\n\nRead on BioseqDB: https://bioseqdb.com/blog/where-postgres-table-storage-can-change/\nRead on Medium: https://medium.com/@styczynski/where-postgresql-table-storage-can-change-baafaca11b01\n\n#PostgreSQL #DatabaseInternals #Storage #SQL #OpenSource",
+    "website_url": "https://bioseqdb.com/blog/where-postgres-table-storage-can-change/",
+    "medium_url": "https://medium.com/@styczynski/where-postgresql-table-storage-can-change-baafaca11b01",
+    "image_alt": "The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers.",
+    "verified": true
+  }
+]

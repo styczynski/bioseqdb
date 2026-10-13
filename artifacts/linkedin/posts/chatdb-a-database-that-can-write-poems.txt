@@ -1,0 +1,10 @@
+Can your database write poems in the middle of the business operation? I bet not!
+
+In December 2022 I tried asking ChatGPT to behave like a key-value store, wrapped it in Python, and gave a second conversation the job of remembering operations. Undo meant shortening that log and replaying the remaining commands.
+
+I have revisited the experiment with selected original passages, a new diagram and notes checking the old implementation. Two conversations were entertaining, but they did not provide atomic commits or write-ahead-log durability. The post keeps that distinction, along with the poems.
+
+Read on BioseqDB: https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/
+Author on Medium: https://medium.com/@styczynski
+
+#Databases #Python #ChatGPT #PostgreSQL #OpenSource
