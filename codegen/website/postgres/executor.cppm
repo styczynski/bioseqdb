@@ -743,6 +743,45 @@ private:
         }
     }
 
+    /// @brief Finds the explicitly supported external tables owned by Bioseq.
+    ///
+    /// Builds without external clients have no such schema. Do not grant access
+    /// to arbitrary tables added there later: only these public provider views
+    /// belong to the runnable-example surface.
+    [[nodiscard]] static std::vector<std::string> external_example_relations(
+        bioseq::libpq::client_connection& connection) {
+        const auto schema = connection.execute(
+            "SELECT pg_catalog.to_regnamespace('bioseq_external') IS NOT NULL");
+        if (schema.row_count() != 1 || schema.cell_is_null(0, 0)) {
+            throw std::runtime_error("could not inspect external example schema");
+        }
+        if (schema.text_value(0, 0) == "f") {
+            return {};
+        }
+        std::vector<std::string> relations;
+        for (const std::string_view name : {
+                 "taxonomy", "catalog", "record_genes", "record_locations",
+                 "sequences"}) {
+            const std::string qualified = "bioseq_external." + std::string(name);
+            const auto member = connection.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d "
+                "JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid "
+                "WHERE d.classid = 'pg_catalog.pg_class'::regclass "
+                "AND d.refclassid = 'pg_catalog.pg_extension'::regclass "
+                "AND d.objid = pg_catalog.to_regclass("
+                + connection.escape_literal(qualified)
+                + ") AND d.deptype = 'e' AND e.extname = 'bioseq')");
+            if (member.row_count() != 1 || member.cell_is_null(0, 0)
+                || member.text_value(0, 0) != "t") {
+                throw std::runtime_error(
+                    "external example table is not a Bioseq extension member: "
+                    + qualified);
+            }
+            relations.push_back(qualified);
+        }
+        return relations;
+    }
+
     /// @brief Grants the example role access needed to use the extension.
     /// @param settings Private-cluste and extension settings.
     /// @param admin_role Administrator  used, to connect to the clone.
@@ -776,6 +815,15 @@ private:
             "bioseq_internal.minimizer_generation_storage TO " + quoted_role);
         (void)clone_admin.execute(
             "GRANT pg_read_all_stats TO " + quoted_role);
+        const auto external_relations = external_example_relations(clone_admin);
+        if (!external_relations.empty()) {
+            (void)clone_admin.execute(
+                "GRANT USAGE ON SCHEMA bioseq_external TO " + quoted_role);
+            for (const auto& relation : external_relations) {
+                (void)clone_admin.execute(
+                    "GRANT SELECT ON TABLE " + relation + " TO " + quoted_role);
+            }
+        }
         for (const std::string& schema :
              settings.documented_function_schemas) {
             (void)clone_admin.execute(
@@ -926,6 +974,36 @@ private:
         if (acl.row_count() != 1 || acl.cell_is_null(0, 0) || acl.text_value(0, 0) != "t") {
             return make_isolation_error(
                 "clone owner does not have the required least-privilege extension ACL");
+        }
+        const auto external_relations = external_example_relations(role_connection);
+        if (!external_relations.empty()) {
+            std::string external_acl_checks;
+            for (const auto& relation : external_relations) {
+                const auto literal = role_connection.escape_literal(relation);
+                external_acl_checks +=
+                    "AND pg_catalog.has_table_privilege(current_user, "
+                    + literal + ", 'SELECT') "
+                    "AND NOT pg_catalog.has_table_privilege(current_user, "
+                    + literal + ", 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') "
+                    "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c "
+                    "CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a "
+                    "WHERE c.oid = pg_catalog.to_regclass(" + literal
+                    + ") AND a.grantee = 0) ";
+            }
+            const auto external_acl = role_connection.execute(
+                "SELECT pg_catalog.has_schema_privilege("
+                "current_user, 'bioseq_external', 'USAGE') "
+                "AND NOT pg_catalog.has_schema_privilege("
+                "current_user, 'bioseq_external', 'CREATE') "
+                "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n "
+                "CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) a "
+                "WHERE n.nspname = 'bioseq_external' AND a.grantee = 0) "
+                + external_acl_checks);
+            if (external_acl.row_count() != 1 || external_acl.cell_is_null(0, 0)
+                || external_acl.text_value(0, 0) != "t") {
+                return make_isolation_error(
+                    "clone owner does not have read-only external-provider ACLs");
+            }
         }
         return std::nullopt;
     }

@@ -92,6 +92,19 @@ execute on the private PostgreSQL cluster. Saved EXPLAIN plans remain examples
 from the author's README. Citation links lead to the bibliography page, and
 source references retain their repository, revision and line anchors.
 
+Posts with runnable `bioseq_external` queries need a source build configured with
+`-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON`. CMake checks this before building the
+site. The SQL examples contact the real provider, so these builds also need
+network access. Enabling a setting in PostgreSQL cannot add this component to
+an extension binary that was built without it.
+
+Inside each disposable example database, the runner grants its restricted role
+schema usage and `SELECT` on the five Bioseq-owned external tables. It grants no
+external schema creation or table write privileges, and does not change the
+template database or installed extension's default ACLs. A build-time integration
+check verifies both read access and these restrictions without contacting a
+provider.
+
 SQL reference pages are generated from every SQL declaration in the production
 extension manifests and every installed extension member in PostgreSQL's
 catalog. Doxygen comments above `bioseq_sql` annotations provide the summaries,
@@ -130,6 +143,16 @@ Add a Markdown file anywhere under `website/blog/`. The generator discovers
 posts recursively, lists published posts at `/blog/` with the newest first, and
 adds each post to search and the sitemap. Blog pages use the same Markdown
 renderer, SQL runner, reference links and dark/light themes as tutorials.
+
+For a yellow availability notice, use GitHub-style warning syntax:
+
+```markdown
+> [!WARNING]
+> This example needs a build with external database clients enabled.
+```
+
+Warnings use the shared dark/light palette and retain the same markup on blog
+and documentation pages.
 
 Start each file with YAML front matter:
 

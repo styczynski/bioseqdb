@@ -178,6 +178,23 @@ endif()
 file(GLOB_RECURSE _tutorial_md CONFIGURE_DEPENDS "${_source_dir}/${_version}/*.md")
 file(GLOB_RECURSE _blog_md CONFIGURE_DEPENDS "${_source_dir}/blog/*.md")
 set(_blog_inputs ${_blog_md} "${_source_dir}/blog.yaml" "${_source_dir}/blog_keywords.yaml")
+
+# External examples execute real provider queries. A build without the provider
+# component must fail before the expensive documentation pipeline, rather than
+# render stale results or discover missing tables during SQL execution.
+if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_tutorial_md} ${_blog_md})
+  foreach(_content_file IN LISTS _tutorial_md _blog_md)
+    file(READ "${_content_file}" _content_text)
+    if(_content_text MATCHES "(```+|~~~+)sql[^\n]*runnable[^\n]*\n[^`~]*bioseq_external\\.")
+      message(FATAL_ERROR
+        "website: ${_content_file} has runnable external-provider SQL. "
+        "Configure with -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; "
+        "this component cannot be enabled at runtime in an extension built without it.")
+    endif()
+  endforeach()
+endif()
 file(GLOB_RECURSE _template_files CONFIGURE_DEPENDS "${_templates_dir}/*.j2")
 file(GLOB_RECURSE _static_files CONFIGURE_DEPENDS "${_static_dir}/*")
 
@@ -1012,6 +1029,10 @@ file(WRITE "${_cluster_child}"
 "fi\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_readme_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/readme_samples.fasta\"\n"
+"\"${Python3_EXECUTABLE}\" '${_source_dir}/tests/integration/test_external_example_acl.py' \\\n"
+"  --generator '${_gen}' --pg-bin-dir '${_staged_bindir}' \\\n"
+"  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
+"  --sql-manifest '${_bioseq_extension_sql_manifest}'\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
 "  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
 "  --sql-manifest '${_bioseq_extension_sql_manifest}' \\\n"
@@ -1072,6 +1093,7 @@ add_custom_command(
           "${_landing_fasta}" "${_readme_fasta}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
+          "${_source_dir}/tests/integration/test_external_example_acl.py"
           ${_tutorial_md} ${_blog_inputs} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
