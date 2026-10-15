@@ -1145,6 +1145,8 @@ add_custom_command(
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py" --check
   COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_butterfly_tutorial.py" --check
+  COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_traceheap_sources.py" --check
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_traceheap.py"
@@ -1158,6 +1160,9 @@ add_custom_command(
           "${_landing_content}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_blog_content.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_butterfly_tutorial.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/blog/comparing-butterfly-genomes-with-bioseqdb.md"
+          "${_static_dir}/examples/butterfly-alignments.zip"
           "${CMAKE_CURRENT_SOURCE_DIR}/blog/writing-a-dna-read-mapper-in-python.md"
           "${_static_dir}/examples/python-aligner.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_traceheap_sources.py"
@@ -1328,6 +1333,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND ${_website_features_contract_command}
   COMMAND "${_venv_python}" "${_source_dir}/tests/contract/test_landing_content.py"
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_python_aligner.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/sync_butterfly_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_traceheap_sources.py" --check
   DEPENDS "${_venv_stamp}" "${_source_dir}/tests/contract/test_theme_palette.py"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

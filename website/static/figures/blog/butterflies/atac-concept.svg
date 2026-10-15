@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-a9bccb:#405c72;--theme-c5a8d6:#7d468c;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">Where an ATAC-seq track would come from</title><desc id="desc">Conceptual ATAC-seq illustration. DNA wraps around nucleosomes; accessible regions can be tagged by Tn5. Sequencing and mapping assay fragments generates a measured signal track. No ATAC-seq measurements are used in this tutorial.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Where an ATAC-seq track would come from</tspan>
+</text>
+<text x="30" y="90" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="20" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">DNA accessibility requires a separate experiment</tspan>
+</text>
+<path d="M60,195 C130,130 180,255 240,195 S340,135 390,195 S490,255 550,195 S670,135 790,195" fill="none" opacity="1" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="5"/>
+<circle cx="150" cy="195" r="31" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.3"/>
+<circle cx="142" cy="187" r="17" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.55"/>
+<circle cx="285" cy="195" r="31" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.3"/>
+<circle cx="277" cy="187" r="17" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.55"/>
+<circle cx="670" cy="195" r="31" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.3"/>
+<circle cx="662" cy="187" r="17" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.55"/>
+<circle cx="755" cy="195" r="31" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.3"/>
+<circle cx="747" cy="187" r="17" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.55"/>
+<text x="210" y="271" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="210" dy="0">DNA wrapped around</tspan>
+<tspan x="210" dy="25.2">nucleosomes</tspan>
+</text>
+<text x="487" y="156" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="19" font-weight="normal" text-anchor="middle">
+<tspan x="487" dy="0">accessible region</tspan>
+</text>
+<path d="M430,205 L440,180 L450,205 Z" fill="var(--theme-f4894f, #f4894f)" opacity="1"/>
+<path d="M475,205 L485,180 L495,205 Z" fill="var(--theme-f4894f, #f4894f)" opacity="1"/>
+<path d="M520,205 L530,180 L540,205 Z" fill="var(--theme-f4894f, #f4894f)" opacity="1"/>
+<text x="485" y="264" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="485" dy="0">Tn5 tags accessible DNA</tspan>
+</text>
+<path d="M485,285 L485,330" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="55" y="352" width="300" height="91" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-20364a, #20364a)" stroke-width="1.5"/>
+<text x="205" y="385" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="19" font-weight="normal" text-anchor="middle">
+<tspan x="205" dy="0">Sequence assay fragments</tspan>
+</text>
+<text x="205" y="418" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="205" dy="0">Map them to the same assembly</tspan>
+</text>
+<path d="M370,396 L416,396" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M435,441 L792,441" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<path d="M435,438 L465,438 L478,422 L486,436 L515,435 L532,378 L545,435 L592,437 L610,409 L618,437 L666,436 L676,393 L690,436 L792,438 L792,441 L435,441 Z" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.35"/>
+<text x="615" y="474" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="615" dy="0">Illustrative signal only</tspan>
+</text>
+<text x="30" y="535" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">This tutorial plots sequence-derived GC, not ATAC-seq, expression or enhancer activity.</tspan>
+</text></svg>

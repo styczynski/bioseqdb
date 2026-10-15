@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 470" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">A rectangle represents a DNA interval</title><desc id="desc">Plotly rectangles use x0, x1, y0 and y1. Genomic x coordinates represent an interval. Vertical positions are arbitrary drawing lanes, not another genomic measurement.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">A rectangle represents a DNA interval</tspan>
+</text>
+<path d="M115,345 L774,345" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M115,345 L115,105" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="250" y="145" width="350" height="155" rx="0" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.18"/>
+<circle cx="250" cy="300" r="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="1"/>
+<circle cx="600" cy="145" r="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="1"/>
+<path d="M250,300 L250,345" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" stroke-dasharray="7 5"/>
+<path d="M600,145 L600,345" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="233" y="327" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="24" font-weight="normal" text-anchor="end">
+<tspan x="233" dy="0">(x0, y0)</tspan>
+</text>
+<text x="615" y="139" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="24" font-weight="normal" text-anchor="start">
+<tspan x="615" dy="0">(x1, y1)</tspan>
+</text>
+<text x="425" y="225" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="23" font-weight="normal" text-anchor="middle">
+<tspan x="425" dy="0">one sequence interval</tspan>
+</text>
+<text x="425" y="264" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="20" font-weight="normal" text-anchor="middle">
+<tspan x="425" dy="0">x0 = start       x1 = end</tspan>
+</text>
+<text x="445" y="389" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="20" font-weight="normal" text-anchor="middle">
+<tspan x="445" dy="0">Position in the imported sequence (bp)</tspan>
+</text>
+<text x="30" y="445" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">The y values place the track on the page; they have no biological unit.</tspan>
+</text></svg>

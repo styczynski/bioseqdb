@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 535" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-ef7a5a:#b3422b;}}</style>
+<title id="title">Two butterflies, one genomic neighborhood</title><desc id="desc">Conceptual butterfly silhouettes with red wing marks, labelled Heliconius erato demophoon and Heliconius melpomene rosina. A sequence interval containing optix appears below each. These are illustrations, not specimen photographs or measured wing patterns.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Two butterflies, one genomic neighborhood</tspan>
+</text>
+<path d="M230,215 C205,140 85,100 80,165 C75,218 135,242 182,236 C105,247 105,322 164,317 C207,310 225,257 230,225 Z" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.2" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="2"/>
+<path d="M230,215 C255,140 375,100 380,165 C385,218 325,242 278,236 C355,247 355,322 296,317 C253,310 235,257 230,225 Z" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.2" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="2"/>
+<path d="M182,191 L112,166 L110,188 L173,215 Z" fill="var(--theme-ef7a5a, #ef7a5a)" opacity="0.85"/>
+<path d="M278,191 L348,166 L350,188 L287,215 Z" fill="var(--theme-ef7a5a, #ef7a5a)" opacity="0.85"/>
+<path d="M230,171 L230,278" fill="none" stroke="var(--theme-eef4f9, #eef4f9)" stroke-width="8"/>
+<path d="M230,176 L210,142" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<path d="M230,176 L250,142" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<text x="230" y="357" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="21" font-weight="normal" text-anchor="middle" font-style="italic">
+<tspan x="230" dy="0">H. erato demophoon</tspan>
+</text>
+<path d="M80,413 L380,413" fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="9"/>
+<path d="M205,413 L255,413" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="13"/>
+<text x="230" y="453" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="230" dy="0">optix + surrounding DNA</tspan>
+</text>
+<path d="M630,215 C605,140 485,100 480,165 C475,218 535,242 582,236 C505,247 505,322 564,317 C607,310 625,257 630,225 Z" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.2" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2"/>
+<path d="M630,215 C655,140 775,100 780,165 C785,218 725,242 678,236 C755,247 755,322 696,317 C653,310 635,257 630,225 Z" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.2" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2"/>
+<path d="M582,191 L512,166 L510,188 L573,215 Z" fill="var(--theme-ef7a5a, #ef7a5a)" opacity="0.85"/>
+<path d="M678,191 L748,166 L750,188 L687,215 Z" fill="var(--theme-ef7a5a, #ef7a5a)" opacity="0.85"/>
+<path d="M630,171 L630,278" fill="none" stroke="var(--theme-eef4f9, #eef4f9)" stroke-width="8"/>
+<path d="M630,176 L610,142" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<path d="M630,176 L650,142" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<text x="630" y="357" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="21" font-weight="normal" text-anchor="middle" font-style="italic">
+<tspan x="630" dy="0">H. melpomene rosina</tspan>
+</text>
+<path d="M480,413 L780,413" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="9"/>
+<path d="M605,413 L655,413" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="13"/>
+<text x="630" y="453" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="630" dy="0">optix + surrounding DNA</tspan>
+</text>
+<text x="30" y="510" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Conceptual illustration. The figures below compare DNA, not photographed wing patterns.</tspan>
+</text></svg>

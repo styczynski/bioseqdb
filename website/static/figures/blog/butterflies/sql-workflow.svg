@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 535" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c5a8d6:#7d468c;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">The analysis stays connected to its data</title><desc id="desc">NCBI assembly metadata and sequence records are queried through SQL. BioseqDB stores the sequence and aligns the intervals. SQLAlchemy executes SQL; Plotly draws the returned summaries and matches. Python downloads the matching NCBI GFF annotations separately.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">The analysis stays connected to its data</tspan>
+</text>
+<rect x="40" y="100" width="340" height="130" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="1.5"/>
+<text x="62" y="138" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="start">
+<tspan x="62" dy="0">NCBI</tspan>
+</text>
+<text x="62" y="175" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="62" dy="0">Assembly metadata</tspan>
+<tspan x="62" dy="25.2">Sequence records</tspan>
+</text>
+<rect x="480" y="100" width="340" height="130" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="1.5"/>
+<text x="502" y="138" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="start">
+<tspan x="502" dy="0">PostgreSQL + BioseqDB</tspan>
+</text>
+<text x="502" y="175" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="502" dy="0">Import and retain provenance</tspan>
+<tspan x="502" dy="25.2">Align with SQL</tspan>
+</text>
+<rect x="40" y="315" width="340" height="130" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-c5a8d6, #c5a8d6)" stroke-width="1.5"/>
+<text x="62" y="353" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="start">
+<tspan x="62" dy="0">SQLAlchemy</tspan>
+</text>
+<text x="62" y="390" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="62" dy="0">Execute parameterized queries</tspan>
+<tspan x="62" dy="25.2">Receive measured result rows</tspan>
+</text>
+<rect x="480" y="315" width="340" height="130" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-f4894f, #f4894f)" stroke-width="1.5"/>
+<text x="502" y="353" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="start">
+<tspan x="502" dy="0">Plotly</tspan>
+</text>
+<text x="502" y="390" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="502" dy="0">Composition and alignment charts</tspan>
+<tspan x="502" dy="25.2">Interactive HTML + SVG</tspan>
+</text>
+<path d="M392,165 L463,165" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="428" y="140" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="428" dy="0">SQL</tspan>
+</text>
+<path d="M650,244 L650,282" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M650,282 L210,282" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2"/>
+<path d="M210,282 L210,303" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="430" y="271" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="430" dy="0">Search and summaries run in the database</tspan>
+</text>
+<path d="M392,380 L463,380" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="30" y="480" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Matching NCBI GFF annotations are downloaded separately by Python.</tspan>
+</text>
+<text x="30" y="510" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Python sends queries and draws their results. No external aligner is invoked.</tspan>
+</text></svg>
