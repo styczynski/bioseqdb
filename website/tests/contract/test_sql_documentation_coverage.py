@@ -105,6 +105,16 @@ def validate(model_path: Path, manifests: list[Path], catalog_path: Path) -> dic
                    and node.get("text", "").strip() for node in nodes), f"SQL entity lacks SQL example: {entity['canonical_id']}"
         for field in entity.get("fields", []):
             assert field["description"], f"SQL field lacks source description: {entity['canonical_id']}/{field['name']}"
+        owner = by_id.get(entity.get("attributes", {}).get("documentation_owner", ""))
+        if (entity["canonical_id"].startswith("sql:type:") and owner
+                and owner.get("attributes", {}).get("access_method", "").strip('"') == "bioseq_external"):
+            expected = f"SELECT row_value FROM {owner['qualified_name']} AS row_value WHERE false;"
+            assert any(node["kind"] == "code_block" and node.get("text") == expected for node in nodes), (
+                f"external row type example would start an unfiltered provider scan: {entity['canonical_id']}"
+            )
+            assert any(node["kind"] == "paragraph" and "returns no rows" in node_text(node) for node in nodes), (
+                f"external row type example must explain its empty result: {entity['canonical_id']}"
+            )
     return {"declared_entities": declared, "authored_summaries": authored,
             "runnable_public_entities": public, "live_catalog_entities": len(catalog_entities),
             "documented_entities_with_overload_groups": len(entities)}

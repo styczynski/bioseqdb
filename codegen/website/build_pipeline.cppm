@@ -2798,6 +2798,22 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     }
 }
 
+// An external table may require an accession or other remote lookup predicate.
+// Its generated row-type page demonstrates the shape without starting a scan;
+// filtered retrieval examples remain on the authored table reference page.
+[[nodiscard]] std::pair<std::string, std::string> relation_row_example(
+    const reference_entity& relation) {
+    const auto method = relation.attributes.find("access_method");
+    const bool external = method != relation.attributes.end()
+        && (method->second == "bioseq_external" || method->second == "\"bioseq_external\"");
+    return {
+        external
+            ? "Inspect the composite row shape without contacting the external provider. WHERE false returns no rows; use the table's documented examples for filtered data retrieval."
+            : "Read whole rows as values of this composite type.",
+        "SELECT row_value FROM " + relation.qualified_name + " AS row_value"
+            + (external ? " WHERE false;" : " LIMIT 5;")};
+}
+
 /// @brief Builds site data that can later  be rendered without PostgreSQL.
 ///
 /// Reads tutorials and reference entities, checks SQL catalog data against the
@@ -3036,11 +3052,12 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
                     .target = source.canonical_id, .attributes = {{"entity_id", source.canonical_id}}},
                 content_node{.kind = content_node_kind::text, .text = "."}}});
         entity.detail_content.push_back(reference_heading("Examples", "examples"));
+        const auto row_example = relation_row_example(source);
         entity.detail_content.push_back(reference_paragraph(row_type
-            ? "Read whole rows as values of this composite type."
+            ? row_example.first
             : "Inspect the index definition installed by the extension."));
         entity.detail_content.push_back(content_node{.kind = content_node_kind::code_block,
-            .text = row_type ? "SELECT row_value FROM " + owner_name + " AS row_value LIMIT 5;"
+            .text = row_type ? row_example.second
                 : "SELECT pg_get_indexdef('" + entity.qualified_name + "'::regclass);",
             .attributes = {{"language", "sql"}}});
     }
@@ -3203,6 +3220,23 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
 /// select individual overloads, including when the extension schema changes.
 /// Also checks EXPLAIN filterin and annotated code rendering.
 void verify_reference_pipeline() {
+    reference_entity sequence_relation;
+    sequence_relation.qualified_name = "bioseq_external.sequences";
+    sequence_relation.attributes["access_method"] = "\"bioseq_external\"";
+    const auto external_row_example = relation_row_example(sequence_relation);
+    expect(external_row_example.second
+               == "SELECT row_value FROM bioseq_external.sequences AS row_value WHERE false;"
+               && external_row_example.first.contains("without contacting")
+               && external_row_example.first.contains("returns no rows"),
+           "external sequence row examples do not start an accession-free provider scan");
+    sequence_relation.qualified_name = "other_schema.sequences";
+    sequence_relation.attributes["access_method"] = "bioseq_external";
+    expect(relation_row_example(sequence_relation).second.ends_with(" WHERE false;"),
+           "external row examples follow the access method independently of schema spelling");
+    sequence_relation.attributes["access_method"] = "\"heap\"";
+    expect(relation_row_example(sequence_relation).second
+               == "SELECT row_value FROM other_schema.sequences AS row_value LIMIT 5;",
+           "ordinary stored row types retain their readable sample query");
     auto explain_probe = boost::json::parse(R"JSON([
         {"Plan":{"Bioseq Batch ABI Version":1,"Plans":[
             {"Fully Attested Alignment Jobs":2,"Scalar Fallbacks":3,
