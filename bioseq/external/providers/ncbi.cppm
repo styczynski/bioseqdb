@@ -12,6 +12,7 @@ module;
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -79,6 +80,9 @@ struct ncbi_plan {
     std::string accession;
     std::optional<std::int64_t> taxon_id;
     std::optional<std::uint64_t> limit;
+    // Optional genomic interval, using zero-based, half-open coordinates.
+    std::optional<std::uint64_t> start0;
+    std::optional<std::uint64_t> end0;
 
     /// Estimate storage for the plan and its strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
@@ -86,7 +90,7 @@ struct ncbi_plan {
                accession.capacity();
     }
 
-    /// Hash the operation, taxon term, and accession for plan identification.
+    /// Hash the operation, lookup values, and requested interval for plan identification.
     /// The target and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
@@ -100,6 +104,15 @@ struct ncbi_plan {
         mix(operation_id);
         mix(taxon_term);
         mix(accession);
+        if (start0) {
+            mix("range");
+            for (const std::uint64_t coordinate : {*start0, *end0}) {
+                for (unsigned shift = 0; shift < 64; shift += 8) {
+                    hash ^= (coordinate >> shift) & 0xffU;
+                    hash *= 1099511628211ULL;
+                }
+            }
+        }
         mix("ncbi");
         prov::external_execution_key key{};
         for (std::size_t index = 0; index < key.size(); ++index) {
@@ -710,6 +723,8 @@ class ncbi_session {
         payload.key.original_identifier = ncbi_bounded_id(plan_.accession);
         payload.key.accession = ncbi_bounded_id(plan_.accession);
         payload.strand = prov::genomic_interval::strand::forward;
+        payload.start0 = plan_.start0;
+        payload.end0 = plan_.end0;
         payload.audit.completed_at = completion_now();
         return payload;
     }
@@ -775,6 +790,12 @@ class ncbi_session {
         std::string path = "/entrez/eutils/efetch.fcgi?db=nuccore&id=";
         path += plan_.accession;
         path += "&rettype=fasta&retmode=text";
+        if (plan_.start0) {
+            // EFetch uses one-based, closed coordinates. The exclusive end
+            // has the same integer value in both coordinate systems.
+            path += "&seq_start=" + std::to_string(*plan_.start0 + 1);
+            path += "&seq_stop=" + std::to_string(*plan_.end0);
+        }
 
         auto response = client.get(path);
         if (!response.has_value()) {
@@ -799,6 +820,12 @@ class ncbi_session {
                                                        ncbi_provider_id(),
                                                        "efetch_nuccore_fasta",
                                                        "NCBI efetch returned no sequence bases"));
+        }
+        if (plan_.start0 && bases.size() != *plan_.end0 - *plan_.start0) {
+            return std::unexpected(make_external_error(
+                external_error_kind::integrity, ncbi_provider_id(),
+                "efetch_nuccore_fasta",
+                "NCBI returned a different sequence length than the requested interval"));
         }
 
         auto emitted = emit_sequence_payloads(sink, bases, stop);
@@ -878,6 +905,8 @@ struct ncbi_provider {
         std::optional<std::string_view> text_term;
         std::optional<std::int64_t> taxon;
         std::optional<std::string_view> accession;
+        std::optional<std::int64_t> start0;
+        std::optional<std::int64_t> end0;
         for (const prov::predicate_node& node : query.predicates) {
             if (const auto* text = std::get_if<prov::text_search_predicate>(&node.leaf)) {
                 if (!text_term) {
@@ -920,6 +949,28 @@ struct ncbi_provider {
                         accession = value->view();
                     }
                     break;
+                case prov::external_field::start0:
+                case prov::external_field::end0: {
+                    std::optional<std::int64_t> coordinate;
+                    if (const auto* value = std::get_if<std::int64_t>(&first)) {
+                        coordinate = *value;
+                    } else if (const auto* value = std::get_if<std::uint64_t>(&first);
+                               value && *value <= static_cast<std::uint64_t>(
+                                   std::numeric_limits<std::int64_t>::max())) {
+                        coordinate = static_cast<std::int64_t>(*value);
+                    }
+                    if (!coordinate) {
+                        return std::unexpected(make_external_error(
+                            external_error_kind::invalid_query, ncbi_provider_id(),
+                            "efetch_nuccore_fasta", "NCBI interval bounds must be bigint values"));
+                    }
+                    if (comparison->field == prov::external_field::start0) {
+                        start0 = *coordinate;
+                    } else {
+                        end0 = *coordinate;
+                    }
+                    break;
+                }
                 default:
                     break;
                 }
@@ -957,6 +1008,16 @@ struct ncbi_provider {
             if (accession) {
                 plan.accession.assign(*accession);
             }
+            if (start0 || end0) {
+                if (!start0 || !end0 || *start0 < 0 || *end0 <= *start0) {
+                    return std::unexpected(make_external_error(
+                        external_error_kind::invalid_query, ncbi_provider_id(),
+                        "efetch_nuccore_fasta",
+                        "NCBI sequence intervals require both start0 and end0 with 0 <= start0 < end0"));
+                }
+                plan.start0 = static_cast<std::uint64_t>(*start0);
+                plan.end0 = static_cast<std::uint64_t>(*end0);
+            }
         } else {
             // Catalog target resolves to a genome assembly report.
             if (accession) {
@@ -966,6 +1027,12 @@ struct ncbi_provider {
                 plan.operation_id = "genome_dataset_reports_by_taxon";
                 plan.taxon_id = taxon;
                 plan.taxon_term = std::to_string(*taxon);
+            } else if (text_term) {
+                // NCBI Datasets accepts a scientific or common name here as
+                // well as a TaxID. Preserve the requested organism instead
+                // of querying the unfiltered default organism.
+                plan.operation_id = "genome_dataset_reports_by_taxon";
+                plan.taxon_term.assign(*text_term);
             } else {
                 plan.operation_id = "genome_dataset_reports_by_taxon";
                 plan.taxon_term = "9606";

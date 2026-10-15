@@ -232,6 +232,17 @@ streaming_accession(const scan_runtime &runtime)
     if (runtime.provider_names.size() != 1 ||
         runtime.provider_names.front() != "ncbi")
         return std::nullopt;
+    // The provider validates explicit intervals and requests only that range
+    // from EFetch. The whole-record streaming path does not carry bounds.
+    for (const provider::predicate_node &node : runtime.query.predicates)
+    {
+        const auto *comparison =
+            std::get_if<provider::comparison_predicate>(&node.leaf);
+        if (comparison != nullptr &&
+            (comparison->field == provider::external_field::start0 ||
+             comparison->field == provider::external_field::end0))
+            return std::nullopt;
+    }
     return external_io::accession_from_query(runtime.query);
 }
 
@@ -729,7 +740,8 @@ append_identity_part(std::string &key, std::string_view value)
  * @brief Builds the key used to remove duplicate provider messages.
  *
  * Keys include the provider and selected record identifiers. Sequence keys
- * also include the chunk index. Returns empty for messages without a row key.
+ * also include interval bounds and the chunk index. Returns empty for messages
+ * without a row key.
  */
 std::string
 message_identity_key(const provider::owning_provider_message &message)
@@ -759,6 +771,10 @@ message_identity_key(const provider::owning_provider_message &message)
 		key = 's';
 		append_identity_part(key, sequence->provider.value);
 		append_identity_part(key, sequence->key.accession.view());
+		append_identity_part(key, sequence->start0
+			? std::to_string(*sequence->start0) : "whole");
+		append_identity_part(key, sequence->end0
+			? std::to_string(*sequence->end0) : "whole");
 		key += '#';
 		key += std::to_string(sequence->chunk_index);
 		return key;

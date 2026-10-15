@@ -67,7 +67,11 @@ taxonomy final {
     std::int64_t retrieved_at;
 };
 
-/** @brief Provider records with identifiers and biological metadata. */
+/** @brief Provider records with identifiers and biological metadata.
+ * @details For NCBI, this table returns genome assembly reports from Datasets.
+ * An equality filter on scientific_name or taxon_id selects the organism.
+ * It is an assembly catalog, not the Entrez Nucleotide text-search index.
+ */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -205,7 +209,13 @@ record_locations final {
     std::int64_t retrieved_at;
 };
 
-/** @brief A complete sequence and the provider record it came from. */
+/** @brief A complete sequence or an explicitly requested genomic interval.
+ * @details NCBI requests require an accession equality filter. Supplying both
+ * start0 and end0 equality filters downloads only that zero-based, half-open
+ * interval: start0 is included and end0 is excluded. The returned sequence
+ * has end0 - start0 bases, while its own slice coordinates begin at zero.
+ * Without interval filters, the whole sequence is returned.
+ */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",

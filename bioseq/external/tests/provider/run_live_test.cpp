@@ -6,22 +6,148 @@
 // Run, the providers directly with the query format used by PostgreSQL.
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 import bioseq.external.providers.run;
+import bioseq.external.providers.ncbi;
 import bioseq.external.provider.base;
 import bioseq.external.provider.query;
 import bioseq.external.provider.messages;
 import bioseq.external.provider.model;
 import bioseq.external.provider.runtime_services;
 import bioseq.external.provider.budget;
+import bioseq.external.provider.capabilities;
 import bioseq.common.context;
 import bioseq.parallelism.pool;
 
 using namespace bioseq::external::provider;
+
+TEST_CASE("NCBI catalog planning preserves the requested organism name",
+          "[component:external_api][layer:unit][feature:external_source]") {
+    normalized_external_query query;
+    query.target = query_target::catalog;
+    comparison_predicate organism;
+    organism.operation = predicate_operator::equal;
+    organism.field = external_field::scientific_name;
+    organism.values.push_back(external_scalar{
+        *bounded_string<maximum_identifier_bytes>::make("Heliconius erato demophoon")});
+    predicate_node name_node;
+    name_node.kind = predicate_node_kind::comparison;
+    name_node.leaf = std::move(organism);
+    query.predicates.push_back(std::move(name_node));
+
+    auto planned = bioseq::external::providers::ncbi_provider::plan(
+        query, provider_capability_snapshot{}, external_slot_budget{});
+    REQUIRE(planned.has_value());
+    REQUIRE(planned->operation_id == "genome_dataset_reports_by_taxon");
+    REQUIRE(planned->taxon_term == "Heliconius erato demophoon");
+    REQUIRE_FALSE(planned->taxon_id.has_value());
+
+    // An explicit TaxID remains authoritative when both filters are present.
+    comparison_predicate taxon;
+    taxon.operation = predicate_operator::equal;
+    taxon.field = external_field::taxon_id;
+    taxon.values.push_back(external_scalar{std::int64_t{1608923}});
+    predicate_node taxon_node;
+    taxon_node.kind = predicate_node_kind::comparison;
+    taxon_node.leaf = std::move(taxon);
+    query.predicates.push_back(std::move(taxon_node));
+    planned = bioseq::external::providers::ncbi_provider::plan(
+        query, provider_capability_snapshot{}, external_slot_budget{});
+    REQUIRE(planned.has_value());
+    REQUIRE(planned->taxon_term == "1608923");
+    REQUIRE(planned->taxon_id == 1608923);
+}
+
+TEST_CASE("NCBI sequence intervals use validated half-open bounds",
+          "[component:external_api][layer:unit][feature:external_source]") {
+    const auto query_for = [](std::optional<std::int64_t> start,
+                              std::optional<std::int64_t> end) {
+        normalized_external_query query;
+        query.target = query_target::sequence;
+        const auto add = [&query](external_field field, std::int64_t value) {
+            comparison_predicate comparison;
+            comparison.field = field;
+            comparison.operation = predicate_operator::equal;
+            comparison.values.push_back(external_scalar{value});
+            predicate_node node;
+            node.kind = predicate_node_kind::comparison;
+            node.leaf = std::move(comparison);
+            query.predicates.push_back(std::move(node));
+        };
+        if (start) add(external_field::start0, *start);
+        if (end) add(external_field::end0, *end);
+        return query;
+    };
+    const auto plan = [&query_for](std::optional<std::int64_t> start,
+                                  std::optional<std::int64_t> end) {
+        return bioseq::external::providers::ncbi_provider::plan(
+            query_for(start, end), provider_capability_snapshot{}, external_slot_budget{});
+    };
+    auto bounded = plan(0, 100);
+    REQUIRE(bounded.has_value());
+    REQUIRE(bounded->start0 == 0);
+    REQUIRE(bounded->end0 == 100);
+    auto whole = plan(std::nullopt, std::nullopt);
+    REQUIRE(whole.has_value());
+    REQUIRE_FALSE(whole->start0.has_value());
+    REQUIRE(bounded->execution_fingerprint() != whole->execution_fingerprint());
+    REQUIRE(bounded->execution_fingerprint() != plan(1, 100)->execution_fingerprint());
+    REQUIRE_FALSE(plan(0, std::nullopt).has_value());
+    REQUIRE_FALSE(plan(std::nullopt, 100).has_value());
+    REQUIRE_FALSE(plan(-1, 100).has_value());
+    REQUIRE_FALSE(plan(100, 100).has_value());
+    REQUIRE_FALSE(plan(101, 100).has_value());
+    auto unsigned_query = query_for(0, 100);
+    std::get<comparison_predicate>(unsigned_query.predicates.front().leaf)
+        .values.front() = std::uint64_t{0};
+    REQUIRE(bioseq::external::providers::ncbi_provider::plan(
+        unsigned_query, provider_capability_snapshot{}, external_slot_budget{}).has_value());
+    std::get<comparison_predicate>(unsigned_query.predicates.front().leaf)
+        .values.front() = UINT64_MAX;
+    REQUIRE_FALSE(bioseq::external::providers::ncbi_provider::plan(
+        unsigned_query, provider_capability_snapshot{}, external_slot_budget{}).has_value());
+}
+
+TEST_CASE("NCBI bounded sequence retrieval returns the requested bases and coordinates",
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+    normalized_external_query query;
+    query.target = query_target::sequence;
+    const auto add = [&query](external_field field, external_scalar value) {
+        comparison_predicate comparison;
+        comparison.field = field;
+        comparison.operation = predicate_operator::equal;
+        comparison.values.push_back(std::move(value));
+        predicate_node node;
+        node.kind = predicate_node_kind::comparison;
+        node.leaf = std::move(comparison);
+        query.predicates.push_back(std::move(node));
+    };
+    add(external_field::accession,
+        *bounded_string<maximum_identifier_bytes>::make("NC_012920.1"));
+    add(external_field::start0, std::int64_t{0});
+    add(external_field::end0, std::int64_t{20});
+    context::context memory;
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    external_runtime_services runtime{};
+    external_slot_budget budget;
+    budget.provider = provider_id{.value = "ncbi"};
+    auto result = bioseq::external::run_external_query(
+        memory, pool, runtime, std::nullopt, provider_id{.value = "ncbi"}, query, budget);
+    INFO((result.error ? std::string(result.error->message.view()) : ""));
+    REQUIRE_FALSE(result.error.has_value());
+    REQUIRE(result.messages.size() == 1);
+    const auto* payload = std::get_if<owning_sequence_payload>(&result.messages.front());
+    REQUIRE(payload != nullptr);
+    REQUIRE(payload->start0 == 0);
+    REQUIRE(payload->end0 == 20);
+    REQUIRE(payload->bases == "GATCACAGGTCTATCACCCT");
+}
 
 namespace {
 
