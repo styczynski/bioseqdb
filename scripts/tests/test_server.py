@@ -1856,7 +1856,7 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 "BIOSEQ_BUILD_WEBSITE": "ON",
                 "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
-                "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+                "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
             },
         )
 
@@ -1998,13 +1998,31 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
         self.assertEqual(
             set(commands[0][3:]),
             {
-                "-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF",
                 "-DBIOSEQ_BUILD_WEBSITE=ON",
                 "-DBIOSEQ_BUILD_CACHE=ON",
                 "-DBIOSEQ_WEBSITE_BROWSER_TESTS=ON",
                 "-DDOXYGEN_EXECUTABLE=/managed/doxygen/1.9.8/bin/doxygen",
             },
         )
+        self.assertEqual(commands[1][:2], ["cmake", "--build"])
+
+    def test_website_repairs_a_legacy_external_disabled_tree_before_build(self):
+        commands = self._run_optional_transition(
+            "website",
+            build_presets.WEBSITE_BUILD_PRESET,
+            {
+                "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+                "BIOSEQ_BUILD_WEBSITE": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
+                "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
+            },
+        )
+        self.assertEqual(
+            commands[0][:3],
+            ["cmake", "--preset", build_presets.WEBSITE_BUILD_PRESET],
+        )
+        self.assertIn("-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON", commands[0])
+        self.assertNotIn("-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF", commands[0])
         self.assertEqual(commands[1][:2], ["cmake", "--build"])
 
     def test_external_and_website_cannot_share_a_live_build_tree(self):

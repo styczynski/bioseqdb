@@ -505,7 +505,7 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_WEBSITE": "ON",
             "BIOSEQ_BUILD_CACHE": "ON",
             "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
-            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
         },
     ),
     POSTGRES_ERROR_SAFETY_MODE: ModeDefinition(

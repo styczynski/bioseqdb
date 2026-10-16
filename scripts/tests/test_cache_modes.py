@@ -128,6 +128,21 @@ class CachePresetContractTest(unittest.TestCase):
         self.assertIn("-save-temps=obj", flags.split())
         self.assertIn("-g", flags.split())
 
+    def test_website_presets_include_external_providers_for_runnable_sql(self) -> None:
+        for name in ("website-aws-x64-linux", "website-aws-x64-linux-debug"):
+            with self.subTest(preset=name):
+                contract = build_presets._cmake_preset_cache_contract(
+                    name,
+                    ("BIOSEQ_BUILD_CORE", "BIOSEQ_BUILD_CACHE",
+                     "BIOSEQ_BUILD_WEBSITE", "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS"),
+                )
+                self.assertEqual(contract, {
+                    "BIOSEQ_BUILD_CORE": "ON",
+                    "BIOSEQ_BUILD_CACHE": "ON",
+                    "BIOSEQ_BUILD_WEBSITE": "ON",
+                    "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
+                })
+
 
 class CacheModeResolutionTest(unittest.TestCase):
     def test_website_presets_are_host_native_and_overrideable(self) -> None:
