@@ -33,7 +33,7 @@ An alignment places two sequences in columns so that corresponding bases can be 
 
 ![DNA letters and a small alignment with a mismatch and a gap.](/static/figures/blog/butterflies/dna-alignment.svg)
 
-We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence. BioseqDB's `mmsearch` starts with short shared fragments, joins promising matches into chains, then aligns selected regions in more detail. This is the [seed-and-extend idea](/v0.1/tutorials/project_alignment_foundations/#seed-and-extend). My [Python read-mapper tutorial](/blog/writing-a-dna-read-mapper-in-python/) goes through the algorithms if you want to build a small version yourself.
+We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence. BioseqDB's `mmsearch` starts with short shared fragments, connects promising matches into chains, then aligns selected regions in more detail. This is the [seed-and-extend idea](/v0.1/tutorials/project_alignment_foundations/#seed-and-extend). My [Python read-mapper tutorial](/blog/writing-a-dna-read-mapper-in-python/) goes through the algorithms if you want to build a small version yourself.
 
 Pangenomics considers variation across multiple genomes instead of treating one reference as the entire species. Here we start with a pairwise comparison across two species. It is a useful first exercise in comparative genomics, but the resulting ribbons are not a pangenome graph and do not describe all variation within either species.
 
@@ -613,7 +613,7 @@ A ribbon diagram looks complicated until we separate its parts. A sequence track
 
 ![A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.](/static/figures/blog/butterflies/rectangle-coordinates.svg)
 
-An alignment joins two intervals with a four-corner polygon. For a forward match, the target's left endpoint corresponds to the query's left endpoint. For a reverse match, it corresponds to the query's right endpoint.
+An alignment connects two intervals with a four-corner polygon. For a forward match, the target's left endpoint corresponds to the query's left endpoint. For a reverse match, it corresponds to the query's right endpoint.
 
 ![The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.](/static/figures/blog/butterflies/ribbon-coordinates.svg)
 

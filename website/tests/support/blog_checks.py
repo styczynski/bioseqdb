@@ -98,6 +98,8 @@ def _butterfly_results(page, width, label):
       return {columns:table.tHead.rows[0].cells.length, rows:table.tBodies[0].rows.length,
         populated:[...table.tBodies[0].querySelectorAll('td')]
           .every(c=>c.textContent.trim() && c.textContent.trim() !== 'NULL'),
+        contained:[...table.tBodies[0].querySelectorAll('td')]
+          .every(c=>c.scrollWidth <= c.clientWidth + 1),
         cellWidth:Math.min(...[...table.tHead.rows[0].cells].map(c=>c.getBoundingClientRect().width)),
         viewport:region.clientWidth, content:region.scrollWidth,
         overflow:getComputedStyle(region).overflowX, focusable:region.tabIndex===0};
@@ -106,6 +108,7 @@ def _butterfly_results(page, width, label):
            f'{label}: expected eight populated alignment rows with thirteen columns: {result}')
     _check(result['cellWidth'] >= 100 and result['focusable'] and result['overflow'] == 'auto',
            f'{label}: alignment columns are squeezed or their scroll region is inaccessible: {result}')
+    _check(result['contained'], f'{label}: a long alignment value overlaps another column: {result}')
     if width <= 1300:
         _check(result['content'] > result['viewport'],
                f'{label}: wide alignment has no horizontal scrolling: {result}')
