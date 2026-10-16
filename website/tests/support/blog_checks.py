@@ -88,6 +88,30 @@ def _tooltip_bounds(page, tooltip, label):
            f"{label}: tooltip is outside the viewport: {bounds}")
 
 
+def _butterfly_results(page, width, label):
+    """Keep the real thirteen-column alignment readable on narrow screens."""
+    result = page.locator('.blog-content .result-table').evaluate_all("""tables => {
+      const table = tables.find(t => t.tHead?.rows[0]?.cells[0]?.textContent
+        .trim().startsWith('target_accession'));
+      if (!table) return null;
+      const region = table.closest('.result-scroll');
+      return {columns:table.tHead.rows[0].cells.length, rows:table.tBodies[0].rows.length,
+        populated:[...table.tBodies[0].querySelectorAll('td')]
+          .every(c=>c.textContent.trim() && c.textContent.trim() !== 'NULL'),
+        cellWidth:Math.min(...[...table.tHead.rows[0].cells].map(c=>c.getBoundingClientRect().width)),
+        viewport:region.clientWidth, content:region.scrollWidth,
+        overflow:getComputedStyle(region).overflowX, focusable:region.tabIndex===0};
+    }""")
+    _check(result and result['columns'] == 13 and result['rows'] == 8 and result['populated'],
+           f'{label}: expected eight populated alignment rows with thirteen columns: {result}')
+    _check(result['cellWidth'] >= 100 and result['focusable'] and result['overflow'] == 'auto',
+           f'{label}: alignment columns are squeezed or their scroll region is inaccessible: {result}')
+    if width <= 1300:
+        _check(result['content'] > result['viewport'],
+               f'{label}: wide alignment has no horizontal scrolling: {result}')
+    return result
+
+
 def _copy_buttons(page, theme):
     """Copied/error feedback must return to readable theme CSS, not stale inline colors."""
     from playwright.sync_api import expect
@@ -491,7 +515,11 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
     page = context.new_page()
     page.on('pageerror', lambda error: errors.append(str(error)))
     for theme in ('dark', 'light'):
-        for name, route in (('index', path('blog/')), ('post', path('blog/introducing-bioseqdb/'))):
+        for name, route in (
+            ('index', path('blog/')),
+            ('post', path('blog/introducing-bioseqdb/')),
+            ('butterflies', path('blog/comparing-butterfly-genomes-with-bioseqdb/')),
+        ):
             page.goto(server.url_for(route), wait_until='networkidle')
             if page.locator('html').get_attribute('data-theme') != theme:
                 page.locator('[data-theme-toggle]').click()
@@ -502,7 +530,7 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
             if name == 'index':
                 _check(page.locator('.blog-card h2 a[href$="/introducing-bioseqdb/"]').count() == 1,
                        'first post is missing from the blog index')
-            else:
+            elif name == 'post':
                 _publication(page, context, server, path)
             for width in WIDTHS:
                 page.set_viewport_size({'width': width, 'height': 1000})
@@ -510,10 +538,15 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
                 _settle(page)
                 label = f'{name}/{theme}/{width}'
                 report = {'page': name, 'theme': theme, 'width': width, 'geometry': _layout(page, width, label)}
+                if name == 'butterflies':
+                    report['alignment_table'] = _butterfly_results(page, width, label)
                 if width in (420, 1600):
                     screenshot = output / f'{name}-{theme}-{width}.png'
                     page.screenshot(path=str(screenshot), full_page=True, animations='disabled')
                     report['screenshot'] = screenshot.name
+                    if name == 'butterflies':
+                        page.screenshot(path=str(output / f'{name}-opening-{theme}-{width}.png'),
+                                        animations='disabled')
                     if theme == 'light':
                         report['contrast'] = _light_readability(page, label)
                 reports.append(report)

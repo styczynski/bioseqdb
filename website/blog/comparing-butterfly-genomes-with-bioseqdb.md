@@ -50,7 +50,7 @@ The division of work is fairly small: PostgreSQL stores the sequences and Bioseq
 > [!WARNING]
 > **Availability on 16 October 2026.** The published `0.1.0-alpha.1` Docker images and native package build profiles omit the external-database integration used here. It is planned for the next alpha release. A runtime `SET`, an API key, or a `GRANT` cannot add a feature omitted at build time. This tutorial is validated against a source build with `BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON`; check your installation before running the NCBI queries.
 
-The [installation page](/v0.1/tutorials/getting_started/) covers the regular Docker and native packages. For this tutorial, use the external-enabled development build described in the [example's setup instructions](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments#database-setup). The important CMake option is:
+The [installation page](/v0.1/tutorials/getting_started/) covers the regular Docker and native packages. For this tutorial, use the external-enabled development build described in the [example's setup instructions](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments#database-setup). Those instructions pin a public source revision and apply the NCBI query fixes included with the example. The important CMake option is:
 
 ```sh
 cmake -S . -B build/butterflies -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON
