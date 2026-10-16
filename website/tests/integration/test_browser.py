@@ -1833,7 +1833,9 @@ def _assert_content_scroll_layout(page, label: str) -> None:
         """cells => cells.map(cell => ({width: cell.getBoundingClientRect().width,
             wrap: getComputedStyle(cell).overflowWrap,
             break: getComputedStyle(cell).wordBreak}))""")
-    _check(all(cell["width"] >= 143 and cell["wrap"] == "normal"
+    # break-word contains long CIGAR strings without changing min-content
+    # sizing. Keep rejecting anywhere/break-all, which squeeze ordinary cells.
+    _check(all(cell["width"] >= 143 and cell["wrap"] in ("normal", "break-word")
                and cell["break"] == "normal" for cell in widths),
            f"{label}: wide SQL result columns collapse or break one character at a time")
     _check(page.locator(".algorithm-line-body").evaluate_all(
