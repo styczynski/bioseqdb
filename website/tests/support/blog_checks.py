@@ -115,6 +115,73 @@ def _butterfly_results(page, width, label):
     return result
 
 
+def _butterfly_lazy_figures(browser, server, path, output, offline):
+    """Direct section links must remain visible while delayed figures load."""
+    image_pattern = re.compile(r'/figures/blog/butterflies/[^/]+\.svg$')
+    snapshot = """anchor => {
+      const heading = document.getElementById(anchor);
+      return {top:heading.getBoundingClientRect().top,
+        margin:parseFloat(getComputedStyle(heading).scrollMarginTop),
+        header:parseFloat(getComputedStyle(document.documentElement)
+          .getPropertyValue('--site-header-height')),
+        images:[...document.querySelectorAll('.blog-content img[src*="/figures/blog/butterflies/"]')]
+          .map(image => ({height:image.getBoundingClientRect().height,
+            ratio:getComputedStyle(image).aspectRatio,
+            loaded:image.complete && image.naturalWidth > 0}))};
+    }"""
+    reports = []
+    for theme in ('dark', 'light'):
+        for width in (420, 1024, 1600):
+            for anchor in ('4-find-the-assemblies-by-organism-name', '12-add-gene-models-and-local-gc'):
+                context = browser.new_context(viewport={'width': width, 'height': 1000})
+                context.add_init_script(f"localStorage.setItem('bioseq-theme', '{theme}')")
+                pending, released = [], False
+
+                def delay_figures(route):
+                    if not released and image_pattern.search(urlsplit(route.request.url).path):
+                        pending.append(route)
+                    else:
+                        offline(route)
+
+                context.route('**/*', delay_figures)
+                page = context.new_page()
+                label = f'butterflies/{theme}/{width}/#{anchor}'
+                try:
+                    page.goto(server.url_for(path('blog/comparing-butterfly-genomes-with-bioseqdb/'))
+                              + '#' + anchor, wait_until='domcontentloaded')
+                    page.evaluate('document.fonts.ready')
+                    # Let native smooth fragment navigation finish, with every
+                    # butterfly figure response still held back.
+                    deadline = time.monotonic() + 6
+                    while time.monotonic() < deadline:
+                        before = page.evaluate(snapshot, anchor)
+                        if abs(before['top'] - before['margin']) <= 1:
+                            break
+                        page.wait_for_timeout(100)
+                    _check(len(before['images']) == 19 and all(
+                        not image['loaded'] and image['height'] > 0 and image['ratio'] != 'auto'
+                        for image in before['images']), f'{label}: unloaded figures reserve no space')
+                    _check(before['header'] <= before['top'] <= before['header'] + 40,
+                           f'{label}: direct section link misses its heading: {before["top"]}')
+                    released = True
+                    for route in pending:
+                        offline(route)
+                    page.locator('.blog-content img').evaluate_all("""images => Promise.all(
+                      images.map(image => { image.loading = 'eager'; return image.decode(); }))""")
+                    _settle(page)
+                    after = page.evaluate(snapshot, anchor)
+                    height_delta = max(abs(a['height'] - b['height'])
+                                       for a, b in zip(after['images'], before['images']))
+                    _check(abs(after['top'] - before['top']) <= 1 and height_delta <= 1,
+                           f'{label}: delayed figures moved the section heading or changed height')
+                    reports.append({'theme': theme, 'width': width, 'anchor': anchor,
+                                    'before_top': before['top'], 'after_top': after['top'],
+                                    'maximum_height_delta': height_delta})
+                finally:
+                    context.close()
+    (output / 'lazy-figures-report.json').write_text(json.dumps(reports, indent=2) + '\n')
+
+
 def _copy_buttons(page, theme):
     """Copied/error feedback must return to readable theme CSS, not stale inline colors."""
     from playwright.sync_api import expect
@@ -535,6 +602,12 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
                        'first post is missing from the blog index')
             elif name == 'post':
                 _publication(page, context, server, path)
+            # Check every figure's response, including images intentionally lazy
+            # below the fold. Lazy layout stability is checked separately.
+            page.locator('main img').evaluate_all("""images => Promise.all(images.map(image => {
+                image.loading = 'eager';
+                return image.decode();
+            }))""")
             for width in WIDTHS:
                 page.set_viewport_size({'width': width, 'height': 1000})
                 page.evaluate('scrollTo(0,0)')
@@ -559,6 +632,7 @@ def exercise_blog(browser, server, base_path, artifact_dir: Path):
     _banner(page)
     _check(not errors, f'blog or banner raised browser errors: {errors}')
     context.close()
+    _butterfly_lazy_figures(browser, server, path, output, offline)
     _blog_browser(browser, server, path, output, offline)
 
     reduced = browser.new_context(viewport={'width': 320, 'height': 900}, reduced_motion='reduce')

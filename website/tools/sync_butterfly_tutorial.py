@@ -1,24 +1,64 @@
 #!/usr/bin/env python3
-"""Keep published butterfly snippets identical to the runnable examples archive.
+"""Keep butterfly snippets and reserved figure dimensions tied to their sources.
 
 Use --examples PATH --write to refresh from the examples checkout. The normal
---check path uses only the committed archive, so website builds are independent
-of a sibling checkout or GitHub availability. Biological integration execution
+--check path uses the committed archive and SVG/CSS sources, so website builds
+are independent of a sibling checkout or GitHub availability. Biological integration execution
 is separate; this checker does not pretend to run PostgreSQL or Python packages.
+Figure aspect ratios come directly from the canonical SVG viewBoxes, so lazy
+loading does not move the article's section anchors.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+from decimal import Decimal, InvalidOperation
 import io
 import json
 from pathlib import Path
 import re
 import zipfile
+import xml.etree.ElementTree as ET
 
 WEBSITE = Path(__file__).resolve().parents[1]
 POST = WEBSITE / "blog/comparing-butterfly-genomes-with-bioseqdb.md"
 ARCHIVE = WEBSITE / "static/examples/butterfly-alignments.zip"
+FIGURES = WEBSITE / "static/figures/blog/butterflies"
+STYLESHEET = WEBSITE / "static/css/project-content.css"
+ASPECT_START = "/* butterfly-figure-aspect-ratios:start */"
+ASPECT_END = "/* butterfly-figure-aspect-ratios:end */"
+
+
+def figure_aspect_ratios():
+    """Reserve lazy-image space using exact SVG coordinates, before download."""
+    rules = []
+    for figure in sorted(FIGURES.glob("*.svg")):
+        view_box = ET.parse(figure).getroot().get("viewBox", "")
+        try:
+            values = [Decimal(value) for value in re.split(r"[\s,]+", view_box.strip())]
+        except InvalidOperation as error:
+            raise ValueError(f"Invalid SVG viewBox in {figure.name}: {view_box}") from error
+        if (len(values) != 4 or not all(value.is_finite() for value in values)
+                or values[2] <= 0 or values[3] <= 0):
+            raise ValueError(f"Invalid SVG viewBox in {figure.name}: {view_box}")
+        width, height = (format(value, "f") for value in values[2:])
+        rules.append(f'.blog-content img[src$="/figures/blog/butterflies/{figure.name}"] '
+                     f'{{ aspect-ratio: {width} / {height}; }}')
+    if not rules:
+        raise ValueError("No canonical butterfly SVG figures found")
+    return (ASPECT_START + "\n"
+            "/* Generated from SVG viewBox values by sync_butterfly_tutorial.py. */\n"
+            + "\n".join(rules) + "\n" + ASPECT_END)
+
+
+def replace_figure_aspect_ratios(stylesheet, block):
+    if ASPECT_START not in stylesheet and ASPECT_END not in stylesheet:
+        return stylesheet.rstrip() + "\n\n" + block + "\n"
+    pattern = re.escape(ASPECT_START) + r".*?" + re.escape(ASPECT_END)
+    updated, count = re.subn(pattern, lambda _: block, stylesheet, flags=re.S)
+    if count != 1 or stylesheet.count(ASPECT_START) != 1 or stylesheet.count(ASPECT_END) != 1:
+        raise ValueError("Expected one complete butterfly figure aspect-ratio CSS block")
+    return updated
 
 
 def literal(value):
@@ -113,6 +153,8 @@ def main():
         files = {name.removeprefix("butterfies_alignments/"): archive.read(name).decode()
                  for name in archive.namelist()}
     expected = content(files)
+    stylesheet = STYLESHEET.read_text()
+    updated_stylesheet = replace_figure_aspect_ratios(stylesheet, figure_aspect_ratios())
     source = POST.read_text()
     updated = source
     for identifier, body in expected.items():
@@ -125,9 +167,13 @@ def main():
         POST.write_text(updated)
         ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
         ARCHIVE.write_bytes(raw)
+        STYLESHEET.write_text(updated_stylesheet)
     elif updated != source:
         raise SystemExit("Butterfly article snippets differ from the downloadable examples; run sync_butterfly_tutorial.py --write")
+    elif updated_stylesheet != stylesheet:
+        raise SystemExit("Butterfly figure aspect ratios differ from canonical SVG viewBox values; run sync_butterfly_tutorial.py --write")
     print(f"Butterfly tutorial: {len(expected)} snippet groups match {len(files)} archived source files")
+    print(f"Butterfly figures: {len(list(FIGURES.glob('*.svg')))} exact viewBox aspect ratios match CSS")
 
 
 if __name__ == "__main__":
