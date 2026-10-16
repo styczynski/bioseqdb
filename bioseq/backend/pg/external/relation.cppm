@@ -39,7 +39,19 @@ extern "C" {
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::table_am_handler,
 })]]
-/** @brief Returns the table access-method handler for external relations. */
+/** @brief Returns the table access-method handler for external relations.
+ *
+ * PostgreSQL supplies the internal argument when it opens a table
+ * using bioseq_external. Application SQL should query the external tables
+ * instead of calling this handler. Those tables reject writes and local
+ * indexes; their rows come from provider requests through BioseqExternalScan.
+ * ```sql
+ * -- Inspect the installed access method and its handler without contacting a provider.
+ * SELECT amname, amhandler::regproc AS handler
+ * FROM pg_catalog.pg_am
+ * WHERE amname = 'bioseq_external';
+ * ```
+ */
 PGDLLEXPORT Datum bioseq_external_handler(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
