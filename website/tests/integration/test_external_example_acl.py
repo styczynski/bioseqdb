@@ -49,7 +49,11 @@ def main() -> None:
         ORDER BY relname;
     """
     original_acl = psql(database, snapshot_sql)
-    psql("postgres", f"CREATE DATABASE {fixture} TEMPLATE {identifier(database)}")
+    # External TAM relations intentionally have no physical relation file;
+    # match the isolated executor's directory-copy strategy. Before PostgreSQL
+    # 15 this is the default and the STRATEGY option is not available.
+    strategy = " STRATEGY FILE_COPY" if int(psql(database, "SHOW server_version_num")) >= 150000 else ""
+    psql("postgres", f"CREATE DATABASE {fixture} TEMPLATE {identifier(database)}{strategy}")
     try:
         psql(fixture, "CREATE TABLE bioseq_external.website_private_probe(value integer)")
         fixture_acl = psql(fixture, snapshot_sql)

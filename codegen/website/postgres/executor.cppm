@@ -159,8 +159,16 @@ public:
             (void)admin.execute("REVOKE CONNECT ON DATABASE template1 FROM PUBLIC");
             (void)admin.execute("CREATE ROLE " + quoted_role
                 + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
+            // External access-method relations have no local storage files.
+            // Copy the template directory rather than asking WAL_LOG to open
+            // every catalog relfilenode as a physical relation. PostgreSQL
+            // before 15 already uses directory copying and has no STRATEGY.
+            const bioseq::libpq::command_result clone_strategy = admin.execute(
+                "SELECT current_setting('server_version_num')::integer >= 150000");
+            const std::string strategy = clone_strategy.text_value(0, 0) == "t"
+                ? " STRATEGY FILE_COPY" : "";
             (void)admin.execute("CREATE DATABASE " + quoted_clone + " TEMPLATE "
-                + quoted_template + " OWNER " + quoted_role);
+                + quoted_template + " OWNER " + quoted_role + strategy);
             (void)admin.execute("REVOKE CONNECT ON DATABASE " + quoted_clone + " FROM PUBLIC");
             (void)admin.execute("GRANT CONNECT ON DATABASE " + quoted_clone
                 + " TO " + quoted_role);
