@@ -17,7 +17,7 @@ For this example I use a few invented laboratory notes and a deliberately small 
 
 Here, `pg_search` means the **Rails gem**. The examples below use PostgreSQL 17's built-in text search; they do not require the separate PostgreSQL extension also named `pg_search`.
 
-![A note and a search query are parsed separately, matched in PostgreSQL, and returned with an explanation.](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/search-rules.svg)
+![A note and a search query are parsed separately, matched in PostgreSQL, and returned with an explanation.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/search-rules.svg)
 
 ## Decide what a match means
 

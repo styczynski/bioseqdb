@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c5a8d6:#7d468c;--theme-eef4f9:#173247;--theme-ef7a5a:#b3422b;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">DNA letters become alignment columns</title><desc id="desc">A, C, G and T denote DNA bases. N denotes an unknown base. A toy alignment shows a match, insertion, deletion and mismatch. This is not a butterfly result.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">DNA letters become alignment columns</tspan>
+</text>
+<rect x="52" y="83" width="68" height="65" rx="12" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.15"/>
+<text x="86" y="128" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="37" font-weight="bold" text-anchor="middle">
+<tspan x="86" dy="0">A</tspan>
+</text>
+<text x="86" y="178" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="86" dy="0">adenine</tspan>
+</text>
+<rect x="215" y="83" width="68" height="65" rx="12" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.15"/>
+<text x="249" y="128" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="37" font-weight="bold" text-anchor="middle">
+<tspan x="249" dy="0">C</tspan>
+</text>
+<text x="249" y="178" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="249" dy="0">cytosine</tspan>
+</text>
+<rect x="378" y="83" width="68" height="65" rx="12" fill="var(--theme-f4894f, #f4894f)" opacity="0.15"/>
+<text x="412" y="128" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="37" font-weight="bold" text-anchor="middle">
+<tspan x="412" dy="0">G</tspan>
+</text>
+<text x="412" y="178" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="412" dy="0">guanine</tspan>
+</text>
+<rect x="541" y="83" width="68" height="65" rx="12" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.15"/>
+<text x="575" y="128" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="37" font-weight="bold" text-anchor="middle">
+<tspan x="575" dy="0">T</tspan>
+</text>
+<text x="575" y="178" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="575" dy="0">thymine</tspan>
+</text>
+<rect x="704" y="83" width="68" height="65" rx="12" fill="var(--theme-a9bccb, #a9bccb)" opacity="0.15"/>
+<text x="738" y="128" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="37" font-weight="bold" text-anchor="middle">
+<tspan x="738" dy="0">N</tspan>
+</text>
+<text x="738" y="178" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="738" dy="0">unknown</tspan>
+</text>
+<path d="M30,207 L830,207" fill="none" stroke="var(--theme-20364a, #20364a)" stroke-width="2"/>
+<text x="30" y="245" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="21" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">One possible alignment</tspan>
+</text>
+<text x="30" y="295" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Target</tspan>
+</text>
+<text x="30" y="366" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Query</tspan>
+</text>
+<rect x="160" y="264" width="52" height="46" rx="6" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.14"/>
+<text x="186" y="297" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="186" dy="0">A</tspan>
+</text>
+<rect x="231" y="264" width="52" height="46" rx="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.14"/>
+<text x="257" y="297" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="257" dy="0">C</tspan>
+</text>
+<text x="328" y="297" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="328" dy="0">-</tspan>
+</text>
+<rect x="373" y="264" width="52" height="46" rx="6" fill="var(--theme-f4894f, #f4894f)" opacity="0.14"/>
+<text x="399" y="297" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="399" dy="0">G</tspan>
+</text>
+<rect x="444" y="264" width="52" height="46" rx="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.14"/>
+<text x="470" y="297" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="470" dy="0">T</tspan>
+</text>
+<rect x="515" y="264" width="52" height="46" rx="6" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.14"/>
+<text x="541" y="297" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="541" dy="0">A</tspan>
+</text>
+<rect x="586" y="264" width="52" height="46" rx="6" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.14"/>
+<text x="612" y="297" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="612" dy="0">A</tspan>
+</text>
+<rect x="657" y="264" width="52" height="46" rx="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.14"/>
+<text x="683" y="297" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="683" dy="0">C</tspan>
+</text>
+<rect x="160" y="336" width="52" height="46" rx="6" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.14"/>
+<text x="186" y="369" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="186" dy="0">A</tspan>
+</text>
+<rect x="231" y="336" width="52" height="46" rx="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.14"/>
+<text x="257" y="369" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="257" dy="0">C</tspan>
+</text>
+<rect x="302" y="336" width="52" height="46" rx="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.14"/>
+<text x="328" y="369" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="328" dy="0">T</tspan>
+</text>
+<rect x="373" y="336" width="52" height="46" rx="6" fill="var(--theme-f4894f, #f4894f)" opacity="0.14"/>
+<text x="399" y="369" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="399" dy="0">G</tspan>
+</text>
+<rect x="444" y="336" width="52" height="46" rx="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.14"/>
+<text x="470" y="369" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="470" dy="0">T</tspan>
+</text>
+<text x="541" y="369" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="541" dy="0">-</tspan>
+</text>
+<rect x="586" y="336" width="52" height="46" rx="6" fill="var(--theme-c5a8d6, #c5a8d6)" opacity="0.14"/>
+<text x="612" y="369" fill="var(--theme-c5a8d6, #c5a8d6)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="612" dy="0">A</tspan>
+</text>
+<rect x="657" y="336" width="52" height="46" rx="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="0.14"/>
+<text x="683" y="369" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="29" font-weight="bold" text-anchor="middle">
+<tspan x="683" dy="0">T</tspan>
+</text>
+<path d="M186,389 L186,414" fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="2"/>
+<text x="186" y="440" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="186" dy="0">match</tspan>
+</text>
+<path d="M328,389 L328,414" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2"/>
+<text x="328" y="440" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="328" dy="0">insertion</tspan>
+</text>
+<path d="M541,389 L541,414" fill="none" stroke="var(--theme-f4894f, #f4894f)" stroke-width="2"/>
+<text x="541" y="440" fill="var(--theme-f4894f, #f4894f)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="541" dy="0">deletion</tspan>
+</text>
+<path d="M683,389 L683,414" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="2"/>
+<text x="683" y="440" fill="var(--theme-ef7a5a, #ef7a5a)" font-family="Arial, sans-serif" font-size="17" font-weight="normal" text-anchor="middle">
+<tspan x="683" dy="0">mismatch</tspan>
+</text>
+<text x="30" y="486" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">The gap symbol “–” is added by the alignment; it is not a DNA base.</tspan>
+</text>
+<text x="30" y="535" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Illustrative letters only. Insertion/deletion are described relative to the target.</tspan>
+</text></svg>

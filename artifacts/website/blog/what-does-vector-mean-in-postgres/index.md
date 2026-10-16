@@ -15,7 +15,7 @@ If a database feature says it supports vectors, I still need to ask what I can p
 
 I find it easier to start with a sample record than with the word itself. Imagine a specimen with a free-text note, three measurements and a position on a laboratory diagram. All three belong to the sample, but searching the note, comparing measurements and drawing its position are separate tasks.
 
-![Three representations of a specimen record: searchable terms, numeric measurements and a geometric location. A separate row shows execution batches operating across records.](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/vector-meanings.svg)
+![Three representations of a specimen record: searchable terms, numeric measurements and a geometric location. A separate row shows execution batches operating across records.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/vector-meanings.svg)
 
 ## The vector made of words
 

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 545" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-ef7a5a:#b3422b;}}</style>
+<title id="title">Changing the view does not change the alignment</title><desc id="desc">An optix-centered view subtracts each gene midpoint. If gene strands differ, the query axis is reflected. This aligns gene orientation in the drawing without rewriting source coordinates or claiming a coordinate lift-over.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Changing the view does not change the alignment</tspan>
+</text>
+<text x="30" y="91" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Raw assembly directions</tspan>
+</text>
+<path d="M80,150 L760,150" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="8"/>
+<path d="M80,228 L760,228" fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="8"/>
+<path d="M300,150 L390,150" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="12" marker-end="url(#arrow)"/>
+<path d="M600,228 L510,228" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="12" marker-end="url(#arrow)"/>
+<text x="345" y="130" fill="var(--theme-ef7a5a, #ef7a5a)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="345" dy="0">optix →</tspan>
+</text>
+<text x="555" y="270" fill="var(--theme-ef7a5a, #ef7a5a)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="555" dy="0">← optix</tspan>
+</text>
+<path d="M390,162 L510,213" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" stroke-dasharray="7 5"/>
+<path d="M300,162 L600,213" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="30" y="325" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Reflect the query, then place both gene midpoints at zero</tspan>
+</text>
+<path d="M90,372 L770,372" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="8"/>
+<path d="M90,432 L770,432" fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="8"/>
+<path d="M390,372 L470,372" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="12" marker-end="url(#arrow)"/>
+<path d="M390,432 L470,432" fill="none" stroke="var(--theme-ef7a5a, #ef7a5a)" stroke-width="12" marker-end="url(#arrow)"/>
+<path d="M430,345 L430,458" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="430" y="485" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="21" font-weight="normal" text-anchor="middle">
+<tspan x="430" dy="0">0</tspan>
+</text>
+<text x="30" y="520" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Display only: x_target = t − center_target; x_query = orientation × (q − center_query).</tspan>
+</text></svg>

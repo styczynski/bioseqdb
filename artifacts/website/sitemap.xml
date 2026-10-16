@@ -3,6 +3,7 @@
   <url><loc>https://bioseqdb.com/benchmarks/</loc></url>
   <url><loc>https://bioseqdb.com/blog/chatdb-a-database-that-can-write-poems/</loc></url>
   <url><loc>https://bioseqdb.com/blog/combining-search-results-in-postgres/</loc></url>
+  <url><loc>https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/</loc></url>
   <url><loc>https://bioseqdb.com/blog/full-text-search-rules-in-sql/</loc></url>
   <url><loc>https://bioseqdb.com/blog/</loc></url>
   <url><loc>https://bioseqdb.com/blog/introducing-bioseqdb/</loc></url>
@@ -144,6 +145,7 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-array-cat-6e5c8d5a0774fd45/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-array-length-b0f969068f2007bf/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-bioseq-external-handler-ed74c269de8a788a/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-bioseq-handler-3c8ee7e5a69e9692/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-block-length-c3b35d7503632ce7/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cache-entries-caf232e33fd9db86/</loc></url>
@@ -453,6 +455,12 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-cec1ea7fbf58055c/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-chunk-92b01f4b97f3c21e/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-chunk-group-33062e032804ddaa/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-catalog-24547a35bdc66e9f/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-record-genes-22e3c62980357dc8/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-record-locations-cd229f7b7ba79742/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-sequence-chunks-ff0caa21f4836460/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-sequences-11cf0c7b06cc2b2a/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-external-taxonomy-505569cd12dc6cc3/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-f18c539261a8b51a/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-f939078ec302679a/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/bioseq-faeac6c7f01534a9/</loc></url>
@@ -579,6 +587,7 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/sequence-shard-max-size-gib-1109d7fffff02225/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/sequence-sort-scan-enabled-b339c617d3ef1ed4/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/sql-routines-bioseq-external-eb4355e52695097a/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/stripe-row-limit-48c288001cbe2d59/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/vectorization-enabled-d0771cec63520a6b/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/object/vulkan-enabled-abcada87cf4aa0df/</loc></url>
@@ -589,10 +598,17 @@
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/schema/bioseq-3f2f16945e0f12e7/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/schema/bioseq-cache-c20973e4b54249c2/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/schema/bioseq-external-e0b0f2dcdcaead9f/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/schema/bioseq-internal-c8d89c01dde6b109/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-chunk-adc739c5486743fd/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-chunk-group-42a679ca58909d59/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-column-mapping-e32729816d43db13/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-catalog-3d2b384f7a8c5ce9/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-record-genes-9291e0fb0bfb284a/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-record-locations-9b7881da99b1b09c/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-sequence-chunks-f162a9d4cd686d5e/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-sequences-6d3e58e8e443c0f0/</loc></url>
+  <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-external-taxonomy-66b749432045f721/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-chunk-2431bbd40890e139/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-chunk-group-bb2158949d931325/</loc></url>
   <url><loc>https://bioseqdb.com/v0.1/reference/sql/type/bioseq-internal-external-relation-options-a48c7fabcda9ed7d/</loc></url>

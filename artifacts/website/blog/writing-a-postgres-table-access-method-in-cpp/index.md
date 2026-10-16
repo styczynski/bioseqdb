@@ -21,7 +21,7 @@ This is an educational method for **PostgreSQL 17**, tested with **17.10**. It d
 
 ## 1. Get a small extension to build
 
-Download the [complete traceheap example](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/examples/traceheap.tar.gz). It contains the C++ source, the extension files and `test.sql`. You can also read the [source file](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/examples/traceheap/traceheap.cpp) directly.
+Download the [complete traceheap example](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/examples/traceheap.tar.gz). It contains the C++ source, the extension files and `test.sql`. You can also read the [source file](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/examples/traceheap/traceheap.cpp) directly.
 
 You need a C++ compiler, `make`, and the server development files for the PostgreSQL 17 installation you will run. Check `pg_config --version`; an unrelated `pg_config` earlier in `PATH` is an easy way to compile against the wrong headers. Use a disposable local database for this experiment. Installing an extension puts executable code inside the server process.
 
@@ -65,7 +65,7 @@ CREATE ACCESS METHOD traceheap TYPE TABLE HANDLER traceheap.handler;
 
 `MODULE_PATHNAME` is replaced during extension installation. The SQL name `traceheap.handler` and the exported symbol `traceheap_handler` are different names for different sides of the boundary. The function returns a pointer to a `TableAmRoutine`, whose members tell PostgreSQL how to scan, insert, update, maintain and inspect a table. [CREATE ACCESS METHOD](https://www.postgresql.org/docs/17/sql-create-access-method.html) documents the registration command; creating an access method requires superuser privileges.
 
-![The traceheap handler returns a callback table. Selected callbacks count operations and delegate to heap, while unsupported index and rewrite paths stop with an explicit error.](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/traceheap-dispatch.svg)
+![The traceheap handler returns a callback table. Selected callbacks count operations and delegate to heap, while unsupported index and rewrite paths stop with an explicit error.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/traceheap-dispatch.svg)
 
 The source starts by giving the PostgreSQL declarations C linkage:
 
@@ -164,7 +164,7 @@ SELECT traceheap.stats()->>'scan_rows' AS rows_delivered_by_am;
 
 The query returns `2, river` and `3, leaf`. The counter returns `4`. In this plan the table method supplies the visible rows and the executor applies `read_count >= 400` afterwards, so delivering a row from the access method does not imply that the row survives the SQL filter.
 
-![Four rows pass through the scan callback. The executor filters out soil and air, leaving river and leaf, so the table callback counter is four and the final result count is two.](/assets/6ad246586dfbc11854332631a95d00e528509581cd8f2f43ca4918229b9662a4/figures/blog/traceheap-scan.svg)
+![Four rows pass through the scan callback. The executor filters out soil and air, leaving river and leaf, so the table callback counter is four and the final result count is two.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/traceheap-scan.svg)
 
 Try `EXPLAIN (ANALYZE, COSTS OFF)` on the same query. It executes the query and therefore changes the counters too. Keeping the measurement query separate from the query being measured avoids an awkward evaluation-order question, and resetting immediately before each experiment makes the results easier to read.
 

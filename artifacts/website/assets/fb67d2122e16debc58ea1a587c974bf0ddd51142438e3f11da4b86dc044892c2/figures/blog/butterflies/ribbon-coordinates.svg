@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">Four endpoints make one alignment ribbon</title><desc id="desc">A forward alignment ribbon joins target start/end on an upper lane to query end/start on a lower lane. Reverse alignments connect the opposite query endpoint order. These are conceptual endpoints.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Four endpoints make one alignment ribbon</tspan>
+</text>
+<rect x="65" y="130" width="730" height="16" rx="3" fill="var(--theme-65b9dd, #65b9dd)" opacity="1"/>
+<rect x="65" y="366" width="730" height="16" rx="3" fill="var(--theme-74c8a8, #74c8a8)" opacity="1"/>
+<path d="M235,146 L510,146 L655,366 L330,366 Z" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.2"/>
+<circle cx="235" cy="146" r="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="1"/>
+<circle cx="510" cy="146" r="6" fill="var(--theme-65b9dd, #65b9dd)" opacity="1"/>
+<circle cx="330" cy="366" r="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="1"/>
+<circle cx="655" cy="366" r="6" fill="var(--theme-74c8a8, #74c8a8)" opacity="1"/>
+<text x="65" y="106" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="start">
+<tspan x="65" dy="0">TARGET</tspan>
+</text>
+<text x="235" y="184" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="end">
+<tspan x="235" dy="0">target_start</tspan>
+</text>
+<text x="524" y="184" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="524" dy="0">target_end</tspan>
+</text>
+<text x="65" y="416" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="start">
+<tspan x="65" dy="0">QUERY</tspan>
+</text>
+<text x="330" y="353" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="end">
+<tspan x="330" dy="0">query_start</tspan>
+</text>
+<text x="671" y="353" fill="var(--theme-74c8a8, #74c8a8)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="671" dy="0">query_end</tspan>
+</text>
+<path d="M310,208 L492,208" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M548,239 L598,305" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M562,324 L399,324" fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="430" y="473" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="430" dy="0">Forward: [target_start, target_end, query_end, query_start]</tspan>
+</text>
+<text x="30" y="535" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">For reverse alignments, swap the two query endpoints when drawing the polygon.</tspan>
+</text></svg>

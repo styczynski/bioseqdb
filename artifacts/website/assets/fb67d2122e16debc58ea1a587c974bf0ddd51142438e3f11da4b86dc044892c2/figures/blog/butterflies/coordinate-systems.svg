@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 490" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-0a1826:#ffffff;--theme-20364a:#ccd9e4;--theme-65b9dd:#146c91;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;}}</style>
+<title id="title">Keep one coordinate convention</title><desc id="desc">An illustrative annotation covering positions three through six in one-based inclusive notation becomes the zero-based half-open interval [2, 6). An imported subinterval has its own origin that must be retained.</desc>
+<defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse"><path d="M0,0 L11,6 L0,12" fill="var(--theme-a9bccb, #a9bccb)"/></marker></defs>
+<text x="30" y="43" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="start">
+<tspan x="30" dy="0">Keep one coordinate convention</tspan>
+</text>
+<text x="30" y="92" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="20" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Same four bases, two ways to write their interval</tspan>
+</text>
+<rect x="170" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.07"/>
+<text x="199" y="211" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="199" dy="0">A</tspan>
+</text>
+<text x="199" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="199" dy="0">1</tspan>
+</text>
+<text x="199" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="199" dy="0">0</tspan>
+</text>
+<rect x="242" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.07"/>
+<text x="271" y="211" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="271" dy="0">C</tspan>
+</text>
+<text x="271" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="271" dy="0">2</tspan>
+</text>
+<text x="271" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="271" dy="0">1</tspan>
+</text>
+<rect x="314" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.25"/>
+<text x="343" y="211" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="343" dy="0">G</tspan>
+</text>
+<text x="343" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="343" dy="0">3</tspan>
+</text>
+<text x="343" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="343" dy="0">2</tspan>
+</text>
+<rect x="386" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.25"/>
+<text x="415" y="211" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="415" dy="0">T</tspan>
+</text>
+<text x="415" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="415" dy="0">4</tspan>
+</text>
+<text x="415" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="415" dy="0">3</tspan>
+</text>
+<rect x="458" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.25"/>
+<text x="487" y="211" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="487" dy="0">T</tspan>
+</text>
+<text x="487" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="487" dy="0">5</tspan>
+</text>
+<text x="487" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="487" dy="0">4</tspan>
+</text>
+<rect x="530" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.25"/>
+<text x="559" y="211" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="559" dy="0">A</tspan>
+</text>
+<text x="559" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="559" dy="0">6</tspan>
+</text>
+<text x="559" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="559" dy="0">5</tspan>
+</text>
+<rect x="602" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.07"/>
+<text x="631" y="211" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="631" dy="0">C</tspan>
+</text>
+<text x="631" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="631" dy="0">7</tspan>
+</text>
+<text x="631" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="631" dy="0">6</tspan>
+</text>
+<rect x="674" y="172" width="58" height="58" rx="7" fill="var(--theme-65b9dd, #65b9dd)" opacity="0.07"/>
+<text x="703" y="211" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="27" font-weight="bold" text-anchor="middle">
+<tspan x="703" dy="0">G</tspan>
+</text>
+<text x="703" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="703" dy="0">8</tspan>
+</text>
+<text x="703" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="middle">
+<tspan x="703" dy="0">7</tspan>
+</text>
+<text x="30" y="149" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">One-based</tspan>
+</text>
+<text x="30" y="263" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">Zero-based</tspan>
+</text>
+<path d="M314,285 L590,285" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="3"/>
+<text x="450" y="323" fill="var(--theme-65b9dd, #65b9dd)" font-family="Arial, sans-serif" font-size="23" font-weight="bold" text-anchor="middle">
+<tspan x="450" dy="0">[3, 6] inclusive → [2, 6) half-open</tspan>
+</text>
+<rect x="30" y="355" width="800" height="78" rx="12" fill="var(--theme-0a1826, #0a1826)" opacity="1" stroke="var(--theme-20364a, #20364a)" stroke-width="1.5"/>
+<text x="50" y="385" fill="var(--theme-eef4f9, #eef4f9)" font-family="Arial, sans-serif" font-size="20" font-weight="normal" text-anchor="start">
+<tspan x="50" dy="0">chromosome position = imported interval start + local position</tspan>
+</text>
+<text x="50" y="415" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="18" font-weight="normal" text-anchor="start">
+<tspan x="50" dy="0">Length = end − start. The base at end is not included.</tspan>
+</text>
+<text x="30" y="465" fill="var(--theme-a9bccb, #a9bccb)" font-family="Arial, sans-serif" font-size="16" font-weight="normal" text-anchor="start">
+<tspan x="30" dy="0">The numbers above are a coordinate example, not positions of the optix gene.</tspan>
+</text></svg>
