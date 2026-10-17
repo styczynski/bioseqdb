@@ -252,6 +252,23 @@ class Exporter:
         self.current["sql_results"].append(rows)
         flat = [[value.replace("\n", " / ") for value in row] for row in rows]
         widths = [max(len(row[i]) for row in flat) for i in range(len(flat[0]))]
+        if len(flat) > 1 and (len(widths) > 5 or max(widths) > 64):
+            # Medium cannot preserve the site's horizontally scrollable tables.
+            # Keep every cell, but expand wide results so a long CIGAR does not
+            # force the whole result to be hundreds of characters wide.
+            lines = ["Result rows (long values continue on indented lines):", ""]
+            for index, row in enumerate(flat[1:], 1):
+                lines.append(f"Row {index}")
+                for name, value in zip(flat[0], row):
+                    if len(name) + len(value) + 2 <= 78:
+                        lines.append(f"{name}: {value}")
+                    else:
+                        lines.append(f"{name}:")
+                        lines.extend("  " + value[start:start + 76] for start in range(0, len(value), 76))
+                lines.append("")
+            self.current["sql_result_formats"].append("expanded rows; long values wrap at 76 characters")
+            return Node("pre", children=[Node("code", {"class": "language-text"}, ["\n".join(lines).rstrip()])])
+        self.current["sql_result_formats"].append("aligned columns")
         lines = [" | ".join(v.ljust(widths[i]) for i, v in enumerate(row)).rstrip() for row in flat]
         lines.insert(1, "-+-".join("-" * width for width in widths))
         return Node("pre", children=[Node("code", {"class": "language-text"}, ["\n".join(lines)])])
@@ -263,6 +280,17 @@ class Exporter:
             return []
         if re.fullmatch("h[2-6]", node.tag) and "id" in node.attrs:
             self.current["section"] = node.attrs["id"]
+        if node.tag == "p":
+            # Medium does not run the website's KaTeX renderer. Keep this known
+            # display formula readable without changing the authored Markdown.
+            content = [child for child in node.children
+                       if not isinstance(child, str) or child.strip()]
+            if (len(content) == 1 and isinstance(content[0], Node)
+                    and content[0].has("project-math")
+                    and content[0].text().strip() == r"\mathrm{GC\%} = 100\frac{G+C}{A+C+G+T}."):
+                formula = "GC% = 100 × (G + C) / (A + C + G + T)."
+                self.current["math_conversions"].append({"latex": content[0].text(), "text": formula})
+                return [Node("p", children=[formula])]
         if node.has("doc-code"):
             code = node.find(lambda n: n.tag == "pre").find(lambda n: n.tag == "code")
             language = next((c.removeprefix("language-") for c in code.attrs.get("class", "").split()
@@ -350,8 +378,8 @@ class Exporter:
         directory.mkdir(parents=True, exist_ok=True)
         self.current = {"slug": slug, "directory": directory, "canonical": canonical,
                         "images": [], "code_blocks": [], "algorithm_lines": [],
-                        "sql_results": [], "prose_tables": [], "prose_blocks_verified": 0,
-                        "section": "", "rewritten_download_links": []}
+                        "sql_results": [], "sql_result_formats": [], "prose_tables": [], "prose_blocks_verified": 0,
+                        "section": "", "rewritten_download_links": [], "math_conversions": []}
         # Read the complete already-rendered article, including its executed outputs.
         inventory = dict(sorted(Counter(n.tag for n in content.walk()).items()))
         cover = document.find(lambda n: n.has("blog-cover"))
@@ -410,8 +438,10 @@ class Exporter:
                     "files": {name: (directory / name).relative_to(self.output).as_posix()
                               for name in ["article.html", "body.html", "body-with-image-markers.html", "article.md", "source.md", "website.md"]},
                     "images": self.current["images"], "code_blocks": self.current["code_blocks"],
-                    "sql_results": self.current["sql_results"], "prose_tables": self.current["prose_tables"],
+                    "sql_results": self.current["sql_results"], "sql_result_formats": self.current["sql_result_formats"],
+                    "prose_tables": self.current["prose_tables"],
                     "algorithm_lines": self.current["algorithm_lines"],
+                    "math_conversions": self.current["math_conversions"],
                     "rewritten_download_links": self.current["rewritten_download_links"],
                     "verification": {"prose_blocks_preserved": self.current["prose_blocks_verified"],
                                      "rendered_tag_inventory": inventory,
@@ -517,7 +547,11 @@ def build_bundle(args):
         "rich-text paste otherwise splits the code block. Markdown and metadata retain exact raw\n"
         "code; no nonempty code line, indentation or displayed result is changed.\n\n"
         "All original article paragraphs, code and result values are retained. Site navigation, buttons,\n"
-        "scripts and tooltip metadata are omitted. SQL results become aligned text; the prose comparison\n"
+        "scripts and tooltip metadata are omitted. The GC formula uses equivalent plain text because\n"
+        "Medium does not render the website's TeX; the conversion is recorded in metadata.json.\n"
+        "SQL results become aligned text or expanded rows when there are more than five columns\n"
+        "or a value longer than 64 characters. Expanded long values wrap at 76 characters; all original\n"
+        "cells remain in sql_results in metadata.json. The prose comparison\n"
         "table becomes linked paragraphs because Medium does not document native HTML-table support.\n"
         "Links to generated download assets point to their original article sections, where the current\n"
         "download is available after future rebuilds; every rewrite is listed in metadata.json. Ordinary\n"
