@@ -6,8 +6,8 @@ date: '2026-10-16'
 author: Piotr Styczyński
 category: bioseqdb
 keywords: [BioseqDB, pangenomics, comparative genomics, Heliconius, optix, NCBI, PostgreSQL, Python, SQLAlchemy, Plotly, sequence alignment, GC content, genome annotation]
-cover: /static/figures/blog/sequence-letters.svg
-image_alt: Translucent A, C, G and T tiles in the BioseqDB colours.
+cover: /static/figures/blog/butterfly-gc-cover.svg
+image_alt: Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows.
 draft: false
 ---
 

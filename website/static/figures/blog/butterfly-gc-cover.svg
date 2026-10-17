@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="240" viewBox="0 0 1200 240" role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid slice">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-ef7a5a:#b3422b;}}</style>
+<title id="title">Butterflies and the composition of their DNA</title>
+<desc id="desc">Two conceptual butterfly silhouettes in teal and blue, with red wing markings, above two fine GC-content traces. The traces use the measured 10 kb windows of the erato and melpomene sequences in this tutorial, vertically offset for this decorative cover. No axes or quantitative comparison are implied.</desc>
+<!-- GC paths retain all 100 measured samples per record from the executed
+     gc-windows figure: x=20+1160*(window_midpoint-5000)/990000,
+     y=baseline-.9*(GC_percent-35). Baselines are decorative offsets. -->
+<g fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="1" opacity=".09">
+  <path d="M20,131 H1180 M20,153 H1180"/>
+  <path d="M180,112 V162 M390,112 V162 M600,112 V162 M810,112 V162 M1020,112 V162"/>
+</g>
+<path d="M20.00,132.19 L31.72,131.81 L43.43,130.29 L55.15,130.32 L66.87,132.54 L78.59,130.41 L90.30,131.88 L102.02,129.31 L113.74,132.66 L125.45,132.03 L137.17,133.11 L148.89,131.48 L160.61,131.46 L172.32,129.18 L184.04,131.33 L195.76,128.85 L207.47,132.47 L219.19,130.98 L230.91,131.88 L242.63,132.56 L254.34,135.60 L266.06,137.71 L277.78,131.32 L289.49,133.47 L301.21,132.36 L312.93,132.03 L324.65,133.93 L336.36,130.75 L348.08,132.92 L359.80,131.10 L371.52,132.95 L383.23,132.18 L394.95,119.53 L406.67,133.78 L418.38,131.80 L430.10,133.48 L441.82,131.82 L453.54,132.18 L465.25,131.58 L476.97,130.15 L488.69,130.02 L500.40,130.14 L512.12,130.67 L523.84,132.38 L535.56,130.04 L547.27,131.29 L558.99,130.71 L570.71,131.41 L582.42,131.57 L594.14,132.93 L605.86,128.38 L617.58,126.34 L629.29,133.07 L641.01,132.12 L652.73,133.40 L664.44,126.65 L676.16,121.68 L687.88,128.72 L699.60,135.12 L711.31,134.43 L723.03,133.58 L734.75,133.80 L746.46,137.30 L758.18,133.31 L769.90,131.68 L781.62,130.23 L793.33,132.93 L805.05,131.34 L816.77,131.62 L828.48,132.24 L840.20,132.75 L851.92,132.12 L863.64,131.27 L875.35,133.59 L887.07,130.98 L898.79,132.28 L910.51,130.93 L922.22,132.46 L933.94,131.29 L945.66,130.87 L957.37,132.33 L969.09,130.54 L980.81,132.74 L992.53,134.07 L1004.24,132.78 L1015.96,130.93 L1027.68,131.66 L1039.39,134.56 L1051.11,131.71 L1062.83,127.83 L1074.55,131.79 L1086.26,131.79 L1097.98,133.41 L1109.70,132.92 L1121.41,129.99 L1133.13,129.54 L1144.85,130.98 L1156.57,134.49 L1168.28,130.89 L1180.00,131.33" fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".75" data-accession="JBTWUK020000023.1" data-window-bp="10000"/>
+<path d="M20.00,148.59 L31.72,153.48 L43.43,151.91 L55.15,152.93 L66.87,153.02 L78.59,154.90 L90.30,151.38 L102.02,148.71 L113.74,151.72 L125.45,153.42 L137.17,148.78 L148.89,153.62 L160.61,157.28 L172.32,155.56 L184.04,154.19 L195.76,152.21 L207.47,153.63 L219.19,154.31 L230.91,156.78 L242.63,150.94 L254.34,154.64 L266.06,154.34 L277.78,154.67 L289.49,153.61 L301.21,154.86 L312.93,147.02 L324.65,153.34 L336.36,153.18 L348.08,152.88 L359.80,154.31 L371.52,154.04 L383.23,154.05 L394.95,152.69 L406.67,152.45 L418.38,152.34 L430.10,152.43 L441.82,152.69 L453.54,152.65 L465.25,156.86 L476.97,156.28 L488.69,154.28 L500.40,155.53 L512.12,155.32 L523.84,157.11 L535.56,144.87 L547.27,151.36 L558.99,155.89 L570.71,153.00 L582.42,149.97 L594.14,156.36 L605.86,153.93 L617.58,155.06 L629.29,153.94 L641.01,151.43 L652.73,153.45 L664.44,152.75 L676.16,149.05 L687.88,155.60 L699.60,155.59 L711.31,142.78 L723.03,159.37 L734.75,154.91 L746.46,154.67 L758.18,157.02 L769.90,152.91 L781.62,152.87 L793.33,155.97 L805.05,155.36 L816.77,156.03 L828.48,154.80 L840.20,153.80 L851.92,154.16 L863.64,155.20 L875.35,156.31 L887.07,158.55 L898.79,154.75 L910.51,152.91 L922.22,153.63 L933.94,151.30 L945.66,154.00 L957.37,153.92 L969.09,152.60 L980.81,154.17 L992.53,154.85 L1004.24,153.38 L1015.96,154.01 L1027.68,153.81 L1039.39,152.96 L1051.11,151.01 L1062.83,152.30 L1074.55,153.41 L1086.26,153.62 L1097.98,154.88 L1109.70,153.19 L1121.41,153.04 L1133.13,154.36 L1144.85,154.40 L1156.57,153.83 L1168.28,156.24 L1180.00,156.64" fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".75" data-accession="NC_140406.1" data-window-bp="10000"/>
+<g transform="translate(510 118) rotate(-8) scale(.6)">
+  <g fill="var(--theme-74c8a8, #74c8a8)" fill-opacity=".28" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width="1.6" stroke-opacity=".85">
+    <path d="M-3,4 C-18,-28 -56,-66 -76,-49 C-95,-33 -67,9 -24,20 C-63,13 -72,39 -52,54 C-31,69 -8,39 -3,15 Z"/>
+    <path d="M3,4 C18,-28 56,-66 76,-49 C95,-33 67,9 24,20 C63,13 72,39 52,54 C31,69 8,39 3,15 Z"/>
+  </g>
+  <g fill="none" stroke="var(--theme-74c8a8, #74c8a8)" stroke-width=".9" opacity=".5">
+    <path d="M-6,9 L-61,-39 M-6,9 L-65,-4 M-6,17 L-47,44 M6,9 L61,-39 M6,9 L65,-4 M6,17 L47,44"/>
+  </g>
+  <g fill="var(--theme-ef7a5a, #ef7a5a)" opacity=".8">
+    <path d="M-26,-20 L-62,-35 L-66,-22 L-31,-7 Z"/>
+    <path d="M26,-20 L62,-35 L66,-22 L31,-7 Z"/>
+  </g>
+  <path d="M0,-24 C-5,-9 -4,32 0,43 C4,32 5,-9 0,-24 Z" fill="var(--theme-eef4f9, #eef4f9)" opacity=".8"/>
+  <g fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="1.6" stroke-linecap="round">
+    <path d="M-1,-20 C-3,-32 -10,-40 -14,-41 M1,-20 C3,-32 10,-40 14,-41"/>
+  </g>
+</g>
+<g transform="translate(700 118) rotate(8) scale(.6)">
+  <g fill="var(--theme-65b9dd, #65b9dd)" fill-opacity=".28" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width="1.6" stroke-opacity=".85">
+    <path d="M-3,4 C-18,-28 -56,-66 -76,-49 C-95,-33 -67,9 -24,20 C-63,13 -72,39 -52,54 C-31,69 -8,39 -3,15 Z"/>
+    <path d="M3,4 C18,-28 56,-66 76,-49 C95,-33 67,9 24,20 C63,13 72,39 52,54 C31,69 8,39 3,15 Z"/>
+  </g>
+  <g fill="none" stroke="var(--theme-65b9dd, #65b9dd)" stroke-width=".9" opacity=".5">
+    <path d="M-6,9 L-61,-39 M-6,9 L-65,-4 M-6,17 L-47,44 M6,9 L61,-39 M6,9 L65,-4 M6,17 L47,44"/>
+  </g>
+  <g fill="var(--theme-ef7a5a, #ef7a5a)" opacity=".8">
+    <path d="M-26,-20 L-62,-35 L-66,-22 L-31,-7 Z"/>
+    <path d="M26,-20 L62,-35 L66,-22 L31,-7 Z"/>
+  </g>
+  <path d="M0,-24 C-5,-9 -4,32 0,43 C4,32 5,-9 0,-24 Z" fill="var(--theme-eef4f9, #eef4f9)" opacity=".8"/>
+  <g fill="none" stroke="var(--theme-a9bccb, #a9bccb)" stroke-width="1.6" stroke-linecap="round">
+    <path d="M-1,-20 C-3,-32 -10,-40 -14,-41 M1,-20 C3,-32 10,-40 14,-41"/>
+  </g>
+</g>
+</svg>
