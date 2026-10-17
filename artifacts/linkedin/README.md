@@ -1,6 +1,6 @@
 # BioseqDB LinkedIn posts
 
-Publication stopped at the user’s request on 13 October 2026. Five posts were already live at that point, and all five have been verified in [the publication ledger](publications.json). No further posts have been published or automatically scheduled.
+As of 17 October 2026, six posts are verified in [the publication ledger](publications.json). Five were live when publication stopped at the user's request on 13 October. The butterfly tutorial was published on 17 October following a separate request; the four older queued posts remain paused and unscheduled.
 
 The user requested a maximum of three new posts per batch and per day. The four remaining posts are prepared in [the queue](queue.json), with a requested resumption date of 14 October 2026. This is a saved plan, not a LinkedIn schedule or an automatic task.
 
@@ -10,9 +10,9 @@ The fourth and fifth published posts remain live while awaiting the user’s dec
 
 Before each queued LinkedIn post, check [the Medium publication ledger](../medium/publications.json). Prefer publishing its queued Medium draft first when the 24-hour cap clears. If the matching article is public, replace the current “Author on Medium” profile fallback with that article’s URL and the label “Read on Medium”. Never use a draft or editor URL. If it is still unpublished, keep the clearly labelled public-profile fallback. The limit remains three new LinkedIn posts per batch and per day; nothing is automatically scheduled.
 
-Each post has a dedicated explanatory PNG for native upload and authored alt text in `posts.json`. These are copies of the reviewed Medium exports, so changing the website asset hash does not affect an uploaded image.
+Each post has explanatory PNGs for native upload and authored alt text in `posts.json`. The butterfly post has three images: the species and optix schematic, SQL workflow and measured optix neighbourhood. All three native uploads and their alt text were verified. Changing the website asset hash does not affect uploaded images.
 
-Five posts link to their published Medium articles. Four use a clearly labelled public author-profile link while their corresponding Medium articles await publication. No private Medium draft links appear in the post text.
+Six posts link to their published Medium articles. Four use a clearly labelled public author-profile link while their corresponding Medium articles await publication. No private Medium draft links appear in the post text.
 
 | Post | LinkedIn status | Copy | Image | Medium destination |
 | --- | --- | --- | --- | --- |
@@ -25,7 +25,8 @@ Five posts link to their published Medium articles. Four use a clearly labelled 
 | Probably the worst database ever — but hey it can write poems! | Prepared · next batch | [Text](posts/chatdb-a-database-that-can-write-poems.txt) | [PNG](images/chatdb-a-database-that-can-write-poems.png) | Public author profile |
 | Learning to map DNA reads by writing an aligner in Python | Prepared · next batch | [Text](posts/writing-a-dna-read-mapper-in-python.txt) | [PNG](images/writing-a-dna-read-mapper-in-python.png) | Public author profile |
 | Writing a small PostgreSQL table access method in C++ | Prepared · next batch | [Text](posts/writing-a-postgres-table-access-method-in-cpp.txt) | [PNG](images/writing-a-postgres-table-access-method-in-cpp.png) | Public author profile |
+| Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly | [Published](https://www.linkedin.com/feed/update/urn:li:ugcPost:7517170696683286529/) | [Text](posts/comparing-butterfly-genomes-with-bioseqdb.txt) | [Species](images/comparing-butterfly-genomes-with-bioseqdb-01.png), [workflow](images/comparing-butterfly-genomes-with-bioseqdb-02.png), [optix](images/comparing-butterfly-genomes-with-bioseqdb-03.png) | Published article |
 
 The source text for every article was read in full. The summaries preserve the scope of its examples and measurements. Each post uses five relevant hashtags.
 
-Independent review passed for all nine summaries, destinations, source PNGs and alt-text mappings. The root reviewer accepted all nine copies.
+Independent review passed for all ten summaries, destinations, source PNGs and alt-text mappings. The root reviewer accepted all ten copies. The butterfly publication also passed public-page checks for its full copy, all three loaded images and both shortened-link destinations. Its scoped screenshot excludes unrelated profile statistics; the public evidence and review are recorded in `audit/`.

@@ -1,0 +1,16 @@
+What happens if we put butterfly DNA into PostgreSQL?
+
+I wrote a tutorial comparing two Heliconius species around optix, a gene involved in their red wing patterns. We import a one-million-base region from each species, count A/C/G/T, measure GC content and find matching stretches of DNA.
+
+The sequences come from NCBI through SQL. BioseqDB stores and aligns them inside PostgreSQL; SQLAlchemy sends the queries, and Plotly draws the results. No separate alignment executable is needed.
+
+We start with one match, draw all the retained alignments, then zoom in on optix with gene annotations and local GC measurements. There are a few useful gotchas along the way, from coordinate conventions to reverse-complement matches. Similar GC percentages certainly don't mean the sequences are the same!
+
+The complete Python code, SQL and notebook are available in the examples repository linked from the article.
+
+One setup detail: the current 0.1.0-alpha.1 Docker images and native packages omit the NCBI integration. For this tutorial, build from source with BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; the article explains how.
+
+Read on BioseqDB: https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/
+Read on Medium: https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b
+
+#BioseqDB #PostgreSQL #Bioinformatics #Genomics #Python

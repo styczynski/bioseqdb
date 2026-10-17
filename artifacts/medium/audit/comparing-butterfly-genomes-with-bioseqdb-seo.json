@@ -1,0 +1,8 @@
+{
+  "canonical": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+  "description": "Fetch butterfly DNA from NCBI with SQL, align optix regions in BioseqDB, and explore GC content and genome matches using Python, SQLAlchemy and Plotly.",
+  "ogDescription": "Retrieve two Heliconius optix regions from NCBI with SQL, inspect their DNA composition, align them inside PostgreSQL and draw the results…",
+  "ogImage": "https://miro.medium.com/v2/resize:fit:1200/1*wafjJy5m5hAOBr0XT4ObiA.png",
+  "ogTitle": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+  "title": "Butterfly genome alignment with BioseqDB and Python | Medium"
+}

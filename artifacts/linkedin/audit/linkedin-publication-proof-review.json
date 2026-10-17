@@ -1,8 +1,8 @@
 {
   "result": "PASS_WITH_DOCUMENTED_SCREENSHOT_LIMITS",
-  "recorded_publications": 5,
-  "snapshot_note": "Root reports five publications completed before the latest stop/limit steering. Further posting is stopped; possible removal of posts 4 and 5 awaits the user decision. This review takes no posting, scheduling, deletion or browser action.",
-  "url_evidence": "The five URLs and verified flags come from the root-owned publication ledger. This reviewer verified syntax, mapping and copy parity but did not independently open the URLs.",
+  "recorded_publications": 6,
+  "snapshot_note": "Five publications were recorded before the 13 October stop. The separately requested butterfly tutorial was published and verified on 17 October. The four older queued posts remain paused; possible removal of historical posts 4 and 5 still awaits the user decision.",
+  "url_evidence": "The historical five URLs retain their original verification records. For the butterfly tutorial, root observed the native success dialog and public post; an independent review verified the public image metadata, copy and both shortened-link destinations.",
   "missing_or_stale_proofs": [],
   "all_ledger_parity_checks_pass": true,
   "posts": [
@@ -162,6 +162,46 @@
         "medium_url_matches": true,
         "alt_matches_approved_bundle": true,
         "public_linkedin_share_url": true
+      }
+    },
+    {
+      "slug": "comparing-butterfly-genomes-with-bioseqdb",
+      "url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7517170696683286529/",
+      "root_live_verification_recorded": true,
+      "proof_path": "artifacts/linkedin/proofs/comparing-butterfly-genomes-with-bioseqdb.jpg",
+      "proof_sha256": "08626f1b122b355530fe47b755689c2c90b1c3cb1396bcce2ac9240596d62a14",
+      "proof_size": [
+        571,
+        1296
+      ],
+      "screenshot_matches_post": true,
+      "screenshot_context": "Public post cropped to its boundaries, excluding unrelated private profile statistics and sidebar content",
+      "screenshot_visible": [
+        "BioseqDB company identity",
+        "Full approved body text including the current alpha limitation",
+        "Two shortened outbound links",
+        "Five hashtags",
+        "Three native-uploaded images"
+      ],
+      "screenshot_limits": [
+        "Browser address bar not included",
+        "Image alt text is not visible in the screenshot; public image metadata verifies it separately",
+        "The smaller image panels are collage previews; full source PNGs are retained separately"
+      ],
+      "ledger_parity_checks": {
+        "copy_matches_approved_bundle": true,
+        "website_url_matches": true,
+        "medium_url_matches": true,
+        "all_three_alts_match_approved_bundle": true,
+        "public_linkedin_post_url": true,
+        "all_three_published_images_loaded": true,
+        "both_shortened_link_destinations_verified": true
+      },
+      "publication_evidence": "artifacts/linkedin/audit/comparing-butterfly-genomes-with-bioseqdb-publication-evidence.json",
+      "independent_review": "artifacts/medium/audit/comparing-butterfly-genomes-with-bioseqdb-publication-review.json",
+      "shortened_links": {
+        "https://lnkd.in/dZRmhMpM": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+        "https://lnkd.in/dTw6GUgA": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b"
       }
     }
   ]

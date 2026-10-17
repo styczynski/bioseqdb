@@ -1,0 +1,44 @@
+{
+  "passed": true,
+  "checks": {
+    "published_medium_title": true,
+    "published_medium_canonical": true,
+    "published_medium_code_count": true,
+    "published_medium_image_count": true,
+    "published_medium_images_loaded": true,
+    "published_medium_uploaded_images_match_draft": true,
+    "published_medium_all_source_links_in_order": true,
+    "published_medium_images_no_hashed_website_dependencies": true,
+    "linkedin_post_copy_matches": true,
+    "linkedin_three_images_with_expected_alts": true,
+    "linkedin_images_loaded": true,
+    "linkedin_images_native_cdn": true,
+    "site_current_source_revision": true,
+    "site_manifest_checksum_index.html": true,
+    "site_manifest_checksum_index.md": true,
+    "website_responsive_layout_no_page_overflow": true,
+    "website_responsive_images_loaded": true,
+    "website_lazy_figures_no_anchor_shift": true
+  },
+  "counts": {
+    "medium_images": 19,
+    "medium_code_and_result_blocks": 27,
+    "medium_source_links": 64,
+    "linkedin_post_images": 3,
+    "website_layouts": 60
+  },
+  "linkedin_short_links": {
+    "https://lnkd.in/dZRmhMpM": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+    "https://lnkd.in/dTw6GUgA": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b"
+  },
+  "linkedin_short_link_verification": "Public unauthenticated lnkd.in interstitial href destinations inspected. Both exact intended destinations.",
+  "exact_copy_evidence": "Complete editor DOM audit passes all 144 prose blocks, 27 code/output blocks, 18 captions and 64 links; published snapshot confirms same title, image IDs/order, code count and links. LinkedIn rendered copy equals postedCopy after platform short-link and hashtag normalization.",
+  "source_revision": "705d645334284b1258d3de888f7cf55fd255ac74",
+  "artifact_commit": "b90d06128689c720b04902aadc0fea1280062f88",
+  "git_status_at_review": "",
+  "actionable_gaps": [],
+  "visual_review": {
+    "medium-published-cover.jpg": "Title, subtitle and custom butterfly/GC cover render correctly; readable layout.",
+    "linkedin-published-post.jpg": "Copy, two links, hashtags and all three illustrated panels appear correctly in the published post."
+  }
+}

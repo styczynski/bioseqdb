@@ -393,5 +393,85 @@
     "automatically_scheduled": false,
     "planned_batch": 1,
     "requested_resume_date": "2026-10-14"
+  },
+  {
+    "order": 10,
+    "slug": "comparing-butterfly-genomes-with-bioseqdb",
+    "title": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+    "category": "bioseqdb",
+    "status": "published",
+    "text": "What happens if we put butterfly DNA into PostgreSQL?\n\nI wrote a tutorial comparing two Heliconius species around optix, a gene involved in their red wing patterns. We import a one-million-base region from each species, count A/C/G/T, measure GC content and find matching stretches of DNA.\n\nThe sequences come from NCBI through SQL. BioseqDB stores and aligns them inside PostgreSQL; SQLAlchemy sends the queries, and Plotly draws the results. No separate alignment executable is needed.\n\nWe start with one match, draw all the retained alignments, then zoom in on optix with gene annotations and local GC measurements. There are a few useful gotchas along the way, from coordinate conventions to reverse-complement matches. Similar GC percentages certainly don't mean the sequences are the same!\n\nThe complete Python code, SQL and notebook are available in the examples repository linked from the article.\n\nOne setup detail: the current 0.1.0-alpha.1 Docker images and native packages omit the NCBI integration. For this tutorial, build from source with BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; the article explains how.\n\nRead on BioseqDB: https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/\nRead on Medium: https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b\n\n#BioseqDB #PostgreSQL #Bioinformatics #Genomics #Python",
+    "text_file": "artifacts/linkedin/posts/comparing-butterfly-genomes-with-bioseqdb.txt",
+    "website_url": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+    "medium_url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b",
+    "medium_link_kind": "published_article",
+    "hashtags": [
+      "BioseqDB",
+      "PostgreSQL",
+      "Bioinformatics",
+      "Genomics",
+      "Python"
+    ],
+    "characters": 1386,
+    "image": {
+      "path": "artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-01.png",
+      "absolute_path": "/Users/styczynski/Code/bioseqdb/artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-01.png",
+      "alt": "Conceptual illustration of Heliconius erato demophoon and Heliconius melpomene rosina, with optix and the surrounding DNA highlighted. The tutorial compares their sequence regions, not photographed wing patterns.",
+      "width": 2400,
+      "height": 1494,
+      "sha256": "05bd1f1a4d84a20111e63acee592ab49e78826ddc1029ab73ed77acfbce33567",
+      "source_export": "build/butterflies-editorial/social/01-butterflies-optix-light.png",
+      "source_figure": "website/static/figures/blog/butterflies/butterflies-optix.svg",
+      "published_src": "https://media.licdn.com/dms/image/v2/D4D22AQEM-QE_1EL_fQ/feedshare-shrink_800/B4DaFJa6bkJUAc-/0/1792233154583?e=1793836800&v=beta&t=mRn5lyftR-J-IQtLQ5IKJfy0khrQMq-oL5Lv5pXYtm0"
+    },
+    "images": [
+      {
+        "path": "artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-01.png",
+        "absolute_path": "/Users/styczynski/Code/bioseqdb/artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-01.png",
+        "alt": "Conceptual illustration of Heliconius erato demophoon and Heliconius melpomene rosina, with optix and the surrounding DNA highlighted. The tutorial compares their sequence regions, not photographed wing patterns.",
+        "width": 2400,
+        "height": 1494,
+        "sha256": "05bd1f1a4d84a20111e63acee592ab49e78826ddc1029ab73ed77acfbce33567",
+        "source_export": "build/butterflies-editorial/social/01-butterflies-optix-light.png",
+        "source_figure": "website/static/figures/blog/butterflies/butterflies-optix.svg",
+        "published_src": "https://media.licdn.com/dms/image/v2/D4D22AQEM-QE_1EL_fQ/feedshare-shrink_800/B4DaFJa6bkJUAc-/0/1792233154583?e=1793836800&v=beta&t=mRn5lyftR-J-IQtLQ5IKJfy0khrQMq-oL5Lv5pXYtm0"
+      },
+      {
+        "path": "artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-02.png",
+        "absolute_path": "/Users/styczynski/Code/bioseqdb/artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-02.png",
+        "alt": "Workflow from NCBI sequence records through SQL into BioseqDB in PostgreSQL. SQLAlchemy retrieves the query results and Plotly turns them into composition charts and genome alignment diagrams.",
+        "width": 2400,
+        "height": 1494,
+        "sha256": "0d48a6525aa1d93ddc9d14799f618426db34cf5696dc1f61b42098adf47d8e2f",
+        "source_export": "build/butterflies-editorial/social/02-sql-workflow-light.png",
+        "source_figure": "website/static/figures/blog/butterflies/sql-workflow.svg",
+        "published_src": "https://media.licdn.com/dms/image/v2/D4D22AQGwarjWM9arsw/feedshare-shrink_800/B4DaFJa6dVHcAc-/0/1792233154692?e=1793836800&v=beta&t=z9ZV1aTlTUyThcRc8UcRh5h3YqQJXT3iWXh3YYiCwl4"
+      },
+      {
+        "path": "artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-03.png",
+        "absolute_path": "/Users/styczynski/Code/bioseqdb/artifacts/linkedin/images/comparing-butterfly-genomes-with-bioseqdb-03.png",
+        "alt": "Measured optix neighbourhood comparison from current NCBI records. The central panel connects BioseqDB alignment blocks between the melpomene target and erato query, with annotated optix genes. The upper and lower panels show local GC content. Each gene is centred on zero and the erato display axis is reversed. These are sequence measurements, not ATAC-seq results.",
+        "width": 2400,
+        "height": 2456,
+        "sha256": "75745f5509d9b9ba16ad9c108467776036195678652618dc6cb705e06a5cd4ce",
+        "source_export": "build/butterflies-editorial/social/03-optix-neighborhood-light.png",
+        "source_figure": "website/static/figures/blog/butterflies/optix-neighborhood.svg",
+        "published_src": "https://media.licdn.com/dms/image/v2/D4D22AQESE8jDkuFwHQ/feedshare-shrink_800/B4DaFJa6fhK0Ac-/0/1792233154873?e=1793836800&v=beta&t=7U2mIBlg6acWNwetz_SnVrsSxqhaXWXdPD0rhJlvOB4"
+      }
+    ],
+    "source_markdown": "website/blog/comparing-butterfly-genomes-with-bioseqdb.md",
+    "source_markdown_sha256": "769c046bf268a30f56810b613b2419438385dba9ac5f3b4490826a3e27d95f24",
+    "review": {
+      "source_read_in_full": true,
+      "claims_checked_against_source": true,
+      "private_draft_links_in_copy": false,
+      "native_image_upload_required": true,
+      "independent_review": "passed",
+      "independent_review_report": "artifacts/medium/audit/comparing-butterfly-genomes-with-bioseqdb-publication-review.json",
+      "root_copy_acceptance": "accepted"
+    },
+    "linkedin_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7517170696683286529/",
+    "publication_verified": true,
+    "recorded_date": "2026-10-17"
   }
 ]

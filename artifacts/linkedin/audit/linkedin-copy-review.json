@@ -1,17 +1,18 @@
 {
   "scope": "Independent source, publication-link, copy, and image-file review; live LinkedIn upload and website browser checks remain root responsibilities.",
   "result": "PASS",
-  "post_count": 9,
-  "public_medium_articles": 5,
+  "post_count": 10,
+  "public_medium_articles": 6,
   "profile_fallbacks": 4,
-  "visual_images_inspected": 9,
+  "visual_images_inspected": 12,
   "editorial_findings": [],
   "notes": [
     "Each post accurately summarizes its authored blog source without inventing experiences or performance claims.",
-    "All five published Medium URLs match the publication ledger; the other four links explicitly say Author on Medium.",
+    "All six published Medium URLs match the publication ledger; the other four links explicitly say Author on Medium.",
     "No private drafts or hashed image URLs appear in public post text. PNGs are intended for native LinkedIn upload.",
     "The full-text-search post identifies pg_search as the Rails gem; the encryption post does not claim BioseqDB compatibility; Python measurements stay distinct from the teaching program; traceheap remains an educational heap delegate.",
-    "Each diagram was visually inspected: readable labels, adequate contrast, no clipping or overlaps in the source PNG."
+    "Each diagram was visually inspected: readable labels, adequate contrast, no clipping or overlaps in the source PNG.",
+    "The butterfly tutorial uses three native PNG uploads and states that the current 0.1.0-alpha.1 Docker images and native packages omit NCBI integration; a source build with BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON is required."
   ],
   "checks": [
     {
@@ -112,6 +113,28 @@
         2205
       ],
       "failures": []
+    },
+    {
+      "slug": "comparing-butterfly-genomes-with-bioseqdb",
+      "result": "PASS",
+      "characters": 1386,
+      "medium_link_kind": "published_article",
+      "image_dimensions": [
+        [
+          2400,
+          1494
+        ],
+        [
+          2400,
+          1494
+        ],
+        [
+          2400,
+          2456
+        ]
+      ],
+      "failures": [],
+      "independent_review": "artifacts/medium/audit/comparing-butterfly-genomes-with-bioseqdb-publication-review.json"
     }
   ]
 }

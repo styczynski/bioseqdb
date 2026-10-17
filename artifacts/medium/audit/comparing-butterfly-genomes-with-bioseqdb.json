@@ -1,0 +1,72 @@
+{
+  "slug": "comparing-butterfly-genomes-with-bioseqdb",
+  "editor_url": "https://medium.com/p/62dda57c6d9b/edit",
+  "content_passed": true,
+  "publication_ready": true,
+  "checks": {
+    "fresh_export_ready": true,
+    "current_authored_source_matches_export": true,
+    "title_matches": true,
+    "every_paragraph_heading_caption_in_order": true,
+    "code_and_result_bytes_in_order": true,
+    "code_snapshot_agrees_with_dom": true,
+    "explicit_code_language_and_mode": true,
+    "language_snapshot_agrees_with_dom": true,
+    "all_link_labels_targets_and_order": true,
+    "image_count": true,
+    "image_alt_text_and_order": true,
+    "images_fully_loaded": true,
+    "images_use_native_medium_cdn": true,
+    "no_hashed_website_image_dependencies": true,
+    "no_hashed_website_asset_links": true,
+    "distinct_uploads_for_distinct_figures": true,
+    "all_figure_captions_in_order": true,
+    "image_aspect_ratios": true,
+    "no_remaining_image_markers": true,
+    "no_hidden_sql_fixtures": true,
+    "requested_callout": true,
+    "canonical_article_backlink": true,
+    "no_originally_posted_callout": true,
+    "readable_formula_1": true
+  },
+  "publication_settings": {
+    "canonical_setting_matches": true,
+    "five_distinct_selected_topics": true
+  },
+  "details": {
+    "counts": {
+      "prose_blocks": 144,
+      "code_and_output_blocks": 27,
+      "authored_code_blocks": 21,
+      "sql_result_tables": 6,
+      "images": 19,
+      "captions": 18,
+      "links": 64
+    },
+    "normalization": "Prose permits Medium smart punctuation and whitespace normalization only. Code/output bytes permit only trailing newlines and ASCII-space-only blank-line normalization."
+  },
+  "snapshot_sha256": "78ffcfd6dbb599e38840b9af4cb44a644c63c29f4bff69d3d1e027f849de2aa5",
+  "body_sha256": "32e654e221d3fc764f74f0ef1b4c977370eb1e1c07c9cfd735f515be3868a8c1",
+  "source_sha256": "769c046bf268a30f56810b613b2419438385dba9ac5f3b4490826a3e27d95f24",
+  "passed": true,
+  "published_url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b",
+  "recorded_date": "2026-10-17",
+  "expected_body_sha256": "32e654e221d3fc764f74f0ef1b4c977370eb1e1c07c9cfd735f515be3868a8c1",
+  "published_checks": {
+    "title_matches": true,
+    "canonical_matches": true,
+    "all_19_images_loaded": true,
+    "native_image_ids_and_alt_order_match_audited_draft": true,
+    "all_27_code_and_result_blocks_present": true,
+    "all_64_source_links_in_order": true,
+    "public_seo_metadata_recorded": true,
+    "scoped_publication_proof_visually_reviewed": true
+  },
+  "public_evidence": {
+    "snapshot": "audit/comparing-butterfly-genomes-with-bioseqdb-publication-evidence.json",
+    "seo": "audit/comparing-butterfly-genomes-with-bioseqdb-seo.json",
+    "independent_review": "audit/comparing-butterfly-genomes-with-bioseqdb-publication-review.json",
+    "proof": "proofs/comparing-butterfly-genomes-with-bioseqdb-published.jpg",
+    "open_graph_note": "The public Open Graph description uses the default article description, truncated by Medium. The observed metadata is retained without claiming that a separate custom preview description persisted."
+  }
+}

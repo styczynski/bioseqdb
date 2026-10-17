@@ -79,5 +79,14 @@
     "sha256": "0d31ee0b8a3dfca71118c0956765fe6ec015b21a01eab67092b585e8702e4f7e",
     "bytes": 99362,
     "treatment": "Unchanged browser screenshot; visually checked for settled content."
+  },
+  {
+    "slug": "comparing-butterfly-genomes-with-bioseqdb",
+    "status": "published",
+    "url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b",
+    "file": "proofs/comparing-butterfly-genomes-with-bioseqdb-published.jpg",
+    "sha256": "99c21ec78ea00decd6036dff4333e8ea77aa4564b913bb3b756714e0e7628a10",
+    "bytes": 49092,
+    "treatment": "Unchanged browser screenshot scoped to the public title, author, subtitle and custom cover; visually checked for settled content."
   }
 ]

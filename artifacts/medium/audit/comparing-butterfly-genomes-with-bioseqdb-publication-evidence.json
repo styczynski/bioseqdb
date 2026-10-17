@@ -1,0 +1,397 @@
+{
+  "canonical": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+  "images": [
+    {
+      "alt": "Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*wafjJy5m5hAOBr0XT4ObiA.png"
+    },
+    {
+      "alt": "A schematic comparison of Heliconius butterflies and the optix region.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*ZLFOarRfLMBlL9p5iLB7HQ.png"
+    },
+    {
+      "alt": "DNA letters and a small alignment with a mismatch and a gap.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*OTwW8WJ4GCLdAf7BRihTow.png"
+    },
+    {
+      "alt": "NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*LqXeflPMZjSk68tutBTz5Q.png"
+    },
+    {
+      "alt": "Coordinate conversion from one-based annotation positions to zero-based slices and local window positions.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*3exiaQ4QR3XyrbRFAh6Rhw.png"
+    },
+    {
+      "alt": "Lengths of the two imported sequence windows.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*l-fu4X4ql8kbJ2k25xX6Mw.png"
+    },
+    {
+      "alt": "Lengths of the complete NCBI source records, distinct from the imported windows.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*NgoJ4xT7ppRjLTMauxsNfw.png"
+    },
+    {
+      "alt": "Measured counts of A, C, G, T and N in the two NCBI windows.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*oI_HA7OYqYEZKmNx-5ZBxQ.png"
+    },
+    {
+      "alt": "GC percentage of called bases in each imported sequence.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*qLzIztOYS81HKlQLHlsTng.png"
+    },
+    {
+      "alt": "GC content measured in consecutive 10 kb windows along both sequences.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*EWQGsttIXef_PzPMQuj7EQ.png"
+    },
+    {
+      "alt": "A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*9VIPGYOqTasVilFMLc6mAg.png"
+    },
+    {
+      "alt": "The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*b4tu7j2ca2XEsTIugCKqUA.png"
+    },
+    {
+      "alt": "One real alignment block connects its target and query intervals.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*jdgGvt09eVpqQMuyqAJA_A.png"
+    },
+    {
+      "alt": "A dot plot of the 355 retained alignments, distinguishing forward and reverse matches.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*0Z1Wl-8ACQgYLNdEQ_v7gw.png"
+    },
+    {
+      "alt": "All retained alignment ribbons between the two one-million-base windows.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*levy578wMAFUsk5Iht0JjA.png"
+    },
+    {
+      "alt": "The optix neighbourhood after centring the gene models and reversing the erato display direction.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*XozUpxJF7WFrubrqZoTUqQ.png"
+    },
+    {
+      "alt": "The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*9KpyqeRdpHmM_n_UdfhWcg.png"
+    },
+    {
+      "alt": "Current NCBI gene models, local GC measurements and BioseqDB alignments around optix.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*okAjCJPHhgsPRT_QXnkhKQ.png"
+    },
+    {
+      "alt": "The current optix gene and exon models in their transcript-oriented display.",
+      "loaded": true,
+      "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*bv6Dzku8eUaSkJDPQbiJtg.png"
+    }
+  ],
+  "links": [
+    {
+      "text": "Bioinformatics",
+      "url": "https://medium.com/tag/bioinformatics?source=post_page---header_tags--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Genomics",
+      "url": "https://medium.com/tag/genomics?source=post_page---header_tags--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Python",
+      "url": "https://medium.com/tag/python?source=post_page---header_tags--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Postgresql",
+      "url": "https://medium.com/tag/postgresql?source=post_page---header_tags--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Bioseqdb",
+      "url": "https://medium.com/tag/bioseqdb?source=post_page---header_tags--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "",
+      "url": "https://medium.com/@styczynski?source=post_page---byline--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Piotr Styczyński [BioseqDB]",
+      "url": "https://medium.com/@styczynski?source=post_page---byline--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "Listen",
+      "url": "https://medium.com/plans?dimension=post_audio_button&postId=62dda57c6d9b&source=upgrade_membership---post_audio_button-------------------------------------------"
+    },
+    {
+      "text": "gene",
+      "url": "https://www.genome.gov/genetics-glossary/Gene"
+    },
+    {
+      "text": "protein",
+      "url": "https://www.genome.gov/genetics-glossary/Protein"
+    },
+    {
+      "text": "Reed and colleagues studied this connection across Heliconius species.",
+      "url": "https://pubmed.ncbi.nlm.nih.gov/21778360/"
+    },
+    {
+      "text": "relational databases",
+      "url": "https://www.postgresql.org/docs/current/tutorial-concepts.html"
+    },
+    {
+      "text": "alignments",
+      "url": "https://en.wikipedia.org/wiki/Sequence_alignment"
+    },
+    {
+      "text": "chromosome",
+      "url": "https://www.genome.gov/genetics-glossary/Chromosome"
+    },
+    {
+      "text": "PostgreSQL",
+      "url": "https://www.postgresql.org/about/"
+    },
+    {
+      "text": "butterfly genome-alignment tutorial using Minimap2 and R",
+      "url": "https://stevenvb12.github.io/misc/2023/03/30/Minimap2-alignment.html"
+    },
+    {
+      "text": "SQL",
+      "url": "https://www.postgresql.org/docs/current/tutorial-sql.html"
+    },
+    {
+      "text": "BioseqDB/examples/butterfies_alignments",
+      "url": "https://github.com/BioseqDB/examples/tree/main/butterfies_alignments"
+    },
+    {
+      "text": "download this tutorial’s code snapshot",
+      "url": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/"
+    },
+    {
+      "text": "FASTA",
+      "url": "https://www.ncbi.nlm.nih.gov/genbank/fastaformat/"
+    },
+    {
+      "text": "DNA",
+      "url": "https://www.genome.gov/genetics-glossary/Deoxyribonucleic-Acid-DNA"
+    },
+    {
+      "text": "nucleotides",
+      "url": "https://www.genome.gov/genetics-glossary/Nucleotide"
+    },
+    {
+      "text": "genome",
+      "url": "https://www.genome.gov/genetics-glossary/Genome"
+    },
+    {
+      "text": "sequencing",
+      "url": "https://www.genome.gov/genetics-glossary/DNA-Sequencing"
+    },
+    {
+      "text": "mutations",
+      "url": "https://www.genome.gov/genetics-glossary/Mutation"
+    },
+    {
+      "text": "mmsearch",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/"
+    },
+    {
+      "text": "seed-and-extend idea",
+      "url": "https://bioseqdb.com/v0.1/tutorials/project_alignment_foundations/#seed-and-extend"
+    },
+    {
+      "text": "Python read-mapper tutorial",
+      "url": "https://bioseqdb.com/blog/writing-a-dna-read-mapper-in-python/"
+    },
+    {
+      "text": "genomics",
+      "url": "https://www.genome.gov/genetics-glossary/genomics"
+    },
+    {
+      "text": "Docker",
+      "url": "https://docs.docker.com/get-started/docker-overview/"
+    },
+    {
+      "text": "installation page",
+      "url": "https://bioseqdb.com/v0.1/tutorials/getting_started/"
+    },
+    {
+      "text": "example’s setup instructions",
+      "url": "https://github.com/BioseqDB/examples/tree/main/butterfies_alignments#database-setup"
+    },
+    {
+      "text": "bioseq.load",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-load-440e918452a32019/"
+    },
+    {
+      "text": "GCA_056362945.2",
+      "url": "https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_056362945.2/"
+    },
+    {
+      "text": "JBTWUK020000023.1",
+      "url": "https://www.ncbi.nlm.nih.gov/nuccore/JBTWUK020000023.1"
+    },
+    {
+      "text": "GCF_056956725.1",
+      "url": "https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_056956725.1/"
+    },
+    {
+      "text": "NC_140406.1",
+      "url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_140406.1"
+    },
+    {
+      "text": "NCBI documents the GFF convention here.",
+      "url": "https://www.ncbi.nlm.nih.gov/datasets/docs/v2/reference-docs/file-formats/annotation-files/about-ncbi-gff3/"
+    },
+    {
+      "text": "bioseq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/"
+    },
+    {
+      "text": "seq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/"
+    },
+    {
+      "text": "bioseq.seq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/"
+    },
+    {
+      "text": "bioseq.len",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/"
+    },
+    {
+      "text": "seq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/"
+    },
+    {
+      "text": "seq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/"
+    },
+    {
+      "text": "bioseq.symbol_count",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-symbol-count-57d215dc4755c7c6/"
+    },
+    {
+      "text": "",
+      "url": "https://events.zoom.us/ev/AjBDzTIgBOjbXyyuF_i2JHKceeuBRp1dycq5phbyKx5EiRMkuSIE~ArkW9LST0g8ykivRZyFH3rRErP9ufAxV9j5V344fZoBICauQAZumvmLfFw?source=promotion_paragraph---post_body_banner_the_writers_circle--62dda57c6d9b-----------------------------------------"
+    },
+    {
+      "text": "mmsearch",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/"
+    },
+    {
+      "text": "SQL function",
+      "url": "https://www.postgresql.org/docs/current/sql-createfunction.html"
+    },
+    {
+      "text": "minimizer",
+      "url": "https://pubmed.ncbi.nlm.nih.gov/15256412/"
+    },
+    {
+      "text": "k-mer",
+      "url": "https://sourmash.readthedocs.io/en/latest/kmers-and-minhash.html"
+    },
+    {
+      "text": "chaining",
+      "url": "https://github.com/lh3/minimap2"
+    },
+    {
+      "text": "bioseq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/"
+    },
+    {
+      "text": "target_start",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-target-start-7f5c101237c7c3f3/"
+    },
+    {
+      "text": "target_end",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-target-end-360d292b54a6c2ca/"
+    },
+    {
+      "text": "query_start",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-start-12e9ad13b132271e/"
+    },
+    {
+      "text": "query_end",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-query-end-6c2a98839d0cee3f/"
+    },
+    {
+      "text": "is_reverse",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-is-reverse-df4949410e1277f8/"
+    },
+    {
+      "text": "cigar",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cigar-2c13a882e87557f3/"
+    },
+    {
+      "text": "edit",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-edit-6e464706e00608f5/"
+    },
+    {
+      "text": "block_length",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-block-length-c3b35d7503632ce7/"
+    },
+    {
+      "text": "score",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-score-4e84dfe56ac3c56b/"
+    },
+    {
+      "text": "mapq",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-mapq-9fa1e9e6781d5a58/"
+    },
+    {
+      "text": "is_primary",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-is-primary-fd211b6fc9a7da2c/"
+    },
+    {
+      "text": "bioseq.cigar",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-cigar-2c13a882e87557f3/"
+    },
+    {
+      "text": "bioseq.edit",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-edit-6e464706e00608f5/"
+    },
+    {
+      "text": "cigar",
+      "url": "https://samtools.github.io/hts-specs/SAMv1.pdf"
+    },
+    {
+      "text": "bioseq.edit",
+      "url": "https://bioseqdb.com/v0.1/reference/sql/function/bioseq-edit-6e464706e00608f5/"
+    },
+    {
+      "text": "Poetry",
+      "url": "https://python-poetry.org/docs/#installation"
+    },
+    {
+      "text": "Plotly explains that dependency here",
+      "url": "https://plotly.com/python/static-image-export/"
+    },
+    {
+      "text": "transactions",
+      "url": "https://www.postgresql.org/docs/current/tutorial-transactions.html"
+    },
+    {
+      "text": "SQLAlchemy's tutorial describes these transaction patterns.",
+      "url": "https://docs.sqlalchemy.org/en/20/tutorial/dbapi_transactions.html"
+    },
+    {
+      "text": "amino acids",
+      "url": "https://www.genome.gov/genetics-glossary/Amino-Acids"
+    },
+    {
+      "text": "BioseqDB",
+      "url": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/"
+    }
+  ],
+  "preCount": 27,
+  "title": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+  "url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b?postPublishedType=initial"
+}

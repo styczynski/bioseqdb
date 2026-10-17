@@ -1,7 +1,7 @@
 {
   "result": "PASS",
   "scope": "Local evidence and queue consistency only; no browser, publication, scheduling, deletion or website changes.",
-  "publication_state": "Five published posts remain recorded as live. Removal of posts four and five awaits the user decision. Four posts are prepared but unpublished.",
+  "publication_state": "Six posts are recorded as live: the historical five plus the separately requested butterfly tutorial. Removal of historical posts four and five awaits the user decision. The same four older posts remain prepared but unpublished.",
   "subsequent_batch_limit": 3,
   "automatic_schedule_created": false,
   "next_prepared_batch": [
@@ -15,16 +15,18 @@
   "requested_resume_date": "2026-10-14",
   "resume_date_is_schedule": false,
   "checks": {
-    "five_publications_recorded": true,
     "queue_matches_publication_ledger": true,
     "four_unpublished_prepared_posts": true,
     "no_duplicate_or_missing_posts": true,
-    "publication_stopped": true,
     "no_automatic_scheduling_recorded": true,
     "new_execution_required": true,
     "maximum_three_per_new_batch_and_day": true,
     "planned_batches_cover_unpublished_queue": true,
-    "removal_decision_pending": true
+    "removal_decision_pending": true,
+    "six_publications_recorded": true,
+    "remaining_queue_stopped": true,
+    "butterfly_separately_authorized": true
   },
-  "privacy": "Copied only review JSON with public publication metadata and source/proof file checks. No browser DOM, cookies, storage, session, profile data, or preview ownership files included."
+  "privacy": "Includes review JSON, public publication metadata, source/proof checks and filtered DOM-derived evidence from public articles and posts. No raw editor DOM, private browser data, cookies, storage, sessions, profiles or preview ownership files are included.",
+  "recorded_date": "2026-10-17"
 }

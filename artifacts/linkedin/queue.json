@@ -7,7 +7,8 @@
     "combining-search-results-in-postgres",
     "what-does-vector-mean-in-postgres",
     "full-text-search-rules-in-sql",
-    "where-postgres-table-storage-can-change"
+    "where-postgres-table-storage-can-change",
+    "comparing-butterfly-genomes-with-bioseqdb"
   ],
   "policy": {
     "maximum_new_posts_per_batch": 3,
@@ -58,5 +59,13 @@
     "no_private_links": "Never use a Medium draft or editor URL in LinkedIn copy.",
     "fallback_if_medium_remains_unpublished": "Keep the clearly labelled Author on Medium link to https://medium.com/@styczynski.",
     "limits": "Publish at most three new LinkedIn posts per day and per batch. No automatic scheduling has been created."
+  },
+  "updated_date": "2026-10-17",
+  "publication_count": 6,
+  "latest_publication": {
+    "slug": "comparing-butterfly-genomes-with-bioseqdb",
+    "date": "2026-10-17",
+    "url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7517170696683286529/",
+    "authorization": "Separately requested butterfly tutorial publication; the four older queued posts remain paused and unscheduled."
   }
 }

@@ -123,5 +123,99 @@
         "alt": "The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers."
       }
     ]
+  },
+  {
+    "slug": "comparing-butterfly-genomes-with-bioseqdb",
+    "title": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+    "url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b",
+    "canonical_url": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+    "topics": [
+      "Bioinformatics",
+      "Genomics",
+      "Python",
+      "Postgresql",
+      "Bioseqdb"
+    ],
+    "status": "published",
+    "content_verified": true,
+    "images": [
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*wafjJy5m5hAOBr0XT4ObiA.png",
+        "alt": "Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*ZLFOarRfLMBlL9p5iLB7HQ.png",
+        "alt": "A schematic comparison of Heliconius butterflies and the optix region."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*OTwW8WJ4GCLdAf7BRihTow.png",
+        "alt": "DNA letters and a small alignment with a mismatch and a gap."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*LqXeflPMZjSk68tutBTz5Q.png",
+        "alt": "NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*3exiaQ4QR3XyrbRFAh6Rhw.png",
+        "alt": "Coordinate conversion from one-based annotation positions to zero-based slices and local window positions."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*l-fu4X4ql8kbJ2k25xX6Mw.png",
+        "alt": "Lengths of the two imported sequence windows."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*NgoJ4xT7ppRjLTMauxsNfw.png",
+        "alt": "Lengths of the complete NCBI source records, distinct from the imported windows."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*oI_HA7OYqYEZKmNx-5ZBxQ.png",
+        "alt": "Measured counts of A, C, G, T and N in the two NCBI windows."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*qLzIztOYS81HKlQLHlsTng.png",
+        "alt": "GC percentage of called bases in each imported sequence."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*EWQGsttIXef_PzPMQuj7EQ.png",
+        "alt": "GC content measured in consecutive 10 kb windows along both sequences."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*9VIPGYOqTasVilFMLc6mAg.png",
+        "alt": "A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*b4tu7j2ca2XEsTIugCKqUA.png",
+        "alt": "The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*jdgGvt09eVpqQMuyqAJA_A.png",
+        "alt": "One real alignment block connects its target and query intervals."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*0Z1Wl-8ACQgYLNdEQ_v7gw.png",
+        "alt": "A dot plot of the 355 retained alignments, distinguishing forward and reverse matches."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*levy578wMAFUsk5Iht0JjA.png",
+        "alt": "All retained alignment ribbons between the two one-million-base windows."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*XozUpxJF7WFrubrqZoTUqQ.png",
+        "alt": "The optix neighbourhood after centring the gene models and reversing the erato display direction."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*9KpyqeRdpHmM_n_UdfhWcg.png",
+        "alt": "The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*okAjCJPHhgsPRT_QXnkhKQ.png",
+        "alt": "Current NCBI gene models, local GC measurements and BioseqDB alignments around optix."
+      },
+      {
+        "src": "https://miro.medium.com/v2/resize:fit:720/format:webp/1*bv6Dzku8eUaSkJDPQbiJtg.png",
+        "alt": "The current optix gene and exon models in their transcript-oriented display."
+      }
+    ],
+    "recorded_date": "2026-10-17"
   }
 ]

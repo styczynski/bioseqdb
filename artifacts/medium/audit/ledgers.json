@@ -162,11 +162,31 @@
         "current_editor_snapshot_passes": true,
         "no_figure_upload_reused_for_different_source": true
       }
+    },
+    {
+      "slug": "comparing-butterfly-genomes-with-bioseqdb",
+      "ledger": "publications.json",
+      "passed": true,
+      "checks": {
+        "unique_slug_across_ledgers": true,
+        "unique_url_across_ledgers": true,
+        "title_matches_source": true,
+        "canonical_matches_source": true,
+        "image_metadata_matches_snapshot": true,
+        "image_alt_order_matches_source": true,
+        "image_count_matches_source": true,
+        "story_id_matches_snapshot": true,
+        "five_selected_topics": true,
+        "current_editor_snapshot_passes": true,
+        "no_figure_upload_reused_for_different_source": true,
+        "public_canonical_verified": true,
+        "all_public_images_loaded": true
+      }
     }
   ],
   "issues": [],
   "coverage": {
-    "present": 9,
-    "all_source_posts": 9
+    "present": 10,
+    "all_source_posts": 10
   }
 }
