@@ -380,6 +380,31 @@ void verify_website_pipeline() {
                    + json_text(landing_copy_fixture.at("hero").at("title")) + "}}}")
                == "A human title &amp; &lt;test&gt;",
            "landing copy is escaped as text rather than interpreted as HTML");
+    const std::string qa_fixture =
+        "title: Questions\ndescription: Answers\nintro: Start here\n"
+        "author: Author\ndate: '2026-10-18'\nnavigation_label: Topics\n"
+        "permalink_label: Link\ncontact_label: Contact\ncontact_text: Ask me\n"
+        "contact_action: Write\ngroups:\n  - id: basics\n    title: Basics\n"
+        "    questions:\n      - id: is-it-postgres\n        question: Is it PostgreSQL?\n"
+        "        answer: >-\n          Yes, with **sequence** columns.\n";
+    const auto qa_fixture_content = parse_qa_content(qa_fixture, "qa.yaml");
+    expect(qa_fixture_content.groups.size() == 1
+        && qa_fixture_content.groups.front().questions.front().id == "is-it-postgres"
+        && qa_fixture_content.groups.front().questions.front().answer == "Yes, with **sequence** columns.",
+        "Q&A YAML retains ordered questions, stable anchors, and authored Markdown");
+    for (const auto& [before, after] : {
+            std::pair{"id: is-it-postgres", "id: basics"},
+            std::pair{"id: is-it-postgres", "id: ../bad"},
+            std::pair{"answer: >-", "unknown: >-"},
+            std::pair{"'2026-10-18'", "'2026-02-30'"},
+            std::pair{"question: Is it PostgreSQL?", "question: [wrong, type]"}}) {
+        auto invalid_qa = qa_fixture;
+        invalid_qa.replace(invalid_qa.find(before), std::string_view(before).size(), after);
+        bool rejected = false;
+        try { (void)parse_qa_content(invalid_qa, "qa.yaml"); }
+        catch (const std::exception&) { rejected = true; }
+        expect(rejected, "Q&A rejects duplicate anchors, invalid IDs, unknown fields, bad dates, and nontext questions");
+    }
     const auto blog_social_fixture = parse_landing_content(
         "medium_posts:\n  introducing-bioseqdb: https://medium.com/@styczynski/article\n"
         "linkedin_posts:\n  introducing-bioseqdb: https://www.linkedin.com/feed/update/urn:li:activity:123\n",
@@ -2074,12 +2099,45 @@ void verify_blog_pipeline() {
     site_view site;
     site.title = "BioseqDB";
     const auto context = boost::json::parse(build_page_context(site,
-        R"({"page_type":"blog","title":"A &amp; B","description":"&lt;SQL&gt;","canonical":"https://example.org/blog/test/","date":"2026-10-01","reading_minutes":1,"structured_title":"A & B </script><b>","structured_description":"<SQL>","structured_author":"A \"B\"","structured_keywords":["<DNA>"]})", "", ""));
+        R"({"page_type":"blog","title":"A &amp; B","description":"&lt;SQL&gt;","canonical":"https://example.org/blog/test/","date":"2026-10-01","modified_date":"2026-10-18","thumbnail_url":"https://example.org/blog/test/thumbnail.jpg","reading_minutes":1,"structured_title":"A & B </script><b> -->","structured_description":"<SQL>","structured_author":"A \"B\"","structured_keywords":["<DNA>"]})", "", ""));
     const auto structured = boost::json::parse(context.at("page").at("jsonld").as_string());
-    expect(structured.at("headline").as_string() == "A & B </script><b>"
-        && structured.at("description").as_string() == "<SQL>"
+    const auto& article = structured.at("@graph").as_array().front();
+    expect(article.at("headline").as_string() == "A & B </script><b> -->"
+        && article.at("description").as_string() == "<SQL>"
+        && article.at("datePublished").as_string() == "2026-10-01"
+        && article.at("dateModified").as_string() == "2026-10-18"
+        && article.at("image").as_string() == "https://example.org/blog/test/thumbnail.jpg"
         && !std::string(context.at("page").at("jsonld").as_string()).contains("</script>"),
-        "BlogPosting structured data retains original text rather than HTML entities");
+        "BlogPosting structured data retains original text, source dates and page screenshot safely");
+    const std::string pagemap(context.at("page").at("pagemap_html").as_string());
+    expect(pagemap.starts_with("<!--\n<PageMap>") && pagemap.ends_with("</PageMap>\n-->")
+        && pagemap.find("-->") == pagemap.size() - 3
+        && pagemap.contains("A &amp; B &lt;/script&gt;&lt;b&gt; &#45;&#45;&gt;")
+        && pagemap.contains("name=\"page_count\">1</Attribute>")
+        && pagemap.contains("name=\"width\">1200</Attribute>"),
+        "PageMap is safe XML in one HTML comment and counts one HTML document");
+    expect(structured.at("@graph").as_array()[2].at("@type").as_string() == "Organization"
+        && structured.at("@graph").as_array().back().at("itemListElement").as_array().front()
+            .at("item").as_string() == "https://example.org/",
+        "Article publisher and absolute fallback breadcrumbs are generated");
+    const auto docs_context = boost::json::parse(build_page_context(site,
+        R"({"page_type":"tutorial","title":"A &amp; B &amp;lt;","canonical":"https://example.org/v0.1/tutorials/example/","breadcrumb":[{"name":"Home","url":"/"},{"name":"A &amp; B","url":"/v0.1/tutorials/example/"}]})", "", ""));
+    const auto docs_structured = boost::json::parse(docs_context.at("page").at("jsonld").as_string());
+    expect(docs_structured.at("@graph").as_array().front().at("headline").as_string() == "A & B &lt;"
+        && !docs_structured.at("@graph").as_array().front().as_object().contains("datePublished")
+        && docs_structured.at("@graph").as_array().back().at("itemListElement").as_array().back()
+            .at("item").as_string() == "https://example.org/v0.1/tutorials/example/",
+        "Documentation metadata decodes template entities once and omits unknown dates");
+    const auto faq_context = boost::json::parse(build_page_context(site,
+        R"({"page_type":"qa","title":"Questions","canonical":"https://example.org/qa/","structured_questions":[{"question":"Is this an extension?","answer":"Yes. It runs inside PostgreSQL.","url":"/qa/#extension"}]})", "", ""));
+    const auto faq_structured = boost::json::parse(faq_context.at("page").at("jsonld").as_string());
+    const auto& faq = faq_structured.at("@graph").as_array().front();
+    expect(faq.at("@type").as_string() == "FAQPage"
+        && faq.at("mainEntity").as_array().front().at("acceptedAnswer").at("text").as_string()
+            == "Yes. It runs inside PostgreSQL."
+        && faq.at("mainEntity").as_array().front().at("url").as_string()
+            == "https://example.org/qa/#extension",
+        "Editorial questions use FAQPage with the visible answers and stable question links");
     std::string long_text;
     for (int i = 0; i < 201; ++i) long_text += "word ";
     expect(blog_reading_minutes(parse_markdown_content(long_text).children) == 2,
@@ -2124,7 +2182,10 @@ void verify_blog_pipeline() {
         (fs::path(site_config_relpath).parent_path() / "contact.yaml").generic_string();
     const auto blog_relative =
         (fs::path(site_config_relpath).parent_path() / "blog.yaml").generic_string();
+    const auto qa_relative =
+        (fs::path(site_config_relpath).parent_path() / "qa.yaml").generic_string();
     for (const auto& relative : {landing_relative, contact_relative, blog_relative,
+                                 qa_relative,
                                  version_string + "/landing_examples.md"}) {
         const fs::path path = source / relative;
         if (!fs::is_regular_file(path)) continue;
@@ -2132,6 +2193,7 @@ void verify_blog_pipeline() {
         if (relative == landing_relative || relative == contact_relative || relative == blog_relative) {
             (void)parse_landing_content(contents, path.generic_string());
         }
+        if (relative == qa_relative) (void)parse_qa_content(contents, path.generic_string());
         inputs.push_back(source_input{
             .path = relative,
             .content_hash = hex64(bioseq::common::fnv1a_64(contents))});
@@ -4448,6 +4510,12 @@ void decorate_code_entity_ranges(
     return parse_landing_content(read_artifact_bytes(copy_path), copy_path.generic_string());
 }
 
+[[nodiscard]] qa_content load_qa_content(const fs::path& site_config_path) {
+    const fs::path path = site_config_path.parent_path() / "qa.yaml";
+    if (!fs::is_regular_file(path)) return {};
+    return parse_qa_content(read_artifact_bytes(path), path.generic_string());
+}
+
 /// @brief Renders a saved site model into a staging directory.
 ///
 /// Uses the model, templates, and static files without a database connection.
@@ -4459,7 +4527,8 @@ void decorate_code_entity_ranges(
     const std::string& base_path, const std::string& revision,
     const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging,
     const landing_content& landing_copy = {}, const landing_content& contact_copy = {},
-    const landing_content& blog_copy = {}) {
+    const landing_content& blog_copy = {}, const qa_content& questions = {},
+    const boost::json::object& page_dates = {}, const fs::path& thumbnails = {}) {
     const std::string version = model.version.path_component;
     const auto url = [&base_path](std::string_view rel) -> std::string {
         return base_path + std::string(rel);
@@ -4562,14 +4631,64 @@ void decorate_code_entity_ranges(
         const auto value = meta->second.find(key);
         return value == meta->second.end() ? fallback : value->second;
     };
-    const auto render = [&route, &site, &templates_dir, &writer, &landing_context,
-                         &contact_context, &blog_context](
+    // Dates come from source history; declared blog dates remain authoritative.
+    std::map<std::string, std::string, std::less<>> page_sources{
+        {"index.html", "website/landing.yaml"},
+        {"qa/index.html", "website/qa.yaml"},
+        {"contact/index.html", "website/contact.yaml"},
+        {"contact_thanks/index.html", "website/contact.yaml"},
+        {"benchmarks/index.html", "website/v0.1/tutorials/project_benchmarking.md"}};
+    for (const tutorial& item : model.tutorials)
+        page_sources[version + "/tutorials/" + item.metadata.slug + "/index.html"] =
+            "website/" + item.source_path;
+    for (const tutorial& item : model.blog_posts)
+        page_sources["blog/" + item.metadata.slug + "/index.html"] = "website/" + item.source_path;
+    const auto record_sources = [&](const auto& entities) {
+        for (const auto& entity : entities)
+            if (entity.declaration)
+                page_sources[reference_entity_relative_route(version, entity) + "index.html"] =
+                    entity.declaration->path.generic_string();
+    };
+    record_sources(model.cpp_entities);
+    record_sources(model.sql_entities);
+    const auto render = [&route, &url, &config, &site, &templates_dir, &writer, &landing_context,
+                         &contact_context, &blog_context, &page_sources, &page_dates, &thumbnails](
                             std::string_view rel,
                             std::string_view template_name,
                             std::string_view page_object,
                             std::string_view key,
                             std::string_view collection) -> void {
-        auto context = boost::json::parse(build_page_context(site, page_object, key, collection));
+        auto page = boost::json::parse(page_object).as_object();
+        if (!page_dates.empty()) {
+            const auto source = page_sources.find(rel);
+            const std::string source_path = source == page_sources.end()
+                ? "website/site.yaml" : source->second;
+            const auto& paths = page_dates.at("paths").as_object();
+            const auto* history = paths.if_contains(source_path);
+            const auto& dates = (history ? *history : page_dates.at("default")).as_object();
+            if (!page.if_contains("date") || page.at("date").as_string().empty())
+                page["date"] = dates.at("date");
+            page["modified_date"] = dates.at("modified_date");
+            // An explicitly dated article cannot have an earlier modification date.
+            if (page.at("modified_date").as_string() < page.at("date").as_string())
+                page["modified_date"] = page.at("date");
+        }
+        const fs::path relative_page{std::string(rel)};
+        const fs::path thumbnail_relative = relative_page.parent_path() /
+            (relative_page.filename() == "index.html" ? "thumbnail.jpg"
+                : relative_page.stem().string() + "-thumbnail.jpg");
+        // The preview pass advertises the images about to be captured. Plain
+        // standalone renders without SEO inputs keep their existing social image.
+        if (!page_dates.empty() || !thumbnails.empty())
+            page["thumbnail_url"] = config.canonical_origin + url(thumbnail_relative.generic_string());
+        if (!thumbnails.empty()) {
+            const fs::path image = thumbnails / thumbnail_relative;
+            if (!fs::is_regular_file(image))
+                throw std::runtime_error("missing rendered page thumbnail: " + image.string());
+            writer.emit(route(thumbnail_relative.generic_string()), read_artifact_bytes(image));
+        }
+        auto context = boost::json::parse(build_page_context(
+            site, boost::json::serialize(page), key, collection));
         context.as_object()["landing"] = landing_context;
         context.as_object()["contact"] = contact_context;
         context.as_object()["blog"] = blog_context;
@@ -4981,6 +5100,13 @@ void decorate_code_entity_ranges(
         }
         return found->metadata.title;
     };
+    std::string bibliography_html;
+    for (const auto& item : model.tutorials) {
+        if (item.metadata.slug == "bibliography") {
+            bibliography_html = render_content_html(item.content);
+            break;
+        }
+    }
     for (const tutorial& item : model.tutorials) {
         const std::string rel =
             version + "/tutorials/" + item.metadata.slug + "/index.html";
@@ -5015,6 +5141,9 @@ void decorate_code_entity_ranges(
             + ",\"doc_nav\":" + doc_nav
             + ",\"on_this_page\":" + on_this_page
             + ",\"body_html\":" + json_quote(body);
+        page += ",\"external_sources_html\":" + json_quote(
+            item.metadata.slug == "bibliography" ? std::string{} :
+            render_external_sources_html(body, bibliography_html, config.canonical_origin));
         page += ",\"previous_url\":";
         page += item.previous_slug
             ? json_text(url(version + "/tutorials/" + *item.previous_slug + "/"))
@@ -5176,6 +5305,60 @@ void decorate_code_entity_ranges(
     blog_index_page["posts"] = std::move(blog_posts);
     render("blog/index.html", "blog_index.html.j2", boost::json::serialize(blog_index_page), "", "");
 
+    // Questions remain visible without JavaScript. The same authored answers
+    // feed the page, anchored search records, and FAQ structured data.
+    if (!questions.groups.empty()) {
+        boost::json::object page;
+        for (const auto& [key, value] : questions.copy)
+            page[key] = boost::json::parse(json_text(value));
+        page["canonical"] = canonical("qa/index.html");
+        page["page_type"] = "qa";
+        page["structured_title"] = questions.copy.at("title");
+        page["structured_description"] = questions.copy.at("description");
+        page["structured_author"] = questions.copy.at("author");
+        page["category"] = "Questions and answers";
+        page["breadcrumb"] = boost::json::parse(breadcrumb_json({
+            {"Home", url("")}, {"Q&A", url("qa/")}}));
+        boost::json::array groups;
+        boost::json::array structured_questions;
+        for (const auto& group : questions.groups) {
+            boost::json::object group_view;
+            group_view["id"] = group.id;
+            group_view["title"] = boost::json::parse(json_text(group.title));
+            boost::json::array entries;
+            for (const auto& question : group.questions) {
+                auto answer_nodes = parse_markdown_content(question.answer).children;
+                std::string answer_text;
+                for (const auto& node : answer_nodes) {
+                    if (!answer_text.empty()) answer_text += ' ';
+                    answer_text += node_plain_text(node, node_plain_text);
+                }
+                const auto rebase = [&url](content_node& node, auto&& self) -> void {
+                    if ((node.kind == content_node_kind::link || node.kind == content_node_kind::image)
+                        && node.target.starts_with('/') && !node.target.starts_with("//"))
+                        node.target = url(node.target.substr(1));
+                    for (auto& child : node.children) self(child, self);
+                };
+                for (auto& node : answer_nodes) rebase(node, rebase);
+                decorate_code_entity_ranges(answer_nodes, route_by_id, qualified_by_id,
+                                            tooltip_url, "qa:" + question.id);
+                boost::json::object entry;
+                entry["id"] = question.id;
+                entry["question"] = boost::json::parse(json_text(question.question));
+                entry["answer_html"] = render_content_html(answer_nodes);
+                entries.push_back(std::move(entry));
+                structured_questions.push_back(boost::json::object{
+                    {"question", question.question}, {"answer", answer_text},
+                    {"url", canonical("qa/index.html") + "#" + question.id}});
+            }
+            group_view["questions"] = std::move(entries);
+            groups.push_back(std::move(group_view));
+        }
+        page["groups"] = std::move(groups);
+        page["structured_questions"] = std::move(structured_questions);
+        render("qa/index.html", "qa.html.j2", boost::json::serialize(page), "", "");
+    }
+
     // Render the reference home, C++ and SQL indexes, and  entity pages.
     render(version + "/reference/index.html", "reference_index.html.j2",
            "{\"title\":" + json_text("API Reference")
@@ -5190,6 +5373,7 @@ void decorate_code_entity_ranges(
            "", "");
     const auto render_domain = [
                                    &backlinks_by_id,
+                                   &bibliography_html,
                                    &breadcrumb_json,
                                    &canonical,
                                    &config,
@@ -5297,9 +5481,12 @@ void decorate_code_entity_ranges(
             decorate_code_entity_ranges(detail_nodes, route_by_id, qualified_by_id,
                                        tooltip_url, entity.canonical_id);
             page += ",\"detail_html\":";
+            const auto detail_html = render_content_html(detail_nodes);
             page += detail_nodes.empty()
                 ? std::string("null")
-                : json_quote(render_content_html(detail_nodes));
+                : json_quote(detail_html);
+            page += ",\"external_sources_html\":" + json_quote(
+                render_external_sources_html(detail_html, bibliography_html, config.canonical_origin));
             // Build declaration links from the stored source path, revision, and
             // line using the configured URL template.
             if (entity.declaration) {
@@ -5445,6 +5632,23 @@ void decorate_code_entity_ranges(
         for (const auto& keyword : item.metadata.keywords) entry.name_source += " " + keyword;
         entry.text_source = item.metadata.description + " " + item.search_text;
         search_entries.push_back(std::move(entry));
+    }
+    for (const auto& group : questions.groups) {
+        for (const auto& question : group.questions) {
+            search_index_entry entry;
+            entry.id = "question:" + question.id;
+            entry.group = "Questions";
+            entry.kind = "question";
+            entry.title = question.question;
+            entry.route = url("qa/#" + question.id);
+            entry.name_source = question.question + " " + group.title;
+            for (const auto& node : parse_markdown_content(question.answer).children) {
+                if (!entry.summary.empty()) entry.summary += ' ';
+                entry.summary += node_plain_text(node, node_plain_text);
+            }
+            entry.text_source = entry.summary;
+            search_entries.push_back(std::move(entry));
+        }
     }
     const auto add_page_entry = [&search_entries, &url](
                                     std::string id,
@@ -5741,7 +5945,8 @@ void decorate_code_entity_ranges(
             fs::path(require_option(options, "static")), staging,
             load_landing_content(site_config_path),
             load_landing_content(site_config_path, "contact.yaml"),
-            load_landing_content(site_config_path, "blog.yaml"));
+            load_landing_content(site_config_path, "blog.yaml"),
+            load_qa_content(site_config_path));
     }
 
     // Write a prepublish descriptor before swapping directories so  the next
@@ -5923,7 +6128,7 @@ void decorate_code_entity_ranges(
 [[nodiscard]] int execute_render_command(std::span<std::string_view const> args) try {
     static constexpr auto value_keys = std::to_array<std::string_view>({
         "model", "site-config", "templates", "static", "output", "base-path",
-        "source-revision", "model-validation-stamp", "report-dir"});
+        "source-revision", "model-validation-stamp", "report-dir", "page-dates", "thumbnails"});
     const auto options = parse_options(args, value_keys, {});
     const fs::path model_path = require_option(options, "model");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -5942,13 +6147,23 @@ void decorate_code_entity_ranges(
     if (const auto found = options.find("source-revision"); found != options.end()) {
         revision = found->second;
     }
+    boost::json::object page_dates;
+    fs::path thumbnails;
+    if (const auto found = options.find("page-dates"); found != options.end()) {
+        page_dates = boost::json::parse(read_artifact_bytes(found->second)).as_object();
+        if (page_dates.at("schema").as_string() != "bioseq.website.page_dates.v1")
+            throw std::runtime_error("unsupported page dates schema");
+    }
+    if (const auto found = options.find("thumbnails"); found != options.end())
+        thumbnails = fs::path(found->second);
     const auto stage_started = std::chrono::steady_clock::now();
     const site_model model = deserialize_site_model(read_artifact_bytes(model_path));
     const std::string manifest_hash = render_site_model(
         model, config, base_path, revision, templates_dir, static_dir, staging,
         load_landing_content(site_config_path),
             load_landing_content(site_config_path, "contact.yaml"),
-            load_landing_content(site_config_path, "blog.yaml"));
+            load_landing_content(site_config_path, "blog.yaml"),
+            load_qa_content(site_config_path), page_dates, thumbnails);
     const auto stage_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - stage_started).count();
     std::uint64_t staged_html = 0;

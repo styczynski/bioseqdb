@@ -19,6 +19,7 @@ header:
   docs: Docs
   benchmarks: Benchmarks
   blog: Blog
+  qa: Q&A
   search_documentation: Search documentation
   search_docs_functions_types: Search docs, functions, types…
   symbol: /
@@ -377,6 +378,7 @@ search:
   search_is_temporarily_unavailable: Search is temporarily unavailable.
   tutorial: Tutorial
   blog_post: Blog post
+  question: Question
   function: Function
   class: Class
   type: Type

@@ -4,10 +4,12 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <regex>
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 module bioseq.codegen.website:html_renderer;
@@ -894,6 +896,122 @@ struct html_content_writer {
     html_content_writer writer;
     writer.render_children(nodes);
     return std::move(writer.out);
+}
+
+/// @brief Lists external links used by a document, including its cited sources.
+/// @param page_html The rendered document body, without the shared navigation.
+/// @param bibliography_html The rendered bibliography for the same version.
+/// @param canonical_origin The website origin, excluded from external sources.
+/// @return A compact, visible section; empty when the document has no sources.
+[[nodiscard]] std::string render_external_sources_html(
+    std::string_view page_html,
+    std::string_view bibliography_html,
+    std::string_view canonical_origin) {
+    struct source_link {
+        std::string url;
+        std::string label;
+        std::string host;
+    };
+    const auto decode = [](std::string text) {
+        // These are the entities emitted by this renderer. Decode ampersands
+        // last so a literal "&amp;quot;" does not become a quotation mark.
+        for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+                 {"&quot;", "\""}, {"&#39;", "'"}, {"&apos;", "'"},
+                 {"&lt;", "<"}, {"&gt;", ">"}, {"&amp;", "&"}}) {
+            std::size_t at = 0;
+            while ((at = text.find(from, at)) != std::string::npos) {
+                text.replace(at, from.size(), to);
+                at += to.size();
+            }
+        }
+        return text;
+    };
+    const auto attribute = [&decode](const std::string& attributes, std::string_view name) {
+        const std::regex pattern("(?:^|\\s)" + std::string(name)
+            + R"attr(\s*=\s*(?:"([^"]*)"|'([^']*)'))attr", std::regex::icase);
+        std::smatch match;
+        if (!std::regex_search(attributes, match, pattern)) return std::string{};
+        return decode(match[1].matched ? match[1].str() : match[2].str());
+    };
+    const auto url_host = [](std::string_view value) {
+        const auto lower = to_ascii_lower(value);
+        const std::size_t start = lower.starts_with("https://") ? 8
+            : lower.starts_with("http://") ? 7 : 0;
+        if (!start) return std::string{};
+        const auto end = value.find_first_of("/?#", start);
+        return to_ascii_lower(value.substr(start, end == std::string_view::npos
+            ? std::string_view::npos : end - start));
+    };
+    const auto site_host = url_host(canonical_origin);
+    const auto make_link = [&](const std::string& attributes, const std::string& inner) {
+        source_link link{.url = attribute(attributes, "href")};
+        link.host = url_host(link.url);
+        if (link.host.empty() || link.host == site_host) return source_link{};
+        link.label = decode(std::regex_replace(inner, std::regex(R"(<[^>]*>)"), ""));
+        link.label = std::regex_replace(link.label, std::regex(R"(\s+)"), " ");
+        const auto first = link.label.find_first_not_of(' ');
+        if (first == std::string::npos) link.label.clear();
+        else link.label = link.label.substr(first, link.label.find_last_not_of(' ') - first + 1);
+        const auto lower_label = to_ascii_lower(link.label);
+        if (link.label.empty() || lower_label == "here" || lower_label == "link"
+            || lower_label == "source" || lower_label == "website"
+            || lower_label == "paper" || lower_label == "more information") {
+            link.label = link.url.substr(link.url.find("://") + 3);
+        }
+        return link;
+    };
+    // Both inputs are already sanitized by render_content_html. Read only
+    // actual anchors, never URL-shaped text inside a listing or a title.
+    const std::regex anchor(R"(<a\b([^>]*)>([\s\S]*?)</a\s*>)", std::regex::icase);
+    const std::string bibliography(bibliography_html);
+    std::map<std::string, std::vector<source_link>, std::less<>> references;
+    std::string current_reference;
+    for (auto it = std::sregex_iterator(bibliography.begin(), bibliography.end(), anchor);
+         it != std::sregex_iterator(); ++it) {
+        const auto attributes = (*it)[1].str();
+        const auto id = attribute(attributes, "id");
+        if (id.starts_with("ref-")) current_reference = id;
+        if (!current_reference.empty()) {
+            auto link = make_link(attributes, (*it)[2].str());
+            if (!link.url.empty()) references[current_reference].push_back(std::move(link));
+        }
+    }
+    std::vector<source_link> links;
+    std::set<std::string> seen;
+    const auto append = [&](const source_link& link) {
+        if (!link.url.empty() && seen.insert(link.url).second) links.push_back(link);
+    };
+    const std::string page(page_html);
+    for (auto it = std::sregex_iterator(page.begin(), page.end(), anchor);
+         it != std::sregex_iterator(); ++it) {
+        const auto attributes = (*it)[1].str();
+        const auto href = attribute(attributes, "href");
+        append(make_link(attributes, (*it)[2].str()));
+        const auto hash = href.find("#ref-");
+        if (hash == std::string::npos) continue;
+        const auto path = std::string_view(href).substr(0, hash);
+        const auto host = url_host(href);
+        const bool local_bibliography = (host.empty() || host == site_host)
+            && (path.ends_with("bibliography/") || path.ends_with("bibliography/index.html")
+                || path.ends_with("bibliography.md"));
+        if (!local_bibliography) continue;
+        const auto found = references.find(href.substr(hash + 1));
+        if (found != references.end()) for (const auto& link : found->second) append(link);
+    }
+    if (links.empty()) return {};
+    std::string out = "<section class=\"document-sources\" aria-label=\"External sources\">"
+        "<h2>External sources</h2><ul>";
+    for (const auto& link : links) {
+        out += "<li><a href=\"";
+        append_escaped_attribute(out, link.url);
+        out += "\">";
+        append_escaped_text(out, link.label);
+        out += "</a> <span class=\"document-sources-host\">(";
+        append_escaped_text(out, link.host);
+        out += ")</span></li>";
+    }
+    out += "</ul></section>";
+    return out;
 }
 
 }  // namespace bioseq::codegen::website

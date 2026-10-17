@@ -137,3 +137,25 @@
 .blog-content img[src$="/figures/blog/butterflies/source-record-lengths.svg"] { aspect-ratio: 860 / 540; }
 .blog-content img[src$="/figures/blog/butterflies/sql-workflow.svg"] { aspect-ratio: 860 / 535; }
 /* butterfly-figure-aspect-ratios:end */
+
+/* Stable component names keep chapter navigation independent of exported IDs. */
+.tutorial-pagination { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin: 28px 0 0; }
+.tutorial-pagination-link { display: flex; flex-direction: column; justify-content: center; min-width: 0; gap: 5px; padding: 12px 15px; border: 1px solid var(--theme-ffffff-a0_12, rgba(255,255,255,.12)); border-radius: 10px; background: var(--theme-ffffff-a0_02, rgba(255,255,255,.02)); color: var(--theme-cbd8e4, #cbd8e4); text-decoration: none; transition: background .15s, border-color .15s; }
+.tutorial-pagination-link:hover { background: var(--theme-46b8de-a0_09, rgba(70,184,222,.09)); border-color: var(--theme-46b8de-a0_4, rgba(70,184,222,.4)); }
+.tutorial-pagination-link:focus-visible { outline: 2px solid var(--theme-46b8de, #46b8de); outline-offset: 3px; }
+.tutorial-pagination-label { font-size: 11px; font-family: 'IBM Plex Mono', monospace; line-height: 1.4; color: var(--theme-7d94a6, #7d94a6); }
+.tutorial-pagination-title { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.tutorial-pagination-next { text-align: right; align-items: flex-end; }
+@media (min-width: 666px) {
+  .tutorial-pagination { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tutorial-pagination-next { grid-column: 2; }
+}
+.document-sources { margin: 30px 0 0; padding-top: 16px; border-top: 1px solid var(--theme-ffffff-a0_12, rgba(255,255,255,.12)); color: var(--theme-9db1c2, #9db1c2); }
+.document-sources h2 { margin: 0 0 9px; font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--theme-cbd8e4, #cbd8e4); }
+.document-sources ul { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px 24px; padding: 0 0 0 17px; margin: 0; }
+.document-sources li { font-size: 12px; line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
+.document-sources a { color: var(--theme-7fcbe8, #7fcbe8); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.document-sources a:hover { color: var(--theme-eef4f9, #eef4f9); }
+.document-sources a:focus-visible { outline: 2px solid var(--theme-46b8de, #46b8de); outline-offset: 3px; }
+.document-sources-host { font-size: 11px; color: var(--theme-9db1c2, #9db1c2); white-space: normal; }
+@media (min-width: 1024px) { .document-sources ul { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -16,12 +16,18 @@ html[data-theme="light"] .theme-moon { display: block; }
   .site-actions .site-github { padding: 0; width: 38px; height: 38px; justify-content: center; }
   .site-github-label { display: none; }
 }
-@media (max-width: 768px) {
-  .site-search-wrap { order: 5; flex: 1 1 calc(100% - 132px); width: 0; }
+@media (max-width: 1024px) {
+  .site-header-inner { flex-wrap: wrap; gap: 10px; padding: 10px 14px; min-height: 111px; }
+  .docs-design-page .site-header .site-menu { display: flex; }
+  .site-search-wrap { order: 5; flex: 1 1 calc(100% - 132px); width: 0; max-width: none; min-width: 0; margin-left: 0; }
   .site-actions { order: 6; margin-left: auto; }
   .site-icon-button, .site-actions .site-github { min-width: 34px; width: 34px; height: 36px; padding: 0; }
   .site-actions { gap: 5px; }
   .site-navigation { margin-left: auto; }
   .site-search-dropdown { width: min(440px, calc(100vw - 28px)); }
+}
+@media (max-width: 568px) {
+  .site-brand > span { display: none; }
+  .site-navigation { gap: clamp(10px, 3vw, 16px); }
 }
 @media (prefers-reduced-motion: reduce) { .site-action-tooltip { transition: none; } }

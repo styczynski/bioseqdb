@@ -8,6 +8,7 @@ module bioseq.codegen.website:tests.contract;
 import :build_pipeline;
 import :reference_index;
 import :search_index;
+import :html_renderer;
 import bioseq.codegen.website.postgres;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
@@ -19,6 +20,40 @@ namespace bioseq::codegen::website {
 
 /// @brief Checks the imported website APIs and runs the pipeline tests.
 void run_website_contract_self_tests() {
+    // Only the sources actually used on a page belong in its compact footer.
+    // Bibliography links remain local in the prose, but their cited URLs are
+    // also exposed as ordinary, crawlable links at the end of the document.
+    const std::string sources = render_external_sources_html(
+        "<p><a href=\"../bibliography/#ref-used\">[1]</a> "
+        "<a href=\"../bibliography/#ref-used\">[1]</a> "
+        "<a href=\"https://example.org/paper?a=1&amp;b=2\">Repeated paper</a> "
+        "<a href=\"https://other.org/guide\">A &amp; B guide</a> "
+        "<a href=\"https://bioseqdb.com/blog/\">Our blog</a></p>"
+        "<pre>&lt;a href=\"https://code.org/\"&gt;Code&lt;/a&gt;</pre>",
+        "<p><a id=\"ref-used\"></a></p>"
+        "<p><a href=\"https://example.org/paper?a=1&amp;b=2\">The &lt;paper&gt;</a></p>"
+        "<a id=\"ref-unused\"></a><a href=\"https://unused.org/\">Unused paper</a>",
+        "https://bioseqdb.com");
+    const std::string first_source = "href=\"https://example.org/paper?a=1&amp;b=2\"";
+    const auto first_source_at = sources.find(first_source);
+    if (first_source_at == std::string::npos
+        || sources.find(first_source, first_source_at + 1) != std::string::npos
+        || !sources.contains("The &lt;paper&gt;")
+        || !sources.contains("A &amp; B guide")
+        || sources.contains("unused.org") || sources.contains("code.org")
+        || sources.contains("bioseqdb.com/blog")) {
+        throw std::runtime_error("External sources must resolve cited references, dedupe and escape links");
+    }
+    if (!render_external_sources_html("<p>No external links</p>", "", "https://bioseqdb.com").empty()) {
+        throw std::runtime_error("Documents without external sources must not render an empty section");
+    }
+    const auto mounted_sources = render_external_sources_html(
+        "<a href=\"/bioseqdb/v0.1/tutorials/bibliography/#ref-one\">1</a>",
+        "<a id='ref-one'></a><a href='https://example.org/one'>One</a>",
+        "https://bioseqdb.com");
+    if (!mounted_sources.contains("https://example.org/one")) {
+        throw std::runtime_error("Bibliography sources must resolve under a mounted base path");
+    }
     // Check that the PostgreSQL executor provides the required operations.
     static_assert(sql_example_executor<postgres_tutorial_executor>,
                   "postgres executor must model the tutorial executor concept");

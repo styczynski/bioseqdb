@@ -1,0 +1,33 @@
+{% extends "base.html.j2" %}
+{% block body_class %}docs-design-page qa-page{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/qa.css">{% endblock %}
+{% block page %}
+<div data-screen-label="BioseqDB questions and answers">
+  {% include "site-header.html.j2" %}
+  <main id="doc-main" class="qa-shell">
+    <nav class="qa-breadcrumb" aria-label="Breadcrumb"><a href="{{ site.base_path }}">Home</a><span aria-hidden="true">/</span><span aria-current="page">Q&A</span></nav>
+    <header class="qa-intro"><p class="qa-eyebrow">BioseqDB Q&A</p><h1>{{ page.title }}</h1><p>{{ page.intro }}</p></header>
+    <div class="qa-layout">
+      <nav class="qa-navigation" aria-label="{{ page.navigation_label }}">
+        <h2>{{ page.navigation_label }}</h2>
+        <ul>{% for group in page.groups %}<li><a href="#{{ group.id }}">{{ group.title }}</a></li>{% endfor %}</ul>
+      </nav>
+      <div class="qa-groups">
+        {% for group in page.groups %}
+        <section class="qa-group" aria-labelledby="{{ group.id }}">
+          <h2 id="{{ group.id }}">{{ group.title }}</h2>
+          {% for question in group.questions %}
+          <article class="qa-question" id="{{ question.id }}">
+            <h3><a href="#{{ question.id }}" title="{{ page.permalink_label }}">{{ question.question }}<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer">{{ question.answer_html }}</div>
+          </article>
+          {% endfor %}
+        </section>
+        {% endfor %}
+        <aside class="qa-contact"><h2>{{ page.contact_label }}</h2><p>{{ page.contact_text }}</p><a href="{{ site.base_path }}contact/">{{ page.contact_action }} <span aria-hidden="true">→</span></a></aside>
+      </div>
+    </div>
+  </main>
+  {% include "site-footer.html.j2" %}
+</div>
+{% endblock %}

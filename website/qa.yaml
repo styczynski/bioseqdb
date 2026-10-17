@@ -1,0 +1,274 @@
+# Q&A copy is published as HTML, included in search, and used for FAQ structured data.
+# Keep ids stable: they are public fragment links. Answers accept ordinary Markdown.
+title: Questions about BioseqDB
+description: Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.
+intro: New to BioseqDB? These are the questions I would ask before putting a dataset into it. The answers link to working examples and the longer explanations in the docs.
+author: Piotr Styczyński
+date: '2026-10-18'
+navigation_label: Find a question
+permalink_label: Link to this question
+contact_label: Still have a question?
+contact_text: Send me a short description of what you are trying to do. BioseqDB is an independent project, so a reply may take a while.
+contact_action: Contact me
+groups:
+  - id: getting-to-know-bioseqdb
+    title: Getting to know BioseqDB
+    questions:
+      - id: is-bioseqdb-a-postgres-extension
+        question: Is BioseqDB a PostgreSQL extension or a separate database?
+        answer: >-
+          It is a PostgreSQL extension. You connect to PostgreSQL with the same clients you already use,
+          then add BioseqDB sequence columns and tables where you need them. The extension supplies sequence
+          types, alignment functions, indexes, and its own table storage. The [SQL walkthrough](/v0.1/tutorials/getting_started/)
+          starts with a small table you can try yourself.
+      - id: what-can-bioseqdb-do
+        question: What can I actually do with it?
+        answer: >-
+          Store DNA sequences beside sample metadata, read slices of those sequences, perform sequence
+          operations, and find alignments using SQL. You can combine an alignment with a metadata filter
+          or a join in the same query. The main focus is sequence storage and alignment; it is not a complete
+          replacement for every tool in a genomics pipeline.
+      - id: fit-into-an-existing-workflow
+        question: How would BioseqDB fit into a workflow I already have?
+        answer: >-
+          A useful starting point is the part where you repeatedly load the same reference sequences,
+          run searches, then join the matches back to a spreadsheet or another database. Put the reference
+          and its metadata in a BioseqDB table and issue those searches from your existing SQL or Python code.
+          You can keep the earlier and later steps of the pipeline as they are. The
+          [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/) shows this with SQLAlchemy and Plotly.
+      - id: difference-from-fasta-files
+        question: Why put sequences in a database instead of keeping FASTA files?
+        answer: >-
+          FASTA files are still useful for exchanging sequences. The database becomes useful when the same
+          sequences have metadata, are queried repeatedly, or need to be combined with other tables.
+          You can filter samples by ordinary columns and ask for their sequence matches without preparing
+          another set of input files for each query.
+      - id: is-it-open-source
+        question: Is BioseqDB open source, and can I use it for free?
+        answer: >-
+          Yes. BioseqDB is published under the Apache 2.0 license, and the source and release packages
+          are available without a subscription. See the [repository and license](https://github.com/styczynski/bioseqdb)
+          for the actual terms and the notices for included components. Running a database still uses your own
+          machine or hosting resources.
+      - id: who-is-building-it
+        question: Who is building BioseqDB?
+        answer: >-
+          I am Piotr Styczyński, and BioseqDB is my independent project. It grew out of several years of
+          experiments with sequence data, aligners, and PostgreSQL. The [introduction](/v0.1/tutorials/project_introduction/)
+          has the timeline and explains how the current implementation developed.
+  - id: installing-and-trying-it
+    title: Installing and trying it
+    questions:
+      - id: easiest-way-to-try-it
+        question: What is the quickest way to try BioseqDB?
+        answer: >-
+          Start with the [Docker quick start](/v0.1/tutorials/getting_started/#docker-quick-start).
+          It gives you the image name, a local PostgreSQL container, and a small alignment query.
+          Run the sample data first so you can check the installation before importing your own dataset.
+      - id: do-i-have-to-use-docker
+        question: Do I have to use Docker?
+        answer: >-
+          No. There are native alpha packages as well as Docker images, and you can build from source.
+          Pick a package that matches your operating system, CPU architecture, and PostgreSQL major version.
+          The [package table](/v0.1/tutorials/getting_started/#packages-and-docker-images) links to the available builds
+          and their setup notes.
+      - id: which-postgres-version
+        question: Will a package for one PostgreSQL version work with another?
+        answer: >-
+          Use the build for your PostgreSQL major version. An extension binary built for one major version
+          is not something you should copy into another server version. The release table also distinguishes
+          stable PostgreSQL releases from prerelease and development builds, so check the full package label.
+      - id: managed-postgres-services
+        question: Can I install it on any managed PostgreSQL service?
+        answer: >-
+          Only if the service lets you install this native extension. Many hosted PostgreSQL services accept
+          a fixed list of extensions and do not let customers upload their own binaries. Check that before
+          choosing a host; a self-managed PostgreSQL instance or the supplied Docker image gives you control
+          over the installation.
+      - id: is-a-gpu-required
+        question: Do I need a GPU?
+        answer: >-
+          No. BioseqDB has CPU implementations, and the walkthrough can run without a GPU. There is also
+          experimental Vulkan work, but a GPU is not a requirement or a promise of better performance.
+          The [benchmark chapter](/v0.1/tutorials/project_benchmarking/) discusses where the tested GPU approach helped
+          and where it did not.
+      - id: ready-for-production
+        question: Is the current release ready for production?
+        answer: >-
+          It is an experimental alpha and still has bugs and limitations. I would start with a copy of a
+          dataset and a reproducible experiment. Read the [alpha limitations](/v0.1/tutorials/getting_started/#alpha-version-limitations)
+          before depending on it, especially the notes about memory admission and automatic index maintenance.
+  - id: sequences-and-storage
+    title: Sequences and storage
+    questions:
+      - id: sequence-versus-text
+        question: Why use bioseq.seq instead of a text column?
+        answer: >-
+          `bioseq.seq` gives the database a sequence type with a defined alphabet and compact representation.
+          BioseqDB can then perform sequence operations and alignment without treating the value as an arbitrary
+          string. With `USING bioseq`, sequence data also uses the extension's storage and index machinery.
+          The [sequence chapter](/v0.1/tutorials/project_sequence_abstractions/) explains the representation.
+      - id: meaning-of-dna4-and-64
+        question: What do dna4 and 64 mean in bioseq.seq('dna4', 64)?
+        answer: >-
+          `dna4` selects the four-letter DNA alphabet: A, C, G, and T. The `64` selects a 64-bit storage unit
+          for the packed representation; it does not limit the sequence to 64 bases. The sequence length is
+          separate and can be read with `bioseq.len`.
+      - id: unknown-bases
+        question: What should I do with unknown bases such as N?
+        answer: >-
+          Use the `dna5` alphabet when N needs to be preserved. DNA4 represents only A, C, G, and T, so it is
+          not the right representation for retaining unknown bases. Check the alphabet before importing a
+          dataset, and keep track of unresolved bases when interpreting composition or alignment results.
+      - id: proteins-and-rna
+        question: Can I use it for protein or RNA alignments?
+        answer: >-
+          The current documented implementation supports DNA4 and DNA5. Its sequence abstractions were designed
+          with other alphabets in mind, but that is not the same as having a supported protein or RNA alignment
+          workflow today. The examples on this site use DNA.
+      - id: keep-metadata-with-sequences
+        question: Can I keep sample names and other metadata in the same table?
+        answer: >-
+          Yes. A sequence table can have ordinary columns such as an identifier, organism, collection date,
+          or sample name beside its `bioseq.seq` column. Those columns can be selected, filtered, aggregated,
+          and joined using SQL. The [walkthrough](/v0.1/tutorials/getting_started/) uses patient metadata to illustrate this.
+      - id: loading-fasta-fastq
+        question: How do I import FASTA or FASTQ data?
+        answer: >-
+          BioseqDB provides `bioseq.load` for loading sequence files into a table. The column layout and header
+          format matter, so start with the [FASTA import example](/v0.1/tutorials/getting_started/#13-load-a-fasta-file-into-another-table)
+          and adapt its target table. A filename passed to the server refers to a file the PostgreSQL server
+          can access, not automatically a file on the computer running your SQL client.
+  - id: alignments-and-results
+    title: Alignments and results
+    questions:
+      - id: what-is-an-alignment
+        question: What does an alignment tell me?
+        answer: >-
+          An alignment describes how parts of two sequences correspond, allowing for substitutions and gaps.
+          It can help locate similar regions, but similarity alone does not establish a gene's function or a
+          biological cause. The [alignment foundations](/v0.1/tutorials/project_alignment_foundations/) introduce the scoring
+          and the seed-and-extend approach used to make large searches practical.
+      - id: how-to-run-a-search
+        question: How do I run a sequence search in SQL?
+        answer: >-
+          Use `mmsearch` in a query over a BioseqDB table, supplying the target sequence column and a query
+          sequence. Select the metadata and alignment fields you want from the matching rows.
+          The [first alignment query](/v0.1/tutorials/getting_started/#6-alignment-query) includes the table and data needed
+          to run it, rather than just an isolated function call.
+      - id: score-and-cigar
+        question: What are bioseq.score and bioseq.cigar showing me?
+        answer: >-
+          `bioseq.score` reports the base-alignment score for a match. `bioseq.cigar` describes the alignment as
+          operations such as aligned columns, insertions, and deletions. Selecting the CIGAR requests base
+          alignment; selecting the score alone does not, so that score can be zero. A CIGAR M operation can include both
+          matching and mismatching bases, so do not read it as a count of identical bases. The
+          [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/) walks through these fields with real sequences.
+      - id: no-alignment-results
+        question: Why did my alignment query return no rows?
+        answer: >-
+          First check that the table contains the sequences you intended to import and that their lengths and
+          alphabets make sense. Then try the small working example from the docs. The query can legitimately
+          find no retained matches when the sequences are too short, too different, or excluded by the chosen
+          thresholds. Inspect the settings and search diagnostics before assuming the data is missing.
+      - id: alignment-metadata-is-null
+        question: Why are alignment fields NULL in a plain SELECT?
+        answer: >-
+          Alignment fields describe a match produced by a search. Reading a row on its own does not create
+          an alignment context, so a field such as `bioseq.score` has no match to describe. Select it in the
+          alignment query shown in the walkthrough. Some details also depend on which alignment work the query
+          requests and which settings are enabled.
+      - id: slices-and-coordinate-conventions
+        question: Can I align just a region, and how do the coordinates work?
+        answer: >-
+          Yes. Sequence slices let you search a region rather than the whole stored sequence. BioseqDB's
+          sequence examples use zero-based, half-open intervals: the start is included and the end is excluded.
+          This differs from the one-based inclusive coordinates used in some biological records. The
+          [slice examples](/v0.1/tutorials/getting_started/#14-slices) and butterfly tutorial show the conversion explicitly.
+  - id: performance-and-configuration
+    title: Performance and configuration
+    questions:
+      - id: always-120-times-faster
+        question: Does the 120× speedup apply to every query?
+        answer: >-
+          No. “Up to 120×” refers to particular measured comparisons, not every workload. Reusing a prepared
+          index, available memory, sequence sizes, and the comparison tool's work all affect the result.
+          Building the index also costs time. Use the [benchmark explorer](/benchmarks/) to inspect the configurations
+          and methodology; an unindexed one-off query can be slower than minimap2.
+      - id: relationship-to-minimap2
+        question: Does BioseqDB run the minimap2 command behind the scenes?
+        answer: >-
+          No separate minimap2 executable is needed for the SQL examples. BioseqDB integrates alignment work
+          into PostgreSQL and offers configurable seeding, chaining, and final-alignment implementations.
+          Minimap2 is an important reference and part of the project's history, but the database also adds
+          persistent indexes, sequence storage, and SQL query integration.
+      - id: when-to-build-an-index
+        question: When is it worth building a sequence index?
+        answer: >-
+          An index is especially useful when you expect to search the same reference data repeatedly. You pay
+          the preparation cost once and can reuse the stored lookup structures in later searches. For a one-off
+          small comparison, that preparation may cost more than it saves. The [index chapter](/v0.1/tutorials/project_index_storage/)
+          explains what is stored and how it is read.
+      - id: automatic-index-updates
+        question: Will inserting new rows update the index automatically?
+        answer: >-
+          Be careful with the current alpha. The default grouped-MPF index does not support automatic insert
+          maintenance, so the walkthrough sets `bioseq.index.insert_maintenance.enabled` to off and shows an
+          explicit rebuild. Other index configurations have different behavior. Follow the
+          [index maintenance notes](/v0.1/tutorials/getting_started/#automatic-index-updates) for the configuration you use.
+      - id: finding-settings
+        question: Where can I find the available settings and their defaults?
+        answer: >-
+          The [configuration reference](/v0.1/tutorials/project_configuration_reference/) lists settings, accepted values,
+          defaults, and descriptions. Search for a setting by its full path in the header search box, or use
+          PostgreSQL's `SHOW` and `pg_settings` to inspect your session. Individual reference pages also include
+          examples and range information where it applies.
+      - id: understanding-a-slow-query
+        question: How can I understand why a query is slow?
+        answer: >-
+          Start with `EXPLAIN (ANALYZE, BUFFERS)` on a query you are prepared to execute. BioseqDB adds search
+          diagnostics, and its cache statistics can help explain repeated reads. Check whether the query reused
+          an index and whether memory or a fallback changed the execution path. The [walkthrough](/v0.1/tutorials/getting_started/)
+          includes complete plans and explanations of their fields.
+  - id: python-data-and-next-steps
+    title: Python, external data, and next steps
+    questions:
+      - id: python-and-sqlalchemy
+        question: Can I use BioseqDB from Python or a notebook?
+        answer: >-
+          Yes. It is still PostgreSQL, so a PostgreSQL driver and SQLAlchemy can send the SQL queries and return
+          ordinary result rows. You do not need a separate Python aligner. The [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/)
+          includes a Poetry environment, SQLAlchemy queries, Plotly figures, and a notebook in the examples repository.
+      - id: ncbi-through-sql
+        question: Can I search NCBI and import its sequences through SQL?
+        answer: >-
+          Yes, when BioseqDB is built with the external API clients enabled. The [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/)
+          searches NCBI by organism, chooses explicit records and sequence windows, then imports them into local
+          tables. Keep the accessions and assembly versions with your results so you know which data you compared.
+      - id: ncbi-missing-from-alpha
+        question: Why are the NCBI tables missing from my Docker image or native package?
+        answer: >-
+          The published 0.1.0-alpha.1 Docker images and native packages do not include the external-database
+          integration. It cannot be switched on with a runtime setting in those binaries. For the current
+          tutorial, build from source with `BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON`; the
+          [setup instructions](/blog/comparing-butterfly-genomes-with-bioseqdb/) explain the additional steps.
+      - id: data-sent-to-external-services
+        question: Does an ordinary alignment send my sequences to another service?
+        answer: >-
+          An alignment over locally stored sequences runs inside your PostgreSQL server. Explicit queries to
+          an external provider such as NCBI do make requests to that provider. Keep those two cases separate
+          when deciding what data to import and what network access to allow for your database.
+      - id: where-to-start-learning
+        question: Do I need to know biology before following the tutorials?
+        answer: >-
+          A little context helps, but you do not need to begin with an entire genomics course. Start with the
+          [biology introduction](/v0.1/tutorials/project_biology/) for DNA and the [alignment chapter](/v0.1/tutorials/project_alignment_foundations/)
+          for sequence comparison. The SQL walkthrough uses small synthetic examples, while the butterfly post
+          builds up a real comparison one step at a time.
+      - id: report-bugs-and-ask-questions
+        question: Where should I report a bug or ask for a feature?
+        answer: >-
+          Open a [GitHub issue](https://github.com/styczynski/bioseqdb/issues) with the BioseqDB build, PostgreSQL
+          version, query, and a small example that reproduces the problem. Avoid posting private data or credentials.
+          For a conversation that does not belong in a public issue, use the [contact page](/contact/).
+          I maintain the project independently, so please allow some time for a reply.

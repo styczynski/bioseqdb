@@ -11,17 +11,13 @@
 
   <div class="docs-content tutorial-body">{{ page.body_html }}</div>
 
-  {% if page.previous_url %}
-  <nav class="dd-s0084" aria-label="Previous and next tutorial">
-    <div class="dd-s0085">
-      <a href="{{ page.previous_url }}" class="dd-s0106 dd-h005"><span class="dd-s0087">&#8592; Previous</span><span class="dd-s0088">{% if page.previous_title %}{{ page.previous_title }}{% else %}Previous tutorial{% endif %}</span></a>
-      {% if page.next_url %}<a href="{{ page.next_url }}" class="dd-s0086 dd-h005"><span class="dd-s0087">Next &#8594;</span><span class="dd-s0088">{% if page.next_title %}{{ page.next_title }}{% else %}Next tutorial{% endif %}</span></a>{% endif %}
-    </div>
+  {% if page.external_sources_html %}{{ page.external_sources_html }}{% endif %}
+
+  {% if page.previous_url or page.next_url %}
+  <nav class="tutorial-pagination" aria-label="Previous and next tutorial">
+    {% if page.previous_url %}<a href="{{ page.previous_url }}" class="tutorial-pagination-link tutorial-pagination-previous" rel="prev"><span class="tutorial-pagination-label">&#8592; Previous</span><span class="tutorial-pagination-title">{% if page.previous_title %}{{ page.previous_title }}{% else %}Previous tutorial{% endif %}</span></a>{% endif %}
+    {% if page.next_url %}<a href="{{ page.next_url }}" class="tutorial-pagination-link tutorial-pagination-next" rel="next"><span class="tutorial-pagination-label">Next &#8594;</span><span class="tutorial-pagination-title">{% if page.next_title %}{{ page.next_title }}{% else %}Next tutorial{% endif %}</span></a>{% endif %}
   </nav>
-  {% else %}
-    {% if page.next_url %}
-    <nav class="dd-s0084" aria-label="Next tutorial"><div class="dd-s0085"><a href="{{ page.next_url }}" class="dd-s0086 dd-h005"><span class="dd-s0087">Next &#8594;</span><span class="dd-s0088">{% if page.next_title %}{{ page.next_title }}{% else %}Next tutorial{% endif %}</span></a></div></nav>
-    {% endif %}
   {% endif %}
 </section>
 {% endblock %}

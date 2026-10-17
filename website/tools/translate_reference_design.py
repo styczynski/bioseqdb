@@ -770,7 +770,7 @@ def shared_header() -> str:
         "loading": "Loading search index…", "no-matches": "No matches for",
         "unavailable": "Search index is unavailable.",
         "error": "Search is temporarily unavailable.",
-        "tutorial": "Tutorial", "blog": "Blog post", "function": "Function", "class": "Class",
+        "tutorial": "Tutorial", "blog": "Blog post", "question": "Question", "function": "Function", "class": "Class",
         "type": "Type", "setting": "Setting", "sql": "SQL object",
         "domain-sql": "SQL", "domain-documentation": "Documentation", "domain-cpp": "C++",
     }
@@ -789,6 +789,7 @@ def shared_header() -> str:
       <a href="{{ nav.documentation }}" data-nav-prefix="{{ site.base_path }}{{ site.version }}/">Docs</a>
       <a href="{{ site.base_path }}benchmarks/">Benchmarks</a>
       <a href="{{ site.base_path }}blog/">Blog</a>
+      <a href="{{ site.base_path }}qa/">{{ landing.header.qa }}</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -1111,6 +1112,7 @@ def base_template(markup: str) -> str:
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
+{{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
@@ -1195,6 +1197,7 @@ def benchmarks_template(markup: str) -> str:
 <title>{{{{ page.title }}}}</title>
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
+{{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>

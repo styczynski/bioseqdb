@@ -6,6 +6,7 @@ export const MAX_SEARCH_RESULTS = 40;
 export function searchType(record) {
   const kind = String(record.kind || "").toLowerCase();
   const group = String(record.group || "").toLowerCase();
+  if (kind === "question") return "Question";
   if (kind === "blog") return "Blog";
   if (kind === "setting") return "Setting";
   if (kind === "sql_object") return "SQL";
@@ -23,6 +24,7 @@ export function searchDomain(record) {
   if (group === "sql" || String(record.id || "").startsWith("sql:") ||
       kind.startsWith("sql_") || kind === "setting") return "SQL";
   if (group === "tutorials" || group === "pages" || group === "blog" || kind === "blog" ||
+      group === "questions" || kind === "question" ||
       kind === "tutorial" || kind === "page") return "Documentation";
   return "C++";
 }
@@ -50,7 +52,8 @@ export function rankedSearch(records, query, limit = MAX_SEARCH_RESULTS) {
       record, tier,
       // Blog posts remain discoverable without displacing any reference or
       // documentation result, even when a post title matches exactly.
-      domain: searchType(record) === "Blog" ? 3 : DOMAIN_PRIORITY[searchDomain(record)],
+      domain: searchType(record) === "Blog" ? 4 :
+        searchType(record) === "Question" ? 3 : DOMAIN_PRIORITY[searchDomain(record)],
       exactSetting: searchType(record) === "Setting" && tier === 0 ? 0 : 1,
     });
   });

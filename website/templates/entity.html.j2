@@ -52,5 +52,6 @@
   {% if page.source_url %}<p class="design-source-line">Source: <a href="{{ page.source_url }}" rel="noreferrer">{{ page.source_label }}</a></p>{% endif %}
   {% if page.provenance %}<p class="design-provenance">{{ page.provenance }}</p>{% endif %}
   {% if page.backlinks %}<section class="design-entity-section"><h2 class="hx design-section-heading" id="referenced-by" data-toc data-title="Referenced by">Referenced by<a data-hash href="#referenced-by" class="dd-s0052">#</a></h2><ul class="design-link-list">{% for backlink in page.backlinks %}<li><a href="{{ backlink.url }}">{{ backlink.title }}</a></li>{% endfor %}</ul></section>{% endif %}
+  {% if page.external_sources_html %}{{ page.external_sources_html }}{% endif %}
 </article>
 {% endblock %}

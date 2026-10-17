@@ -401,6 +401,103 @@ struct site_configuration {
 using landing_content = std::map<
     std::string, std::map<std::string, std::string, std::less<>>, std::less<>>;
 
+// Stable IDs belong to the authored YAML rather than being derived from copy:
+// changing a question's wording must not break search and incoming links.
+struct qa_question {
+    std::string id;
+    std::string question;
+    std::string answer;
+};
+struct qa_group {
+    std::string id;
+    std::string title;
+    std::vector<qa_question> questions;
+};
+struct qa_content {
+    std::map<std::string, std::string, std::less<>> copy;
+    std::vector<qa_group> groups;
+};
+
+[[nodiscard]] qa_content parse_qa_content(
+    const std::string& yaml_text, std::string_view path) {
+    validate_yaml_strict(yaml_text, path);
+    const YAML::Node root = YAML::Load(yaml_text);
+    if (!root.IsMap())
+        throw std::runtime_error("Q&A content must be a mapping: " + std::string(path));
+    qa_content result;
+    const std::set<std::string> copy_keys{
+        "title", "description", "intro", "author", "date", "navigation_label",
+        "permalink_label", "contact_label", "contact_text", "contact_action"};
+    const auto required_text = [&path](const YAML::Node& node, std::string_view key) {
+        auto value = require_scalar(node, key, path);
+        if (value.find_first_not_of(" \t\r\n") == std::string::npos)
+            throw std::runtime_error("empty Q&A field '" + std::string(key) + "': " + std::string(path));
+        return value;
+    };
+    for (const auto& item : root) {
+        const auto key = item.first.as<std::string>();
+        if (key == "groups") continue;
+        if (!copy_keys.contains(key))
+            throw std::runtime_error("unknown Q&A field '" + key + "': " + std::string(path));
+        result.copy.emplace(key, required_text(item.second, key));
+    }
+    for (const auto& key : copy_keys) {
+        if (!result.copy.contains(key))
+            throw std::runtime_error("missing Q&A field '" + key + "': " + std::string(path));
+    }
+    const auto date = result.copy.at("date");
+    const std::chrono::year_month_day parsed_date = [&date]() {
+        if (date.size() != 10 || date[4] != '-' || date[7] != '-')
+            return std::chrono::year_month_day{};
+        for (std::size_t i = 0; i < date.size(); ++i)
+            if (i != 4 && i != 7 && (date[i] < '0' || date[i] > '9'))
+                return std::chrono::year_month_day{};
+        return std::chrono::year_month_day{
+            std::chrono::year{std::stoi(date.substr(0, 4))},
+            std::chrono::month{static_cast<unsigned>(std::stoi(date.substr(5, 2)))},
+            std::chrono::day{static_cast<unsigned>(std::stoi(date.substr(8, 2)))}};
+    }();
+    if (!parsed_date.ok())
+        throw std::runtime_error("Q&A date must be YYYY-MM-DD: " + std::string(path));
+    if (!root["groups"].IsSequence() || root["groups"].size() == 0)
+        throw std::runtime_error("Q&A groups must be a nonempty sequence: " + std::string(path));
+    std::set<std::string> ids;
+    const auto read_id = [&required_text, &ids, &path](const YAML::Node& node) {
+        auto id = required_text(node, "id");
+        if (blog_title_slug(id) != id || !ids.insert(id).second)
+            throw std::runtime_error("Q&A ids must be unique lower-kebab-case: " + std::string(path));
+        return id;
+    };
+    for (const auto& node : root["groups"]) {
+        if (!node.IsMap())
+            throw std::runtime_error("Q&A group must be a mapping: " + std::string(path));
+        for (const auto& field : node) {
+            const auto key = field.first.as<std::string>();
+            if (key != "id" && key != "title" && key != "questions")
+                throw std::runtime_error("unknown Q&A group field: " + key);
+        }
+        qa_group group{.id = read_id(node["id"]),
+                       .title = required_text(node["title"], "title")};
+        if (!node["questions"].IsSequence() || node["questions"].size() == 0)
+            throw std::runtime_error("Q&A questions must be a nonempty sequence: " + std::string(path));
+        for (const auto& item : node["questions"]) {
+            if (!item.IsMap())
+                throw std::runtime_error("Q&A question must be a mapping: " + std::string(path));
+            for (const auto& field : item) {
+                const auto key = field.first.as<std::string>();
+                if (key != "id" && key != "question" && key != "answer")
+                    throw std::runtime_error("unknown Q&A question field: " + key);
+            }
+            group.questions.push_back(qa_question{
+                .id = read_id(item["id"]),
+                .question = required_text(item["question"], "question"),
+                .answer = required_text(item["answer"], "answer")});
+        }
+        result.groups.push_back(std::move(group));
+    }
+    return result;
+}
+
 [[nodiscard]] landing_content parse_landing_content(
     const std::string& yaml_text, std::string_view path) {
     validate_yaml_strict(yaml_text, path);

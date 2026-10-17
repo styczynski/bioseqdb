@@ -33,6 +33,23 @@ test("GUC path fragments and full names return the Setting record", () => {
   }
 });
 
+test("questions have a separate label and rank below references but above blog posts", () => {
+  const question = record("question:sequence", "question", "sequence", "Questions");
+  const blog = record("blog:sequence", "blog", "sequence", "Blog");
+  const cpp = record("cpp:function:load", "function", "load", "C++", { summary: "Read a sequence." });
+  const tutorial = record("tutorial:sequence", "tutorial", "Working with a sequence", "Tutorials");
+  const sql = record("sql:type:seq", "sql_type", "seq", "SQL", { summary: "Stores a sequence." });
+  assert.equal(searchType(question), "Question");
+  assert.equal(searchDomain(question), "Documentation");
+  assert.deepEqual(rankedSearch([blog, question, tutorial, cpp, sql], "sequence"),
+    [sql, tutorial, cpp, question, blog]);
+  assert.deepEqual(rankedSearch([blog, question, cpp], "sequence", 2), [cpp, question]);
+  const answerMatch = record("question:answer", "question", "Can I import a file?", "Questions", {
+    summary: "Use the FASTA loader from a SQL query.",
+  });
+  assert.deepEqual(rankedSearch([answerMatch], "FASTA"), [answerMatch]);
+});
+
 test("an exact setting beats an identically named SQL function and broad matches", () => {
   const sameNameFunction = record("sql:function:alias()", "sql_function", setting.title, "SQL");
   const broad = record("sql:function:helper()", "sql_function", "helper", "SQL", {

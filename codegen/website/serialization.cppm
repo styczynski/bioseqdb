@@ -2206,86 +2206,213 @@ namespace {
     nav_object["tutorials"] = site.tutorials_url;
     nav_object["reference"] = site.reference_url;
 
-    // Build page.jsonld frm the page title, description, and canonical URL.
-    // The page kind selects WebSite, TechArticle, or WebPage. Include a
-    // BreadcrumbList when the page has breadcrumbs. Publication dates are
-    // omitted because the input has no fixed dates to use.
+    // Metadata shares the same page inputs as visible content. PageMaps are
+    // consumed by Programmable Search; JSON-LD describes the public page to
+    // general search engines. Neither format invents publication dates.
     boost::json::value page_value = parse_json_value(page_object);
     if (page_value.is_object()) {
         boost::json::object& page_object_ref = page_value.as_object();
-        std::string page_type = "WebPage";
-        if (page_object_ref.contains("page_type") && page_object_ref.at("page_type").is_string()) {
-            const std::string hint(page_object_ref.at("page_type").as_string().c_str());
-            if (hint == "landing") {
-                page_type = "WebSite";
-            } else if (hint == "blog") {
-                page_type = "BlogPosting";
-            } else if (hint == "tutorial" || hint == "entity") {
-                page_type = "TechArticle";
+        // Template fields have been HTML-escaped by json_text. Decode only
+        // that encoder's entities, once, while preserving raw structured_*
+        // fields (a title can legitimately contain a literal "&lt;").
+        const auto template_text = [](std::string_view text) {
+            std::string result;
+            for (std::size_t offset = 0; offset < text.size();) {
+                bool decoded = false;
+                for (const auto& [entity, replacement] :
+                     std::initializer_list<std::pair<std::string_view, char>>{
+                         {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'},
+                         {"&quot;", '"'}, {"&#39;", '\''}}) {
+                    if (text.substr(offset).starts_with(entity)) {
+                        result.push_back(replacement);
+                        offset += entity.size();
+                        decoded = true;
+                        break;
+                    }
+                }
+                if (!decoded) result.push_back(text[offset++]);
             }
+            return result;
+        };
+        const auto text = [&page_object_ref](std::string_view key) {
+            const auto* value = page_object_ref.if_contains(key);
+            return value != nullptr && value->is_string()
+                ? std::string(value->as_string()) : std::string{};
+        };
+        const auto original = [&text, &template_text](
+                                  std::string_view raw_key, std::string_view escaped_key) {
+            const std::string raw = text(raw_key);
+            return raw.empty() ? template_text(text(escaped_key)) : raw;
+        };
+        const std::string hint = text("page_type");
+        const std::string title = original("structured_title", "title");
+        const std::string description = original("structured_description", "description");
+        const std::string canonical = template_text(text("canonical"));
+        const auto origin_end = canonical.find('/', canonical.find("://") + 3);
+        const std::string origin = canonical.substr(0, origin_end);
+        const std::string home = origin + (site.base_path.empty() ? "/" : site.base_path);
+        const auto absolute_url = [&origin, &home](std::string value) {
+            if (value.starts_with("https://") || value.starts_with("http://")) return value;
+            if (value.starts_with('/')) return origin + value;
+            if (!value.empty()) return home + value;
+            return std::string{};
+        };
+        std::string author = original("structured_author", "author");
+        if (author.empty()) {
+            author = site.copyright_holder;
+            if (author.starts_with("BioseqDB ")) author.erase(0, 9);
+            if (author.empty()) author = "Piotr Styczyński";
         }
+        std::string category = template_text(text("category"));
+        if (category.empty()) category = hint.empty() ? "documentation" : hint;
+        const std::string date = text("date");
+        const std::string modified_date = text("modified_date");
+        std::string thumbnail = absolute_url(template_text(text("thumbnail_url")));
+        if (thumbnail.empty()) thumbnail = absolute_url(template_text(text("social_image_url")));
+        if (thumbnail.empty()) thumbnail = absolute_url(site.social_image_url);
+        const bool is_article = hint == "blog" || hint == "tutorial" || hint == "entity";
+        const std::string page_type = hint == "landing" ? "WebSite"
+            : hint == "blog" ? "BlogPosting"
+            : is_article ? "TechArticle"
+            : hint == "qa" || hint == "faq" ? "FAQPage" : "WebPage";
+        const std::string organization_id = home + "#organization";
+        const std::string website_id = home + "#website";
+        boost::json::object organization{
+            {"@type", "Organization"}, {"@id", organization_id},
+            {"name", "BioseqDB"}, {"url", home},
+            {"description", "Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines."},
+            {"logo", boost::json::object{{"@type", "ImageObject"},
+                {"url", home + "bioseq-mark.svg"}}},
+            {"sameAs", boost::json::array{
+                site.repository_url, "https://www.linkedin.com/company/bioseqdb/",
+                "https://www.crunchbase.com/organization/bioseq-db"}},
+            {"subjectOf", boost::json::object{{"@type", "WebPage"},
+                {"url", home + "benchmarks/"}, {"name", "BioseqDB benchmarks"}}}};
+        boost::json::object website{
+            {"@type", "WebSite"}, {"@id", website_id}, {"url", home},
+            {"name", site.title}, {"inLanguage", "en"},
+            {"publisher", boost::json::object{{"@id", organization_id}}}};
         boost::json::object primary;
         primary["@type"] = page_type;
-        primary["name"] = page_object_ref.contains("title")
-            ? page_object_ref.at("title") : boost::json::value("");
-        primary["description"] = page_object_ref.contains("description")
-            ? page_object_ref.at("description") : boost::json::value("");
-        primary["url"] = page_object_ref.contains("canonical")
-            ? page_object_ref.at("canonical") : boost::json::value("");
-        primary["isPartOf"] = site.title;
-        if (!site.social_image_url.empty()) {
-            primary["image"] = site.social_image_url;
+        primary["@id"] = hint == "landing" ? website_id
+            : canonical + (is_article ? "#article" : "#webpage");
+        primary["name"] = title;
+        primary["description"] = description;
+        primary["url"] = canonical;
+        primary["inLanguage"] = "en";
+        primary["publisher"] = boost::json::object{{"@id", organization_id}};
+        if (hint != "landing") primary["isPartOf"] = boost::json::object{{"@id", website_id}};
+        if (!thumbnail.empty()) {
+            primary["image"] = thumbnail;
+            primary["thumbnailUrl"] = thumbnail;
         }
-        if (page_type == "BlogPosting") {
-            primary["name"] = page_object_ref.at("structured_title");
-            primary["headline"] = page_object_ref.at("structured_title");
-            primary["description"] = page_object_ref.at("structured_description");
-            primary["mainEntityOfPage"] = primary.at("url");
-            primary["datePublished"] = page_object_ref.at("date");
+        if (!date.empty()) primary["datePublished"] = date;
+        if (!modified_date.empty()) primary["dateModified"] = modified_date;
+        if (is_article) {
+            primary["headline"] = title;
+            primary["mainEntityOfPage"] = boost::json::object{
+                {"@type", "WebPage"}, {"@id", canonical}};
             primary["author"] = boost::json::object{
-                {"@type", "Person"}, {"name", page_object_ref.at("structured_author")}};
-            primary["keywords"] = page_object_ref.at("structured_keywords");
-            if (page_object_ref.contains("category"))
-                primary["articleSection"] = page_object_ref.at("category");
-            primary["timeRequired"] = "PT" + std::to_string(
-                page_object_ref.at("reading_minutes").to_number<std::uint32_t>()) + "M";
-            if (page_object_ref.contains("social_image_url"))
-                primary["image"] = page_object_ref.at("social_image_url");
+                {"@type", "Person"}, {"name", author}};
+            if (author == "Piotr Styczyński")
+                primary["author"].as_object()["url"] = "https://github.com/styczynski";
+            if (const auto* keywords = page_object_ref.if_contains("structured_keywords"))
+                primary["keywords"] = *keywords;
+            primary["articleSection"] = category;
+            if (const auto* minutes = page_object_ref.if_contains("reading_minutes"))
+                primary["timeRequired"] = "PT" + std::to_string(
+                    minutes->to_number<std::uint32_t>()) + "M";
         }
-        boost::json::object json_ld;
-        json_ld["@context"] = "https://schema.org";
+        if (page_type == "FAQPage") {
+            // This is an editorial collection of answers, not a single
+            // community question accepting user answers (QAPage).
+            boost::json::array questions;
+            if (const auto* entries = page_object_ref.if_contains("structured_questions")) {
+                for (const auto& entry : entries->as_array()) {
+                    const auto& question = entry.as_object();
+                    boost::json::object answer{
+                        {"@type", "Question"}, {"name", question.at("question")},
+                        {"acceptedAnswer", boost::json::object{
+                            {"@type", "Answer"}, {"text", question.at("answer")}}}};
+                    if (const auto* href = question.if_contains("url"))
+                        answer["url"] = absolute_url(std::string(href->as_string()));
+                    questions.push_back(std::move(answer));
+                }
+            }
+            primary["mainEntity"] = std::move(questions);
+        }
+        boost::json::array graph;
+        graph.push_back(std::move(primary));
+        if (hint != "landing") graph.push_back(std::move(website));
+        graph.push_back(std::move(organization));
+        boost::json::array crumb_items;
+        const auto append_crumb = [&crumb_items](const std::string& name, const std::string& href) {
+            crumb_items.push_back(boost::json::object{
+                {"@type", "ListItem"},
+                {"position", static_cast<std::int64_t>(crumb_items.size() + 1)},
+                {"name", name}, {"item", href}});
+        };
         if (page_object_ref.contains("breadcrumb") && page_object_ref.at("breadcrumb").is_array()
             && !page_object_ref.at("breadcrumb").as_array().empty()) {
-            boost::json::array crumb_items;
-            std::int64_t position = 1;
             for (const boost::json::value& crumb : page_object_ref.at("breadcrumb").as_array()) {
-                if (!crumb.is_object()) {
-                    continue;
-                }
-                boost::json::object list_item;
-                list_item["@type"] = "ListItem";
-                list_item["position"] = position++;
-                list_item["name"] = crumb.as_object().contains("name")
-                    ? crumb.as_object().at("name") : boost::json::value("");
-                if (crumb.as_object().contains("url")
-                    && crumb.as_object().at("url").is_string()) {
-                    list_item["item"] = crumb.as_object().at("url");
-                }
-                crumb_items.push_back(std::move(list_item));
-            }
-            boost::json::object breadcrumb_list;
-            breadcrumb_list["@type"] = "BreadcrumbList";
-            breadcrumb_list["itemListElement"] = std::move(crumb_items);
-            boost::json::array graph;
-            graph.push_back(std::move(primary));
-            graph.push_back(std::move(breadcrumb_list));
-            json_ld["@graph"] = std::move(graph);
-        } else {
-            for (const auto& field : primary) {
-                json_ld[field.key()] = field.value();
+                if (!crumb.is_object()) continue;
+                const auto* name = crumb.as_object().if_contains("name");
+                const auto* href = crumb.as_object().if_contains("url");
+                if (name == nullptr || !name->is_string()) continue;
+                append_crumb(template_text(std::string(name->as_string())),
+                    href != nullptr && href->is_string()
+                        ? absolute_url(template_text(std::string(href->as_string()))) : canonical);
             }
         }
+        if (crumb_items.size() < 2 && canonical != home && !canonical.empty()) {
+            crumb_items.clear();
+            append_crumb("Home", home);
+            append_crumb(title, canonical);
+        }
+        // A homepage has no ancestor. Do not invent a two-item trail to meet
+        // Google's minimum of two breadcrumb items.
+        if (crumb_items.size() >= 2)
+            graph.push_back(boost::json::object{{"@type", "BreadcrumbList"},
+                {"@id", canonical + "#breadcrumbs"}, {"itemListElement", std::move(crumb_items)}});
+        boost::json::object json_ld{{"@context", "https://schema.org"}, {"@graph", std::move(graph)}};
         page_object_ref["jsonld"] = apply_html_safe_escapes(boost::json::serialize(json_ld));
+
+        // A PageMap is XML inside an HTML comment. Escaping '-' as well as
+        // XML characters prevents editorial text containing '-->' from ending
+        // that comment. Character references restore the original XML value.
+        const auto xml_comment_text = [](std::string_view value) {
+            std::string escaped;
+            for (const char ch : html_escape(value)) {
+                if (ch == '-') escaped += "&#45;";
+                else escaped.push_back(ch);
+            }
+            return escaped;
+        };
+        std::string pagemap = "<!--\n<PageMap>\n  <DataObject type=\"document\">\n";
+        const auto attribute = [&pagemap, &xml_comment_text](std::string_view name, std::string_view value) {
+            pagemap += "    <Attribute name=\"" + std::string(name) + "\">"
+                + xml_comment_text(value) + "</Attribute>\n";
+        };
+        attribute("title", title);
+        attribute("description", description);
+        attribute("page_count", "1"); // One HTML document; not an estimated print length.
+        attribute("last_update", modified_date);
+        attribute("category", category);
+        attribute("author", author);
+        attribute("date", date);
+        pagemap += "  </DataObject>\n";
+        if (!thumbnail.empty()) {
+            pagemap += "  <DataObject type=\"thumbnail\">\n";
+            attribute("src", thumbnail);
+            // The screenshot pipeline writes every page thumbnail at this size.
+            if (!text("thumbnail_url").empty()) {
+                attribute("width", "1200");
+                attribute("height", "630");
+            }
+            pagemap += "  </DataObject>\n";
+        }
+        pagemap += "</PageMap>\n-->";
+        page_object_ref["pagemap_html"] = std::move(pagemap);
     }
 
     boost::json::object root;

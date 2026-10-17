@@ -66,6 +66,7 @@
 .site-header .doc-search-type{color:var(--theme-8fd6ba, #8fd6ba);background:var(--theme-74c8a8-a0_1, rgba(116,200,168,.1));border:1px solid var(--theme-74c8a8-a0_28, rgba(116,200,168,.28))}
 .site-header .doc-search-sql{color:var(--theme-8fd6ba, #8fd6ba);background:var(--theme-74c8a8-a0_1, rgba(116,200,168,.1));border:1px solid var(--theme-74c8a8-a0_28, rgba(116,200,168,.28))}
 .site-header .doc-search-setting{color:var(--theme-f6c664, #f6c664);background:var(--theme-f6c664-a0_1, rgba(246,198,100,.1));border:1px solid var(--theme-f6c664-a0_28, rgba(246,198,100,.28))}
+.site-header .doc-search-question{color:var(--theme-8fd6ba, #8fd6ba);background:var(--theme-74c8a8-a0_1, rgba(116,200,168,.1));border:1px solid var(--theme-74c8a8-a0_28, rgba(116,200,168,.28))}
 .site-header .doc-search-text{flex:1;min-width:0}
 .site-header .doc-search-title-row{display:flex;align-items:baseline;gap:8px}
 .site-header .doc-search-title-row>.doc-search-title{flex:1;min-width:0}
