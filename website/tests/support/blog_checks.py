@@ -132,7 +132,7 @@ def _butterfly_lazy_figures(browser, server, path, output, offline):
     reports = []
     for theme in ('dark', 'light'):
         for width in (420, 1024, 1600):
-            for anchor in ('4-find-the-assemblies-by-organism-name', '12-add-gene-models-and-local-gc'):
+            for anchor in ('4-search-ncbi-via-sql', '12-add-gene-models'):
                 context = browser.new_context(viewport={'width': width, 'height': 1000})
                 context.add_init_script(f"localStorage.setItem('bioseq-theme', '{theme}')")
                 pending, released = [], False
@@ -158,7 +158,7 @@ def _butterfly_lazy_figures(browser, server, path, output, offline):
                         if abs(before['top'] - before['margin']) <= 1:
                             break
                         page.wait_for_timeout(100)
-                    _check(len(before['images']) == 19 and all(
+                    _check(len(before['images']) == 18 and all(
                         not image['loaded'] and image['height'] > 0 and image['ratio'] != 'auto'
                         for image in before['images']), f'{label}: unloaded figures reserve no space')
                     _check(before['header'] <= before['top'] <= before['header'] + 40,
