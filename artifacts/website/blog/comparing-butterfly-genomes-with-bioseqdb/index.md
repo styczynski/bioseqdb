@@ -6,58 +6,61 @@ date: '2026-10-16'
 author: Piotr Styczyński
 category: bioseqdb
 keywords: [BioseqDB, pangenomics, comparative genomics, Heliconius, optix, NCBI, PostgreSQL, Python, SQLAlchemy, Plotly, sequence alignment, GC content, genome annotation]
-cover: /static/figures/blog/sequence-letters.svg
-image_alt: Translucent A, C, G and T tiles in the BioseqDB colours.
+cover: /static/figures/blog/butterfly-gc-cover.svg
+image_alt: Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows.
 draft: false
 ---
 
-Two butterflies can look remarkably similar without belonging to the same species. In *Heliconius*, part of that story involves *optix*, a gene whose activity helps determine where red patterns appear on the wings. It encodes a transcription factor: a protein which helps control the activity of other genes. The DNA around it is interesting too, because changes in regulatory regions can affect where and when a gene is used. [Reed and colleagues studied this connection across Heliconius species.](https://pubmed.ncbi.nlm.nih.gov/21778360/)
+Two butterflies can look remarkably similar without belonging to the same species. For *Heliconius*, part of the story why that happens, involves *optix*, a gene whose activity helps determine where red patterns appear on the wings. It encodes a transcription factor - so a protein which helps control the activity of other genes, that in very simplified terms works like sompphisticated switch, because changes in regulatory regions can affect not only if, but where and when a gene is used. [Reed and colleagues studied this connection across Heliconius species.](https://pubmed.ncbi.nlm.nih.gov/21778360/)
 
-In this tutorial we will align a piece of chromosome or scaffold from two *Heliconius* species that includes *optix*. We will fetch the sequences from NCBI, keep them in PostgreSQL, ask BioseqDB to find matching regions, and use SQLAlchemy and Plotly to inspect the results in Python. No separate alignment executable is needed.
+I decided to write this tutorial to showcase very simple example of analysis that one can do for single selected organism. As similar topics were always an interest of mine, I dedicated few last years to create a software that combines power of usual relational databases and software used commonly in compuatational biology to perform alignments (one can view them as problem of searching text in the database and understanding text similarity in specific biological way).
+In this tutorial we will align a piece of chromosome or scaffold from two *Heliconius* species that includes *optix*. We will fetch the sequences from NCBI, keep them in PostgreSQL, ask BioseqDB (the database software I created and do little self-promotion :)) to find matching regions, and use SQLAlchemy and Plotly to inspect the results in Python. We won't need any separate alignment executable or tools.
 
-I previously helped with a [butterfly genome-alignment tutorial using Minimap2 and R](https://stevenvb12.github.io/misc/2023/03/30/Minimap2-alignment.html). I wanted to work through the same kind of comparison with BioseqDB. This version uses newer NCBI assemblies and their own gene annotations, so the coordinates and results below belong to this experiment.
+I inspired myself by excellent blog post:  [butterfly genome-alignment tutorial using Minimap2 and R](https://stevenvb12.github.io/misc/2023/03/30/Minimap2-alignment.html). I wanted to work through the same kind of comparison with BioseqDB. This version uses newer NCBI assemblies and their own gene annotations, so the coordinates and results below will be different obviously!
 
-![A schematic comparison of Heliconius butterflies and the optix region.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/butterflies-optix.svg)
+![A schematic comparison of Heliconius butterflies and the optix region.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/butterflies-optix.svg)
 
-The full code, SQL, dependency lock and notebook are in [BioseqDB/examples/butterfies_alignments](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments). You can also [download this tutorial’s code snapshot](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/examples/butterfly-alignments.zip). The repository does not contain downloaded genomes. The sequence imports below are SQL queries; the small Python annotation loader retrieves matching GFF files from NCBI.
+You can find all the full code, SQL, dependencies and Python notebook in [BioseqDB/examples/butterfies_alignments](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments). You can also [download this tutorial’s code snapshot](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/examples/butterfly-alignments.zip), but please note that neither provide FASTA files as I rely on NCBI datasets.
 
-## 1. A little biology before the queries
+## 1. Very short biological introduction on what we will be doing
 
-A DNA sequence is commonly written with four letters: **A**, **C**, **G** and **T**, representing adenine, cytosine, guanine and thymine. These are the bases of its nucleotides. A sequence file may also contain **N**, meaning the base is unresolved. Removing those letters would move every coordinate after them, so we keep them.
+A DNA sequence is commonly written with four letters: **A**, **C**, **G** and **T**, representing adenine, cytosine, guanine and thymine. These are the bases of its nucleotides. A sequence file may also contain **N**, meaning the base is unresolved. Removing those letters would move every coordinate after them, so we keep them for simplicity.
 
-DNA has two complementary strands. A pairs with T, and C with G; the strands also run in opposite directions. To read the same region from the other strand, reverse the sequence and complement each letter. For example, the reverse complement of `AACGT` is `ACGTT`. This detail will matter quite a lot in our butterfly plots.
+DNA has two complementary strands - A pairs with T, and C with G and the strands also run in opposite directions. To read the same region from the other strand, we need to reverse the sequence and complement each letter. For example, the reverse complement of `AACGT` is `ACGTT`. I mentioning this, because this detail will matter quite a lot in our butterfly plots.
 
-A genome is an organism's complete set of DNA, and an assembly is a reconstruction of it from sequencing data. A chromosome record can represent a reconstructed chromosome; a scaffold is an assembled sequence whose placement may still be incomplete. Our *H. melpomene rosina* record is chromosome 18. The *H. erato demophoon* record is an **unplaced scaffold** named `ntLink_18`; its name alone does not make it a chromosome assignment.
+A genome is an organism's complete set of DNA, and an assembly is a reconstruction of it from sequencing data collected from some instruments (this process goes into "wet lab" so you ask your fellow collegues to run Illumina machine, which yields many many parts of the sequence you are interested in along with some noise. I won't go into details now how exactly this is done, but we have our sequence already in the dataset!).
+A chromosome record can represent a reconstructed chromosome, while a scaffold is an assembled sequence whose placement may still be incomplete. We will be usiong record for two species - our *H. melpomene rosina* record is chromosome 18, while the *H. erato demophoon* record is an **unplaced scaffold** named `ntLink_18`
 
-An alignment places two sequences in columns so that corresponding bases can be compared. Equal letters are matches, different letters are substitutions, and gaps account for insertions or deletions relative to the other sequence. Local alignment searches for matching pieces without requiring every base in both records to have a partner.
+Now the core of any genomic/metagenomic analysis pipeline is the problem of alignment. An alignment is a process that places two sequences in columns so that corresponding bases (nucleotites A,C,T,G) can be compared. Equal letters are matches, different letters are substitutions, and gaps mean insertions or deletions relative to the other sequence. This allows us to understand for example where specific nucleotides were changed during evolutionary processes (how mutations arise, where etc.)
 
-![DNA letters and a small alignment with a mismatch and a gap.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/dna-alignment.svg)
+![DNA letters and a small alignment with a mismatch and a gap.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/dna-alignment.svg)
 
-We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence. BioseqDB's `mmsearch` starts with short shared fragments, connects promising matches into chains, then aligns selected regions in more detail. This is the [seed-and-extend idea](/v0.1/tutorials/project_alignment_foundations/#seed-and-extend). My [Python read-mapper tutorial](/blog/writing-a-dna-read-mapper-in-python/) goes through the algorithms if you want to build a small version yourself.
+We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence (that is a lot of text, so our alignment algorithm would be ridiciously slow!). Thankfully in BioseqDB's I provided search function`mmsearch`. Internally it starts with short shared fragments, connects promising matches into chains, then aligns selected regions in more detail. This approach is called the [seed-and-extend idea](/v0.1/tutorials/project_alignment_foundations/#seed-and-extend) and it allows more efficient processing so you can align ridiciously long sequences with no issue. If you are interested in writing your own aligner, my [Python read-mapper tutorial](/blog/writing-a-dna-read-mapper-in-python/) goes through the algorithms specifically written in very simple Python.
 
-Pangenomics considers variation across multiple genomes instead of treating one reference as the entire species. Here we start with a pairwise comparison across two species. It is a useful first exercise in comparative genomics, but the resulting ribbons are not a pangenome graph and do not describe all variation within either species.
+Here we start analysis with a pairwise comparison across two species, caluclating alignemnt of fragments per every pair of sequences. It is a useful first exercise in comparative genomics.
 
-## 2. What we will build
+## 2. Setting things up!
 
-We will import two one-million-base windows, inspect their lengths and nucleotide counts, calculate GC content, align them, and progressively draw one match, all retained matches, and the neighbourhood of *optix*. The last figure adds current gene annotations and local GC measurements.
+We will import two one-million-base sequence fragments, inspect their lengths and nucleotide counts, calculate GC content, align them, and progressively draw one match, all retained matches, and the neighbourhood of *optix*.
 
-![NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/sql-workflow.svg)
+![NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/sql-workflow.svg)
 
-The division of work is fairly small: PostgreSQL stores the sequences and BioseqDB performs the alignment. SQLAlchemy sends SQL and receives rows. Plotly turns those rows into figures. The same SQL works from `psql`, so the Python layer does not hide a second alignment pipeline.
+PostgreSQL via BioseqDB extension stores the sequences and BioseqDB performs the alignment. We will write Python code using SQLAlchemy, that will send SQL and receive rows, which later will be used by Plotly to constrtuct some figures. You can do that same thing with plain SQL client like `psql` as every step of data processing will happen inside the database itself.
 
 ## 3. Install BioseqDB and check external access
 
 > [!WARNING]
-> **Availability on 16 October 2026.** The published `0.1.0-alpha.1` Docker images and native package build profiles omit the external-database integration used here. It is planned for the next alpha release. A runtime `SET`, an API key, or a `GRANT` cannot add a feature omitted at build time. This tutorial is validated against a source build with `BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON`; check your installation before running the NCBI queries.
+> **Availability on 16 October 2026.** The published `0.1.0-alpha.1` Docker images and native package builds omit the external-database integration used here (due to my oversight). It is planned for the next alpha release, but you can obviously compile source from Github directly. Currently using runtime `SET`, an API key, or a `GRANT` won't work as the code isn't present in the binary - when building one must use `BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON` to enable this feature.
 
-The [installation page](/v0.1/tutorials/getting_started/) covers the regular Docker and native packages. For this tutorial, use the external-enabled development build described in the [example's setup instructions](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments#database-setup). Those instructions pin a public source revision and apply the NCBI query fixes included with the example. The important CMake option is:
+The [installation page](/v0.1/tutorials/getting_started/) covers the regular Docker and native packages. For this tutorial, use the external-enabled development build described in the [example's setup instructions](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments#database-setup):
 
 ```sh
 cmake -S . -B build/butterflies -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON
 cmake --build build/butterflies --target postgresql_bioseq postgresql_bioseq_cache
 ```
 
-These lines modify an already configured source build; the example's setup instructions include the tested toolchain and PostgreSQL setup. They are not commands to run inside the released Docker container. After installing that build and enabling the extension in a fresh database, check its SQL objects:
+These lines modify an already configured source build to enable the external clients module, which is responsible for directly interfacing with NCBI database. Obviously a workaround at this time, would be directly downloading datasets by yourself and loading FASTA using `bioseq.load` function.
+After installing that build and enabling the extension in a fresh database, check its SQL objects:
 
 <!-- butterfly:preflight:start -->
 ```sql
@@ -75,11 +78,11 @@ GRANT SELECT ON bioseq_external.catalog, bioseq_external.sequences
 TO butterfly_reader;
 ```
 
-Replace `butterfly_reader` with your existing database role. This is a permission step for a build that already has the feature; it does not enable the feature in an older package. The example uses a local database account which owns the tutorial tables.
+Replace `butterfly_reader` with your existing database role.
 
-## 4. Find the assemblies by organism name
+## 4. Search NCBI via SQL
 
-Start with metadata. Printing a chromosome's entire sequence is rarely a useful first query.
+We will start with some metadata to make sure we refer to correct organism etc. The following query will use NCBI provider in BioseqDB and send requests to puiblic NCBI API to search organisms for you (all in SQL - how amazing it is instead using hard to understand CLIs?)
 
 <!-- butterfly:discovery:start -->
 ```sql
@@ -91,28 +94,24 @@ ORDER BY accession;
 ```
 <!-- butterfly:discovery:end -->
 
-`bioseq_external.catalog` presents NCBI assembly metadata as a SQL table. The `provider` condition selects NCBI and `scientific_name` selects the organism. `accession` is the assembly identifier; `assembly_level` distinguishes such things as scaffold and chromosome assemblies. The catalog is backed by NCBI Datasets, so it is not a copy of every record returned by the NCBI Nucleotide website's free-text search.
+ The `provider` conditionis important as it selects NCBI and BioseqDB supports manyh other public databases of sequences. Field `scientific_name` selects the organism, in this case our butterfly species and naturally all seasrch fields are compatible what official NCBI API provides. Field `accession` is the assembly identifier and it's common name for most of public data sources. The last important one - `assembly_level` - is a field that distinguishes such things as scaffold and chromosome assemblies (there may be different kind of objects in the database so we would like to see what's there!)
 
-Discovery answers what is available now. For a reproducible comparison we then choose explicit assembly and sequence versions:
+When you run this query, you *can probably* get different results as the database is updated. For this comparison, I selected these two assemblies and sequence windows:
 
 | Organism | Assembly | Sequence record | Imported interval, zero-based |
 | --- | --- | --- | --- |
 | *H. erato demophoon* | [GCA_056362945.2](https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_056362945.2/) | [JBTWUK020000023.1](https://www.ncbi.nlm.nih.gov/nuccore/JBTWUK020000023.1), unplaced scaffold | `[3700000, 4700000)` |
 | *H. melpomene rosina* | [GCF_056956725.1](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_056956725.1/) | [NC_140406.1](https://www.ncbi.nlm.nih.gov/nuccore/NC_140406.1), chromosome 18 | `[600000, 1600000)` |
 
-Each interval contains one million bases, or **1 Mb**. A **kb** is one thousand bases. We keep the deposited orientation of both records during import.
-
-Before choosing the feature, distinguish a few terms. A **transcript** is an RNA copy made from a gene. A **coding sequence**, or CDS, is the part translated into a protein; a protein is a chain of amino acids. **Transcript orientation** means reading that sequence in the direction used by the gene, which may require a reverse complement. A **homolog** is a corresponding gene related through shared ancestry.
-
-There is a naming wrinkle worth resolving before drawing anything. The melpomene annotation names its gene `Optix`; the erato annotation calls the corresponding candidate `AC2CFC_001707`, described as “homeobox protein SIX6”. The two transcript-oriented coding sequences have 778 identical positions out of 804 bases, and their translated proteins share 266 of 267 amino acids. Together with the local alignment, this supports treating the erato feature as the *optix* homolog here. It is our identification from the sequence evidence, not a claim that its NCBI annotation already uses that name. The notebook checks those counts again from the sequences returned by SQL.
+Each interval contains one million bases, or **1 Mb** (in this notation **kb** is one thousand bases and **1Mb** means sequence is one million A/C/T/G/maybe others characters-long).
 
 We use zero-based, half-open coordinates throughout: `[start, end)` includes `start` and excludes `end`, so its length is `end - start`. NCBI GFF annotations use one-based inclusive coordinates; convert them with `start0 = start1 - 1`, leaving the end unchanged. [NCBI documents the GFF convention here.](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/reference-docs/file-formats/annotation-files/about-ncbi-gff3/)
 
-![Coordinate conversion from one-based annotation positions to zero-based slices and local window positions.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/coordinate-systems.svg)
+![Coordinate conversion from one-based annotation positions to zero-based slices and local window positions.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/coordinate-systems.svg)
 
-## 5. Store the selected intervals
+## 5. Now the storage!
 
-Here is our own table. `USING bioseq` gives it BioseqDB's sequence storage and search support; the other fields retain the information needed to interpret a coordinate later.
+Here is our own table that we can create as in ordinary SQL you should be familiar with. `USING bioseq` gives it BioseqDB's sequence storage and search support. The other fields are tehre just to save the information needed to interpret a coordinates later.
 
 <!-- butterfly:schema:start -->
 ```sql
@@ -137,11 +136,11 @@ CREATE TABLE IF NOT EXISTS butterflies.regions (
 | `organism` | Full scientific name, including the subspecies. |
 | `assembly` | Assembly accession used to select the matching annotations. |
 | `start0`, `end0` | Boundaries of the imported window on the original record. |
-| `seq` | The actual DNA, stored as `bioseq.seq('dna5', 64)`; DNA5 retains A/C/G/T/N. |
+| `seq` | The actual DNA, stored as `bioseq.seq('dna5', 64)` |
 
-The `64` selects the sequence storage width; it is not a 64-base limit. The repository also includes this field table as `schema.tex` for use in a LaTeX document.
+Oner important gotcha: you might be familiar with SQL `VARCHAR` where the number signifies how long the text can be. Here it's not the maximum bound on sequence length, but because of my decisions, this it how the sequence is encoded. It can be encoded on units of 8-bits, 16-bits, 32-bits or 64-bits and by default I recommend using the 64. If you try to plug here some other number you will gen an error.
 
-Now import the two intervals. The external `start0` and `end0` filters request the selected part of each accession; there is no need to download the whole chromosome into Python first.
+Now we import the two intervals. The external `start0` and `end0` filters request the selected part of each accession sequence. Beatuful thing is that every step of the process so far happens inside the database, so you don't have to import anything in Python or use BioPython at all. Th SQL is self-explanatory (at least this is what I think - we just do previous query but along with `INSERT INTO` statement so it's persisted in the table we created):
 
 <!-- butterfly:import:start -->
 ```sql
@@ -167,9 +166,8 @@ WHERE provider = 'ncbi'
 ```
 <!-- butterfly:import:end -->
 
-`INSERT ... SELECT` copies the returned sequences into our table. Once imported, the composition and alignment queries use local data. The Python runner wraps both imports in one transaction, checks that each produced exactly one row, and verifies the sequence hashes recorded in `sources.json`.
-
-Inspect a short prefix rather than the million letters:
+`INSERT ... SELECT` copies the returned sequences into our table. Once imported, the composition and alignment queries use local data.
+Let's inspect a short prefix to see what's there out of curiousity:
 
 <!-- butterfly:inspect:start -->
 ```sql
@@ -182,9 +180,9 @@ ORDER BY key;
 
 `bioseq.len(seq)` gives the number of bases. `seq[0:20]` takes the first twenty, using the same half-open convention as our genomic windows. A coordinate returned by an alignment will be relative to this imported sequence. To get back to the NCBI record, add its stored `start0`.
 
-## 6. Count the bases before aligning
+## 6. Let's do some exploration and count bases!
 
-Two records can have similar overall composition and still contain very different sequences. These checks help us understand the input; they do not establish homology by themselves.
+Two records can have similar overall composition and still contain very different sequences. I don't want to read entire million of bases as this would crowd up our screen, so lets stick to some meta properties, like the sequence lengths and counts for every nucleotide:
 
 <!-- butterfly:composition:start -->
 ```sql
@@ -205,29 +203,29 @@ ORDER BY key;
 ```
 <!-- butterfly:composition:end -->
 
-`bioseq.symbol_count` counts a selected letter. **GC content** is the percentage of called bases which are G or C:
+`bioseq.symbol_count` counts a selected letter and **GC content** is the percentage of called bases which are G or C:
 
 $$\mathrm{GC\%} = 100\frac{G+C}{A+C+G+T}.$$
 
-We exclude N from the denominator and report it separately. `NULLIF` avoids dividing by zero if a sequence contains no called bases; that case is unknown GC content, not zero GC. Both windows used here happen to contain no Ns.
+We exclude N from the denominator as N represents an unresolved base and in practice it can be anything of A/C/T/G, but we never know for sure. Usually Ns are small part of the sequence overall and we are not interested in them so much. `NULLIF` here avoids dividing by zero if a sequence contains no called bases. That case is unknown GC content, not zero GC. Lucily for us, both windows we saved and used here happen to contain no Ns (hooray!)
 
-![Lengths of the two imported sequence windows.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/sequence-lengths.svg)
+![Lengths of the two imported sequence windows.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/sequence-lengths.svg)
 
-![Lengths of the complete NCBI source records, distinct from the imported windows.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/source-record-lengths.svg)
+![Lengths of the complete NCBI source records, distinct from the imported windows.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/source-record-lengths.svg)
 
-Both analysis windows are exactly 1 Mb. This is a choice of input window, not evidence that the two chromosomes have equal length. The source erato scaffold is 5,549,739 bases; the source melpomene chromosome is 16,989,447 bases.
+Both analysis windows are exactly 1 Mb. The source erato scaffold is 5,549,739 bases, the source melpomene chromosome is 16,989,447 bases.
 
-![Measured counts of A, C, G, T and N in the two NCBI windows.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/base-counts.svg)
+![Measured counts of A, C, G, T and N in the two NCBI windows.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/base-counts.svg)
 
-A and T are more frequent than C and G in both windows. Erato contains 329,927 A, 172,322 C, 170,873 G and 326,878 T bases. Melpomene contains 327,164 A, 171,599 C, 171,833 G and 329,404 T bases. The runner checks that the counts, including N, sum to the imported length.
+A and T are more frequent than C and G in both windows. Erato contains 329,927 A, 172,322 C, 170,873 G and 326,878 T bases. Melpomene contains 327,164 A, 171,599 C, 171,833 G and 329,404 T bases.
 
-![GC percentage of called bases in each imported sequence.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/gc-content.svg)
+![GC percentage of called bases in each imported sequence.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/gc-content.svg)
 
-The GC values are close: **34.3195%** and **34.3432%**. A single percentage hides local variation, so we also calculate it in consecutive 10 kb windows. The final, shorter window would be retained if the sequence length were not an exact multiple of 10 kb.
+The GC values are close: **34.3195%** and **34.3432%**, but note that this isn't reflecting their similarity as we don't measure here any position-based properties.
 
-![GC content measured in consecutive 10 kb windows along both sequences.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/gc-windows.svg)
+![GC content measured in consecutive 10 kb windows along both sequences.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/gc-windows.svg)
 
-The SQL query for that profile is below, showing its first six windows. The complete query in the repository returns all 200.
+More interesting is measuring GC content in windows of specified length, because they we have more than only one single data point per entire sequence of interest (they are long so any mutations will average to very similar total GC content percentage. Using smaller windows on sequences allow us to see some regions where "something happens" and the structure of sequence changes - all this without actually comparing all nucleotides themselves on our screen  - in practice this can be used as very primitive tool to quickly search for regions of interest)
 
 <!-- butterfly:gc-windows:start -->
 ```sql
@@ -254,11 +252,11 @@ LIMIT 6;
 ```
 <!-- butterfly:gc-windows:end -->
 
-These curves show where the composition changes within each imported region. Peaks are not, by themselves, genes, enhancers or accessible chromatin. We need the appropriate annotations or experiments to make those claims.
+These curves show where the composition changes within each imported region - peaks/valleyhs or other interesting shapes are not, by themselves, genes, enhancers or anything else and we need the appropriate annotations or experiments in "wet labs" to check, but nevertheless it's some information we can use in our analysis.
 
 ## 7. Align the regions inside PostgreSQL
 
-We will use melpomene as the **target** and erato as the **query**. Both come from the same local table, selected by their `key` fields. This listing shows the first eight results; `06_align.sql` in the repository omits the final `LIMIT` and returns every block.
+We will use melpomene as the **target** and erato as the **query**. Both come from the same local table, selected by their `key` fields. This listing shows the first eight result (`06_align.sql` in the repository omits the final `LIMIT` and returns every block. I used `LIMIT` here just for simpler illustrative purposes)
 
 <!-- butterfly:alignment:start -->
 ```sql
@@ -286,9 +284,10 @@ LIMIT 8;
 ```
 <!-- butterfly:alignment:end -->
 
-`mmsearch(t.seq, q.seq, ...)` produces local sequence matches. Here `kmer_size => 15` uses 15-base seeds and `window_size => 10` controls their minimizer windows. A **k-mer** is a run of k consecutive bases. A **minimizer** is one representative k-mer selected from a window by a fixed ordering, which reduces the number of seeds we keep. The gap and minimum chain-score options affect which candidate chains are explored; `max_gap => 200` is not a promise that every gap in the final alignment will be at most 200 bases.
+`mmsearch(t.seq, q.seq, ...)` is SQL function you can use to produce local sequence matches (perform sequence alignment). Here `kmer_size => 15` uses 15-base seeds and `window_size => 10` controls their minimizer windows (I don't want to go too deep into details, but a **k-mer** is a run of k consecutive bases and a **minimizer** is one representative k-mer selected from a window by a fixed ordering, which reduces the number of seeds we keep. The longer k-mers can increase performance by reducing sensitivity, but here we use BioseqDB's default k-mer size 15 and window size 10, so we will stick to them. They are presented here to let you know what you can change. These two values can be omitted when the session defaults are unchanged, but keep the gap options below to reproduce these results).
+The gap and minimum chain-score options affect which candidate chains are explored and can do the same - improve performance at the cost of sensitivity. Here `max_gap => 200` differs from the default 5000; `max_gap_ref` is accepted but is not yet used by the current chaining implementation.
 
-The `bioseq.*` projections describe the match associated with `t.seq` in the current result row:
+The `bioseq.*` projections describe the match we get from aligning of`t.seq` in the current result row:
 
 | Projection | What we use it for |
 | --- | --- |
@@ -301,11 +300,11 @@ The `bioseq.*` projections describe the match associated with `t.seq` in the cur
 | `score` | Alignment score under the scoring scheme; not a percentage. |
 | `mapq`, `is_primary` | Estimated placement confidence and primary/secondary information used when inspecting competing matches. |
 
-Mapping quality, or **MAPQ**, concerns confidence in a placement among alternatives; it is different from the fraction of identical bases in an alignment. A high MAPQ does not mean the two sequences are identical.
+Mapping quality, or **MAPQ**, concerns confidence in a placement among alternatives. It is different from the fraction of identical bases in an alignment, it says us how many different regions where there for some part of the query, so a high MAPQ does not mean the two sequences are identical, but means that for each region we were aligning there weren't many regions that can match as well so result is likely around correct place.
 
-Requesting `bioseq.cigar` matters: it asks BioseqDB for the base-level alignment rather than only a candidate chain. An `M` operation can contain both equal and unequal bases, so counting M positions is not sufficient to measure identity. Our runner independently replays every CIGAR against the fetched bases, checks `bioseq.edit`, then calculates `100 * (block_length - edits) / block_length`. This definition counts a gap column as a difference.
+Requesting `bioseq.cigar` asks BioseqDB for the base-level alignment rather than only an estimates of positions (other base-level projections, including `bioseq.edit`, also request this step; without them the start/end of query/target might change! ASking for cigar improves the accuracy to the positions of individual bases). In a CIGAR string, `M` consumes a base from each sequence and can include both matches and mismatches; `I` marks inserted query bases and `D` marks deleted target bases. The numbers are run lengths. Use `bioseq.edit()` to retrieve the number of substitutions and inserted/deleted bases.
 
-The validated run returned **661 blocks**, of which **592** had reverse query orientation. For the plots we keep blocks with at least 300 alignment columns, mapping quality at least 20 and identity at least 70%. That leaves **355 blocks**, including **342 reverse matches**. These are display thresholds, not a biological definition of conservation, and all 661 unfiltered rows remain in the local analysis output.
+The validated run returned **661 blocks**, of which **592** had reverse query orientation (the aligners consider reverse strand which means that we not only search for some sequence X, but also it's reverse-complement. In very simple terms this is because of how DNA work and the reverse complement of ACTG is CAGT). For the plots we keep blocks with at least 300 alignment columns, mapping quality at least 20 and identity at least 70%. That leaves **355 blocks**, including **342 reverse matches**.
 
 ## 8. Set up Python with Poetry
 
@@ -319,13 +318,13 @@ export DATABASE_URL='postgresql+psycopg://postgres:bioseq@localhost:55432/butter
 poetry run butterfly-tutorial
 ```
 
-Use the connection details of your external-enabled database. The password shown here is only a local example. `poetry install` installs SQLAlchemy, psycopg, Plotly, Kaleido and JupyterLab from the included lock file. If starting a separate project instead, the corresponding dependency command is:
+Use the connection details of your external-enabled database. The password shown here is only a local example. `poetry install` installs SQLAlchemy, psycopg, Plotly, Kaleido and JupyterLab. If starting a separate project instead, the corresponding dependency command is:
 
 ```sh
 poetry add sqlalchemy 'psycopg[binary]' plotly kaleido jupyterlab nbclient
 ```
 
-Static SVG export uses Kaleido and requires Chrome; [Plotly explains that dependency here](https://plotly.com/python/static-image-export/). The database analysis can run without image export using `--no-figures`. After the first successful import, `--reuse` verifies the stored sequence hashes and repeats the analysis without fetching those sequences again.
+Static SVG export uses Plotly with Kaleido and requires Chrome [Plotly explains that dependency here](https://plotly.com/python/static-image-export/). The database analysis can run without image export using `--no-figures`. After the first successful import, you can use `--reuse` to repeat the analysis without fetching those sequences again.
 
 For the notebook interface:
 
@@ -333,9 +332,9 @@ For the notebook interface:
 poetry run jupyter lab notebooks/butterfly_alignments.ipynb
 ```
 
-## 9. Send the same SQL with SQLAlchemy
+## 9. Mastering SQL now
 
-The SQL lives in separate files so the command-line runner and notebook use the same queries. Start a connection and read the inspection query:
+You don't have to manually enter SQL into the database, you can do that the same thing from Python via the industry-standardised SQLAlchemy library:
 
 <!-- butterfly:python-inspect:start -->
 ```python id=butterfly_python_connection
@@ -362,7 +361,7 @@ for row in preview:
 ```
 <!-- butterfly:python-inspect:end -->
 
-`create_engine` describes how to connect. The `with engine.connect()` block acquires a connection and returns it to the pool when finished. `.mappings()` gives rows with column names, which is convenient for tables and figures. We disable psycopg's automatic prepared statements here because the current external-query implementation needs the accession and range values available in its custom query plan.
+I use `create_engine`to tell SQLAlchemy how and where to connect and later the `with engine.connect()` block acquires a connection and returns it to the pool when finished. `.mappings()` gives rows with column names, which is convenient for tables and figures. We disable psycopg's automatic prepared statements here because the current external-query implementation needs the accession and range values available in its custom query plan.
 
 The first two returned rows are:
 
@@ -386,9 +385,9 @@ print([dict(row) for row in assemblies])
 ```
 <!-- butterfly:python-discover:end -->
 
-The organism string remains data, rather than becoming part of the SQL syntax. For writes, the import helper uses `engine.begin()`: successful work commits when the block ends, while an exception rolls back the transaction. [SQLAlchemy's tutorial describes these transaction patterns.](https://docs.sqlalchemy.org/en/20/tutorial/dbapi_transactions.html)
+If you want to read more about SQLAlchemy transactions and what is `engine.connect()` you are welcome to read more here: [SQLAlchemy's tutorial describes these transaction patterns.](https://docs.sqlalchemy.org/en/20/tutorial/dbapi_transactions.html)
 
-To repeat the imports from Python, use the pinned manifest and the transactional helper:
+To repeat the imports from Python, use the transactional helper:
 
 <!-- butterfly:python-import:start -->
 ```python id=butterfly_python_import
@@ -400,7 +399,7 @@ import_regions(engine, sources["records"])
 ```
 <!-- butterfly:python-import:end -->
 
-The alignment is another query through the same connection:
+The alignment is SQL, so it's another query through the same connection (nothing special here really!)
 
 <!-- butterfly:python-align:start -->
 ```python id=butterfly_python_align
@@ -411,17 +410,17 @@ print(f"{len(matches)} alignment blocks")
 ```
 <!-- butterfly:python-align:end -->
 
-The `matches` list contains the same 661 rows as the SQL query. Python is receiving coordinates and alignment details, not invoking Minimap2 behind the scenes. The full runner also validates lengths, nucleotide counts, sequence hashes, CIGAR operations and the *optix* coding sequences before it draws any charts.
+The `matches` list contains the same 661 rows as the SQL query. The full runner in the GitHub repo also validates lengths, nucleotide counts, sequence hashes, CIGAR operations and the *optix* coding sequences before, but I'm not going to present it all here as this is just some additional boilerplate not very relevant to the analysis itself.
 
-## 10. Draw one match first
+## 10. First drawing!
 
-A ribbon diagram looks complicated until we separate its parts. A sequence track is just a rectangle whose x coordinates are sequence positions. Its height and y position are display choices.
+There's a think called ribbon diagram, where a sequence track is just a rectangle whose x coordinates are sequence positions and its height and y position are display choices:
 
-![A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/rectangle-coordinates.svg)
+![A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/rectangle-coordinates.svg)
 
-An alignment connects two intervals with a four-corner polygon. For a forward match, the target's left endpoint corresponds to the query's left endpoint. For a reverse match, it corresponds to the query's right endpoint.
+An alignment connects two intervals with a four-corner polygon. For a forward match, the target's left endpoint corresponds to the query's left endpoint. For a reverse match, it corresponds to the query's right endpoint. No rocket science here, right? Only butterfly science! Huh.
 
-![The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/ribbon-coordinates.svg)
+![The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/ribbon-coordinates.svg)
 
 Here is the small plotting operation behind a ribbon:
 
@@ -445,41 +444,41 @@ figure.show()
 ```
 <!-- butterfly:python-ribbon:end -->
 
-The figures on this page are static SVGs. The notebook and generated HTML versions also let you zoom and hover over a match to inspect its coordinates. The complete plotting function adds species labels and axes; here is the highest-scoring retained match:
+The figures on this page are static SVGs, but the notebook and generated HTML versions also let you zoom and hover over a match to inspect its coordinates and it feel much cooler to see them update after your code changes. You can give it a try.
 
-![One real alignment block connects its target and query intervals.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/first-alignment-ribbon.svg)
+![One real alignment block connects its target and query intervals.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/first-alignment-ribbon.svg)
 
-Its target interval is `[639721, 644608)` and its query interval is `[332091, 337300)`, with reverse orientation. The spans need not have equal lengths because the alignment includes insertions and deletions. This block has 5,307 alignment columns and 894 edits, giving about 83.15% identity under our stated definition.
+Its target interval is `[639721, 644608)` and its query interval is `[332091, 337300)`, with reverse orientation. The spans need not have equal lengths because the alignment includes insertions and deletions. This block has 5,307 alignment columns and 894 edits, giving about 83.15% identity.
 
-## 11. From one match to the whole neighbourhood
+## 11. We need more plots! Mooore!
 
-A dot plot is a useful first view of many matches. Each line segment plots target position against query position; its slope shows orientation.
+One plot won't satisfy my needs for colourful graphs. We can use a dot plot. A dot plot is a useful first view of many matches - each line segment plots target position against query position and its slope shows orientation.
 
-![A dot plot of the 355 retained alignments, distinguishing forward and reverse matches.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/alignment-dot-plot.svg)
+![A dot plot of the 355 retained alignments, distinguishing forward and reverse matches.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/alignment-dot-plot.svg)
 
-The broad reverse trend agrees with the opposite orientations of the annotated *optix* regions in these deposited records. It does **not** by itself establish a biological inversion between the species: an assembly record can be deposited in either orientation.
+The broad reverse trend agrees with the opposite orientations of the annotated *optix* regions in records, but it does **not** by itself mean a biological inversion between the species and somehow they reversed everyrthing just by randon accident - an assembly record can be deposited in either orientation to NCBI so it's likely that.
 
 Now draw all retained ribbons in the original coordinate systems:
 
-![All retained alignment ribbons between the two one-million-base windows.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/alignment-ribbons.svg)
+![All retained alignment ribbons between the two one-million-base windows.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/alignment-ribbons.svg)
 
-Overlapping blocks are possible, especially around repeated sequence, so summing their lengths would overstate coverage. After merging overlapping intervals, the displayed blocks cover 374,441 target bases and 387,528 query bases. These are the spans touched by the selected alignments; they are not counts of identical bases or whole-genome conservation estimates.
+Overlapping blocks are possible, especially around repeated sequence, so summing their lengths would overstate coverage. After merging overlapping intervals, the displayed blocks cover 374,441 target bases and 387,528 query bases. These are the spans touched by the selected alignments.
 
 For a closer look at *optix*, we centre each gene on zero and reverse the erato display axis. In local window coordinates, the gene midpoints are 493,223.5 for melpomene and 495,840 for erato. The display transformations are therefore `x = target_position - 493223.5` and `x = -(query_position - 495840)`.
 
-![The optix neighbourhood after centring the gene models and reversing the erato display direction.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/optix-centered-ribbons.svg)
+![The optix neighbourhood after centring the gene models and reversing the erato display direction.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/optix-centered-ribbons.svg)
 
-![The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/alignment-display-transform.svg)
+![The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/alignment-display-transform.svg)
 
-Centring gene models is a display choice: their annotated transcript spans differ, so corresponding coding bases need not fall at exactly the same x position.
+We need to make a choice how to  center the genome and it's compltely arbitrary - their annotated transcript spans differ, so corresponding coding bases need not fall at exactly the same x position. This transformation makes the comparison easier to read. In the interactive notebook and HTML versions, the hover text retains the original local coordinates. When selecting a zoom, we keep blocks that overlap it, including blocks crossing its boundary, requiring both endpoints to lie inside the zoom would silently discard useful matches. If you have better idea how to draw this, go ahead!
 
-This transformation makes the comparison easier to read, but does not change the stored sequence or perform coordinate liftover. In the interactive notebook and HTML versions, the hover text retains the original local coordinates. When selecting a zoom, we keep blocks that overlap it, including blocks crossing its boundary; requiring both endpoints to lie inside the zoom would silently discard useful matches.
+## 12. Add gene models
 
-## 12. Add gene models and local GC
+The erato feature `AC2CFC_001707` is annotated as homeobox protein SIX6; I treat it as the *optix* homolog here because its coding sequence shares 778/804 bases and its protein 266/267 amino acids with melpomene Optix.
 
-The annotation loader downloads the exact GFF files listed in `sources.json`, verifies their checksums, selects the appropriate accession, converts coordinates and clips features to our imported windows. There are **35 gene or pseudogene models** overlapping the erato window and **38** overlapping the melpomene window, including one pseudogene in each. A pseudogene is a gene-like sequence annotated as no longer encoding the usual functional product. A gene model is an annotation of a gene's structure; it is not a direct measurement of expression in these butterflies.
+The annotation loader on GitHub downloads the exact GFF files listed in `sources.json`, selects the appropriate accession, converts coordinates and clips features to our imported windows. There are **35 gene or pseudogene models** overlapping the erato window and **38** overlapping the melpomene window, including one pseudogene in each. A pseudogene is a gene-like sequence annotated as no longer encoding the usual functional product. A gene model is an annotation of a gene's structure.
 
-The notebook assembles these views from the validated query results. `make_figures` returns a dictionary of Plotly figures; for example, `figures["optix-neighborhood"].show()` opens this comparison.
+The notebook assembles these views and `make_figures` returns a dictionary of Plotly figures.
 
 <!-- butterfly:python-analysis:start -->
 ```python id=butterfly_python_analysis
@@ -499,26 +498,16 @@ print(json.dumps(analysis["summary"], indent=2))
 ```
 <!-- butterfly:python-analysis:end -->
 
-![Current NCBI gene models, local GC measurements and BioseqDB alignments around optix.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/optix-neighborhood.svg)
+![Current NCBI gene models, local GC measurements and BioseqDB alignments around optix.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/optix-neighborhood.svg)
 
-![The current optix gene and exon models in their transcript-oriented display.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/optix-gene-models.svg)
+![The current optix gene and exon models in their transcript-oriented display.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterflies/optix-gene-models.svg)
 
-The exon panel is a closer view of the annotations. Exons are the parts retained in a mature transcript; not every exonic base is protein-coding. The annotated erato transcript has two exons and the melpomene transcript has one in these files. Those annotation structures should not be inferred from the length of a single alignment block.
-
-Read the three-panel neighbourhood figure in layers. The gene tracks place the matching segments in their annotated neighbourhood. The ribbons show sequence resemblance under the alignment and display settings. The GC tracks add a simple measurement made directly from the imported DNA. A gap in the ribbons can reflect sequence differences, repeats, or our search and display thresholds; it is not automatically a deleted gene.
-
-The earlier tutorial also used transposable-element annotations and ATAC-seq tracks. A **transposable element** is a DNA element capable, or descended from an element capable, of moving within a genome. **Chromatin** is DNA together with the proteins that package it. DNA wraps around protein units called nucleosomes, and some regions are more exposed than others. **ATAC-seq** uses an enzyme called Tn5 transposase to insert sequencing adapters into accessible DNA, then maps the resulting reads. It measures accessible chromatin: regions where DNA is relatively available to the assay's transposase, in a particular biological sample. It can help investigate potential regulatory regions, but an accessibility peak is not the same as gene expression.
-
-![A conceptual ATAC-seq workflow, from chromatin accessibility to mapped sequencing signal.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/butterflies/atac-concept.svg)
-
-This diagram explains where such an experiment could extend our comparison. It is not an ATAC-seq result from these samples. We have not transferred the old tutorial's TE or ATAC tracks onto the new assemblies; their coordinates belong to different references. The current NCBI files used here provide gene models, and the remaining tracks are measurements we can reproduce from the actual sequence windows. [The original ATAC-seq paper describes what the assay measures.](https://pmc.ncbi.nlm.nih.gov/articles/PMC3959825/)
+The exon panel is a closer view of the annotations. Exons are the parts retained in a mature transcript, The annotated erato transcript has two exons and the melpomene transcript has one in these files and I put everything into one simple graphic. The gene here tracks place the matching segments in their annotated neighbourhood. The ribbons show sequence resemblance under the alignment and the last one - GC tracks add a simple measurement of GC content made directly from the imported DNA.
 
 ## 13. What did we learn?
 
-The two regions have almost the same overall GC content, yet their alignment is a collection of local blocks with gaps and competing matches. That is why composition checks and alignment answer different questions. The *optix* coding sequences are especially similar, while the surrounding DNA provides a larger and less uniform comparison. None of these plots alone identifies the regulatory change responsible for a wing pattern.
+The two regions have almost the same overall GC content, yet their alignment is a collection of local blocks with gaps and competing matches. The *optix* coding sequences are especially similar, while the surrounding DNA provides a larger and less uniform comparison. None of these plots alone identifies the regulatory change responsible for a wing pattern, but hey, we got some cool plots!
 
-What I find useful about this workflow is that the sequences, their accession identifiers and the analysis stay connected. Selecting another region means changing explicit coordinates. Selecting another organism starts with another catalog query. The alignment returns rows which can be filtered, saved or joined with other metadata, and SQLAlchemy uses the same queries that we tested directly in PostgreSQL.
+What I find useful about this workflow is that the sequences, their accession identifiers and the analysis stay all withing SQL. Selecting another region means changing explicit coordinates in your code without the need to look for CLI docs in the internet or using different tools blues together via bash scripts. You can even search NCBI via SQL layer that directly uses their API. I didn't show it here but you can export the table into usual FASTA as well.
 
-There are still choices to make: which assemblies to trust, which features correspond, which alignment settings make sense, and what a plot can support. BioseqDB does not remove those decisions. It gives us one place to carry them out and a fairly short route from an NCBI record to a reproducible Python figure.
-
-To continue, try changing the display thresholds and compare the dot plot before interpreting an apparent break. Then select another gene neighbourhood, preserving the accession versions and coordinate conventions. Adding more genomes can turn this small pairwise exercise into a broader comparative analysis; building a pangenome representation would be a separate next step.
+To continue, try changing the display thresholds and compare the dot plot before interpreting an apparent break. Then select another gene neighbourhood, preserving the accession versions and coordinate conventions. Adding more genomes can turn this small pairwise exercise into a broader comparative analysis. with even more cool charts!

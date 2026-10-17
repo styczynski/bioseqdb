@@ -19,7 +19,7 @@ That is the useful part of transparent data encryption, or TDE. The word “tran
 
 An authorised database session needs readable rows to filter and return results. Encrypting stored files therefore does not stop that session from reading a specimen note, nor does it conceal the note from a fully compromised running server. The connection needs its own protection, normally TLS, and database permissions still decide who can issue the query. PostgreSQL describes these separate layers in its [encryption options](https://www.postgresql.org/docs/18/encryption-options.html).
 
-![SQL clients receive readable rows; PostgreSQL processes them in memory, while pg_tde encrypts selected stored files. A principal key in a separate key service protects the internal keys used for those files.](/assets/fb67d2122e16debc58ea1a587c974bf0ddd51142438e3f11da4b86dc044892c2/figures/blog/encryption-boundary.svg)
+![SQL clients receive readable rows; PostgreSQL processes them in memory, while pg_tde encrypts selected stored files. A principal key in a separate key service protects the internal keys used for those files.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/encryption-boundary.svg)
 
 I find it easier to draw this boundary before choosing an extension, because “the database is encrypted” says very little about a CSV export sitting beside it, an application log containing query results, or the person holding a database password.
 
