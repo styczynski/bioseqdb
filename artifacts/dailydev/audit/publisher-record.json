@@ -1,0 +1,38 @@
+{
+  "profile": "https://daily.dev/bioseqdb",
+  "published_at": "2026-10-18",
+  "posts": [
+    {
+      "title": "Introducing BioseqDB",
+      "url": "https://daily.dev/posts/i-built-bioseqdb-to-keep-biological-sequences-and-their-metadata-in-the-same-postgresql-table-this--omovhufke",
+      "article": "https://bioseqdb.com/blog/introducing-bioseqdb/"
+    },
+    {
+      "title": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+      "url": "https://daily.dev/posts/can-we-compare-two-butterfly-genomes-without-leaving-sql-and-python-this-tutorial-retrieves-two-hel-wyhgwjupx",
+      "article": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/"
+    }
+  ],
+  "tools": [
+    "PostgreSQL",
+    "C++",
+    "CMake",
+    "Docker",
+    "Python",
+    "SQLAlchemy",
+    "Plotly",
+    "Ninja",
+    "Clang",
+    "vcpkg",
+    "Poetry",
+    "psycopg",
+    "JupyterLab",
+    "Kaleido"
+  ],
+  "open_source": {
+    "title": "BioseqDB — creator and maintainer",
+    "repository": "https://github.com/BioseqDB/examples",
+    "active_from": "2025-12",
+    "current": true
+  }
+}

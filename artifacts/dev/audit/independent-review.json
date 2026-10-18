@@ -1,0 +1,77 @@
+{
+  "approved": true,
+  "articles": [
+    {
+      "slug": "introducing-bioseqdb",
+      "checks": {
+        "authored_prose_lines_preserved_in_order": true,
+        "visible_code_blocks_exact_in_order": true,
+        "no_hidden_sql_or_build_directives": true,
+        "no_internal_paths_or_hashed_assets": true,
+        "required_links_present": true,
+        "preferred_promo_wording": true,
+        "results_match_committed_html_exactly": true,
+        "each_generated_result_present": true,
+        "all_body_images_in_original_order": true,
+        "internal_links_and_fragment_targets_exist": true
+      },
+      "prose_lines": 29,
+      "code_blocks": 4,
+      "body_images": 1,
+      "result_sets": 2,
+      "source_sha256": "cc56c940a680c7b8dc0f9a1c5ecc70d41dfcbcc6a5a7d807926821df586a5225",
+      "body_sha256": "d2e47e73a81fec82d30d80c6a4e3c5718fe249a1d4c1313acec1d45d614aa8cf",
+      "missing_prose": [],
+      "missing_code": [],
+      "internal_links_checked": 12,
+      "bad_internal_links": []
+    },
+    {
+      "slug": "comparing-butterfly-genomes-with-bioseqdb",
+      "checks": {
+        "authored_prose_lines_preserved_in_order": true,
+        "visible_code_blocks_exact_in_order": true,
+        "no_hidden_sql_or_build_directives": true,
+        "no_internal_paths_or_hashed_assets": true,
+        "required_links_present": true,
+        "preferred_promo_wording": true,
+        "results_match_committed_html_exactly": true,
+        "each_generated_result_present": true,
+        "all_body_images_in_original_order": true,
+        "internal_links_and_fragment_targets_exist": true
+      },
+      "prose_lines": 130,
+      "code_blocks": 21,
+      "body_images": 18,
+      "result_sets": 6,
+      "source_sha256": "769c046bf268a30f56810b613b2419438385dba9ac5f3b4490826a3e27d95f24",
+      "body_sha256": "da2edea2650a9bf8c4094aa76f51972828e24f1a02efb8ee461e29834bb0d4ce",
+      "missing_prose": [],
+      "missing_code": [],
+      "approved_presentation_adaptations": [
+        "download this tutorial’s code snapshot → find this tutorial’s code snapshot on the website",
+        "figures on this page are static SVGs → figures on this page are static images",
+        "Unchanged GC expression in DEV KaTeX block instead of dollar delimiters"
+      ],
+      "internal_links_checked": 6,
+      "bad_internal_links": []
+    }
+  ],
+  "images": {
+    "verified_http_images": 21,
+    "body_images": 19,
+    "stable_publication_cdn": true,
+    "visually_inspected": [
+      "intro workflow diagram",
+      "butterfly coordinate convention",
+      "butterfly optix neighbourhood chart",
+      "both new 1200×504 covers"
+    ]
+  },
+  "publication_ui_checks_remaining": [
+    "Use the new PNG covers; legacy short-banner frontmatter cover URLs are fallback only.",
+    "Verify DEV image proxy displays all 19 body figures and both uploaded covers.",
+    "Verify DEV KaTeX block renders the GC expression.",
+    "Set canonical URL per manifest and publish through UI."
+  ]
+}

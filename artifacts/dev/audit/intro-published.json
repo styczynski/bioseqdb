@@ -1,0 +1,26 @@
+{
+  "url": "https://dev.to/bioseqdb/introducing-bioseqdb-c6m",
+  "canonical": "https://bioseqdb.com/blog/introducing-bioseqdb/",
+  "images": [
+    {
+      "alt": "Cover image for Introducing BioseqDB",
+      "loaded": true,
+      "src": "https://media2.dev.to/dynamic/image/width=1000,height=420,fit=cover,gravity=auto,format=auto/https%3A%2F%2Fdev-to-uploads.s3.us-east-2.amazonaws.com%2Fuploads%2Farticles%2F2u0wwp130x2wlz1ey7xd.png"
+    },
+    {
+      "alt": "BioseqDB",
+      "loaded": true,
+      "src": "https://media2.dev.to/dynamic/image/width=50,height=50,fit=cover,gravity=auto,format=auto/https%3A%2F%2Fdev-to-uploads.s3.us-east-2.amazonaws.com%2Fuploads%2Fuser%2Fprofile_image%2F4192396%2Fc111fc4a-421f-4955-b784-0efe3413a664.png"
+    },
+    {
+      "alt": "Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.",
+      "loaded": true,
+      "src": "https://media2.dev.to/dynamic/image/width=800%2Cheight=%2Cfit=scale-down%2Cgravity=auto%2Cformat=auto/https%3A%2F%2Fcdn-images-1.medium.com%2Fmax%2F1600%2F1%2Aja1m2JVtHRKvvt0bKfxQ2A.png"
+    },
+    {
+      "alt": "pic",
+      "loaded": true,
+      "src": "https://media2.dev.to/dynamic/image/width=90,height=90,fit=cover,gravity=auto,format=auto/https%3A%2F%2Fdev-to-uploads.s3.us-east-2.amazonaws.com%2Fuploads%2Fuser%2Fprofile_image%2F4192396%2Fc111fc4a-421f-4955-b784-0efe3413a664.png"
+    }
+  ]
+}

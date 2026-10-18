@@ -1,0 +1,39 @@
+{
+  "url": "https://daily.dev/bioseqdb",
+  "verified_on": "2026-10-18",
+  "tools": [
+    "PostgreSQL",
+    "C++",
+    "CMake",
+    "Docker",
+    "Python",
+    "SQLAlchemy",
+    "Plotly",
+    "Ninja",
+    "Clang",
+    "vcpkg",
+    "Poetry",
+    "psycopg",
+    "JupyterLab",
+    "Kaleido"
+  ],
+  "tool_count": 14,
+  "open_source": {
+    "title": "BioseqDB — creator and maintainer",
+    "repository": "https://github.com/BioseqDB/examples",
+    "active_from": "2025-12",
+    "current": true,
+    "website": "https://bioseqdb.com/",
+    "description": "BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL. I built it to keep DNA sequences beside their metadata, so alignment can be combined with ordinary filters and joins. It provides compact sequence types, columnar storage and sequence alignment inside PostgreSQL. An independent project by Piotr Styczyński, released under Apache 2.0; the current release is experimental.\n\nWebsite and documentation: https://bioseqdb.com/\nRunnable examples: https://github.com/BioseqDB/examples",
+    "repository_note": "The profile entry links to the public examples repository; its description covers BioseqDB and links to the project website."
+  },
+  "verification": {
+    "all_14_tools_visible": true,
+    "open_source_entry_visible": true,
+    "current_since_december_2025_visible": true
+  },
+  "proof_files": [
+    "artifacts/dailydev/proofs/daily-tools-profile.png",
+    "artifacts/dailydev/proofs/daily-opensource-profile.png"
+  ]
+}

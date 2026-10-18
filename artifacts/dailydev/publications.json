@@ -1,0 +1,72 @@
+[
+  {
+    "slug": "introducing-bioseqdb",
+    "title": "Introducing BioseqDB",
+    "url": "https://daily.dev/posts/i-built-bioseqdb-to-keep-biological-sequences-and-their-metadata-in-the-same-postgresql-table-this--omovhufke",
+    "article_url": "https://bioseqdb.com/blog/introducing-bioseqdb/",
+    "publication_type": "link_share",
+    "status": "published",
+    "verified_on": "2026-10-18",
+    "profile_url": "https://daily.dev/bioseqdb",
+    "caption": "I built BioseqDB to keep biological sequences and their metadata in the same PostgreSQL table. This introduction covers how it started, two SQL examples, how it compares with existing aligners, and a Docker quick start. Please check my OS project - BioseqDB.",
+    "crosslinks": [
+      {
+        "url": "https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d",
+        "label": "Medium",
+        "display": "plain text in share commentary"
+      },
+      {
+        "url": "https://www.linkedin.com/company/bioseqdb/",
+        "label": "LinkedIn",
+        "display": "plain text in share commentary"
+      }
+    ],
+    "article_card": {
+      "destination": "https://bioseqdb.com/blog/introducing-bioseqdb/",
+      "clickable": true,
+      "thumbnail": "Website-generated preview selected by daily.dev",
+      "loaded": true
+    },
+    "verification": {
+      "published_share_visually_confirmed": true,
+      "article_card_visually_confirmed": true,
+      "crosslinks_present_as_plain_text": true
+    },
+    "proof_file": "artifacts/dailydev/proofs/daily-intro-published.png"
+  },
+  {
+    "slug": "comparing-butterfly-genomes-with-bioseqdb",
+    "title": "Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly",
+    "url": "https://daily.dev/posts/can-we-compare-two-butterfly-genomes-without-leaving-sql-and-python-this-tutorial-retrieves-two-hel-wyhgwjupx",
+    "article_url": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+    "publication_type": "link_share",
+    "status": "published",
+    "verified_on": "2026-10-18",
+    "profile_url": "https://daily.dev/bioseqdb",
+    "caption": "Can we compare two butterfly genomes without leaving SQL and Python? This tutorial retrieves two Heliconius optix regions from NCBI, measures GC content, aligns them inside PostgreSQL, and plots the matches with SQLAlchemy and Plotly. Code and a notebook are included. The NCBI queries currently need an external-enabled development build. Please check my OS project - BioseqDB.",
+    "crosslinks": [
+      {
+        "url": "https://medium.com/@styczynski/comparing-butterfly-genomes-with-bioseqdb-sqlalchemy-and-plotly-62dda57c6d9b",
+        "label": "Medium",
+        "display": "plain text in share commentary"
+      },
+      {
+        "url": "https://www.linkedin.com/company/bioseqdb/",
+        "label": "LinkedIn",
+        "display": "plain text in share commentary"
+      }
+    ],
+    "article_card": {
+      "destination": "https://bioseqdb.com/blog/comparing-butterfly-genomes-with-bioseqdb/",
+      "clickable": true,
+      "thumbnail": "Website-generated preview selected by daily.dev",
+      "loaded": true
+    },
+    "verification": {
+      "published_share_visually_confirmed": true,
+      "article_card_visually_confirmed": true,
+      "crosslinks_present_as_plain_text": true
+    },
+    "proof_file": "artifacts/dailydev/proofs/daily-butterfly-published.png"
+  }
+]
