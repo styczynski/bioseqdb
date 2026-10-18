@@ -10,6 +10,14 @@ window.gtag("config", "G-989VYH5HT7", {
 });
 
 (() => {
+  // Load Google's runtime after the local deferred initializer has queued the
+  // configuration. The remote request never blocks parsing or DOMContentLoaded.
+  const tag = document.createElement("script");
+  tag.src = "https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7";
+  tag.async = true;
+  tag.fetchPriority = "low";
+  document.head.append(tag);
+
   const packageSource = (url) => {
     if ((url.hostname === "sourceforge.net" && url.pathname.startsWith("/projects/bioseqdb/")) ||
         (url.hostname.endsWith(".sourceforge.net") && url.pathname.startsWith("/project/bioseqdb/"))) return "sourceforge";

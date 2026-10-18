@@ -156,7 +156,7 @@ class DCLogic {
     const current = this.root.querySelector("[data-benchmark-tip]");
     if (!source || !current) return;
     const tip = source.cloneNode(true);
-    bindNode(tip, this.renderVals());
+    bindNode(tip, this.renderTipVals());
     current.replaceWith(tip);
     if (this.state.tip) requestAnimationFrame(() => {
       const box = tip.getBoundingClientRect();
@@ -267,9 +267,19 @@ class Component extends DCLogic {
     return s.hist.map((h) => ({ h: Math.round((h.count / max) * 100), color: h.count ? 'var(--theme-46b8de, #46b8de)' : 'var(--theme-ffffff-a0_08, rgba(255,255,255,0.08))' }));
   }
 
+  renderTipVals() {
+    const tip = this.state.tip;
+    return {
+      tipX: tip ? tip.x : -9999, tipY: tip ? tip.y : -9999, tipOpacity: tip ? 1 : 0,
+      hasTip: !!tip, tipTitle: tip ? tip.title : '', tipSub: tip ? (tip.sub || '') : '',
+      tipNote: tip ? (tip.note || '') : '', tipHasNote: !!(tip && tip.note),
+      tipRows: tip ? (tip.rows || []) : [],
+      tipHasHist: !!(tip && tip.hist && tip.hist.length), tipHist: tip ? (tip.hist || []) : [],
+    };
+  }
+
   renderVals() {
     const st = this.state, model = st.model, lib = this.lib;
-    const tip = st.tip;
     const out = {
       loading: st.loading, ready: false, empty: !st.loading && (!model || !model.order.length),
       onTipOut: this.hideTip,
@@ -289,11 +299,7 @@ class Component extends DCLogic {
           rows: (f.benchmarkKeys || []).slice(0, 9).map((k) => ({ k: 'benchmark', v: k, color: 'var(--theme-8fd6ba, #8fd6ba)' })),
         }),
       })),
-      tipX: tip ? tip.x : -9999, tipY: tip ? tip.y : -9999, tipOpacity: tip ? 1 : 0,
-      hasTip: !!tip, tipTitle: tip ? tip.title : '', tipSub: tip ? (tip.sub || '') : '',
-      tipNote: tip ? (tip.note || '') : '', tipHasNote: !!(tip && tip.note),
-      tipRows: tip ? (tip.rows || []) : [],
-      tipHasHist: !!(tip && tip.hist && tip.hist.length), tipHist: tip ? (tip.hist || []) : [],
+      ...this.renderTipVals(),
       navGroups: [], metricOpts: [], statOpts: [], regionOpts: [], baselineOpts: [], runOpts: [],
       dirOpts: [], cols: [], groups: [], benchChips: [], casesList: [], algosList: [],
       metricsList: [],

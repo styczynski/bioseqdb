@@ -76,43 +76,67 @@ function navigation() {
 }
 
 function videos() {
-  const kick = (video) => {
-    if (motionPreference.matches) {
+  // Decorative media must not compete with the heading, fonts or examples.
+  // Sources stay inert in the HTML until their section reaches the viewport.
+  const connection = navigator.connection;
+  const backgrounds = [...root.querySelectorAll("video[data-autobg]")]
+    .map((video) => ({ video, visible: false, loaded: false }));
+  const shouldPlay = (item) => item.visible && !document.hidden &&
+    !motionPreference.matches && !connection?.saveData;
+  const synchronize = (item) => {
+    const { video } = item;
+    if (!shouldPlay(item)) {
       video.pause();
       return;
     }
+    if (!item.loaded) {
+      video.querySelectorAll("source[data-src]").forEach((source) => {
+        source.src = source.dataset.src;
+        source.removeAttribute("data-src");
+      });
+      item.loaded = true;
+      video.load();
+    }
     const attempt = video.play();
-    if (attempt && attempt.catch) attempt.catch(() => {});
+    if (attempt?.catch) attempt.catch(() => {});
   };
-  const backgrounds = [...root.querySelectorAll("video[data-autobg]")];
-  const applyPreference = () => {
-    backgrounds.forEach((video) => {
-      if (motionPreference.matches) video.pause();
-      else if (!document.hidden) kick(video);
-    });
-  };
-  backgrounds.forEach((video) => {
-    video.muted = true; video.loop = true; video.playsInline = true; video.setAttribute("loop", "");
-    video.addEventListener("ended", () => { try { video.currentTime = 0; } catch {} kick(video); });
-    video.addEventListener("pause", () => {
-      if (!motionPreference.matches && !document.hidden) {
-        requestAnimationFrame(() => {
-          if (video.paused && !document.hidden) kick(video);
-        });
+  backgrounds.forEach((item) => {
+    const { video } = item;
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.addEventListener("ended", () => {
+      if (shouldPlay(item)) {
+        try { video.currentTime = 0; } catch {}
+        synchronize(item);
       }
     });
-    kick(video);
   });
-  window.setInterval(() => {
-    if (motionPreference.matches || document.hidden) return;
-    backgrounds.forEach((video) => {
-      if (video.paused || video.ended) { try { if (video.ended) video.currentTime = 0; } catch {} kick(video); }
-    });
-  }, 1500);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) applyPreference();
-  });
-  motionPreference.addEventListener?.("change", applyPreference);
+  const update = () => backgrounds.forEach(synchronize);
+  document.addEventListener("visibilitychange", update);
+  motionPreference.addEventListener?.("change", update);
+  connection?.addEventListener?.("change", update);
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (window.IntersectionObserver) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          const item = backgrounds.find(({ video }) => video === entry.target);
+          item.visible = entry.isIntersecting;
+          synchronize(item);
+        });
+      }, { threshold: 0.01 });
+      backgrounds.forEach(({ video }) => observer.observe(video));
+    } else {
+      const check = () => backgrounds.forEach((item) => {
+        const rect = item.video.getBoundingClientRect();
+        item.visible = rect.bottom > 0 && rect.top < window.innerHeight;
+        synchronize(item);
+      });
+      window.addEventListener("scroll", check, { passive: true });
+      window.addEventListener("resize", check, { passive: true });
+      check();
+    }
+  }));
 }
 
 function examples() {

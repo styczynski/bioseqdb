@@ -9,17 +9,17 @@
 {% if page.pagemap_html %}{{ page.pagemap_html }}{% endif %}
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
 <script src="{{ site.assets_base_url }}js/theme.js"></script>
-<script src="{{ site.assets_base_url }}js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<script defer src="{{ site.assets_base_url }}js/analytics.js"></script>
 {% include "social-metadata.html.j2" %}
 <link rel="icon" href="{{ site.favicon_url }}">
+<link rel="preload" href="{{ site.assets_base_url }}fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="{{ site.assets_base_url }}fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 <link rel="stylesheet" href="{{ site.css_url }}">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/benchmarks-design.css">
 <link rel="stylesheet" href="{{ site.prism_css_url }}">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/code-theme.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/project-content.css">
-<link rel="stylesheet" href="{{ site.assets_base_url }}vendor/katex/katex.min.css">
-<link rel="stylesheet" href="{{ site.assets_base_url }}css/site-header.css">
+<link rel="stylesheet" href="{{ site.assets_base_url }}css/site-header.css" data-shared-styles>
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/responsive.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/site-controls.css">
 <link rel="stylesheet" href="{{ site.assets_base_url }}css/announcement.css">
@@ -381,12 +381,11 @@
 </template>
 <div id="entity-pop"></div>
 {% if page.jsonld %}<script type="application/ld+json">{{ page.jsonld }}</script>{% endif %}
-<script src="{{ site.assets_base_url }}js/prism-init.js"></script>
-<script src="{{ site.prism_js_url }}"></script>
-<script src="{{ site.assets_base_url }}js/prism-languages.js"></script>
-<script src="{{ site.assets_base_url }}vendor/katex/katex.min.js"></script>
-<script src="{{ site.assets_base_url }}js/project-math.js"></script>
-<script type="module" src="{{ site.js_url }}"></script>
+<script defer src="{{ site.assets_base_url }}js/prism-init.js"></script>
+<script defer src="{{ site.prism_js_url }}"></script>
+<script defer src="{{ site.assets_base_url }}js/prism-languages.js"></script>
+<script defer src="{{ site.js_url }}"></script>
+<script type="module" src="{{ site.assets_base_url }}js/content-runtime.mjs"></script>
 <script type="module" src="{{ site.assets_base_url }}js/site-header.mjs"></script>
 <script type="module" src="{{ site.assets_base_url }}js/announcement.mjs"></script>
 <script type="module" src="{{ site.assets_base_url }}js/docs-design.mjs"></script>

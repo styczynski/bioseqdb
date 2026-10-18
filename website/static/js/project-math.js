@@ -13,4 +13,5 @@ document.querySelectorAll('[data-math]').forEach((node) => {
       '\\Call': '\\operatorname{#1}(#2)',
     },
   });
+  node.dataset.mathRendered = 'true';
 });

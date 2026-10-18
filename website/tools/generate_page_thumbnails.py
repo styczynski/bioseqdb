@@ -91,6 +91,11 @@ async def capture(args, manifest, origin):
                         raise RuntimeError(f"Thumbnail page failed: {route}")
                     await page.evaluate("document.fonts.ready")
                     await page.locator("h1").first.wait_for(state="visible")
+                    # Readers see source TeX while the optional renderer loads.
+                    # Sharing previews should capture the finished formula instead.
+                    if await page.locator("[data-math]").count():
+                        await page.locator("html[data-math-state='ready']").wait_for(
+                            state="attached", timeout=45000)
                     await page.screenshot(path=str(cached), type="jpeg", quality=80,
                                           animations="disabled", caret="hide")
                 shutil.copyfile(cached, destination)

@@ -927,6 +927,16 @@ def landing_badges() -> str:
 
 def landing_template(markup: str) -> str:
     shared_header()  # Register shared editable labels during standalone translation too.
+    # The landing runtime attaches media URLs only when each video is visible.
+    # Scope this to video elements so responsive badge/image sources stay intact.
+    def deferred_video(match: re.Match) -> str:
+        video = re.sub(r"\sautoplay\b", "", match.group(0))
+        video = video.replace('preload="auto"', 'preload="none"')
+        return re.sub(r"(<source\b[^>]*?)\ssrc=", r"\1 data-src=", video)
+    markup = re.sub(r"<video\b.*?</video>", deferred_video, markup, flags=re.S)
+    markup = re.sub(
+        r'(<img\b[^>]*src="\{\{ site\.assets_base_url \}\}logos/[^\"]+"[^>]*)(>)',
+        r'\1 loading="lazy" decoding="async"\2', markup)
     markup = replace_header(markup, "nav", '{% include "site-header.html.j2" %}')
     examples_link = re.search(r'<a\b[^>]*href="#examples"[^>]*>See the examples</a>', markup)
     if not examples_link:
@@ -1115,19 +1125,18 @@ def base_template(markup: str) -> str:
 {{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
-<script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 {{% include "social-metadata.html.j2" %}}
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
+<link rel="preload" href="{{{{ site.assets_base_url }}}}fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="{{{{ site.assets_base_url }}}}fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 {{% block extra_head %}}{{% endblock %}}
 <link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 {{% block design_css %}}<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/docs-design.css">{{% endblock %}}
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/code-theme.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
-<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
-<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-benchmarks.css">
-<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css" data-shared-styles>
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/announcement.css">
@@ -1141,13 +1150,11 @@ def base_template(markup: str) -> str:
 {{% endblock %}}
 <div id="entity-pop"></div>
 {{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
-<script src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
-<script src="{{{{ site.prism_js_url }}}}"></script>
-<script src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
-<script src="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.js"></script>
-<script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
-<script type="module" src="{{{{ site.assets_base_url }}}}js/project-benchmarks.mjs"></script>
-<script type="module" src="{{{{ site.js_url }}}}"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
+<script defer src="{{{{ site.prism_js_url }}}}"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
+<script defer src="{{{{ site.js_url }}}}"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/content-runtime.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/announcement.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
@@ -1192,17 +1199,17 @@ def benchmarks_template(markup: str) -> str:
 {{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
-<script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 {{% include "social-metadata.html.j2" %}}
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
+<link rel="preload" href="{{{{ site.assets_base_url }}}}fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="{{{{ site.assets_base_url }}}}fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/benchmarks-design.css">
 <link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/code-theme.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/project-content.css">
-<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.css">
-<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-header.css" data-shared-styles>
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/responsive.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/site-controls.css">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/announcement.css">
@@ -1224,12 +1231,11 @@ def benchmarks_template(markup: str) -> str:
 </template>
 <div id="entity-pop"></div>
 {{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
-<script src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
-<script src="{{{{ site.prism_js_url }}}}"></script>
-<script src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
-<script src="{{{{ site.assets_base_url }}}}vendor/katex/katex.min.js"></script>
-<script src="{{{{ site.assets_base_url }}}}js/project-math.js"></script>
-<script type="module" src="{{{{ site.js_url }}}}"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/prism-init.js"></script>
+<script defer src="{{{{ site.prism_js_url }}}}"></script>
+<script defer src="{{{{ site.assets_base_url }}}}js/prism-languages.js"></script>
+<script defer src="{{{{ site.js_url }}}}"></script>
+<script type="module" src="{{{{ site.assets_base_url }}}}js/content-runtime.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/site-header.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/announcement.mjs"></script>
 <script type="module" src="{{{{ site.assets_base_url }}}}js/docs-design.mjs"></script>
@@ -1276,7 +1282,24 @@ def benchmark_component_source(source: str) -> str:
   };"""
     if component.count(old_show) != 1 or component.count(old_hide) != 1:
         raise RuntimeError("benchmark tooltip interaction seam changed")
-    return component.replace(old_show, new_show).replace(old_hide, new_hide)
+    component = component.replace(old_show, new_show).replace(old_hide, new_hide)
+    # Hover/focus updates replace only the tooltip. Reusing renderVals() there
+    # also rebuilt every comparison row and its handlers on each pointer move.
+    tip_values = re.search(r"^      tipX:.*?^      tipHasHist:[^\n]*\n", component, re.M | re.S)
+    tip_local = "    const tip = st.tip;\n"
+    render_signature = "  renderVals() {\n"
+    if not tip_values or component.count(tip_local) != 1 or component.count(render_signature) != 1:
+        raise RuntimeError("benchmark tooltip value seam changed")
+    bindings = tip_values.group(0)
+    component = component.replace(bindings, "      ...this.renderTipVals(),\n", 1)
+    component = component.replace(tip_local, "", 1)
+    tip_method = (
+        "  renderTipVals() {\n"
+        "    const tip = this.state.tip;\n"
+        "    return {\n" + bindings + "    };\n"
+        "  }\n\n"
+    )
+    return component.replace(render_signature, tip_method + render_signature, 1)
 
 
 def validate_benchmark_manifest(source: str) -> None:
@@ -1457,7 +1480,7 @@ class DCLogic {
     const current = this.root.querySelector("[data-benchmark-tip]");
     if (!source || !current) return;
     const tip = source.cloneNode(true);
-    bindNode(tip, this.renderVals());
+    bindNode(tip, this.renderTipVals());
     current.replaceWith(tip);
     if (this.state.tip) requestAnimationFrame(() => {
       const box = tip.getBoundingClientRect();
