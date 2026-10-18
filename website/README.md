@@ -42,6 +42,31 @@ anchors remain ordinary links in the rendered documentation; fragment URLs are
 not separate canonical pages. Validation checks sitemap coverage and the
 `Sitemap` directive in `robots.txt` before publication.
 
+Q&A content lives in `qa.yaml`. Each group and question has a stable `id`, and
+answers accept Markdown links and inline SQL references. Keep existing IDs when
+editing wording so incoming links still work. The generator renders `/qa/`, adds
+each question to header search with a `?` icon, and generates `FAQPage` data from
+the same answers. Questions rank below SQL, documentation and C++ results, but
+above blog posts. `QAPage` is reserved for a single question accepting community
+answers, so it does not describe this authored collection.
+
+Every rendered page has a PageMap XML comment for Google Programmable Search
+and JSON-LD for its page type, organization and breadcrumbs. Blog entries use
+`BlogPosting`. Publication dates come from blog metadata where supplied; other
+dates and modification times come from Git source history, not the build clock.
+CMake renders a preview, captures each page with pinned Chromium in light mode,
+then imports a 1200 × 630 JPEG into the final manifest. Thumbnail URLs are stable
+(`thumbnail.jpg` beside each directory page); captures are cached by content,
+assets and browser version. This requires Chromium even when the broader browser
+acceptance suite is disabled. The independent SEO validator checks metadata,
+visible Q&A text, dates, breadcrumbs and every thumbnail before publication.
+
+Tutorial and reference pages also list their external sources in a small visible
+section. Bibliography citations resolve to the cited external destinations, with
+duplicate URLs removed. This keeps the sources useful without hiding links from
+readers. Structured data describes the page; it does not guarantee rich results
+or a particular search ranking.
+
 Landing SQL lives in `v0.1/landing_examples.md`. Hidden `bioseq:setup` and
 `bioseq:teardown` sections prepare and clean up the local database; only the
 `bioseq:visible` section appears in the cards. The build rejects empty results or

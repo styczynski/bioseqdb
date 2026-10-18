@@ -231,6 +231,7 @@ void verify_reference_pipeline();
 namespace {
 void verify_blog_pipeline();
 void verify_stable_assets();
+void verify_generated_html_template_markers();
 void rewrite_entity_link_routes(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
@@ -251,6 +252,7 @@ void decorate_code_entity_ranges(
 void verify_website_pipeline() {
     verify_blog_pipeline();
     verify_stable_assets();
+    verify_generated_html_template_markers();
     const auto algorithm = parse_markdown_content(
         "```pseudocode\nRequire: $x$\nFor $i$\n  If $x_i$\n    Return `score` // saved score\n  End If\nEnd For\n```\n");
     const auto algorithm_html = render_content_html(algorithm.children);
@@ -2099,20 +2101,24 @@ void verify_blog_pipeline() {
     site_view site;
     site.title = "BioseqDB";
     const auto context = boost::json::parse(build_page_context(site,
-        R"({"page_type":"blog","title":"A &amp; B","description":"&lt;SQL&gt;","canonical":"https://example.org/blog/test/","date":"2026-10-01","modified_date":"2026-10-18","thumbnail_url":"https://example.org/blog/test/thumbnail.jpg","reading_minutes":1,"structured_title":"A & B </script><b> -->","structured_description":"<SQL>","structured_author":"A \"B\"","structured_keywords":["<DNA>"]})", "", ""));
+        R"({"page_type":"blog","title":"A &amp; B","description":"&lt;SQL&gt;","canonical":"https://example.org/blog/test/","date":"2026-10-01","modified_date":"2026-10-18","thumbnail_url":"https://example.org/blog/test/thumbnail.jpg","reading_minutes":1,"structured_title":"A & B </script><b> --> {{ value }} {% statement %} {# comment #}","structured_description":"<SQL>","structured_author":"A \"B\"","structured_keywords":["<DNA>"]})", "", ""));
     const auto structured = boost::json::parse(context.at("page").at("jsonld").as_string());
     const auto& article = structured.at("@graph").as_array().front();
-    expect(article.at("headline").as_string() == "A & B </script><b> -->"
+    expect(article.at("headline").as_string() == "A & B </script><b> --> {{ value }} {% statement %} {# comment #}"
         && article.at("description").as_string() == "<SQL>"
         && article.at("datePublished").as_string() == "2026-10-01"
         && article.at("dateModified").as_string() == "2026-10-18"
         && article.at("image").as_string() == "https://example.org/blog/test/thumbnail.jpg"
-        && !std::string(context.at("page").at("jsonld").as_string()).contains("</script>"),
+        && !std::string(context.at("page").at("jsonld").as_string()).contains("</script>")
+        && !std::string(context.at("page").at("jsonld").as_string()).contains("{{")
+        && !std::string(context.at("page").at("jsonld").as_string()).contains("{%")
+        && !std::string(context.at("page").at("jsonld").as_string()).contains("{#"),
         "BlogPosting structured data retains original text, source dates and page screenshot safely");
     const std::string pagemap(context.at("page").at("pagemap_html").as_string());
     expect(pagemap.starts_with("<!--\n<PageMap>") && pagemap.ends_with("</PageMap>\n-->")
         && pagemap.find("-->") == pagemap.size() - 3
         && pagemap.contains("A &amp; B &lt;/script&gt;&lt;b&gt; &#45;&#45;&gt;")
+        && pagemap.contains("&#123;&#123; value }}")
         && pagemap.contains("name=\"page_count\">1</Attribute>")
         && pagemap.contains("name=\"width\">1200</Attribute>"),
         "PageMap is safe XML in one HTML comment and counts one HTML document");
@@ -4168,8 +4174,11 @@ void validate_generated_html(std::string_view route, std::string_view html) {
         throw std::runtime_error("generated HTML validation failed for "
                                  + std::string(route) + ": " + std::string(why));
     };
+    // Opening delimiters identify leftover Jinja expressions, statements, or
+    // comments. Adjacent closing braces are also valid nested JSON objects.
     if (html.find("{{") != std::string_view::npos
-        || html.find("}}") != std::string_view::npos) {
+        || html.find("{%") != std::string_view::npos
+        || html.find("{#") != std::string_view::npos) {
         fail("contains an unrendered template placeholder");
     }
     if (html.find("javascript:") != std::string_view::npos) {
@@ -4228,6 +4237,22 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     }
     if (html.find("frame-ancestors") != std::string_view::npos) {
         fail("frame-ancestors must not appear in the meta CSP");
+    }
+}
+
+void verify_generated_html_template_markers() {
+    const std::string opening = "<!doctype html><html><head>"
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'\">"
+        "</head><body><h1>Example</h1>";
+    const std::string closing = "</body></html>";
+    validate_generated_html("/example/", opening
+        + "<script type=\"application/ld+json\">{\"publisher\":{\"logo\":{\"url\":\"/logo.svg\"}}}</script>"
+        + closing);
+    for (const std::string_view marker : {"{{ page.title }}", "{% if page %}", "{# comment #}"}) {
+        bool rejected = false;
+        try { validate_generated_html("/example/", opening + std::string(marker) + closing); }
+        catch (const std::runtime_error&) { rejected = true; }
+        expect(rejected, "generated HTML rejects opening template markers but accepts nested JSON objects");
     }
 }
 

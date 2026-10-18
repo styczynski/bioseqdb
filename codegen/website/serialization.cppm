@@ -2375,15 +2375,28 @@ namespace {
             graph.push_back(boost::json::object{{"@type", "BreadcrumbList"},
                 {"@id", canonical + "#breadcrumbs"}, {"itemListElement", std::move(crumb_items)}});
         boost::json::object json_ld{{"@context", "https://schema.org"}, {"@graph", std::move(graph)}};
-        page_object_ref["jsonld"] = apply_html_safe_escapes(boost::json::serialize(json_ld));
+        std::string structured_json = apply_html_safe_escapes(boost::json::serialize(json_ld));
+        // These opening delimiters cannot occur in JSON grammar, only in
+        // string values. Preserve literal editorial template examples while
+        // preventing the HTML validator from mistaking them for leftovers.
+        for (const std::string_view marker : {"{{", "{%", "{#"}) {
+            std::size_t offset = 0;
+            while ((offset = structured_json.find(marker, offset)) != std::string::npos) {
+                structured_json.replace(offset, 1, "\\u007b");
+                offset += 6;
+            }
+        }
+        page_object_ref["jsonld"] = std::move(structured_json);
 
-        // A PageMap is XML inside an HTML comment. Escaping '-' as well as
-        // XML characters prevents editorial text containing '-->' from ending
-        // that comment. Character references restore the original XML value.
+        // A PageMap is XML inside an HTML comment. Escaping '-' and '{' as
+        // well as XML characters prevents editorial text from ending the
+        // comment or resembling an unrendered template. Character references
+        // restore the original XML value.
         const auto xml_comment_text = [](std::string_view value) {
             std::string escaped;
             for (const char ch : html_escape(value)) {
                 if (ch == '-') escaped += "&#45;";
+                else if (ch == '{') escaped += "&#123;";
                 else escaped.push_back(ch);
             }
             return escaped;

@@ -236,7 +236,9 @@ def validate_html(path: Path, text: str) -> list[str]:
     problems.extend(_parse_problems(path, text))
 
     # --- preserved substring rules (mirror the generator + prior validator) --
-    if "{{" in text or "}}" in text:
+    # Closing braces may terminate nested JSON-LD objects. Only opening Jinja
+    # delimiters indicate an unrendered expression, statement, or comment.
+    if any(marker in text for marker in ("{{", "{%", "{#")):
         problems.append(_fail(path, "contains an unrendered template placeholder"))
     if "javascript:" in text:
         problems.append(_fail(path, "contains a javascript: URL"))
