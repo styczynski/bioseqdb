@@ -1999,7 +1999,9 @@ def _exercise_project_content(page, tutorial: dict, base_path: str, version: str
         _check(math.count() > 0, "biology formulas were not rendered")
         _exercise_figure_viewer(page)
     if slug == "project_postgres_custom_scan":
-        links = page.locator('main#doc-main a[href^="https://github.com/"][href*="/blob/"]')
+        # Check the original article references, not the compact external-source
+        # footer that repeats their destinations as plain reading links.
+        links = page.locator('main#doc-main .tutorial-body a[href^="https://github.com/"][href*="/blob/"]')
         _check(links.count() >= 5, "original PostgreSQL source references were lost")
         _check(links.evaluate_all(
             "links => links.every(link => link.matches('.source-link') && link.querySelector('svg.github-mark'))"),
