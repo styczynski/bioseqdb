@@ -96,6 +96,12 @@ async def capture(args, manifest, origin):
                     if await page.locator("[data-math]").count():
                         await page.locator("html[data-math-state='ready']").wait_for(
                             state="attached", timeout=45000)
+                    # Social previews should emphasize the title, not freeze
+                    # volatile badge counters or third-party service errors.
+                    # Set the CSS property directly because CSP blocks an
+                    # injected screenshot stylesheet; visibility keeps layout.
+                    await page.locator("[data-project-badges]").evaluate_all(
+                        "nodes => nodes.forEach(node => node.style.setProperty('visibility', 'hidden', 'important'))")
                     await page.screenshot(path=str(cached), type="jpeg", quality=80,
                                           animations="disabled", caret="hide")
                 shutil.copyfile(cached, destination)
