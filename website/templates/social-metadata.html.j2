@@ -1,0 +1,39 @@
+{% if page.page_type == "error" or page.page_type == "contact_thanks" %}
+<meta name="robots" content="noindex, follow">
+<meta name="googlebot" content="noindex, follow">
+<meta name="bingbot" content="noindex, follow">
+{% else %}
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+{% endif %}
+<meta property="og:title" content="{{ page.title }}">
+<meta property="og:description" content="{{ page.description }}">
+<meta property="og:type" content="{% if page.page_type == "blog" or page.page_type == "tutorial" or page.page_type == "entity" %}article{% else %}website{% endif %}">
+<meta property="og:url" content="{{ page.canonical }}">
+<meta property="og:site_name" content="{{ site.title }}">
+<meta property="og:locale" content="en_US">
+{% if page.thumbnail_url %}
+<meta property="og:image" content="{{ page.thumbnail_url }}">
+<meta property="og:image:secure_url" content="{{ page.thumbnail_url }}">
+<meta property="og:image:type" content="image/jpeg">
+{% else %}
+<meta property="og:image" content="{{ site.social_image_url }}">
+<meta property="og:image:secure_url" content="{{ site.social_image_url }}">
+<meta property="og:image:type" content="image/png">
+{% endif %}
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of {{ page.title }} on BioseqDB">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page.title }}">
+<meta name="twitter:description" content="{{ page.description }}">
+<meta name="twitter:image" content="{% if page.thumbnail_url %}{{ page.thumbnail_url }}{% else %}{{ site.social_image_url }}{% endif %}">
+<meta name="twitter:image:alt" content="Preview of {{ page.title }} on BioseqDB">
+{% if page.page_type == "blog" or page.page_type == "tutorial" or page.page_type == "entity" %}
+{% if page.date %}<meta property="article:published_time" content="{{ page.date }}">{% endif %}
+{% if page.modified_date %}<meta property="article:modified_time" content="{{ page.modified_date }}">{% endif %}
+{% if not page.author or page.author == "Piotr Styczyński" %}<meta property="article:author" content="https://github.com/styczynski">{% endif %}
+<meta property="article:section" content="{% if page.category %}{{ page.category }}{% else %}Documentation{% endif %}">
+{% if page.keywords %}{% for keyword in page.keywords %}<meta property="article:tag" content="{{ keyword }}">{% endfor %}{% endif %}
+{% endif %}

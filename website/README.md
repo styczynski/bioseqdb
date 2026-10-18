@@ -37,7 +37,8 @@ the landing installation commands. These events omit query parameters, command
 arguments and contact form contents. Browser tests intercept analytics requests.
 
 The generator creates `robots.txt` and `sitemap.xml` for every build, using the
-canonical site URL from `site.yaml`. The sitemap lists each page once. Heading
+canonical site URL from `site.yaml`. The sitemap lists each indexable page once;
+the error and contact-confirmation pages use `noindex` and are omitted. Heading
 anchors remain ordinary links in the rendered documentation; fragment URLs are
 not separate canonical pages. Validation checks sitemap coverage and the
 `Sitemap` directive in `robots.txt` before publication.
@@ -60,6 +61,16 @@ then imports a 1200 × 630 JPEG into the final manifest. Thumbnail URLs are stab
 assets and browser version. This requires Chromium even when the broader browser
 acceptance suite is disabled. The independent SEO validator checks metadata,
 visible Q&A text, dates, breadcrumbs and every thumbnail before publication.
+
+Shared Open Graph and Twitter card tags describe each page and its large preview
+image. Public pages allow indexing, link following, large image previews and
+unlimited text/video previews through generic `robots`, `googlebot` and `bingbot`
+metadata. Other crawlers use the generic robots directive; there is no invented
+crawler name or request for a guaranteed crawl schedule. The HTML meta CSP and
+suggested HTTP policy restrict scripts to local files and the configured Google
+tag loader, prohibit inline event handlers and frames, and restrict forms to the
+site and Formserve. `frame-ancestors` remains in the HTTP policy because browsers
+do not support it in a meta policy.
 
 Tutorial and reference pages also list their external sources in a small visible
 section. Bibliography citations resolve to the cited external destinations, with

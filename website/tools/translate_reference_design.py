@@ -1105,7 +1105,7 @@ def base_template(markup: str) -> str:
     pop_begin, pop_end = element_span(markup, pop_start)
     markup = markup[:pop_begin] + markup[pop_end:]
     return f'''<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1113,19 +1113,11 @@ def base_template(markup: str) -> str:
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
 {{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
-<meta property="og:title" content="{{{{ page.title }}}}">
-<meta property="og:description" content="{{{{ page.description }}}}">
-<meta property="og:type" content="{{% if page.page_type == \"blog\" %}}article{{% else %}}website{{% endif %}}">
-<meta property="og:url" content="{{{{ page.canonical }}}}">
-<meta property="og:image" content="{{% if page.social_image_url %}}{{{{ page.social_image_url }}}}{{% else %}}{{{{ site.social_image_url }}}}{{% endif %}}">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="{{{{ page.title }}}}">
-<meta name="twitter:description" content="{{{{ page.description }}}}">
-<meta name="twitter:image" content="{{% if page.social_image_url %}}{{{{ page.social_image_url }}}}{{% else %}}{{{{ site.social_image_url }}}}{{% endif %}}">
+{{% include "social-metadata.html.j2" %}}
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
 {{% block extra_head %}}{{% endblock %}}
 <link rel="stylesheet" href="{{{{ site.prism_css_url }}}}">
@@ -1190,7 +1182,7 @@ def benchmarks_template(markup: str) -> str:
     footer = markup[footer_at:footer_end].replace(' data-bench-click="onTop"', '')
     markup = markup[:footer_at] + markup[footer_end:]
     return f'''<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1198,19 +1190,11 @@ def benchmarks_template(markup: str) -> str:
 <meta name="description" content="{{{{ page.description }}}}">
 <link rel="canonical" href="{{{{ page.canonical }}}}">
 {{% if page.pagemap_html %}}{{{{ page.pagemap_html }}}}{{% endif %}}
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
 <script src="{{{{ site.assets_base_url }}}}js/theme.js"></script>
 <script src="{{{{ site.assets_base_url }}}}js/analytics.js"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
-<meta property="og:title" content="{{{{ page.title }}}}">
-<meta property="og:description" content="{{{{ page.description }}}}">
-<meta property="og:type" content="website">
-<meta property="og:url" content="{{{{ page.canonical }}}}">
-<meta property="og:image" content="{{{{ site.social_image_url }}}}">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="{{{{ page.title }}}}">
-<meta name="twitter:description" content="{{{{ page.description }}}}">
-<meta name="twitter:image" content="{{{{ site.social_image_url }}}}">
+{{% include "social-metadata.html.j2" %}}
 <link rel="icon" href="{{{{ site.favicon_url }}}}">
 <link rel="stylesheet" href="{{{{ site.css_url }}}}">
 <link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/benchmarks-design.css">

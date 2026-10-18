@@ -654,7 +654,10 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                                         f"(also on {seen_canonical[canonical]})"))
         else:
             seen_canonical[canonical] = path
-        if path.name == "index.html" and canonical not in sitemap_urls:
+        utility_page = path.relative_to(site).as_posix() in {"error.html", "contact_thanks/index.html"}
+        if utility_page and canonical in sitemap_urls:
+            problems.append(_fail(path, "noindex utility page must not appear in sitemap.xml"))
+        if path.name == "index.html" and not utility_page and canonical not in sitemap_urls:
             problems.append(_fail(path, "indexable page is missing from sitemap.xml"))
     for url in sorted(sitemap_urls):
         if url not in seen_canonical:

@@ -139,7 +139,7 @@ def apply_theme_palette(website_root: Path = WEBSITE, *, include_shared_header: 
     # New authored components define explicit paired palettes; literal design
     # exports and figures still use the reversible automatic palette below.
     paths = [p for p in paths if p.is_file() and p.name not in
-             ("theme.css", "contact.css", "blog.css", "announcement.css")]
+             ("theme.css", "contact.css", "blog.css", "announcement.css", "qa.css")]
     changed = []
     palettes = {}
     for path in paths:

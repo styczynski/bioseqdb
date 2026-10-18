@@ -42,6 +42,12 @@ def page_geometry(page):
     }""")
 
 
+def settle_paint(page):
+    # Scrolling can trigger lazy figures above the viewport. Let Chromium
+    # commit their layout and sticky-header paint before capturing evidence.
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--site", type=Path, required=True)
@@ -70,6 +76,7 @@ def main():
                         check(response and response.status == 200, f"Page failed: {route}")
                         page.evaluate("document.fonts.ready")
                         page.locator('.site-navigation a[href$="/qa/"]').wait_for(state="visible")
+                        settle_paint(page)
                         geometry = page_geometry(page)
                         check(geometry["theme"] == theme, "Saved theme was not respected")
                         check(geometry["scrollWidth"] <= width + 1, f"Horizontal page overflow: {route}: {geometry}")
@@ -84,6 +91,9 @@ def main():
                     answers = page.locator(".qa-answer").all_text_contents()
                     check(all(len(x.strip()) >= 40 for x in answers), "Q&A contains an empty/placeholder answer")
                     qa["questions"] = questions.count()
+                    qa["palette"] = questions.first.evaluate("element => ({surface:getComputedStyle(element).backgroundColor,heading:getComputedStyle(element.querySelector('h3')).color,body:getComputedStyle(element.querySelector('.qa-answer')).color})")
+                    expected_palette = {"surface": "rgb(255, 255, 255)", "heading": "rgb(23, 50, 71)", "body": "rgb(69, 94, 115)"} if theme == "light" else {"surface": "rgb(14, 35, 55)", "heading": "rgb(238, 244, 249)", "body": "rgb(157, 177, 194)"}
+                    check(qa["palette"] == expected_palette, f"Q&A authored {theme} palette changed: {qa['palette']}")
                     page.screenshot(path=str(args.output / f"qa-{theme}-{width}.png"))
                     # Exact question text must be reachable through the shared search.
                     question = page.locator(".qa-question h3").first.inner_text().rstrip("#").strip()
@@ -109,9 +119,11 @@ def main():
                     check(any("10.1093/bioinformatics/bty191" in x for x in hrefs), "The cited Minimap2 bibliography URL is absent")
                     check(all(x["text"].strip() for x in source_links), "Empty external link label")
                     sources.scroll_into_view_if_needed()
+                    settle_paint(page)
                     page.screenshot(path=str(args.output / f"sources-{theme}-{width}.png"))
                     pager = page.locator(".tutorial-pagination")
                     pager.scroll_into_view_if_needed()
+                    settle_paint(page)
                     cards = pager.locator(".tutorial-pagination-link")
                     check(cards.count() == 2, "Chapter must have previous and next links")
                     boxes = [cards.nth(n).bounding_box() for n in range(2)]
@@ -135,6 +147,7 @@ def main():
                     check(pager.locator(".tutorial-pagination-link").count() == 1, "First chapter should only have Next")
                     next_card = pager.locator(".tutorial-pagination-next")
                     pager.scroll_into_view_if_needed()
+                    settle_paint(page)
                     parent_box, next_box = pager.bounding_box(), next_card.bounding_box()
                     if width >= 666:
                         check(next_box["x"] >= parent_box["x"] + parent_box["width"] / 2 - 1, "Next-only pager must stay on the right")

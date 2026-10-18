@@ -5091,6 +5091,7 @@ void decorate_code_entity_ranges(
            "{\"title\":" + json_text("Page not found")
                + ",\"description\":" + json_text("The requested page does not exist.")
                + ",\"canonical\":" + json_text(canonical("error.html"))
+               + ",\"page_type\":" + json_text("error")
                + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
@@ -5722,11 +5723,12 @@ void decorate_code_entity_ranges(
                 "User-agent: *\nAllow: /\nSitemap: " + config.canonical_origin
                     + url("sitemap.xml") + "\n");
     writer.emit(route("security-headers.txt"),
-                "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com; "
+                "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; "
                 "style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; "
                 "media-src 'self'; connect-src 'self' https://raw.githubusercontent.com "
                 "https://api.github.com https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; "
-                "base-uri 'self'; form-action 'self' https://formserve.io; frame-ancestors 'none'\n"
+                "base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; "
+                "form-action 'self' https://formserve.io; frame-ancestors 'none'\n"
                 "X-Content-Type-Options: nosniff\n"
                 "Referrer-Policy: strict-origin-when-cross-origin\n"
                 "Permissions-Policy: geolocation=(), microphone=(), camera=()\n");
@@ -5734,8 +5736,9 @@ void decorate_code_entity_ranges(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n";
     for (const auto& [manifest_route, digest] : writer.manifest) {
-        if (!manifest_route.ends_with("index.html")) {
-            continue;
+        if (!manifest_route.ends_with("index.html")
+            || manifest_route == "/contact_thanks/index.html") {
+            continue; // Confirmation and error pages are deliberately noindex.
         }
         std::string rel = manifest_route.substr(1);
         sitemap += "  <url><loc>" + canonical(rel) + "</loc></url>\n";
