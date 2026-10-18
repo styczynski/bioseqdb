@@ -766,6 +766,7 @@ def localize_landing_markup(markup: str, group: str = "hero") -> str:
 
 def shared_header() -> str:
     """One navigation/search surface, using the supplied documentation palette."""
+    LANDING_DEFAULT_COPY.setdefault("header", {})["qa"] = "Q&A"
     search_copy = {
         "loading": "Loading search index…", "no-matches": "No matches for",
         "unavailable": "Search index is unavailable.",
