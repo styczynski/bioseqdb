@@ -127,6 +127,18 @@ def variables_for(content: str) -> dict[str, str]:
     return dict(sorted({token_name(value): light_color(value) for value in values}.items()))
 
 
+def with_font_fallbacks(content: str) -> str:
+    """Keep mono labels monospaced before local font files arrive.
+
+    The export omits fallback families, which makes browsers use a proportional
+    default while downloading Plex Mono. Preserve single-name @font-face
+    declarations; fallback lists belong only on elements using those faces.
+    """
+    tokens = re.compile(r"@font-face\s*\{[^{}]*\}|font-family\s*:\s*(['\"])IBM Plex Mono\1(?=\s*[;}])", re.I)
+    return tokens.sub(lambda match: match.group() if match.group().lower().startswith("@font-face")
+                      else match.group() + ",monospace", content)
+
+
 def apply_theme_palette(website_root: Path = WEBSITE, *, include_shared_header: bool = True) -> list[Path]:
     """Apply after translating the design exports; safe to run repeatedly."""
     paths = sorted((website_root / "static/css").glob("*.css"))
@@ -149,7 +161,7 @@ def apply_theme_palette(website_root: Path = WEBSITE, *, include_shared_header: 
         elif path.name.endswith(".html.j2"):
             result = tokenize_html(original)
         else:
-            result = tokenize_colors(original)
+            result = tokenize_colors(with_font_fallbacks(original) if path.suffix == ".css" else original)
         palettes.update(variables_for(SVG_THEME_RE.sub("", result) if path.suffix == ".svg" else result))
         if original != result:
             path.write_text(result)
