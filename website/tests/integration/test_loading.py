@@ -173,6 +173,8 @@ def main():
 
             ctx, page, errors, requests = context()
             open_page(page, "/benchmarks/")
+            manifests = [url for url in requests if urlsplit(url).path.endswith("/project-benchmarks.json")]
+            check(len(manifests) == 1, f"Benchmark data must be fetched once, including embedded tables: {manifests}")
             cell = page.locator("#benchmarks-app td.bd-s0072[tabindex='0']").first
             cell.wait_for(state="visible", timeout=30000)
             cell.hover()

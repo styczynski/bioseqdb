@@ -53,7 +53,10 @@ export async function loadOptionalContent(root, loadModule = (url) => import(url
       root.documentElement.dataset.mathState = 'error';
     }));
   }
-  if (root.querySelector('.project-benchmark[data-table]')) {
+  // The dedicated benchmark page already owns a full explorer and its data
+  // request. Chapter excerpt enhancement applies only to documentation pages.
+  if (!root.body.classList.contains('benchmarks-design-page') &&
+      root.querySelector('.project-benchmark[data-table]')) {
     tasks.push((async () => {
       await stylesheet(root, 'css/project-benchmarks.css');
       await loadModule(new URL('./project-benchmarks.mjs', import.meta.url).href);

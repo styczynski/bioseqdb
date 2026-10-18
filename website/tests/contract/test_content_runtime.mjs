@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadOptionalContent } from '../../static/js/content-runtime.mjs';
 
-function fixture({ math = false, benchmarks = false, idle = true } = {}) {
+function fixture({ math = false, benchmarks = false, dedicatedBenchmarks = false, idle = true } = {}) {
   const resources = [], frames = [], idleCallbacks = [], imports = [];
   const sharedStyles = {};
   const root = {
+    body: { classList: { contains: name => dedicatedBenchmarks && name === 'benchmarks-design-page' } },
     documentElement: { dataset: {} },
     defaultView: {
       requestAnimationFrame: callback => frames.push(callback),
@@ -75,6 +76,26 @@ test('benchmark excerpts load only their own stylesheet and module', async () =>
   await complete;
   assert.equal(page.imports.length, 1);
   assert.match(page.imports[0], /project-benchmarks.mjs$/);
+});
+
+test('the dedicated benchmark page leaves data loading to its own explorer', async () => {
+  const page = fixture({ benchmarks: true, dedicatedBenchmarks: true });
+  await page.load();
+  assert.deepEqual(page.resources, []);
+  assert.deepEqual(page.imports, []);
+});
+
+test('the dedicated benchmark page can render maths without importing chapter excerpts', async () => {
+  const page = fixture({ math: true, benchmarks: true, dedicatedBenchmarks: true });
+  const complete = page.load();
+  page.firstPaint();
+  await Promise.resolve();
+  assert.equal(page.resources.length, 2);
+  page.resources.forEach(resource => resource.finish());
+  await complete;
+  assert.equal(page.root.documentElement.dataset.mathState, 'ready');
+  assert.equal(page.imports.length, 1);
+  assert.match(page.imports[0], /project-math.js$/);
 });
 
 test('math resource failure keeps the authored text and records a completed failure state', async () => {
