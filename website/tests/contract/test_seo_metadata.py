@@ -100,10 +100,102 @@ def find_class(element: ET.Element, name: str) -> ET.Element | None:
     return next((node for node in element.iter() if name in node.get("class", "").split()), None)
 
 
+def csp_directives(value: str) -> dict[str, set[str]]:
+    directives: dict[str, set[str]] = {}
+    for directive in value.split(";"):
+        parts = directive.split()
+        if not parts:
+            continue
+        require(parts[0] not in directives, f"duplicate CSP directive: {parts[0]}")
+        directives[parts[0]] = set(parts[1:])
+    return directives
+
+
+def validate_csp(head: ET.Element, header: dict[str, set[str]]) -> None:
+    policies = [node.get("content", "") for node in head.iter("meta")
+                if node.get("http-equiv", "").lower() == "content-security-policy"]
+    require(len(policies) == 1, "one meta Content-Security-Policy is required")
+    document = csp_directives(policies[0])
+    required = {
+        "default-src": {"'self'"},
+        "script-src": {"'self'", "https://www.googletagmanager.com"},
+        "script-src-attr": {"'none'"},
+        "base-uri": {"'none'"},
+        "frame-src": {"'none'"},
+        "object-src": {"'none'"},
+        "worker-src": {"'self'"},
+        "manifest-src": {"'self'"},
+        "form-action": {"'self'", "https://formserve.io"},
+    }
+    for name, values in required.items():
+        require(document.get(name) == values, f"unexpected meta CSP {name}: {document.get(name)}")
+        require(header.get(name) == values, f"unexpected HTTP CSP {name}: {header.get(name)}")
+    require("frame-ancestors" not in document, "frame-ancestors is only effective in the HTTP CSP")
+    require(header.get("frame-ancestors") == {"'none'"}, "HTTP CSP must disallow framing")
+    required_connections = {"'self'", "https://www.googletagmanager.com",
+                            "https://*.google-analytics.com", "https://*.google.com", "https://formserve.io"}
+    connections = document.get("connect-src", set())
+    require(required_connections <= connections, "meta CSP blocks an expected analytics or contact endpoint")
+    require(connections <= header.get("connect-src", set()), "meta connections must also be allowed by HTTP CSP")
+    require(header.get("connect-src") == required_connections | {"https://raw.githubusercontent.com", "https://api.github.com"}, "HTTP CSP connection origins changed unexpectedly")
+
+
+def validate_social_metadata(head: ET.Element, canonical: str, fields: dict[str, str],
+                            primary: dict, thumbnail: str, utility: bool) -> None:
+    tags: dict[str, list[str]] = {}
+    for node in head.iter("meta"):
+        key = node.get("property") or node.get("name")
+        if key:
+            tags.setdefault(key, []).append(node.get("content", ""))
+
+    def exact(name: str, value: str) -> None:
+        require(tags.get(name) == [value], f"expected one {name}={value!r}, got {tags.get(name)}")
+
+    is_article = primary.get("@type") in {"BlogPosting", "TechArticle"}
+    exact("og:title", fields["title"])
+    exact("og:description", fields["description"])
+    exact("og:type", "article" if is_article else "website")
+    exact("og:url", canonical)
+    exact("og:site_name", "BioseqDB")
+    exact("og:locale", "en_US")
+    exact("og:image", thumbnail)
+    exact("og:image:secure_url", thumbnail)
+    exact("og:image:type", "image/jpeg")
+    exact("og:image:width", "1200")
+    exact("og:image:height", "630")
+    alternate = f"Preview of {fields['title']} on BioseqDB"
+    exact("og:image:alt", alternate)
+    exact("twitter:card", "summary_large_image")
+    exact("twitter:title", fields["title"])
+    exact("twitter:description", fields["description"])
+    exact("twitter:image", thumbnail)
+    exact("twitter:image:alt", alternate)
+    public_policy = {"index", "follow", "max-image-preview:large", "max-snippet:-1", "max-video-preview:-1"}
+    for robot in ("robots", "googlebot", "bingbot"):
+        values = tags.get(robot, [])
+        require(len(values) == 1, f"expected one {robot} policy")
+        policy = {value.strip() for value in values[0].split(",")}
+        require(policy == ({"noindex", "follow"} if utility else public_policy), f"unexpected {robot} policy: {policy}")
+    if is_article:
+        exact("article:published_time", fields["date"])
+        exact("article:modified_time", fields["last_update"])
+        if fields["author"] == "Piotr Styczyński":
+            exact("article:author", "https://github.com/styczynski")
+        exact("article:section", fields["category"] if primary["@type"] == "BlogPosting" else "Documentation")
+        if primary["@type"] == "BlogPosting":
+            require(tags.get("article:tag") == primary.get("keywords"), "article tags differ from authored keywords")
+
+
 def validate(site: Path, qa_source: Path | None = None) -> dict[str, int]:
     manifest = json.loads((site / "site-manifest.json").read_text())
     base_path = manifest["base_path"]
     outputs = manifest["outputs"]
+    header_policies = [line.split(":", 1)[1].strip() for line in (site / "security-headers.txt").read_text().splitlines()
+                       if line.strip().lower().startswith("content-security-policy:")]
+    require(len(header_policies) == 1, "one HTTP Content-Security-Policy is required")
+    header_policy = csp_directives(header_policies[0])
+    sitemap_urls = {node.text for node in ET.parse(site / "sitemap.xml").iter()
+                    if node.tag.endswith("}loc")}
     pages = sorted(site.rglob("*.html"))
     require(bool(pages), "the rendered site contains no HTML pages")
     thumbnails: set[str] = set()
@@ -116,6 +208,7 @@ def validate(site: Path, qa_source: Path | None = None) -> dict[str, int]:
             document = html5lib.parse(path.read_text(), namespaceHTMLElements=False)
             head = document.find("head")
             require(head is not None, "missing head")
+            validate_csp(head, header_policy)
             canonical_links = [node.get("href", "") for node in head.iter("link") if node.get("rel") == "canonical"]
             require(len(canonical_links) == 1 and absolute_http(canonical_links[0]), "one absolute canonical URL is required")
             canonical = canonical_links[0]
@@ -156,6 +249,10 @@ def validate(site: Path, qa_source: Path | None = None) -> dict[str, int]:
             require(absolute_http(thumbnail_url), "thumbnail URL must be absolute")
             require(primary.get("image") == thumbnail_url and primary.get("thumbnailUrl") == thumbnail_url, "JSON-LD and PageMap thumbnails differ")
             require(thumbnail.get("width") == "1200" and thumbnail.get("height") == "630", "incorrect PageMap thumbnail dimensions")
+            utility = relative in {"error.html", "contact_thanks/index.html"}
+            validate_social_metadata(head, canonical, fields, primary, thumbnail_url, utility)
+            if utility:
+                require(canonical not in sitemap_urls, "noindex utility page must not appear in the sitemap")
             thumbnail_path = unquote(urlsplit(thumbnail_url).path)
             require(thumbnail_path.startswith(base_path), "thumbnail is outside this deployment base")
             thumbnail_relative = thumbnail_path[len(base_path):]
