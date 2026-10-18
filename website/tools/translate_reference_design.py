@@ -1221,7 +1221,7 @@ def benchmarks_template(markup: str) -> str:
 {{% include "site-header.html.j2" %}}
 <div id="benchmarks-app"
      data-loader-url="{{{{ site.assets_base_url }}}}js/project-benchmark-loader.mjs"
-     data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"></div>
+     data-manifest-url="{{{{ site.assets_base_url }}}}project-benchmarks.json"><p class="benchmark-loading" role="status">Loading benchmark results… <a href="#benchmark-methodology">Read the measurement methodology</a>.</p></div>
 {{% if page.benchmark_methodology_html %}}<section id="benchmark-methodology" class="benchmark-methodology markdown tutorial-body docs-content" aria-labelledby="benchmark-methodology-title">
 <h2 id="benchmark-methodology-title">Methodology &amp; machines</h2>
 {{{{ page.benchmark_methodology_html }}}}

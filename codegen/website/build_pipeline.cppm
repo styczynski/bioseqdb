@@ -232,6 +232,7 @@ namespace {
 void verify_blog_pipeline();
 void verify_stable_assets();
 void verify_generated_html_template_markers();
+void verify_stylesheet_bundles();
 void rewrite_entity_link_routes(
     std::vector<content_node>& nodes,
     const std::map<std::string, std::string, std::less<>>& identity_by_reference,
@@ -253,6 +254,7 @@ void verify_website_pipeline() {
     verify_blog_pipeline();
     verify_stable_assets();
     verify_generated_html_template_markers();
+    verify_stylesheet_bundles();
     const auto algorithm = parse_markdown_content(
         "```pseudocode\nRequire: $x$\nFor $i$\n  If $x_i$\n    Return `score` // saved score\n  End If\nEnd For\n```\n");
     const auto algorithm_html = render_content_html(algorithm.children);
@@ -4017,6 +4019,165 @@ struct static_asset {
     return assets;
 }
 
+// CSP hashes encode the binary SHA-256 digest, not its printable hex form.
+[[nodiscard]] std::string csp_script_hash(std::string_view script) {
+    const auto hex = bioseq::common::sha256_hex(script);
+    constexpr std::string_view digits = "0123456789abcdef";
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    std::uint32_t buffer = 0;
+    unsigned bits = 0;
+    for (std::size_t at = 0; at < hex.size(); at += 2) {
+        buffer = (buffer << 8) | static_cast<unsigned>((digits.find(hex[at]) << 4) | digits.find(hex[at + 1]));
+        bits += 8;
+        while (bits >= 6) {
+            bits -= 6;
+            encoded += alphabet[(buffer >> bits) & 63];
+        }
+    }
+    if (bits != 0) encoded += alphabet[(buffer << (6 - bits)) & 63];
+    while (encoded.size() % 4 != 0) encoded += '=';
+    return "'sha256-" + encoded + "'";
+}
+
+[[nodiscard]] std::string inline_theme_bootstrap(std::string html,
+    std::string_view asset_base, std::string_view theme_script) {
+    const std::string tag = "<script src=\"" + std::string(asset_base) + "js/theme.js\"></script>";
+    const auto at = html.find(tag);
+    if (at == std::string::npos || theme_script.find("</script") != std::string_view::npos)
+        throw std::runtime_error("missing or unsafe pre-paint theme bootstrap");
+    html.replace(at, tag.size(), "<script data-theme-bootstrap>" + std::string(theme_script) + "</script>");
+    constexpr std::string_view directive = "script-src 'self' https://www.googletagmanager.com;";
+    const auto policy = html.find(directive);
+    if (policy == std::string::npos)
+        throw std::runtime_error("missing script policy for pre-paint theme bootstrap");
+    html.insert(policy + directive.size() - 1, " " + csp_script_hash(theme_script));
+    return html;
+}
+
+// Bundle each page's authored styles without changing their cascade or relative
+// asset URLs. Keep the existing shared-style insertion point as a second bundle:
+// optional KaTeX/benchmark CSS still belongs between content and shared styles.
+struct stylesheet_bundle_result {
+    std::string html;
+    std::vector<static_asset> assets;
+};
+
+[[nodiscard]] stylesheet_bundle_result bundle_page_stylesheets(
+    std::string html, std::string_view asset_base,
+    const std::vector<static_asset>& assets) {
+    struct link_record {
+        std::size_t start;
+        std::size_t length;
+        std::string path;
+        bool shared;
+    };
+    std::vector<link_record> links;
+    constexpr std::string_view prefix = "<link rel=\"stylesheet\" href=\"";
+    const auto head_end = html.find("</head>");
+    for (std::size_t at = 0; (at = html.find(prefix, at)) != std::string::npos;) {
+        if (at >= head_end) break;
+        const auto url_start = at + prefix.size();
+        const auto url_end = html.find('"', url_start);
+        const auto tag_end = html.find('>', url_end);
+        if (url_end == std::string::npos || tag_end == std::string::npos)
+            throw std::runtime_error("unterminated stylesheet link");
+        const std::string_view href(html.data() + url_start, url_end - url_start);
+        if (!href.starts_with(asset_base))
+            throw std::runtime_error("page stylesheet is outside its static bundle");
+        const auto tail = html.substr(url_end + 1, tag_end - url_end - 1);
+        if (tail != "" && tail != " data-shared-styles")
+            throw std::runtime_error("stylesheet bundling requires unconditional style links");
+        links.push_back({at, tag_end - at + 1, std::string(href.substr(asset_base.size())),
+                         tail == " data-shared-styles"});
+        at = tag_end + 1;
+    }
+    stylesheet_bundle_result result;
+    result.html = std::move(html);
+    // Replacements run backwards so link offsets remain valid.
+    std::size_t last = links.size();
+    while (last != 0) {
+        std::size_t first = last - 1;
+        while (first > 0 && !links[first].shared) --first;
+        std::string content;
+        for (std::size_t index = first; index < last; ++index) {
+            const auto& link = links[index];
+            const auto source = std::ranges::find(assets, link.path, &static_asset::relative_path);
+            if (source == assets.end())
+                throw std::runtime_error("missing page stylesheet: " + link.path);
+            // Every authored CSS file lives directly under css/. The vendored
+            // Prism theme contains no relative references. Reject new exceptions
+            // instead of silently breaking a later font/image import.
+            if ((!link.path.starts_with("css/") || link.path.find('/', 4) != std::string::npos)
+                && (source->content.find("url(") != std::string::npos
+                    || source->content.find("URL(") != std::string::npos))
+                throw std::runtime_error("cannot relocate stylesheet URLs: " + link.path);
+            if (source->content.find("@import") != std::string::npos
+                || source->content.find("@charset") != std::string::npos)
+                throw std::runtime_error("page stylesheets must not contain imports or charset rules");
+            content += "/* " + link.path + " */\n";
+            content += source->content;
+            content += '\n';
+        }
+        const auto digest = bioseq::common::sha256_hex(content);
+        const std::string path = "css/page-" + digest + ".css";
+        for (std::size_t index = last; index-- > first;) {
+            const auto& link = links[index];
+            const std::string replacement = index == first
+                ? "<link rel=\"stylesheet\" href=\"" + std::string(asset_base) + path + "\""
+                    + (link.shared ? " data-shared-styles" : "") + ">"
+                : "";
+            result.html.replace(link.start, link.length, replacement);
+        }
+        result.assets.push_back({path, std::move(content), digest});
+        last = first;
+    }
+    return result;
+}
+
+void verify_stylesheet_bundles() {
+    expect(csp_script_hash("abc") == "'sha256-ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0='",
+        "inline script CSP uses the binary SHA-256 digest encoded as base64");
+    const auto theme = inline_theme_bootstrap(
+        "<head><meta content=\"script-src 'self' https://www.googletagmanager.com;\">"
+        "<script src=\"/assets/hash/js/theme.js\"></script></head>", "/assets/hash/", "abc");
+    expect(theme.find("<script data-theme-bootstrap>abc</script>") != std::string::npos
+        && theme.find(csp_script_hash("abc")) != std::string::npos,
+        "pre-paint theme executes without a blocking network request or an unsafe-inline policy");
+    const std::vector<static_asset> assets{
+        {"css/site.css", "@font-face{src:url('../fonts/example.woff2')} .x{color:red}", ""},
+        {"vendor/prism/prism.css", ".token{color:orange}", ""},
+        {"css/shared.css", ".x{color:blue}", ""},
+        {"css/theme.css", ".x{color:green}", ""},
+    };
+    for (const std::string base : {"/assets/hash/", "/bioseqdb/assets/hash/"}) {
+        const std::string html = "<head><title>Example</title>"
+            "<link rel=\"stylesheet\" href=\"" + base + "css/site.css\">"
+            "<link rel=\"stylesheet\" href=\"" + base + "vendor/prism/prism.css\">"
+            "<link rel=\"stylesheet\" href=\"" + base + "css/shared.css\" data-shared-styles>"
+            "<link rel=\"stylesheet\" href=\"" + base + "css/theme.css\"></head><body>Example</body>";
+        const auto result = bundle_page_stylesheets(html, base, assets);
+        expect(result.assets.size() == 2, "stylesheets retain the optional-content insertion boundary");
+        expect(result.assets[1].content.find("color:red") < result.assets[1].content.find("color:orange")
+            && result.assets[0].content.find("color:blue") < result.assets[0].content.find("color:green"),
+            "stylesheet bundles preserve the authored cascade");
+        expect(result.assets[1].content.find("url('../fonts/example.woff2')") != std::string::npos
+            && result.html.find(base + "css/page-") != std::string::npos
+            && result.html.ends_with("</head><body>Example</body>"),
+            "bundling preserves font paths, deployment prefixes, and non-style markup");
+        expect(result.html.find("data-shared-styles") != std::string::npos,
+            "optional styles retain their DOM insertion marker");
+    }
+    auto invalid = assets;
+    invalid[1].content = "a{background:url('./image.png')}";
+    bool rejected = false;
+    try {
+        (void)bundle_page_stylesheets("<head><link rel=\"stylesheet\" href=\"/assets/hash/vendor/prism/prism.css\"></head>",
+            "/assets/hash/", invalid);
+    } catch (const std::runtime_error&) { rejected = true; }
+    expect(rejected, "bundling rejects styles whose relative URLs would change meaning");
+}
+
 [[nodiscard]] std::vector<std::pair<std::string, const static_asset*>> resolve_stable_assets(
     const std::map<std::string, std::string, std::less<>>& aliases,
     const std::vector<static_asset>& assets,
@@ -4578,6 +4739,10 @@ void decorate_code_entity_ranges(
     const std::vector<static_asset> assets =
         collect_static_assets(static_dir, bundle_sha256);
     const std::string bundle_prefix = "assets/" + bundle_sha256 + "/";
+    const auto theme_asset = std::ranges::find(assets, "js/theme.js", &static_asset::relative_path);
+    if (theme_asset == assets.end()) throw std::runtime_error("missing theme bootstrap asset");
+    const std::string theme_script = theme_asset->content;
+    const std::string theme_csp_hash = csp_script_hash(theme_script);
 
     std::error_code staging_error;
     fs::remove_all(staging, staging_error);
@@ -4677,7 +4842,7 @@ void decorate_code_entity_ranges(
     record_sources(model.cpp_entities);
     record_sources(model.sql_entities);
     const auto render = [&route, &url, &config, &site, &templates_dir, &writer, &landing_context,
-                         &contact_context, &blog_context, &page_sources, &page_dates, &thumbnails](
+                         &contact_context, &blog_context, &page_sources, &page_dates, &thumbnails, &assets, &bundle_prefix, &theme_script](
                             std::string_view rel,
                             std::string_view template_name,
                             std::string_view page_object,
@@ -4717,9 +4882,14 @@ void decorate_code_entity_ranges(
         context.as_object()["landing"] = landing_context;
         context.as_object()["contact"] = contact_context;
         context.as_object()["blog"] = blog_context;
-        const std::string html =
-            render_page_template(templates_dir.string(), template_name, boost::json::serialize(context));
-        writer.emit(route(rel), html);
+        const auto bundled = bundle_page_stylesheets(
+            render_page_template(templates_dir.string(), template_name, boost::json::serialize(context)),
+            site.assets_base_url, assets);
+        for (const auto& asset : bundled.assets) {
+            const auto asset_route = route(bundle_prefix + asset.relative_path);
+            if (!writer.manifest.contains(asset_route)) writer.emit(asset_route, asset.content);
+        }
+        writer.emit(route(rel), inline_theme_bootstrap(bundled.html, site.assets_base_url, theme_script));
     };
 
     // Rebuild entity routes for this deployment base path and reject duplicate
@@ -5214,7 +5384,12 @@ void decorate_code_entity_ranges(
         return value == group->second.end() ? std::string{} : value->second;
     };
     boost::json::array blog_posts;
-    std::string markdown_headers;
+    // Only content-addressed resources are immutable. Stable URLs (HTML,
+    // search indexes, thumbnails and logo aliases) must be able to refresh.
+    std::string markdown_headers = url("assets/*") + "\n"
+        "  Cache-Control: public, max-age=31536000, immutable\n\n"
+        + tooltip_url + "\n"
+        "  Cache-Control: public, max-age=31536000, immutable\n\n";
     const std::array<std::string_view, 12> month_names{
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"};
@@ -5723,7 +5898,8 @@ void decorate_code_entity_ranges(
                 "User-agent: *\nAllow: /\nSitemap: " + config.canonical_origin
                     + url("sitemap.xml") + "\n");
     writer.emit(route("security-headers.txt"),
-                "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; "
+                "Content-Security-Policy: default-src 'self'; script-src 'self' https://www.googletagmanager.com "
+                + theme_csp_hash + "; script-src-attr 'none'; "
                 "style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; "
                 "media-src 'self'; connect-src 'self' https://raw.githubusercontent.com "
                 "https://api.github.com https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; "

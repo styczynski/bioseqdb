@@ -54,6 +54,7 @@ def evidence(page):
       paints: performance.getEntriesByType('paint').map(x => x.toJSON()),
       resources: performance.getEntriesByType('resource').map(x => ({url:x.name,type:x.initiatorType,start:x.startTime,duration:x.duration,bytes:x.decodedBodySize,blocking:x.renderBlockingStatus})),
       scripts: [...document.scripts].filter(x => x.src).map(x => ({src:x.src,type:x.type,defer:x.defer,async:x.async})),
+      bundledStyles: [...document.querySelectorAll('head link[rel="stylesheet"][href*="/css/page-"]')].map(x => x.href),
       nodes: document.querySelectorAll('*').length,
       highlightedTokens: document.querySelectorAll('pre code .token').length,
       entityLinks: document.querySelectorAll('pre code .code-entity-ref').length
@@ -61,8 +62,9 @@ def evidence(page):
 
 
 def check_deferred_scripts(data):
-    blocking = [s["src"] for s in data["scripts"] if s["type"] != "module" and not s["defer"] and not s["async"] and not s["src"].endswith("/js/theme.js")]
+    blocking = [s["src"] for s in data["scripts"] if s["type"] != "module" and not s["defer"] and not s["async"]]
     check(not blocking, f"Unexpected parser-blocking scripts: {blocking}")
+    check(len(data["bundledStyles"]) == 2, "Page styles must use two cascade-preserving bundles")
 
 
 def main():
@@ -99,6 +101,24 @@ def main():
             page.evaluate("document.fonts.ready")
 
         try:
+            # The initial mobile layout must not depend on scripts moving the
+            # sidebar out of flow or revealing the article title after loading.
+            mobile = browser.new_context(viewport={"width": 390, "height": 844}, java_script_enabled=False)
+            contexts.append(mobile)
+            mobile.route("**/*", local_requests)
+            initial = mobile.new_page()
+            initial.goto(server.origin + prefix + f"/{args.version}/tutorials/getting_started/", wait_until="networkidle")
+            title = initial.locator(".design-page-header h1")
+            check(title.is_visible(), "Article title must be visible without JavaScript")
+            check(title.bounding_box()["y"] < 300, "Mobile sidebar displaced the initial article heading")
+            check(not initial.locator("#sidebar").is_visible(), "Closed mobile drawer must be hidden before JavaScript")
+            check(initial.locator("#doc-main").bounding_box()["y"] < 200, "Mobile main content starts below an in-flow sidebar")
+            initial.goto(server.origin + prefix + "/benchmarks/", wait_until="networkidle")
+            check(initial.locator(".benchmark-loading").is_visible(), "Benchmark loading state must be visible without JavaScript")
+            check(initial.locator("#benchmark-methodology").bounding_box()["y"] >= 844,
+                  "Benchmark explorer must reserve its layout before data arrives")
+            mobile.close()
+
             for name, route in (("landing", "/"), ("qa", "/qa/"), ("blog", "/blog/introducing-bioseqdb/")):
                 ctx, page, errors, requests = context()
                 if name == "landing":

@@ -8,6 +8,7 @@ answers, so it would misrepresent this collection of author-written answers.
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import date, datetime, time, timezone
 import hashlib
 import json
@@ -136,9 +137,15 @@ def validate_csp(head: ET.Element, header: dict[str, set[str]]) -> None:
                 if node.get("http-equiv", "").lower() == "content-security-policy"]
     require(len(policies) == 1, "one meta Content-Security-Policy is required")
     document = csp_directives(policies[0])
+    bootstraps = [node for node in head.iter("script") if "data-theme-bootstrap" in node.attrib]
+    require(len(bootstraps) == 1, "one inline pre-paint theme bootstrap is required")
+    bootstrap = bootstraps[0]
+    require(not bootstrap.get("src"), "theme bootstrap must not block on a network request")
+    digest = base64.b64encode(hashlib.sha256((bootstrap.text or "").encode()).digest()).decode()
+    theme_hash = f"'sha256-{digest}'"
     required = {
         "default-src": {"'self'"},
-        "script-src": {"'self'", "https://www.googletagmanager.com"},
+        "script-src": {"'self'", "https://www.googletagmanager.com", theme_hash},
         "script-src-attr": {"'none'"},
         "base-uri": {"'none'"},
         "frame-src": {"'none'"},
