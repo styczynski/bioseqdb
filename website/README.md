@@ -156,6 +156,13 @@ runnable-example grants. Adding a reference page does not grant an example acces
 to that SQL entity. SQL code blocks and inline SQL names use the same generated
 reference records for links and hover descriptions.
 
+On touch screens, tapping an automatic glossary, SQL or code-reference link
+opens its description and keeps it visible. Choose **Read more** to follow the
+original link, or **Close** to return to the text. Tapping outside or pressing
+Escape dismisses the description. Desktop hover and keyboard link navigation
+keep their usual behavior. The touch popover browser check covers both palettes,
+short screens, delayed reference data and offline fallback links.
+
 Keep reference examples in the declaration's Doxygen comment as fenced `sql`
 blocks. Begin each block with a `--` comment explaining its use; the generator
 renders that comment as the example description. Document annotated composite

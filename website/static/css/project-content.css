@@ -65,6 +65,23 @@
 .entity-detail .reference-values-table td:last-child { min-width: 16rem; color: var(--theme-a9bccb, #a9bccb); line-height: 1.6; }
 .design-entity-page .design-definition-list dd { min-width: 0; overflow-wrap: anywhere; }
 .entity-pop-param-detail { min-width: 0; overflow-wrap: anywhere; }
+.tutorial-body a.entity-ref:not(.code-entity-ref),
+.tutorial-body a.source-link { text-decoration-line: underline; text-decoration-style: dotted; text-underline-offset: .2em; }
+a:is(.entity-ref,.glossary-link,.source-link,[data-social-description]) { -webkit-tap-highlight-color: transparent; }
+
+/* Touch descriptions are nonmodal dialogs. Their actions remain visible even
+   when a setting has more detail than fits on a short phone screen. */
+.link-popover { box-sizing: border-box; max-height: calc(100dvh - 24px); }
+#entity-pop.link-popover { max-height: calc(100dvh - 24px); }
+#entity-pop.is-persistent, .blog-glossary-tip.is-persistent { pointer-events: auto; flex-direction: column; }
+.link-popover.is-persistent .link-popover-content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.link-popover.is-persistent .entity-pop-view { display: none; }
+.link-popover-actions { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--theme-28425b, #28425b); }
+.link-popover-more, .link-popover-close { box-sizing: border-box; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border-radius: 7px; font: 500 13px/1.4 'IBM Plex Sans', sans-serif; }
+.link-popover-more { color: var(--theme-7fcbe8, #7fcbe8); text-decoration: underline; text-underline-offset: 3px; }
+.link-popover-close { border: 1px solid var(--theme-28425b, #28425b); color: var(--theme-cbd8e4, #cbd8e4); background: transparent; cursor: pointer; }
+.link-popover :is(a,button):focus-visible { outline: 2px solid var(--theme-46b8de, #46b8de); outline-offset: 2px; }
+.link-popover[hidden] { display: none !important; }
 @media (max-width: 600px) {
   .design-entity-page .design-page-header > p.dd-s0046 { font-size: 16px; }
 }
