@@ -67,8 +67,9 @@ image. Public pages allow indexing, link following, large image previews and
 unlimited text/video previews through generic `robots`, `googlebot` and `bingbot`
 metadata. Other crawlers use the generic robots directive; there is no invented
 crawler name or request for a guaranteed crawl schedule. The HTML meta CSP and
-suggested HTTP policy restrict scripts to local files and the configured Google
-tag loader, prohibit inline event handlers and frames, and restrict forms to the
+suggested HTTP policy allow local scripts, the configured Google tag loader,
+and the exact hashed theme initializer that restores the saved choice before
+paint. They prohibit inline event handlers and frames, and restrict forms to the
 site and Formserve. `frame-ancestors` remains in the HTTP policy because browsers
 do not support it in a meta policy.
 
@@ -329,3 +330,30 @@ alongside the hashed bundle. The logo is therefore available at
 `https://bioseqdb.com/bioseq-mark.svg`, which is the URL used by the repository
 README. Generated hosting headers give stable aliases a short cache lifetime
 so a logo update does not leave an immutable cached copy behind.
+
+## Hosting cache policy
+
+The generated `_headers` file gives the content-addressed `/assets/` tree and
+hashed entity records `Cache-Control: public, max-age=31536000, immutable`.
+An asset change creates a new URL, so these files can stay in the browser for
+one year. HTML, `search-index.json`, thumbnails and the stable logo are not
+immutable; their URLs can serve updated content.
+
+`_headers` is understood by hosts such as Cloudflare Pages. The current GitHub
+Pages deployment does not apply that file as response headers. When Cloudflare
+proxies GitHub Pages, configure a Cache Rule for hostname `bioseqdb.com` and URI
+path starting with `/assets/`: set **Cache eligibility** to **Eligible for
+cache** (this includes `.mjs` modules), and set **Browser TTL** to **Override
+origin**, **1 year**. Leave HTML and other paths outside this rule. Keep error
+responses on their default short edge lifetime. This avoids keeping an old
+page or a missing-file response for a year.
+
+Check the actual response after changing hosting settings; a meta tag or a file
+inside the published site cannot override the CDN's HTTP cache policy:
+
+```sh
+curl -I 'https://bioseqdb.com/assets/<current-hash>/js/docs-design.mjs'
+```
+
+See [Cloudflare Cache Rules settings](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/)
+and [custom headers for Cloudflare Pages](https://developers.cloudflare.com/pages/configuration/headers/).

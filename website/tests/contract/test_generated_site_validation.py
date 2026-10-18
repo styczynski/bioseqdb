@@ -329,6 +329,34 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         )
     base_path = manifest.get("base_path", "/")
 
+    # Hosting rules must never pin editable HTML, search indexes or stable
+    # aliases in a browser cache. Only hashed resources get immutable caching.
+    headers_path = site / "_headers"
+    if not headers_path.is_file():
+        problems.append(_fail(headers_path, "missing generated hosting policy"))
+    else:
+        headers = headers_path.read_text(encoding="utf-8")
+        asset_rule = base_path.rstrip("/") + "/assets/*"
+        immutable_routes = set()
+        for section in headers.strip().split("\n\n"):
+            lines = section.splitlines()
+            if not lines:
+                continue
+            route = lines[0]
+            if any("immutable" in line.lower() for line in lines[1:]):
+                immutable_routes.add(route)
+                entity_path = re.fullmatch(
+                    re.escape(base_path.rstrip("/"))
+                    + r"/[^/]+/entities\.[0-9a-f]{64}\.json", route)
+                if route != asset_rule and not entity_path:
+                    problems.append(_fail(headers_path,
+                        f"immutable cache rule includes a mutable URL: {route}"))
+                if "  Cache-Control: public, max-age=31536000, immutable" not in lines:
+                    problems.append(_fail(headers_path,
+                        f"hashed resource lacks the one-year cache policy: {route}"))
+        if asset_rule not in immutable_routes:
+            problems.append(_fail(headers_path, "hashed assets lack immutable caching"))
+
     # (1) Every emitted JSON/XML artifact parses with the standard-library parsers.
     for path in sorted(site.rglob("*.json")):
         try:
