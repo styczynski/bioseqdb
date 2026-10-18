@@ -51,6 +51,35 @@ const custom = loader.buildTable(run, { metric: 'wall_clock_ns', direction: -1, 
 assert.equal(custom.baseline, 'mpf-bounded-simd-block');
 assert.ok(custom.groups[0].rows.find((r) => r.algo === custom.baseline).values.every((cell) => cell.ratio === null));
 
+// Updating a tooltip must not rebuild comparison rows and their event handlers.
+// Exercise the actual binding path, while making a full table render fail.
+globalThis.Node = { TEXT_NODE: 3, DOCUMENT_FRAGMENT_NODE: 11 };
+globalThis.requestAnimationFrame = () => {};
+const tooltipOnly = new ProjectComponent();
+tooltipOnly.renderVals = () => { throw new Error('tooltip rebuilt the table'); };
+let boundTooltip;
+tooltipOnly.root = { querySelector: () => ({ replaceWith: (node) => { boundTooltip = node; } }) };
+tooltipOnly.template = { content: { querySelector: () => ({ cloneNode: () => ({
+  nodeType: Node.TEXT_NODE,
+  nodeValue: '[[ tipTitle ]]|[[ tipSub ]]|[[ tipNote ]]|[[ tipOpacity ]]|[[ hasTip ]]|[[ tipX ]]|[[ tipY ]]',
+}) }) } };
+tooltipOnly.state.tip = {
+  title: 'Measured alignment', sub: 'A · Complete time', note: 'Published source',
+  x: 120, y: 240, rows: [{ k: 'baseline value', v: '1.25 ms' }],
+  hist: [{ h: 100, color: '#74c8a8' }],
+};
+tooltipOnly.renderTip();
+assert.equal(boundTooltip.nodeValue, 'Measured alignment|A · Complete time|Published source|1|true|120|240');
+assert.deepEqual(tooltipOnly.renderTipVals().tipRows, tooltipOnly.state.tip.rows);
+assert.deepEqual(tooltipOnly.renderTipVals().tipHist, tooltipOnly.state.tip.hist);
+assert.equal(tooltipOnly.renderTipVals().tipHasHist, true);
+assert.equal(tooltipOnly.renderTipVals().tipHasNote, true);
+tooltipOnly.state.tip = null;
+tooltipOnly.renderTip();
+assert.equal(boundTooltip.nodeValue, '|||0|false|-9999|-9999');
+assert.deepEqual(tooltipOnly.renderTipVals().tipRows, []);
+assert.deepEqual(tooltipOnly.renderTipVals().tipHist, []);
+
 // Escape must dismiss hover-only tooltips on the page and embedded chapter
 // tables, even when no tooltip trigger owns keyboard focus.
 const tooltipComponents = [true, true, false].map((isConnected) => {

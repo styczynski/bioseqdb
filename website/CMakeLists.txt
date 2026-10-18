@@ -1292,11 +1292,17 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             -DSTAMP=${_browser_bioseqdb_stamp}
             -DBROWSERS_PATH=${_output_root}/playwright-browsers
             -P "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
+            "${_venv_python}" "${_source_dir}/tests/integration/test_loading.py"
+            --site "${_staging_dir}" --base-path "${_base_path}" --version "${_version}"
+            --output "${_output_root}/browser-artifacts/loading"
     COMMAND "${CMAKE_COMMAND}" -E touch "${_browser_stamp}"
     DEPENDS ${_gen_dep} "${_html_validation_stamp}" "${_site_model}"
             "${_venv_stamp}"
             "${_design_translation_stamp}"
             "${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py"
+            "${_source_dir}/tests/integration/test_loading.py"
             "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/static_fixture_server.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/site_features_checks.py"
@@ -1359,7 +1365,8 @@ if(_website_node_executable)
   set(_website_features_contract_command
     "${_website_node_executable}" --test
     "${_source_dir}/tests/contract/test_theme_runtime.mjs"
-    "${_source_dir}/tests/contract/test_analytics_runtime.mjs")
+    "${_source_dir}/tests/contract/test_analytics_runtime.mjs"
+    "${_source_dir}/tests/contract/test_content_runtime.mjs")
 else()
   set(_website_benchmark_contract_command
     "${CMAKE_COMMAND}" -E echo

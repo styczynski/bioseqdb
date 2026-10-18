@@ -816,7 +816,7 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             "project_biology": ("Biological context", "data-math"),
             "project_postgres_custom_scan": ("BioseqScan", "PlaceHolderVar"),
             "project_index_storage": ("minimizers_per_fragment", "symbol_counts"),
-            "project_benchmarking": ("project-benchmarks", "7.68 cores", "120.8 GiB",
+            "project_benchmarking": ('class="project-benchmark"', "data-table=", "7.68 cores", "120.8 GiB",
                                      "32,607 MiB", "595.84", "1.4.329", "500.28 GB",
                                      "6,000 IOPS / 500 MiB/s"),
         }.items():

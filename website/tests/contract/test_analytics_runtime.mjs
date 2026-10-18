@@ -6,13 +6,17 @@ import test from 'node:test';
 const source = readFileSync(new URL('../../static/js/analytics.js', import.meta.url), 'utf8');
 function fixture(landing = true) {
   const handlers = new Map();
+  const scripts = [];
+  const window = {};
   const document = {
     body: { classList: { contains: value => landing && value === 'landing-design-page' } },
     addEventListener: (name, callback) => handlers.set(name, callback),
+    createElement: (tag) => ({ tagName: tag }),
+    head: { append: node => scripts.push({ ...node, queuedEvents: window.dataLayer.length }) },
   };
-  const window = {};
   vm.runInNewContext(source, { window, document, URL, Date, location: { href: 'https://bioseqdb.org/' } });
   return {
+    scripts,
     events: () => JSON.parse(JSON.stringify(window.dataLayer.map(args => [...args]))),
     click(href, type = 'click', button = 0) {
       handlers.get(type)({ type, button, target: { closest: () => ({ href }) } });
@@ -27,6 +31,14 @@ test('initializes the supplied property with advertising personalization disable
   assert.equal(events[0][0], 'js');
   assert.deepEqual(events[1], ['config', 'G-989VYH5HT7', {
     allow_google_signals: false, allow_ad_personalization_signals: false,
+  }]);
+});
+
+test('loads the remote tag asynchronously at low priority after queuing the configuration', () => {
+  const page = fixture();
+  assert.deepEqual(page.scripts, [{
+    tagName: 'script', src: 'https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7',
+    async: true, fetchPriority: 'low', queuedEvents: 2,
   }]);
 });
 
