@@ -329,6 +329,14 @@ def _translated_style_catalog(source: str, label: str, prefix: str,
     return rules
 
 
+def _with_design_monospace_fallback(css: str) -> str:
+    """Allow only the explicit Plex Mono loading fallback in the design oracle."""
+    return re.sub(
+        r"@font-face\s*\{[^{}]*\}|font-family\s*:\s*(['\"])IBM Plex Mono\1(?=\s*[;}])",
+        lambda match: match.group() if match.group().lower().startswith("@font-face")
+        else match.group() + ",monospace", css, flags=re.I)
+
+
 def _assert_translator_declaration_parity(site: Path, design_source: Path) -> None:
     configurations = (
         ("index.html", "BioseqDB landing", "ld-", "landing-design-page",
@@ -348,7 +356,8 @@ def _assert_translator_declaration_parity(site: Path, design_source: Path) -> No
         css = re.sub(
             r"var\(--theme-[\w-]+,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^()]+\))\)",
             lambda match: match.group(1), css)
-        rules = _translated_style_catalog(source, label, prefix, page_class)
+        rules = [_with_design_monospace_fallback(rule) for rule in
+                 _translated_style_catalog(source, label, prefix, page_class)]
         missing = [rule for rule in rules if rule not in css]
         _check(not missing,
                f"{css_name} lost {len(missing)} literal design declaration(s); "
@@ -358,7 +367,7 @@ def _assert_translator_declaration_parity(site: Path, design_source: Path) -> No
             r"<helmet>.*?<style>\s*(.*?)\s*</style>.*?</helmet>", source, re.S)
         _check(global_match is not None,
                f"supplied design {filename} has no global style block")
-        global_css = global_match.group(1).strip()
+        global_css = _with_design_monospace_fallback(global_match.group(1).strip())
         _check(global_css in css,
                f"{css_name} does not contain the literal supplied global CSS")
 
@@ -2127,6 +2136,12 @@ def _compare_design_style(page, actual_selector: str, reference: dict,
           if (!actual) return null;
           const probe = document.createElement(tag);
           probe.style.cssText = style;
+          // The production translation adds a monospace fallback so the first
+          // paint does not use a proportional default while Plex Mono loads.
+          // Keep the authored primary family and every other style comparison.
+          if (probe.style.fontFamily.replace(/["']/g, '').trim() === 'IBM Plex Mono') {
+            probe.style.fontFamily += ', monospace';
+          }
           probe.style.position = probe.style.position || 'fixed';
           probe.style.left = '-10000px';
           probe.style.visibility = 'hidden';
