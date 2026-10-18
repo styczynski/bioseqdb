@@ -721,10 +721,21 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             ))
         for record in records:
             route = record.get("route")
-            rel = _route_to_relpath(route, base_path) if route else None
+            resolved = urlsplit(route) if route else None
+            rel = (_route_to_relpath(resolved.path, base_path)
+                   if resolved and not resolved.scheme and not resolved.netloc else None)
             if rel is None or not (site / rel).is_file():
                 problems.append(_fail(search_path,
                                       f"record {record.get('id')!r} route {route} does not resolve"))
+                continue
+            fragment = unquote(resolved.fragment)
+            if fragment:
+                target_file = site / rel
+                target_route = "/" + target_file.relative_to(site).as_posix()
+                ids = page_ids.get(target_route, set())
+                if fragment not in ids:
+                    problems.append(_fail(search_path,
+                                          f"record {record.get('id')!r} anchor #{fragment} not found in {rel}"))
         tutorial_root = search_path.parent / "tutorials"
         actual_slugs = {page.parent.name for page in tutorial_root.glob("*/index.html")}
         expected_slugs = {identifier.removeprefix("tutorial:")
