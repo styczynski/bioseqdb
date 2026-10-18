@@ -1,62 +1,100 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Where PostgreSQL table storage can change</title>
 <meta name="description" content="Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.">
 <link rel="canonical" href="https://bioseqdb.com/blog/where-postgres-table-storage-can-change/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Where PostgreSQL table storage can change</Attribute>
+    <Attribute name="description">Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;12T21:58:39+02:00</Attribute>
+    <Attribute name="category">others</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;12</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/blog/where&#45;postgres&#45;table&#45;storage&#45;can&#45;change/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Where PostgreSQL table storage can change">
 <meta property="og:description" content="Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/blog/where-postgres-table-storage-can-change/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/blog/where-postgres-table-storage-can-change/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/blog/where-postgres-table-storage-can-change/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Where PostgreSQL table storage can change on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Where PostgreSQL table storage can change">
 <meta name="twitter:description" content="Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/blog/where-postgres-table-storage-can-change/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Where PostgreSQL table storage can change on BioseqDB">
+
+<meta property="article:published_time" content="2026-10-12">
+<meta property="article:modified_time" content="2026-10-12T21:58:39+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="others">
+<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="table access methods"><meta property="article:tag" content="storage"><meta property="article:tag" content="heap"><meta property="article:tag" content="indexing"><meta property="article:tag" content="MVCC"><meta property="article:tag" content="WAL"><meta property="article:tag" content="VACUUM">
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
 <link rel="alternate" type="text/markdown" href="/blog/where-postgres-table-storage-can-change/index.md" title="Where PostgreSQL table storage can change">
 <meta name="keywords" content="PostgreSQL, table access methods, storage, heap, indexing, MVCC, WAL, VACUUM">
 <meta name="author" content="Piotr Styczyński">
-<meta property="article:published_time" content="2026-10-12">
-<meta property="article:section" content="others">
-<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="table access methods"><meta property="article:tag" content="storage"><meta property="article:tag" content="heap"><meta property="article:tag" content="indexing"><meta property="article:tag" content="MVCC"><meta property="article:tag" content="WAL"><meta property="article:tag" content="VACUUM">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/blog.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
 
 <div data-screen-label="BioseqDB documentation">
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -105,7 +143,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." fetchpriority="high">
+        <img class="blog-cover" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=others">Others</a></p>
           <h1>Where PostgreSQL table storage can change</h1>
@@ -152,7 +190,7 @@ WHERE relation.oid IN (
   'lab_observations'::regclass,
   'lab_observations_count_idx'::regclass
 )
-ORDER BY object_name;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 2 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">object_name<br><code>name</code></th><th scope="col">access_method<br><code>name</code></th></tr></thead><tbody><tr><td>lab_observations</td><td>heap</td></tr><tr><td>lab_observations_count_idx</td><td>btree</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">There are two objects here with two different jobs, even though they describe the same collection of observations. That gives me a useful boundary for an experiment: I can ask whether I need a different way to locate candidates, or whether I really need a different representation of the table itself.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/table-access-boundary.svg"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/table-access-boundary.svg" alt="The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers." loading="lazy"></a></p><h2 class="hx" id="returning-a-row-is-the-beginning" data-toc data-title="Returning a row is the beginning">Returning a row is the beginning<a data-hash href="#returning-a-row-is-the-beginning" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">A table access method supplies a handler returning a <code>TableAmRoutine</code>, whose callbacks let PostgreSQL request operations such as starting a scan or inserting a tuple. A tuple slot provides a representation of a row that the rest of the executor can use without understanding every detail of its storage. The <a href="https://www.postgresql.org/docs/17/tableam.html" rel="noreferrer">table access method documentation</a> describes that interface and the constraints around row identifiers.</p><p class="doc-paragraph">This is an attractive place to experiment, but the first successful <code>SELECT</code> answers a very small question. If I put three records into an array and read them back, I have demonstrated that particular path through my code. I have not established what happens when a second connection arrives, a <a href="https://www.postgresql.org/docs/current/tutorial-transactions.html" rel="noreferrer" class="glossary-link" title="A group of database operations committed together or rolled back as one unit." data-glossary-description="A group of database operations committed together or rolled back as one unit." data-glossary-term="transaction">transaction</a> aborts, or the server disappears halfway through a write.</p><p class="doc-paragraph">For example, <a href="https://www.postgresql.org/docs/17/mvcc-intro.html" rel="noreferrer">MVCC</a> gives a query a view of the database through a snapshot. “Return the newest record I can find” is not enough when that record belongs to a transaction the reader cannot see. I would test an uncommitted update from another connection before spending time comparing scan speeds.</p><p class="doc-paragraph">An index lookup has the same visibility problem. The table method's <code>index_fetch_tuple</code> callback receives a candidate identifier and a snapshot; it must find a suitable visible tuple rather than blindly trust the index entry. The <a href="https://github.com/postgres/postgres/blob/REL_17_STABLE/src/include/access/tableam.h" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>API comments</a> also distinguish ordinary vacuum work from the callbacks used by <code>ANALYZE</code> and table rewrites. These are different operations, even when they all involve visiting stored data.</p><h2 class="hx" id="keep-an-ordinary-query-as-a-reference" data-toc data-title="Keep an ordinary query as a reference">Keep an ordinary query as a reference<a data-hash href="#keep-an-ordinary-query-as-a-reference" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">I would keep this kind of deliberately boring query beside a storage experiment:</p><figure class="doc-code" data-term data-sql-example="storage_reviewed_observations"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-2955c146ff78375a-3" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-2955c146ff78375a-3" class="language-sql">SELECT specimen, read_count
+ORDER BY object_name;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 2 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">object_name<br><code>name</code></th><th scope="col">access_method<br><code>name</code></th></tr></thead><tbody><tr><td>lab_observations</td><td>heap</td></tr><tr><td>lab_observations_count_idx</td><td>btree</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">There are two objects here with two different jobs, even though they describe the same collection of observations. That gives me a useful boundary for an experiment: I can ask whether I need a different way to locate candidates, or whether I really need a different representation of the table itself.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/table-access-boundary.svg"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/table-access-boundary.svg" alt="The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers." loading="lazy"></a></p><h2 class="hx" id="returning-a-row-is-the-beginning" data-toc data-title="Returning a row is the beginning">Returning a row is the beginning<a data-hash href="#returning-a-row-is-the-beginning" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">A table access method supplies a handler returning a <code>TableAmRoutine</code>, whose callbacks let PostgreSQL request operations such as starting a scan or inserting a tuple. A tuple slot provides a representation of a row that the rest of the executor can use without understanding every detail of its storage. The <a href="https://www.postgresql.org/docs/17/tableam.html" rel="noreferrer">table access method documentation</a> describes that interface and the constraints around row identifiers.</p><p class="doc-paragraph">This is an attractive place to experiment, but the first successful <code>SELECT</code> answers a very small question. If I put three records into an array and read them back, I have demonstrated that particular path through my code. I have not established what happens when a second connection arrives, a <a href="https://www.postgresql.org/docs/current/tutorial-transactions.html" rel="noreferrer" class="glossary-link" title="A group of database operations committed together or rolled back as one unit." data-glossary-description="A group of database operations committed together or rolled back as one unit." data-glossary-term="transaction">transaction</a> aborts, or the server disappears halfway through a write.</p><p class="doc-paragraph">For example, <a href="https://www.postgresql.org/docs/17/mvcc-intro.html" rel="noreferrer">MVCC</a> gives a query a view of the database through a snapshot. “Return the newest record I can find” is not enough when that record belongs to a transaction the reader cannot see. I would test an uncommitted update from another connection before spending time comparing scan speeds.</p><p class="doc-paragraph">An index lookup has the same visibility problem. The table method's <code>index_fetch_tuple</code> callback receives a candidate identifier and a snapshot; it must find a suitable visible tuple rather than blindly trust the index entry. The <a href="https://github.com/postgres/postgres/blob/REL_17_STABLE/src/include/access/tableam.h" rel="noreferrer" class="source-link"><svg class="github-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.92-.89-1.16-.89-1.16-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.71 1.22 1.87.87 2.33.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.96 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.87c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.52.56.83 1.28.83 2.15 0 3.08-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>API comments</a> also distinguish ordinary vacuum work from the callbacks used by <code>ANALYZE</code> and table rewrites. These are different operations, even when they all involve visiting stored data.</p><h2 class="hx" id="keep-an-ordinary-query-as-a-reference" data-toc data-title="Keep an ordinary query as a reference">Keep an ordinary query as a reference<a data-hash href="#keep-an-ordinary-query-as-a-reference" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">I would keep this kind of deliberately boring query beside a storage experiment:</p><figure class="doc-code" data-term data-sql-example="storage_reviewed_observations"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-2955c146ff78375a-3" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-2955c146ff78375a-3" class="language-sql">SELECT specimen, read_count
 FROM lab_observations
 WHERE needs_review
 ORDER BY read_count DESC, specimen;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 2 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">specimen<br><code>text</code></th><th scope="col">read_count<br><code>integer</code></th></tr></thead><tbody><tr><td>S-32</td><td>480</td></tr><tr><td>S-11</td><td>120</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">The expected result is small enough to check by eye. From there I would add updates, rollbacks, deleted rows and overlapping readers, keeping the expected answers seperate from the engine's implementation. A faster result is useful only after I know it is the right result.</p><p class="doc-paragraph">Reclaiming obsolete data also needs attention. PostgreSQL's heap requires <a href="https://www.postgresql.org/docs/17/routine-vacuuming.html" rel="noreferrer">routine vacuuming</a>; a different storage design still needs a clear account of when old information can be removed. I would include a long-running reader in that experiment, because reclaiming something too early is harder to notice than retaining it too long.</p><h2 class="hx" id="the-part-that-survives-a-restart" data-toc data-title="The part that survives a restart">The part that survives a restart<a data-hash href="#the-part-that-survives-a-restart" aria-label="Link to this section">#</a></h2><p class="doc-paragraph"><a href="https://www.postgresql.org/docs/17/wal-intro.html" rel="noreferrer">Write-ahead logging</a> provides the ordering needed to recover logged changes after a crash. A custom method needs its own coherent recovery story; PostgreSQL's table interface permits its <a href="https://www.postgresql.org/docs/current/wal-intro.html" rel="noreferrer" class="glossary-link" title="Recording changes in a durable log before writing the corresponding data pages, enabling recovery after a crash." data-glossary-description="Recording changes in a durable log before writing the corresponding data pages, enabling recovery after a crash." data-glossary-term="write-ahead logging">WAL</a> facilities or another implementation. An in-memory demonstration should not be mistaken for durable storage just because it accepts familiar SQL.</p><p class="doc-paragraph">There is an operational boundary too. In PostgreSQL 17, changing an existing table with <code>ALTER TABLE ... SET ACCESS METHOD</code> rewrites it and requires an <code>ACCESS EXCLUSIVE</code> lock. I would plan that as a migration, with room for the rewrite and a tested way back, rather than treat it as an inexpensive setting. The version-specific <a href="https://www.postgresql.org/docs/17/sql-altertable.html" rel="noreferrer">ALTER TABLE documentation</a> is the place to check before doing it.</p><p class="doc-paragraph">What interests me here is the amount of PostgreSQL I can keep while investigating a different storage layout. The SQL examples above deliberately stay with heap; they establish the boundary and a few expected results, leaving the larger implementation questions visible instead of hiding them behind a successful demo.</p></div>
@@ -161,7 +199,7 @@ ORDER BY read_count DESC, specimen;</code></pre><div class="terminal-result" dat
             <ul class="blog-keywords" aria-label="Topics"><li>PostgreSQL</li><li>table access methods</li><li>storage</li><li>heap</li><li>indexing</li><li>MVCC</li><li>WAL</li><li>VACUUM</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -178,7 +216,7 @@ ORDER BY read_count DESC, specimen;</code></pre><div class="terminal-result" dat
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -236,17 +274,15 @@ ORDER BY read_count DESC, specimen;</code></pre><div class="terminal-result" dat
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"Where PostgreSQL table storage can change","description":"Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.","url":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png","headline":"Where PostgreSQL table storage can change","mainEntityOfPage":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","table access methods","storage","heap","indexing","MVCC","WAL","VACUUM"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"Where PostgreSQL table storage can change","item":"/blog/where-postgres-table-storage-can-change/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/blog.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","@id":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/#article","name":"Where PostgreSQL table storage can change","description":"Following a small specimen table from SQL into its access method, and looking at the work that remains after a custom engine can return its first row.","url":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/thumbnail.jpg","datePublished":"2026-10-12","dateModified":"2026-10-12T21:58:39+02:00","headline":"Where PostgreSQL table storage can change","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"keywords":["PostgreSQL","table access methods","storage","heap","indexing","MVCC","WAL","VACUUM"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://bioseqdb.com/blog/"},{"@type":"ListItem","position":3,"name":"Where PostgreSQL table storage can change","item":"https://bioseqdb.com/blog/where-postgres-table-storage-can-change/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/blog.mjs"></script>
 </body>
 </html>

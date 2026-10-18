@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Questions about BioseqDB</title>
+<meta name="description" content="Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.">
+<link rel="canonical" href="https://bioseqdb.com/qa/">
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Questions about BioseqDB</Attribute>
+    <Attribute name="description">Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;18T15:27:54+02:00</Attribute>
+    <Attribute name="category">Questions and answers</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;18</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/qa/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
+<meta property="og:title" content="Questions about BioseqDB">
+<meta property="og:description" content="Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bioseqdb.com/qa/">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/qa/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/qa/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Questions about BioseqDB on BioseqDB">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Questions about BioseqDB">
+<meta name="twitter:description" content="Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.">
+<meta name="twitter:image" content="https://bioseqdb.com/qa/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Questions about BioseqDB on BioseqDB">
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/qa.css">
+</head>
+<body id="page-top" class="docs-design-page qa-page">
+<a class="skip-link" href="#doc-main">Skip to main content</a>
+
+<div data-screen-label="BioseqDB questions and answers">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <div class="site-header-inner">
+    <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
+    <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
+      <span>Bioseq<span>DB</span></span>
+    </a>
+    <nav data-topnav class="site-navigation" aria-label="Main navigation">
+      <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+      <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
+    </nav>
+    <div data-search-wrap class="site-search-wrap">
+      <div data-search-box class="site-search-box">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"></circle><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <input id="doc-search" type="search" role="combobox" aria-label="Search documentation" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="/v0.1/search-index.json" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div id="search-dd" class="site-search-dropdown" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div data-ver-wrap class="site-version-wrap">
+      <button id="ver-btn" type="button" class="site-version-button">v0.1 <span class="site-version-status">Alpha</span><span data-caret class="site-version-caret"></span></button>
+      <div id="ver-menu" class="site-version-menu" data-versions-url="/versions.json">
+        <a data-ver href="/v0.1/tutorials/getting_started/" aria-current="page" class="site-version-link">v0.1 <span class="site-version-current">current</span></a>
+        <a data-ver-all href="/versions/" class="site-version-link">All versions</a>
+      </div>
+    </div>
+    <div class="site-actions">
+      <a data-contact-link class="site-icon-button" href="/contact/" aria-label="Contact me" title="Contact the BioseqDB maintainer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.6"></rect><path d="m4 7 8 6 8-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        <span class="site-contact-label">Contact me</span><span class="site-action-tooltip" aria-hidden="true">Contact the BioseqDB maintainer</span>
+      </a>
+      <a data-ghbtn class="site-github" href="https://github.com/styczynski/bioseqdb" rel="noreferrer" aria-label="GitHub" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.86c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.58 9.58 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"></path></svg>
+        <span class="site-github-label">GitHub</span>
+      </a>
+      <button type="button" class="site-icon-button" data-theme-toggle aria-pressed="false" data-dark-label="Dark mode. Switch to light mode." data-light-label="Light mode. Switch to dark mode." aria-label="Dark mode. Switch to light mode." title="Dark mode. Switch to light mode.">
+        <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg>
+        <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 15.3A8.5 8.5 0 0 1 8.7 4 8.5 8.5 0 1 0 20 15.3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path></svg>
+        <span data-theme-tooltip class="site-action-tooltip" aria-hidden="true">Dark mode. Switch to light mode.</span>
+      </button>
+    </div>
+  </div>
+  
+  <section class="site-announcement" data-announcement aria-label="Release announcement">
+    <div class="site-announcement-inner">
+      <div class="site-announcement-window" data-announcement-window tabindex="0">
+        <p data-announcement-text><strong>BioseqDB first version released!</strong> Note that this is experimental software that still contains bugs. Feel free to provide feedback via <a href="https://github.com/styczynski/bioseqdb/issues">GitHub issues</a> and <a href="/contact/">contact</a></p>
+      </div>
+      <button type="button" data-announcement-toggle hidden aria-pressed="false" aria-label="Pause release announcement" data-pause-label="Pause release announcement" data-resume-label="Resume release announcement" title="Pause release announcement"><svg class="announcement-pause" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1h3v10H2zm5 0h3v10H7z"></path></svg><svg class="announcement-play" width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="m3 1 8 5-8 5z"></path></svg></button>
+    </div>
+  </section>
+  
+</header>
+
+  <main id="doc-main" class="qa-shell">
+    <nav class="qa-breadcrumb" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><span aria-current="page">Q&amp;A</span></nav>
+    <header class="qa-intro"><p class="qa-eyebrow">BioseqDB Q&amp;A</p><h1>Questions about BioseqDB</h1><p>New to BioseqDB? These are the questions I would ask before putting a dataset into it. The answers link to working examples and the longer explanations in the docs.</p></header>
+    <div class="qa-layout">
+      <nav class="qa-navigation" aria-label="Find a question">
+        <h2>Find a question</h2>
+        <ul><li><a href="#getting-to-know-bioseqdb">Getting to know BioseqDB</a></li><li><a href="#installing-and-trying-it">Installing and trying it</a></li><li><a href="#sequences-and-storage">Sequences and storage</a></li><li><a href="#alignments-and-results">Alignments and results</a></li><li><a href="#performance-and-configuration">Performance and configuration</a></li><li><a href="#python-data-and-next-steps">Python, external data, and next steps</a></li></ul>
+      </nav>
+      <div class="qa-groups">
+        
+        <section class="qa-group" aria-labelledby="getting-to-know-bioseqdb">
+          <h2 id="getting-to-know-bioseqdb">Getting to know BioseqDB</h2>
+          
+          <article class="qa-question" id="is-bioseqdb-a-postgres-extension">
+            <h3><a href="#is-bioseqdb-a-postgres-extension" title="Link to this question">Is BioseqDB a PostgreSQL extension or a separate database?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">It is a PostgreSQL extension. You connect to PostgreSQL with the same clients you already use, then add BioseqDB sequence columns and tables where you need them. The extension supplies sequence types, alignment functions, indexes, and its own table storage. The <a href="/v0.1/tutorials/getting_started/">SQL walkthrough</a> starts with a small table you can try yourself.</p></div>
+          </article>
+          
+          <article class="qa-question" id="what-can-bioseqdb-do">
+            <h3><a href="#what-can-bioseqdb-do" title="Link to this question">What can I actually do with it?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Store DNA sequences beside sample metadata, read slices of those sequences, perform sequence operations, and find alignments using SQL. You can combine an alignment with a metadata filter or a join in the same query. The main focus is sequence storage and alignment; it is not a complete replacement for every tool in a genomics pipeline.</p></div>
+          </article>
+          
+          <article class="qa-question" id="fit-into-an-existing-workflow">
+            <h3><a href="#fit-into-an-existing-workflow" title="Link to this question">How would BioseqDB fit into a workflow I already have?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">A useful starting point is the part where you repeatedly load the same reference sequences, run searches, then join the matches back to a spreadsheet or another database. Put the reference and its metadata in a BioseqDB table and issue those searches from your existing SQL or Python code. You can keep the earlier and later steps of the pipeline as they are. The <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a> shows this with SQLAlchemy and Plotly.</p></div>
+          </article>
+          
+          <article class="qa-question" id="difference-from-fasta-files">
+            <h3><a href="#difference-from-fasta-files" title="Link to this question">Why put sequences in a database instead of keeping FASTA files?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">FASTA files are still useful for exchanging sequences. The database becomes useful when the same sequences have metadata, are queried repeatedly, or need to be combined with other tables. You can filter samples by ordinary columns and ask for their sequence matches without preparing another set of input files for each query.</p></div>
+          </article>
+          
+          <article class="qa-question" id="is-it-open-source">
+            <h3><a href="#is-it-open-source" title="Link to this question">Is BioseqDB open source, and can I use it for free?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Yes. BioseqDB is published under the Apache 2.0 license, and the source and release packages are available without a subscription. See the <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer">repository and license</a> for the actual terms and the notices for included components. Running a database still uses your own machine or hosting resources.</p></div>
+          </article>
+          
+          <article class="qa-question" id="who-is-building-it">
+            <h3><a href="#who-is-building-it" title="Link to this question">Who is building BioseqDB?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">I am Piotr Styczyński, and BioseqDB is my independent project. It grew out of several years of experiments with sequence data, aligners, and PostgreSQL. The <a href="/v0.1/tutorials/project_introduction/">introduction</a> has the timeline and explains how the current implementation developed.</p></div>
+          </article>
+          
+        </section>
+        
+        <section class="qa-group" aria-labelledby="installing-and-trying-it">
+          <h2 id="installing-and-trying-it">Installing and trying it</h2>
+          
+          <article class="qa-question" id="easiest-way-to-try-it">
+            <h3><a href="#easiest-way-to-try-it" title="Link to this question">What is the quickest way to try BioseqDB?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Start with the <a href="/v0.1/tutorials/getting_started/#docker-quick-start">Docker quick start</a>. It gives you the image name, a local PostgreSQL container, and a small alignment query. Run the sample data first so you can check the installation before importing your own dataset.</p></div>
+          </article>
+          
+          <article class="qa-question" id="do-i-have-to-use-docker">
+            <h3><a href="#do-i-have-to-use-docker" title="Link to this question">Do I have to use Docker?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">No. There are native alpha packages as well as Docker images, and you can build from source. Pick a package that matches your operating system, CPU architecture, and PostgreSQL major version. The <a href="/v0.1/tutorials/getting_started/#packages-and-docker-images">package table</a> links to the available builds and their setup notes.</p></div>
+          </article>
+          
+          <article class="qa-question" id="which-postgres-version">
+            <h3><a href="#which-postgres-version" title="Link to this question">Will a package for one PostgreSQL version work with another?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Use the build for your PostgreSQL major version. An extension binary built for one major version is not something you should copy into another server version. The release table also distinguishes stable PostgreSQL releases from prerelease and development builds, so check the full package label.</p></div>
+          </article>
+          
+          <article class="qa-question" id="managed-postgres-services">
+            <h3><a href="#managed-postgres-services" title="Link to this question">Can I install it on any managed PostgreSQL service?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Only if the service lets you install this native extension. Many hosted PostgreSQL services accept a fixed list of extensions and do not let customers upload their own binaries. Check that before choosing a host; a self-managed PostgreSQL instance or the supplied Docker image gives you control over the installation.</p></div>
+          </article>
+          
+          <article class="qa-question" id="is-a-gpu-required">
+            <h3><a href="#is-a-gpu-required" title="Link to this question">Do I need a GPU?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">No. BioseqDB has CPU implementations, and the walkthrough can run without a GPU. There is also experimental Vulkan work, but a GPU is not a requirement or a promise of better performance. The <a href="/v0.1/tutorials/project_benchmarking/">benchmark chapter</a> discusses where the tested GPU approach helped and where it did not.</p></div>
+          </article>
+          
+          <article class="qa-question" id="ready-for-production">
+            <h3><a href="#ready-for-production" title="Link to this question">Is the current release ready for production?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">It is an experimental alpha and still has bugs and limitations. I would start with a copy of a dataset and a reproducible experiment. Read the <a href="/v0.1/tutorials/getting_started/#alpha-version-limitations">alpha limitations</a> before depending on it, especially the notes about memory admission and automatic index maintenance.</p></div>
+          </article>
+          
+        </section>
+        
+        <section class="qa-group" aria-labelledby="sequences-and-storage">
+          <h2 id="sequences-and-storage">Sequences and storage</h2>
+          
+          <article class="qa-question" id="sequence-versus-text">
+            <h3><a href="#sequence-versus-text" title="Link to this question">Why use bioseq.seq instead of a text column?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph"><code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.seq</code> gives the database a sequence type with a defined alphabet and compact representation. BioseqDB can then perform sequence operations and alignment without treating the value as an arbitrary string. With <code data-entity-ranges="[{&quot;start&quot;:6,&quot;len&quot;:6,&quot;id&quot;:&quot;sql:access_method:$extension.bioseq::table::sql_routines.bioseq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">USING bioseq</code>, sequence data also uses the extension's storage and index machinery. The <a href="/v0.1/tutorials/project_sequence_abstractions/">sequence chapter</a> explains the representation.</p></div>
+          </article>
+          
+          <article class="qa-question" id="meaning-of-dna4-and-64">
+            <h3><a href="#meaning-of-dna4-and-64" title="Link to this question">What do dna4 and 64 mean in bioseq.seq(&#39;dna4&#39;, 64)?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph"><code>dna4</code> selects the four-letter DNA alphabet: A, C, G, and T. The <code>64</code> selects a 64-bit storage unit for the packed representation; it does not limit the sequence to 64 bases. The sequence length is separate and can be read with <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.len</code>.</p></div>
+          </article>
+          
+          <article class="qa-question" id="unknown-bases">
+            <h3><a href="#unknown-bases" title="Link to this question">What should I do with unknown bases such as N?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Use the <code>dna5</code> alphabet when N needs to be preserved. DNA4 represents only A, C, G, and T, so it is not the right representation for retaining unknown bases. Check the alphabet before importing a dataset, and keep track of unresolved bases when interpreting composition or alignment results.</p></div>
+          </article>
+          
+          <article class="qa-question" id="proteins-and-rna">
+            <h3><a href="#proteins-and-rna" title="Link to this question">Can I use it for protein or RNA alignments?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">The current documented implementation supports DNA4 and DNA5. Its sequence abstractions were designed with other alphabets in mind, but that is not the same as having a supported protein or RNA alignment workflow today. The examples on this site use DNA.</p></div>
+          </article>
+          
+          <article class="qa-question" id="keep-metadata-with-sequences">
+            <h3><a href="#keep-metadata-with-sequences" title="Link to this question">Can I keep sample names and other metadata in the same table?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Yes. A sequence table can have ordinary columns such as an identifier, organism, collection date, or sample name beside its <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.seq</code> column. Those columns can be selected, filtered, aggregated, and joined using SQL. The <a href="/v0.1/tutorials/getting_started/">walkthrough</a> uses patient metadata to illustrate this.</p></div>
+          </article>
+          
+          <article class="qa-question" id="loading-fasta-fastq">
+            <h3><a href="#loading-fasta-fastq" title="Link to this question">How do I import FASTA or FASTQ data?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">BioseqDB provides <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:11,&quot;id&quot;:&quot;sql:function:bioseq.load(regclass,text,text,bioseq.column_mapping[])&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-load-440e918452a32019/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.load</code> for loading sequence files into a table. The column layout and header format matter, so start with the <a href="/v0.1/tutorials/getting_started/#13-load-a-fasta-file-into-another-table">FASTA import example</a> and adapt its target table. A filename passed to the server refers to a file the PostgreSQL server can access, not automatically a file on the computer running your SQL client.</p></div>
+          </article>
+          
+        </section>
+        
+        <section class="qa-group" aria-labelledby="alignments-and-results">
+          <h2 id="alignments-and-results">Alignments and results</h2>
+          
+          <article class="qa-question" id="what-is-an-alignment">
+            <h3><a href="#what-is-an-alignment" title="Link to this question">What does an alignment tell me?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">An alignment describes how parts of two sequences correspond, allowing for substitutions and gaps. It can help locate similar regions, but similarity alone does not establish a gene's function or a biological cause. The <a href="/v0.1/tutorials/project_alignment_foundations/">alignment foundations</a> introduce the scoring and the seed-and-extend approach used to make large searches practical.</p></div>
+          </article>
+          
+          <article class="qa-question" id="how-to-run-a-search">
+            <h3><a href="#how-to-run-a-search" title="Link to this question">How do I run a sequence search in SQL?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Use <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:8,&quot;id&quot;:&quot;sql:overload_group:$extension.mmsearch&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">mmsearch</code> in a query over a BioseqDB table, supplying the target sequence column and a query sequence. Select the metadata and alignment fields you want from the matching rows. The <a href="/v0.1/tutorials/getting_started/#6-alignment-query">first alignment query</a> includes the table and data needed to run it, rather than just an isolated function call.</p></div>
+          </article>
+          
+          <article class="qa-question" id="score-and-cigar">
+            <h3><a href="#score-and-cigar" title="Link to this question">What are bioseq.score and bioseq.cigar showing me?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph"><code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.score(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-score-4e84dfe56ac3c56b/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.score</code> reports the base-alignment score for a match. <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.cigar(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-cigar-2c13a882e87557f3/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.cigar</code> describes the alignment as operations such as aligned columns, insertions, and deletions. Selecting the CIGAR requests base alignment; selecting the score alone does not, so that score can be zero. A CIGAR M operation can include both matching and mismatching bases, so do not read it as a count of identical bases. The <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a> walks through these fields with real sequences.</p></div>
+          </article>
+          
+          <article class="qa-question" id="no-alignment-results">
+            <h3><a href="#no-alignment-results" title="Link to this question">Why did my alignment query return no rows?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">First check that the table contains the sequences you intended to import and that their lengths and alphabets make sense. Then try the small working example from the docs. The query can legitimately find no retained matches when the sequences are too short, too different, or excluded by the chosen thresholds. Inspect the settings and search diagnostics before assuming the data is missing.</p></div>
+          </article>
+          
+          <article class="qa-question" id="alignment-metadata-is-null">
+            <h3><a href="#alignment-metadata-is-null" title="Link to this question">Why are alignment fields NULL in a plain SELECT?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Alignment fields describe a match produced by a search. Reading a row on its own does not create an alignment context, so a field such as <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.score(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-score-4e84dfe56ac3c56b/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.score</code> has no match to describe. Select it in the alignment query shown in the walkthrough. Some details also depend on which alignment work the query requests and which settings are enabled.</p></div>
+          </article>
+          
+          <article class="qa-question" id="slices-and-coordinate-conventions">
+            <h3><a href="#slices-and-coordinate-conventions" title="Link to this question">Can I align just a region, and how do the coordinates work?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Yes. Sequence slices let you search a region rather than the whole stored sequence. BioseqDB's sequence examples use zero-based, half-open intervals: the start is included and the end is excluded. This differs from the one-based inclusive coordinates used in some biological records. The <a href="/v0.1/tutorials/getting_started/#14-slices">slice examples</a> and butterfly tutorial show the conversion explicitly.</p></div>
+          </article>
+          
+        </section>
+        
+        <section class="qa-group" aria-labelledby="performance-and-configuration">
+          <h2 id="performance-and-configuration">Performance and configuration</h2>
+          
+          <article class="qa-question" id="always-120-times-faster">
+            <h3><a href="#always-120-times-faster" title="Link to this question">Does the 120× speedup apply to every query?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">No. “Up to 120×” refers to particular measured comparisons, not every workload. Reusing a prepared index, available memory, sequence sizes, and the comparison tool's work all affect the result. Building the index also costs time. Use the <a href="/benchmarks/">benchmark explorer</a> to inspect the configurations and methodology; an unindexed one-off query can be slower than minimap2.</p></div>
+          </article>
+          
+          <article class="qa-question" id="relationship-to-minimap2">
+            <h3><a href="#relationship-to-minimap2" title="Link to this question">Does BioseqDB run the minimap2 command behind the scenes?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">No separate minimap2 executable is needed for the SQL examples. BioseqDB integrates alignment work into PostgreSQL and offers configurable seeding, chaining, and final-alignment implementations. Minimap2 is an important reference and part of the project's history, but the database also adds persistent indexes, sequence storage, and SQL query integration.</p></div>
+          </article>
+          
+          <article class="qa-question" id="when-to-build-an-index">
+            <h3><a href="#when-to-build-an-index" title="Link to this question">When is it worth building a sequence index?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">An index is especially useful when you expect to search the same reference data repeatedly. You pay the preparation cost once and can reuse the stored lookup structures in later searches. For a one-off small comparison, that preparation may cost more than it saves. The <a href="/v0.1/tutorials/project_index_storage/">index chapter</a> explains what is stored and how it is read.</p></div>
+          </article>
+          
+          <article class="qa-question" id="automatic-index-updates">
+            <h3><a href="#automatic-index-updates" title="Link to this question">Will inserting new rows update the index automatically?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Be careful with the current alpha. The default grouped-MPF index does not support automatic insert maintenance, so the walkthrough sets <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:39,&quot;id&quot;:&quot;sql:guc:bioseq.index.insert_maintenance.enabled&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/insert-maintenance-enabled-d1b9ecb5352dbdbb/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.index.insert_maintenance.enabled</code> to off and shows an explicit rebuild. Other index configurations have different behavior. Follow the <a href="/v0.1/tutorials/getting_started/#automatic-index-updates">index maintenance notes</a> for the configuration you use.</p></div>
+          </article>
+          
+          <article class="qa-question" id="finding-settings">
+            <h3><a href="#finding-settings" title="Link to this question">Where can I find the available settings and their defaults?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">The <a href="/v0.1/tutorials/project_configuration_reference/">configuration reference</a> lists settings, accepted values, defaults, and descriptions. Search for a setting by its full path in the header search box, or use PostgreSQL's <code>SHOW</code> and <code>pg_settings</code> to inspect your session. Individual reference pages also include examples and range information where it applies.</p></div>
+          </article>
+          
+          <article class="qa-question" id="understanding-a-slow-query">
+            <h3><a href="#understanding-a-slow-query" title="Link to this question">How can I understand why a query is slow?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Start with <code>EXPLAIN (ANALYZE, BUFFERS)</code> on a query you are prepared to execute. BioseqDB adds search diagnostics, and its cache statistics can help explain repeated reads. Check whether the query reused an index and whether memory or a fallback changed the execution path. The <a href="/v0.1/tutorials/getting_started/">walkthrough</a> includes complete plans and explanations of their fields.</p></div>
+          </article>
+          
+        </section>
+        
+        <section class="qa-group" aria-labelledby="python-data-and-next-steps">
+          <h2 id="python-data-and-next-steps">Python, external data, and next steps</h2>
+          
+          <article class="qa-question" id="python-and-sqlalchemy">
+            <h3><a href="#python-and-sqlalchemy" title="Link to this question">Can I use BioseqDB from Python or a notebook?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Yes. It is still PostgreSQL, so a PostgreSQL driver and SQLAlchemy can send the SQL queries and return ordinary result rows. You do not need a separate Python aligner. The <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a> includes a Poetry environment, SQLAlchemy queries, Plotly figures, and a notebook in the examples repository.</p></div>
+          </article>
+          
+          <article class="qa-question" id="ncbi-through-sql">
+            <h3><a href="#ncbi-through-sql" title="Link to this question">Can I search NCBI and import its sequences through SQL?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Yes, when BioseqDB is built with the external API clients enabled. The <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a> searches NCBI by organism, chooses explicit records and sequence windows, then imports them into local tables. Keep the accessions and assembly versions with your results so you know which data you compared.</p></div>
+          </article>
+          
+          <article class="qa-question" id="ncbi-missing-from-alpha">
+            <h3><a href="#ncbi-missing-from-alpha" title="Link to this question">Why are the NCBI tables missing from my Docker image or native package?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">The published 0.1.0-alpha.1 Docker images and native packages do not include the external-database integration. It cannot be switched on with a runtime setting in those binaries. For the current tutorial, build from source with <code>BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON</code>; the <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">setup instructions</a> explain the additional steps.</p></div>
+          </article>
+          
+          <article class="qa-question" id="data-sent-to-external-services">
+            <h3><a href="#data-sent-to-external-services" title="Link to this question">Does an ordinary alignment send my sequences to another service?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">An alignment over locally stored sequences runs inside your PostgreSQL server. Explicit queries to an external provider such as NCBI do make requests to that provider. Keep those two cases separate when deciding what data to import and what network access to allow for your database.</p></div>
+          </article>
+          
+          <article class="qa-question" id="where-to-start-learning">
+            <h3><a href="#where-to-start-learning" title="Link to this question">Do I need to know biology before following the tutorials?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">A little context helps, but you do not need to begin with an entire genomics course. Start with the <a href="/v0.1/tutorials/project_biology/">biology introduction</a> for DNA and the <a href="/v0.1/tutorials/project_alignment_foundations/">alignment chapter</a> for sequence comparison. The SQL walkthrough uses small synthetic examples, while the butterfly post builds up a real comparison one step at a time.</p></div>
+          </article>
+          
+          <article class="qa-question" id="report-bugs-and-ask-questions">
+            <h3><a href="#report-bugs-and-ask-questions" title="Link to this question">Where should I report a bug or ask for a feature?<span aria-hidden="true" class="qa-anchor">#</span></a></h3>
+            <div class="qa-answer"><p class="doc-paragraph">Open a <a href="https://github.com/styczynski/bioseqdb/issues" rel="noreferrer">GitHub issue</a> with the BioseqDB build, PostgreSQL version, query, and a small example that reproduces the problem. Avoid posting private data or credentials. For a conversation that does not belong in a public issue, use the <a href="/contact/">contact page</a>. I maintain the project independently, so please allow some time for a reply.</p></div>
+          </article>
+          
+        </section>
+        
+        <aside class="qa-contact"><h2>Still have a question?</h2><p>Send me a short description of what you are trying to do. BioseqDB is an independent project, so a reply may take a while.</p><a href="/contact/">Contact me <span aria-hidden="true">→</span></a></aside>
+      </div>
+    </div>
+  </main>
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            <a href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation home</a><a href="/v0.1/reference/" class="dd-s0250 dd-h009">API reference</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="/" class="dd-s0250 dd-h009">Product home</a>
+            <a href="/#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="/#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="/#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="/#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="/v0.1/tutorials/getting_started/" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="https://github.com/styczynski/bioseqdb" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">Alpha &middot; v0.1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; 2026 BioseqDB Piotr Styczyński</span>
+        <nav class="site-footer-links dd-s0257">
+          <a href="https://github.com/styczynski/bioseqdb/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (Apache 2.0)</a>
+          <a href="/versions/" class="dd-s0258 dd-h010">Versions</a>
+          <a href="https://www.crunchbase.com/organization/bioseq-db" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Crunchbase</a>
+          <a href="https://medium.com/@styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Medium</a>
+          <a href="https://www.linkedin.com/company/bioseqdb/" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">BioseqDB LinkedIn</a>
+          <a href="https://www.linkedin.com/in/piotrstyczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author LinkedIn</a>
+          <a href="https://github.com/styczynski" rel="noreferrer" class="dd-s0258 dd-h010 site-footer-profile">Author GitHub</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+</div>
+
+<div id="entity-pop"></div>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"FAQPage","@id":"https://bioseqdb.com/qa/#webpage","name":"Questions about BioseqDB","description":"Practical answers about BioseqDB, from installing the PostgreSQL extension to storing DNA, running alignments, and understanding the current alpha.","url":"https://bioseqdb.com/qa/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/qa/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/qa/thumbnail.jpg","datePublished":"2026-10-18","dateModified":"2026-10-18T15:27:54+02:00","mainEntity":[{"@type":"Question","name":"Is BioseqDB a PostgreSQL extension or a separate database?","acceptedAnswer":{"@type":"Answer","text":"It is a PostgreSQL extension. You connect to PostgreSQL with the same clients you already use, then add BioseqDB sequence columns and tables where you need them. The extension supplies sequence types, alignment functions, indexes, and its own table storage. The SQL walkthrough starts with a small table you can try yourself."},"url":"https://bioseqdb.com/qa/#is-bioseqdb-a-postgres-extension"},{"@type":"Question","name":"What can I actually do with it?","acceptedAnswer":{"@type":"Answer","text":"Store DNA sequences beside sample metadata, read slices of those sequences, perform sequence operations, and find alignments using SQL. You can combine an alignment with a metadata filter or a join in the same query. The main focus is sequence storage and alignment; it is not a complete replacement for every tool in a genomics pipeline."},"url":"https://bioseqdb.com/qa/#what-can-bioseqdb-do"},{"@type":"Question","name":"How would BioseqDB fit into a workflow I already have?","acceptedAnswer":{"@type":"Answer","text":"A useful starting point is the part where you repeatedly load the same reference sequences, run searches, then join the matches back to a spreadsheet or another database. Put the reference and its metadata in a BioseqDB table and issue those searches from your existing SQL or Python code. You can keep the earlier and later steps of the pipeline as they are. The butterfly tutorial shows this with SQLAlchemy and Plotly."},"url":"https://bioseqdb.com/qa/#fit-into-an-existing-workflow"},{"@type":"Question","name":"Why put sequences in a database instead of keeping FASTA files?","acceptedAnswer":{"@type":"Answer","text":"FASTA files are still useful for exchanging sequences. The database becomes useful when the same sequences have metadata, are queried repeatedly, or need to be combined with other tables. You can filter samples by ordinary columns and ask for their sequence matches without preparing another set of input files for each query."},"url":"https://bioseqdb.com/qa/#difference-from-fasta-files"},{"@type":"Question","name":"Is BioseqDB open source, and can I use it for free?","acceptedAnswer":{"@type":"Answer","text":"Yes. BioseqDB is published under the Apache 2.0 license, and the source and release packages are available without a subscription. See the repository and license for the actual terms and the notices for included components. Running a database still uses your own machine or hosting resources."},"url":"https://bioseqdb.com/qa/#is-it-open-source"},{"@type":"Question","name":"Who is building BioseqDB?","acceptedAnswer":{"@type":"Answer","text":"I am Piotr Styczyński, and BioseqDB is my independent project. It grew out of several years of experiments with sequence data, aligners, and PostgreSQL. The introduction has the timeline and explains how the current implementation developed."},"url":"https://bioseqdb.com/qa/#who-is-building-it"},{"@type":"Question","name":"What is the quickest way to try BioseqDB?","acceptedAnswer":{"@type":"Answer","text":"Start with the Docker quick start. It gives you the image name, a local PostgreSQL container, and a small alignment query. Run the sample data first so you can check the installation before importing your own dataset."},"url":"https://bioseqdb.com/qa/#easiest-way-to-try-it"},{"@type":"Question","name":"Do I have to use Docker?","acceptedAnswer":{"@type":"Answer","text":"No. There are native alpha packages as well as Docker images, and you can build from source. Pick a package that matches your operating system, CPU architecture, and PostgreSQL major version. The package table links to the available builds and their setup notes."},"url":"https://bioseqdb.com/qa/#do-i-have-to-use-docker"},{"@type":"Question","name":"Will a package for one PostgreSQL version work with another?","acceptedAnswer":{"@type":"Answer","text":"Use the build for your PostgreSQL major version. An extension binary built for one major version is not something you should copy into another server version. The release table also distinguishes stable PostgreSQL releases from prerelease and development builds, so check the full package label."},"url":"https://bioseqdb.com/qa/#which-postgres-version"},{"@type":"Question","name":"Can I install it on any managed PostgreSQL service?","acceptedAnswer":{"@type":"Answer","text":"Only if the service lets you install this native extension. Many hosted PostgreSQL services accept a fixed list of extensions and do not let customers upload their own binaries. Check that before choosing a host; a self-managed PostgreSQL instance or the supplied Docker image gives you control over the installation."},"url":"https://bioseqdb.com/qa/#managed-postgres-services"},{"@type":"Question","name":"Do I need a GPU?","acceptedAnswer":{"@type":"Answer","text":"No. BioseqDB has CPU implementations, and the walkthrough can run without a GPU. There is also experimental Vulkan work, but a GPU is not a requirement or a promise of better performance. The benchmark chapter discusses where the tested GPU approach helped and where it did not."},"url":"https://bioseqdb.com/qa/#is-a-gpu-required"},{"@type":"Question","name":"Is the current release ready for production?","acceptedAnswer":{"@type":"Answer","text":"It is an experimental alpha and still has bugs and limitations. I would start with a copy of a dataset and a reproducible experiment. Read the alpha limitations before depending on it, especially the notes about memory admission and automatic index maintenance."},"url":"https://bioseqdb.com/qa/#ready-for-production"},{"@type":"Question","name":"Why use bioseq.seq instead of a text column?","acceptedAnswer":{"@type":"Answer","text":"bioseq.seq gives the database a sequence type with a defined alphabet and compact representation. BioseqDB can then perform sequence operations and alignment without treating the value as an arbitrary string. With USING bioseq, sequence data also uses the extension's storage and index machinery. The sequence chapter explains the representation."},"url":"https://bioseqdb.com/qa/#sequence-versus-text"},{"@type":"Question","name":"What do dna4 and 64 mean in bioseq.seq('dna4', 64)?","acceptedAnswer":{"@type":"Answer","text":"dna4 selects the four-letter DNA alphabet: A, C, G, and T. The 64 selects a 64-bit storage unit for the packed representation; it does not limit the sequence to 64 bases. The sequence length is separate and can be read with bioseq.len."},"url":"https://bioseqdb.com/qa/#meaning-of-dna4-and-64"},{"@type":"Question","name":"What should I do with unknown bases such as N?","acceptedAnswer":{"@type":"Answer","text":"Use the dna5 alphabet when N needs to be preserved. DNA4 represents only A, C, G, and T, so it is not the right representation for retaining unknown bases. Check the alphabet before importing a dataset, and keep track of unresolved bases when interpreting composition or alignment results."},"url":"https://bioseqdb.com/qa/#unknown-bases"},{"@type":"Question","name":"Can I use it for protein or RNA alignments?","acceptedAnswer":{"@type":"Answer","text":"The current documented implementation supports DNA4 and DNA5. Its sequence abstractions were designed with other alphabets in mind, but that is not the same as having a supported protein or RNA alignment workflow today. The examples on this site use DNA."},"url":"https://bioseqdb.com/qa/#proteins-and-rna"},{"@type":"Question","name":"Can I keep sample names and other metadata in the same table?","acceptedAnswer":{"@type":"Answer","text":"Yes. A sequence table can have ordinary columns such as an identifier, organism, collection date, or sample name beside its bioseq.seq column. Those columns can be selected, filtered, aggregated, and joined using SQL. The walkthrough uses patient metadata to illustrate this."},"url":"https://bioseqdb.com/qa/#keep-metadata-with-sequences"},{"@type":"Question","name":"How do I import FASTA or FASTQ data?","acceptedAnswer":{"@type":"Answer","text":"BioseqDB provides bioseq.load for loading sequence files into a table. The column layout and header format matter, so start with the FASTA import example and adapt its target table. A filename passed to the server refers to a file the PostgreSQL server can access, not automatically a file on the computer running your SQL client."},"url":"https://bioseqdb.com/qa/#loading-fasta-fastq"},{"@type":"Question","name":"What does an alignment tell me?","acceptedAnswer":{"@type":"Answer","text":"An alignment describes how parts of two sequences correspond, allowing for substitutions and gaps. It can help locate similar regions, but similarity alone does not establish a gene's function or a biological cause. The alignment foundations introduce the scoring and the seed-and-extend approach used to make large searches practical."},"url":"https://bioseqdb.com/qa/#what-is-an-alignment"},{"@type":"Question","name":"How do I run a sequence search in SQL?","acceptedAnswer":{"@type":"Answer","text":"Use mmsearch in a query over a BioseqDB table, supplying the target sequence column and a query sequence. Select the metadata and alignment fields you want from the matching rows. The first alignment query includes the table and data needed to run it, rather than just an isolated function call."},"url":"https://bioseqdb.com/qa/#how-to-run-a-search"},{"@type":"Question","name":"What are bioseq.score and bioseq.cigar showing me?","acceptedAnswer":{"@type":"Answer","text":"bioseq.score reports the base-alignment score for a match. bioseq.cigar describes the alignment as operations such as aligned columns, insertions, and deletions. Selecting the CIGAR requests base alignment; selecting the score alone does not, so that score can be zero. A CIGAR M operation can include both matching and mismatching bases, so do not read it as a count of identical bases. The butterfly tutorial walks through these fields with real sequences."},"url":"https://bioseqdb.com/qa/#score-and-cigar"},{"@type":"Question","name":"Why did my alignment query return no rows?","acceptedAnswer":{"@type":"Answer","text":"First check that the table contains the sequences you intended to import and that their lengths and alphabets make sense. Then try the small working example from the docs. The query can legitimately find no retained matches when the sequences are too short, too different, or excluded by the chosen thresholds. Inspect the settings and search diagnostics before assuming the data is missing."},"url":"https://bioseqdb.com/qa/#no-alignment-results"},{"@type":"Question","name":"Why are alignment fields NULL in a plain SELECT?","acceptedAnswer":{"@type":"Answer","text":"Alignment fields describe a match produced by a search. Reading a row on its own does not create an alignment context, so a field such as bioseq.score has no match to describe. Select it in the alignment query shown in the walkthrough. Some details also depend on which alignment work the query requests and which settings are enabled."},"url":"https://bioseqdb.com/qa/#alignment-metadata-is-null"},{"@type":"Question","name":"Can I align just a region, and how do the coordinates work?","acceptedAnswer":{"@type":"Answer","text":"Yes. Sequence slices let you search a region rather than the whole stored sequence. BioseqDB's sequence examples use zero-based, half-open intervals: the start is included and the end is excluded. This differs from the one-based inclusive coordinates used in some biological records. The slice examples and butterfly tutorial show the conversion explicitly."},"url":"https://bioseqdb.com/qa/#slices-and-coordinate-conventions"},{"@type":"Question","name":"Does the 120× speedup apply to every query?","acceptedAnswer":{"@type":"Answer","text":"No. “Up to 120×” refers to particular measured comparisons, not every workload. Reusing a prepared index, available memory, sequence sizes, and the comparison tool's work all affect the result. Building the index also costs time. Use the benchmark explorer to inspect the configurations and methodology; an unindexed one-off query can be slower than minimap2."},"url":"https://bioseqdb.com/qa/#always-120-times-faster"},{"@type":"Question","name":"Does BioseqDB run the minimap2 command behind the scenes?","acceptedAnswer":{"@type":"Answer","text":"No separate minimap2 executable is needed for the SQL examples. BioseqDB integrates alignment work into PostgreSQL and offers configurable seeding, chaining, and final-alignment implementations. Minimap2 is an important reference and part of the project's history, but the database also adds persistent indexes, sequence storage, and SQL query integration."},"url":"https://bioseqdb.com/qa/#relationship-to-minimap2"},{"@type":"Question","name":"When is it worth building a sequence index?","acceptedAnswer":{"@type":"Answer","text":"An index is especially useful when you expect to search the same reference data repeatedly. You pay the preparation cost once and can reuse the stored lookup structures in later searches. For a one-off small comparison, that preparation may cost more than it saves. The index chapter explains what is stored and how it is read."},"url":"https://bioseqdb.com/qa/#when-to-build-an-index"},{"@type":"Question","name":"Will inserting new rows update the index automatically?","acceptedAnswer":{"@type":"Answer","text":"Be careful with the current alpha. The default grouped-MPF index does not support automatic insert maintenance, so the walkthrough sets bioseq.index.insert_maintenance.enabled to off and shows an explicit rebuild. Other index configurations have different behavior. Follow the index maintenance notes for the configuration you use."},"url":"https://bioseqdb.com/qa/#automatic-index-updates"},{"@type":"Question","name":"Where can I find the available settings and their defaults?","acceptedAnswer":{"@type":"Answer","text":"The configuration reference lists settings, accepted values, defaults, and descriptions. Search for a setting by its full path in the header search box, or use PostgreSQL's SHOW and pg_settings to inspect your session. Individual reference pages also include examples and range information where it applies."},"url":"https://bioseqdb.com/qa/#finding-settings"},{"@type":"Question","name":"How can I understand why a query is slow?","acceptedAnswer":{"@type":"Answer","text":"Start with EXPLAIN (ANALYZE, BUFFERS) on a query you are prepared to execute. BioseqDB adds search diagnostics, and its cache statistics can help explain repeated reads. Check whether the query reused an index and whether memory or a fallback changed the execution path. The walkthrough includes complete plans and explanations of their fields."},"url":"https://bioseqdb.com/qa/#understanding-a-slow-query"},{"@type":"Question","name":"Can I use BioseqDB from Python or a notebook?","acceptedAnswer":{"@type":"Answer","text":"Yes. It is still PostgreSQL, so a PostgreSQL driver and SQLAlchemy can send the SQL queries and return ordinary result rows. You do not need a separate Python aligner. The butterfly tutorial includes a Poetry environment, SQLAlchemy queries, Plotly figures, and a notebook in the examples repository."},"url":"https://bioseqdb.com/qa/#python-and-sqlalchemy"},{"@type":"Question","name":"Can I search NCBI and import its sequences through SQL?","acceptedAnswer":{"@type":"Answer","text":"Yes, when BioseqDB is built with the external API clients enabled. The butterfly tutorial searches NCBI by organism, chooses explicit records and sequence windows, then imports them into local tables. Keep the accessions and assembly versions with your results so you know which data you compared."},"url":"https://bioseqdb.com/qa/#ncbi-through-sql"},{"@type":"Question","name":"Why are the NCBI tables missing from my Docker image or native package?","acceptedAnswer":{"@type":"Answer","text":"The published 0.1.0-alpha.1 Docker images and native packages do not include the external-database integration. It cannot be switched on with a runtime setting in those binaries. For the current tutorial, build from source with BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; the setup instructions explain the additional steps."},"url":"https://bioseqdb.com/qa/#ncbi-missing-from-alpha"},{"@type":"Question","name":"Does an ordinary alignment send my sequences to another service?","acceptedAnswer":{"@type":"Answer","text":"An alignment over locally stored sequences runs inside your PostgreSQL server. Explicit queries to an external provider such as NCBI do make requests to that provider. Keep those two cases separate when deciding what data to import and what network access to allow for your database."},"url":"https://bioseqdb.com/qa/#data-sent-to-external-services"},{"@type":"Question","name":"Do I need to know biology before following the tutorials?","acceptedAnswer":{"@type":"Answer","text":"A little context helps, but you do not need to begin with an entire genomics course. Start with the biology introduction for DNA and the alignment chapter for sequence comparison. The SQL walkthrough uses small synthetic examples, while the butterfly post builds up a real comparison one step at a time."},"url":"https://bioseqdb.com/qa/#where-to-start-learning"},{"@type":"Question","name":"Where should I report a bug or ask for a feature?","acceptedAnswer":{"@type":"Answer","text":"Open a GitHub issue with the BioseqDB build, PostgreSQL version, query, and a small example that reproduces the problem. Avoid posting private data or credentials. For a conversation that does not belong in a public issue, use the contact page. I maintain the project independently, so please allow some time for a reply."},"url":"https://bioseqdb.com/qa/#report-bugs-and-ask-questions"}]},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/qa/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Q\u0026A","item":"https://bioseqdb.com/qa/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+
+</body>
+</html>

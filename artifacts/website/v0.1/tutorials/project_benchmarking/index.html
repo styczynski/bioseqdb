@@ -1,38 +1,78 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarking and performance evaluation</title>
 <meta name="description" content="Benchmarking and performance evaluation">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/tutorials/project_benchmarking/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Benchmarking and performance evaluation</Attribute>
+    <Attribute name="description">Benchmarking and performance evaluation</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;05T00:28:51+02:00</Attribute>
+    <Attribute name="category">tutorial</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;04T23:42:25+02:00</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Benchmarking and performance evaluation">
 <meta property="og:description" content="Benchmarking and performance evaluation">
-<meta property="og:type" content="website">
+<meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/tutorials/project_benchmarking/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Benchmarking and performance evaluation on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Benchmarking and performance evaluation">
 <meta name="twitter:description" content="Benchmarking and performance evaluation">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Benchmarking and performance evaluation on BioseqDB">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
+<meta property="article:published_time" content="2026-10-04T23:42:25+02:00">
+<meta property="article:modified_time" content="2026-10-05T00:28:51+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="Documentation">
+
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
 
 </head>
 <body id="page-top" class="docs-design-page">
@@ -41,17 +81,18 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -170,12 +211,12 @@
 <p class="doc-paragraph"><a href="/benchmarks/?table=external-2-k20-w15">Benchmark results</a></p><p class="doc-paragraph">Each cell: A, comparison, B, comparison. <span class="project-math" data-math="inline">\cdot</span>: no measurement. n/a: no comparison.</p><p class="doc-paragraph">Blue: one lowest A and one lowest B measurement for each column for each configuration.</p><p class="doc-paragraph">Gray: minimap2. Yellow: my preferred MPF / Bounded / SIMD-DP / Block configuration.</p><p class="doc-paragraph">Comparisons use minimap2. The minimap2 row compares with BioseqDB.</p><p class="doc-paragraph"><sup>*</sup> Each algorithm except BLAST required intensive splitting, sometimes not equal. The splitting was the biggest possible to allow algorithm not to crash.</p><p class="doc-paragraph"><sup>a</sup>BLAST scores N as -3, compared with -1 in minimap2.</p><p class="doc-paragraph"><sup>b</sup>LexicMap stores reference N as A.</p><h3 class="hx" id="vulkan-on-a-vast-ai-gpu-instance" data-toc-sub data-title="Vulkan on a Vast.ai GPU instance">Vulkan on a Vast.ai GPU instance<a data-hash href="#vulkan-on-a-vast-ai-gpu-instance" aria-label="Link to this section">#</a></h3><p class="doc-paragraph"><a id="sec-vastai-gpu-results"></a></p><p class="doc-paragraph"><em>Vast.ai machine specs</em> <a id="tab-vastai-machine"></a></p><table><tr><td>Property</td><td>Value</td></tr><tr><td>CPU</td><td>AMD EPYC 7282 16-Core Processor</td></tr><tr><td>CPU quota</td><td>7.68 cores</td></tr><tr><td>Memory limit</td><td>120.8 GiB</td></tr><tr><td>GPU</td><td>NVIDIA GeForce RTX 5090</td></tr><tr><td>GPU memory</td><td>32,607 MiB</td></tr><tr><td>OS</td><td>Ubuntu 24.04</td></tr><tr><td>NVIDIA driver</td><td>595.84</td></tr><tr><td>Vulkan API</td><td>1.4.329</td></tr></table><p class="doc-paragraph"><a id="tab-vastai-gpu"></a> <a id="tab-bench-vastai"></a></p><div class="project-benchmark" data-table="vastai"></div>
 <p class="doc-paragraph"><a href="/benchmarks/?table=vastai">Benchmark results</a></p><p class="doc-paragraph">Each cell: A, comparison, B, comparison. Light gray = minimap2.</p><p class="doc-paragraph">Blue: one lowest A and one lowest B measurement for each column for each configuration.</p><p class="doc-paragraph">MPF/MPS = minimizers per fragment/sequence. Vulkan rows compare with minimap2 on the same machine.</p><p class="doc-paragraph"><span class="project-math" data-math="inline">\cdot</span> = no result. n/a: no comparison. <span class="project-color-brickred"><span class="project-math" data-math="inline">\bigcirc</span></span> = setup rejected. <span class="project-color-brickred"><span class="project-math" data-math="inline">\times</span></span> = execution failed.</p><p class="doc-paragraph"><sup>1</sup>The GPU index exceeds the available memory budget.</p><p class="doc-paragraph"><sup>2</sup>The MPS control buffer exceeds the Vulkan buffer limit.</p></div>
 
+  <section class="document-sources" aria-label="External sources"><h2>External sources</h2><ul><li><a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html">Amazon EBS-optimized instance types</a> <span class="document-sources-host">(docs.aws.amazon.com)</span></li></ul></section>
+
   
-  <nav class="dd-s0084" aria-label="Previous and next tutorial">
-    <div class="dd-s0085">
-      <a href="/v0.1/tutorials/project_index_storage/" class="dd-s0106 dd-h005"><span class="dd-s0087">&#8592; Previous</span><span class="dd-s0088">Persistent sequence indexes</span></a>
-      <a href="/v0.1/tutorials/project_conclusion/" class="dd-s0086 dd-h005"><span class="dd-s0087">Next &#8594;</span><span class="dd-s0088">Conclusions</span></a>
-    </div>
+  <nav class="tutorial-pagination" aria-label="Previous and next tutorial">
+    <a href="/v0.1/tutorials/project_index_storage/" class="tutorial-pagination-link tutorial-pagination-previous" rel="prev"><span class="tutorial-pagination-label">&#8592; Previous</span><span class="tutorial-pagination-title">Persistent sequence indexes</span></a>
+    <a href="/v0.1/tutorials/project_conclusion/" class="tutorial-pagination-link tutorial-pagination-next" rel="next"><span class="tutorial-pagination-label">Next &#8594;</span><span class="tutorial-pagination-title">Conclusions</span></a>
   </nav>
   
 </section>
@@ -200,7 +241,7 @@
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -266,17 +307,15 @@
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"Benchmarking and performance evaluation","description":"Benchmarking and performance evaluation","url":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Benchmarking and performance evaluation","item":"/v0.1/tutorials/project_benchmarking/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","@id":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/#article","name":"Benchmarking and performance evaluation","description":"Benchmarking and performance evaluation","url":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/thumbnail.jpg","datePublished":"2026-10-04T23:42:25+02:00","dateModified":"2026-10-05T00:28:51+02:00","headline":"Benchmarking and performance evaluation","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"articleSection":"tutorial"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"https://bioseqdb.com/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"https://bioseqdb.com/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Benchmarking and performance evaluation","item":"https://bioseqdb.com/v0.1/tutorials/project_benchmarking/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
 
 </body>
 </html>

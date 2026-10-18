@@ -65,7 +65,7 @@ ORDER BY object_name;
 
 There are two objects here with two different jobs, even though they describe the same collection of observations. That gives me a useful boundary for an experiment: I can ask whether I need a different way to locate candidates, or whether I really need a different representation of the table itself.
 
-![The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers.](/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/table-access-boundary.svg)
+![The SQL executor reaches table storage through table callbacks, while an index supplies candidate row identifiers.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/table-access-boundary.svg)
 
 ## Returning a row is the beginning
 

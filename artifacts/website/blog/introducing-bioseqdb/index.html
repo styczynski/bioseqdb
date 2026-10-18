@@ -1,62 +1,100 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Introducing BioseqDB</title>
 <meta name="description" content="Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.">
 <link rel="canonical" href="https://bioseqdb.com/blog/introducing-bioseqdb/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Introducing BioseqDB</Attribute>
+    <Attribute name="description">Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;12T21:50:34+02:00</Attribute>
+    <Attribute name="category">bioseqdb</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;01</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/blog/introducing&#45;bioseqdb/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Introducing BioseqDB">
 <meta property="og:description" content="Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/blog/introducing-bioseqdb/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/blog/introducing-bioseqdb/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/blog/introducing-bioseqdb/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Introducing BioseqDB on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Introducing BioseqDB">
 <meta name="twitter:description" content="Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/blog/introducing-bioseqdb/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Introducing BioseqDB on BioseqDB">
+
+<meta property="article:published_time" content="2026-10-01">
+<meta property="article:modified_time" content="2026-10-12T21:50:34+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="bioseqdb">
+<meta property="article:tag" content="BioseqDB"><meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="sequence alignment"><meta property="article:tag" content="genomic data"><meta property="article:tag" content="FASTA"><meta property="article:tag" content="FASTQ"><meta property="article:tag" content="minimap2"><meta property="article:tag" content="bioinformatics">
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
 <link rel="alternate" type="text/markdown" href="/blog/introducing-bioseqdb/index.md" title="Introducing BioseqDB">
 <meta name="keywords" content="BioseqDB, PostgreSQL, SQL, sequence alignment, genomic data, FASTA, FASTQ, minimap2, bioinformatics">
 <meta name="author" content="Piotr Styczyński">
-<meta property="article:published_time" content="2026-10-01">
-<meta property="article:section" content="bioseqdb">
-<meta property="article:tag" content="BioseqDB"><meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="sequence alignment"><meta property="article:tag" content="genomic data"><meta property="article:tag" content="FASTA"><meta property="article:tag" content="FASTQ"><meta property="article:tag" content="minimap2"><meta property="article:tag" content="bioinformatics">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/blog.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
 
 <div data-screen-label="BioseqDB documentation">
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -105,7 +143,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." fetchpriority="high">
+        <img class="blog-cover" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=bioseqdb">BioseqDB</a></p>
           <h1>Introducing BioseqDB</h1>
@@ -129,7 +167,7 @@
             </nav>
             <a class="blog-markdown" href="/blog/introducing-bioseqdb/index.md" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>Markdown</a>
           </div>
-          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">BioseqDB is a <a href="https://www.postgresql.org/docs/current/extend-extensions.html" rel="noreferrer" class="glossary-link" title="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-description="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-term="PostgreSQL extension">PostgreSQL extension</a> for storing, indexing and searching biological sequences with <a href="https://www.postgresql.org/docs/current/tutorial-sql.html" rel="noreferrer" class="glossary-link" title="The language used to define, query and change data in relational databases." data-glossary-description="The language used to define, query and change data in relational databases." data-glossary-term="SQL">SQL</a>. Combine genomic matches with relational data using compact sequence types and columnar storage!</p><p class="doc-paragraph">I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its <a href="https://www.genome.gov/genetics-glossary/Deoxyribonucleic-Acid-DNA" rel="noreferrer" class="glossary-link" title="The molecule that carries genetic information, written using the bases A, C, G and T." data-glossary-description="The molecule that carries genetic information, written using the bases A, C, G and T." data-glossary-term="DNA">DNA</a>. Searching for a similar sequence should fit into the same query as filtering those columns.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequences-in-sql.svg"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequences-in-sql.svg" alt="Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query." loading="lazy"></a></p><h2 class="hx" id="how-it-started" data-toc data-title="How it started">How it started<a data-hash href="#how-it-started" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research.</p><ul><li><strong>2021–2022:</strong> Working with large GISAID datasets made <a href="https://www.ncbi.nlm.nih.gov/genbank/fastaformat/" rel="noreferrer" class="glossary-link" title="A text format with a greater-than header line followed by a biological sequence." data-glossary-description="A text format with a greater-than header line followed by a biological sequence." data-glossary-term="FASTA">FASTA</a> files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected <a href="https://github.com/lh3/bwa" rel="noreferrer" class="glossary-link" title="An alignment algorithm in the Burrows-Wheeler Aligner suite for mapping reads to a reference genome." data-glossary-description="An alignment algorithm in the Burrows-Wheeler Aligner suite for mapping reads to a reference genome." data-glossary-term="BWA-MEM">BWA-MEM</a> to <a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a> in May 2022.</li><li><strong>2023–2024:</strong> I wrote a <a href="/blog/writing-a-dna-read-mapper-in-python/">Python aligner</a> and then improved it, learning how the algorithms work along the way.</li><li><strong>December 2025–2026:</strong> The current BioseqDB began with <a href="https://github.com/lh3/minimap2" rel="noreferrer" class="glossary-link" title="Heng Li&#39;s sequence mapper for DNA and RNA, including long-read and spliced alignment." data-glossary-description="Heng Li&#39;s sequence mapper for DNA and RNA, including long-read and spliced alignment." data-glossary-term="minimap2">minimap2</a> and columnar storage. Custom seeding and <a href="https://github.com/lh3/minimap2" rel="noreferrer" class="glossary-link" title="Joining compatible seed matches into a candidate alignment before comparing individual bases." data-glossary-description="Joining compatible seed matches into a candidate alignment before comparing individual bases." data-glossary-term="chaining">chaining</a>, indexes, sequence slices and end-to-end benchmarks followed.</li></ul><p class="doc-paragraph">The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The <a href="/v0.1/tutorials/project_introduction/#sec-introduction-timeline">introduction and full timeline</a> have more of the story.</p><h2 class="hx" id="two-queries-to-get-a-feel-for-it" data-toc data-title="Two queries to get a feel for it">Two queries to get a feel for it<a data-hash href="#two-queries-to-get-a-feel-for-it" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">These examples use the three synthetic samples from the <a href="/v0.1/tutorials/getting_started/#2-insert-patient-data">SQL walkthrough</a>. The <code>samples</code> table has ordinary metadata columns and a <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.seq</code> column. <code data-entity-ranges="[{&quot;start&quot;:6,&quot;len&quot;:6,&quot;id&quot;:&quot;sql:access_method:$extension.bioseq::table::sql_routines.bioseq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">USING bioseq</code> selects the sequence-aware storage.</p><p class="doc-paragraph">First, read metadata and a small piece of DNA. <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.len</code> gives the sequence length; <code>[:16]</code> takes its first sixteen bases.</p><figure class="doc-code" data-term data-sql-example="blog_introduction_sequences"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-29e2a85889774bea-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-29e2a85889774bea-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:21,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">SELECT patient_name, bioseq.len(seq) AS bases,
+          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">BioseqDB is a <a href="https://www.postgresql.org/docs/current/extend-extensions.html" rel="noreferrer" class="glossary-link" title="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-description="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-term="PostgreSQL extension">PostgreSQL extension</a> for storing, indexing and searching biological sequences with <a href="https://www.postgresql.org/docs/current/tutorial-sql.html" rel="noreferrer" class="glossary-link" title="The language used to define, query and change data in relational databases." data-glossary-description="The language used to define, query and change data in relational databases." data-glossary-term="SQL">SQL</a>. Combine genomic matches with relational data using compact sequence types and columnar storage!</p><p class="doc-paragraph">I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its <a href="https://www.genome.gov/genetics-glossary/Deoxyribonucleic-Acid-DNA" rel="noreferrer" class="glossary-link" title="The molecule that carries genetic information, written using the bases A, C, G and T." data-glossary-description="The molecule that carries genetic information, written using the bases A, C, G and T." data-glossary-term="DNA">DNA</a>. Searching for a similar sequence should fit into the same query as filtering those columns.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequences-in-sql.svg"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequences-in-sql.svg" alt="Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query." loading="lazy"></a></p><h2 class="hx" id="how-it-started" data-toc data-title="How it started">How it started<a data-hash href="#how-it-started" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">This project required several years of exploration and experiments. I began without a formal background in computational biology, thus learning the field was part of the research.</p><ul><li><strong>2021–2022:</strong> Working with large GISAID datasets made <a href="https://www.ncbi.nlm.nih.gov/genbank/fastaformat/" rel="noreferrer" class="glossary-link" title="A text format with a greater-than header line followed by a biological sequence." data-glossary-description="A text format with a greater-than header line followed by a biological sequence." data-glossary-term="FASTA">FASTA</a> files hard to manage. I proposed the database idea in May 2021 and directed a team prototype that connected <a href="https://github.com/lh3/bwa" rel="noreferrer" class="glossary-link" title="An alignment algorithm in the Burrows-Wheeler Aligner suite for mapping reads to a reference genome." data-glossary-description="An alignment algorithm in the Burrows-Wheeler Aligner suite for mapping reads to a reference genome." data-glossary-term="BWA-MEM">BWA-MEM</a> to <a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a> in May 2022.</li><li><strong>2023–2024:</strong> I wrote a <a href="/blog/writing-a-dna-read-mapper-in-python/">Python aligner</a> and then improved it, learning how the algorithms work along the way.</li><li><strong>December 2025–2026:</strong> The current BioseqDB began with <a href="https://github.com/lh3/minimap2" rel="noreferrer" class="glossary-link" title="Heng Li&#39;s sequence mapper for DNA and RNA, including long-read and spliced alignment." data-glossary-description="Heng Li&#39;s sequence mapper for DNA and RNA, including long-read and spliced alignment." data-glossary-term="minimap2">minimap2</a> and columnar storage. Custom seeding and <a href="https://github.com/lh3/minimap2" rel="noreferrer" class="glossary-link" title="Joining compatible seed matches into a candidate alignment before comparing individual bases." data-glossary-description="Joining compatible seed matches into a candidate alignment before comparing individual bases." data-glossary-term="chaining">chaining</a>, indexes, sequence slices and end-to-end benchmarks followed.</li></ul><p class="doc-paragraph">The current BioseqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments. The <a href="/v0.1/tutorials/project_introduction/#sec-introduction-timeline">introduction and full timeline</a> have more of the story.</p><h2 class="hx" id="two-queries-to-get-a-feel-for-it" data-toc data-title="Two queries to get a feel for it">Two queries to get a feel for it<a data-hash href="#two-queries-to-get-a-feel-for-it" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">These examples use the three synthetic samples from the <a href="/v0.1/tutorials/getting_started/#2-insert-patient-data">SQL walkthrough</a>. The <code>samples</code> table has ordinary metadata columns and a <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.seq</code> column. <code data-entity-ranges="[{&quot;start&quot;:6,&quot;len&quot;:6,&quot;id&quot;:&quot;sql:access_method:$extension.bioseq::table::sql_routines.bioseq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/object/sql-routines-bioseq-91535448a77c5402/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">USING bioseq</code> selects the sequence-aware storage.</p><p class="doc-paragraph">First, read metadata and a small piece of DNA. <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">bioseq.len</code> gives the sequence length; <code>[:16]</code> takes its first sixteen bases.</p><figure class="doc-code" data-term data-sql-example="blog_introduction_sequences"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-29e2a85889774bea-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-29e2a85889774bea-0" class="language-sql" data-entity-ranges="[{&quot;start&quot;:21,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">SELECT patient_name, bioseq.len(seq) AS bases,
   seq[:16]::text AS prefix
 FROM samples
 WHERE age &gt;= 30
@@ -152,7 +190,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
             <ul class="blog-keywords" aria-label="Topics"><li>BioseqDB</li><li>PostgreSQL</li><li>SQL</li><li>sequence alignment</li><li>genomic data</li><li>FASTA</li><li>FASTQ</li><li>minimap2</li><li>bioinformatics</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -169,7 +207,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -227,17 +265,15 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"Introducing BioseqDB","description":"Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.","url":"https://bioseqdb.com/blog/introducing-bioseqdb/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png","headline":"Introducing BioseqDB","mainEntityOfPage":"https://bioseqdb.com/blog/introducing-bioseqdb/","datePublished":"2026-10-01","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["BioseqDB","PostgreSQL","SQL","sequence alignment","genomic data","FASTA","FASTQ","minimap2","bioinformatics"],"articleSection":"bioseqdb","timeRequired":"PT4M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"Introducing BioseqDB","item":"/blog/introducing-bioseqdb/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/blog.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","@id":"https://bioseqdb.com/blog/introducing-bioseqdb/#article","name":"Introducing BioseqDB","description":"Store biological sequences beside their metadata and search them with SQL. A first look at BioseqDB, its history, two queries, and the benchmark results.","url":"https://bioseqdb.com/blog/introducing-bioseqdb/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/introducing-bioseqdb/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/introducing-bioseqdb/thumbnail.jpg","datePublished":"2026-10-01","dateModified":"2026-10-12T21:50:34+02:00","headline":"Introducing BioseqDB","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/blog/introducing-bioseqdb/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"keywords":["BioseqDB","PostgreSQL","SQL","sequence alignment","genomic data","FASTA","FASTQ","minimap2","bioinformatics"],"articleSection":"bioseqdb","timeRequired":"PT4M"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/introducing-bioseqdb/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://bioseqdb.com/blog/"},{"@type":"ListItem","position":3,"name":"Introducing BioseqDB","item":"https://bioseqdb.com/blog/introducing-bioseqdb/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/blog.mjs"></script>
 </body>
 </html>

@@ -1,62 +1,100 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Full-text search rules I can explain in SQL</title>
 <meta name="description" content="A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.">
 <link rel="canonical" href="https://bioseqdb.com/blog/full-text-search-rules-in-sql/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Full&#45;text search rules I can explain in SQL</Attribute>
+    <Attribute name="description">A small specimen&#45;note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;12T20:08:15+02:00</Attribute>
+    <Attribute name="category">others</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;12</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/blog/full&#45;text&#45;search&#45;rules&#45;in&#45;sql/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Full-text search rules I can explain in SQL">
 <meta property="og:description" content="A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/blog/full-text-search-rules-in-sql/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/blog/full-text-search-rules-in-sql/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/blog/full-text-search-rules-in-sql/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Full-text search rules I can explain in SQL on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Full-text search rules I can explain in SQL">
 <meta name="twitter:description" content="A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/blog/full-text-search-rules-in-sql/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Full-text search rules I can explain in SQL on BioseqDB">
+
+<meta property="article:published_time" content="2026-10-12">
+<meta property="article:modified_time" content="2026-10-12T20:08:15+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="others">
+<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="full-text search"><meta property="article:tag" content="pg_search"><meta property="article:tag" content="Rails"><meta property="article:tag" content="tsvector"><meta property="article:tag" content="GIN"><meta property="article:tag" content="indexing">
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
 <link rel="alternate" type="text/markdown" href="/blog/full-text-search-rules-in-sql/index.md" title="Full-text search rules I can explain in SQL">
 <meta name="keywords" content="PostgreSQL, full-text search, pg_search, Rails, tsvector, GIN, indexing">
 <meta name="author" content="Piotr Styczyński">
-<meta property="article:published_time" content="2026-10-12">
-<meta property="article:section" content="others">
-<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="full-text search"><meta property="article:tag" content="pg_search"><meta property="article:tag" content="Rails"><meta property="article:tag" content="tsvector"><meta property="article:tag" content="GIN"><meta property="article:tag" content="indexing">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/blog.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
 
 <div data-screen-label="BioseqDB documentation">
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -105,7 +143,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." fetchpriority="high">
+        <img class="blog-cover" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=others">Others</a></p>
           <h1>Full-text search rules I can explain in SQL</h1>
@@ -129,7 +167,7 @@
             </nav>
             <a class="blog-markdown" href="/blog/full-text-search-rules-in-sql/index.md" type="text/markdown"><svg width="19" height="16" viewBox="0 0 24 20" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="18" rx="3" stroke="currentColor" stroke-width="1.5"></rect><path d="M4 14V6l4 4 4-4v8m4-4 2 3 2-3m-2 3V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>Markdown</a>
           </div>
-          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">I find search easier to work on when I can point at a row and <a href="https://www.postgresql.org/docs/current/using-explain.html" rel="noreferrer" class="glossary-link" title="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-description="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-term="EXPLAIN">explain</a> why it belongs in the result. A search box which returns something plausible is a useful beginning, but it becomes less convincing when a slightly different phrase makes a specimen disappear and the only explanation is somewhere inside an ORM-generated query.</p><p class="doc-paragraph">For this example I use a few invented laboratory notes and a deliberately small rule: include a note if it contains the phrase “low coverage”, or if it contains both “repeat” and “extraction”. This gives me something concrete to check before adding a search scope, a ranking formula or another index.</p><p class="doc-paragraph">Here, <code>pg_search</code> means the <strong>Rails gem</strong>. The examples below use <a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a> 17's built-in text search; they do not require the separate <a href="https://www.postgresql.org/docs/current/extend-extensions.html" rel="noreferrer" class="glossary-link" title="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-description="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-term="PostgreSQL extension">PostgreSQL extension</a> also named <code>pg_search</code>.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/search-rules.svg"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/search-rules.svg" alt="A note and a search query are parsed separately, matched in PostgreSQL, and returned with an explanation." loading="lazy"></a></p><h2 class="hx" id="decide-what-a-match-means" data-toc data-title="Decide what a match means">Decide what a match means<a data-hash href="#decide-what-a-match-means" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">I would not make visitors type PostgreSQL's query syntax into an ordinary search box. For free-form input, <code>websearch_to_tsquery</code> understands quoted phrases, <code>OR</code> and exclusion with a minus sign. A field which promises a phrase has a narrower job, so <code>phraseto_tsquery</code> fits it better. These are different input contracts, even when their UI is just a text field. PostgreSQL documents the <a href="https://www.postgresql.org/docs/17/textsearch-controls.html#TEXTSEARCH-PARSING-QUERIES" rel="noreferrer">query parsers and their syntax</a>.</p><figure class="doc-code" data-term data-sql-example="note_query_parsers"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-bc0329d824dff468-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-bc0329d824dff468-0" class="language-sql">SELECT
+          <div class="docs-content tutorial-body blog-content"><p class="doc-paragraph">I find search easier to work on when I can point at a row and <a href="https://www.postgresql.org/docs/current/using-explain.html" rel="noreferrer" class="glossary-link" title="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-description="A PostgreSQL command that shows a query plan; its ANALYZE option also executes the query and reports measurements." data-glossary-term="EXPLAIN">explain</a> why it belongs in the result. A search box which returns something plausible is a useful beginning, but it becomes less convincing when a slightly different phrase makes a specimen disappear and the only explanation is somewhere inside an ORM-generated query.</p><p class="doc-paragraph">For this example I use a few invented laboratory notes and a deliberately small rule: include a note if it contains the phrase “low coverage”, or if it contains both “repeat” and “extraction”. This gives me something concrete to check before adding a search scope, a ranking formula or another index.</p><p class="doc-paragraph">Here, <code>pg_search</code> means the <strong>Rails gem</strong>. The examples below use <a href="https://www.postgresql.org/about/" rel="noreferrer" class="glossary-link" title="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-description="An open-source relational database with SQL, transactions and extension interfaces for custom types and query operations." data-glossary-term="PostgreSQL">PostgreSQL</a> 17's built-in text search; they do not require the separate <a href="https://www.postgresql.org/docs/current/extend-extensions.html" rel="noreferrer" class="glossary-link" title="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-description="A package of related database objects, such as types and functions, installed together in PostgreSQL." data-glossary-term="PostgreSQL extension">PostgreSQL extension</a> also named <code>pg_search</code>.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/search-rules.svg"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/search-rules.svg" alt="A note and a search query are parsed separately, matched in PostgreSQL, and returned with an explanation." loading="lazy"></a></p><h2 class="hx" id="decide-what-a-match-means" data-toc data-title="Decide what a match means">Decide what a match means<a data-hash href="#decide-what-a-match-means" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">I would not make visitors type PostgreSQL's query syntax into an ordinary search box. For free-form input, <code>websearch_to_tsquery</code> understands quoted phrases, <code>OR</code> and exclusion with a minus sign. A field which promises a phrase has a narrower job, so <code>phraseto_tsquery</code> fits it better. These are different input contracts, even when their UI is just a text field. PostgreSQL documents the <a href="https://www.postgresql.org/docs/17/textsearch-controls.html#TEXTSEARCH-PARSING-QUERIES" rel="noreferrer">query parsers and their syntax</a>.</p><figure class="doc-code" data-term data-sql-example="note_query_parsers"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-bc0329d824dff468-0" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-bc0329d824dff468-0" class="language-sql">SELECT
   phraseto_tsquery('english', 'low coverage') AS phrase,
   websearch_to_tsquery('english', 'repeat extraction') AS words;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 1 row</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">phrase<br><code>tsquery</code></th><th scope="col">words<br><code>tsquery</code></th></tr></thead><tbody><tr><td>'low' &lt;-&gt; 'coverag'</td><td>'repeat' &amp; 'extract'</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">Once input has become a <code>tsquery</code>, I can combine values using the <a href="https://www.postgresql.org/docs/17/textsearch-features.html#TEXTSEARCH-MANIPULATE-TSQUERY" rel="noreferrer">query operators</a>. There is no need to build a new query language by replacing spaces with operator characters, and doing so would make punctuation surprisingly important.</p><h2 class="hx" id="keep-a-searchable-document-beside-the-note" data-toc data-title="Keep a searchable document beside the note">Keep a searchable document beside the note<a data-hash href="#keep-a-searchable-document-beside-the-note" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">A <code>tsvector</code> stores normalized lexemes and can keep their positions. It is not the original text, and it is not a numeric embedding: stemming can change a word and a dictionary can remove it altogether. That is why I keep the note as well as its <a href="https://www.postgresql.org/docs/17/datatype-textsearch.html" rel="noreferrer">text-search representation</a>.</p><p class="doc-paragraph">This is the table used by the examples:</p><figure class="doc-code" data-term><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-515e05cd536adb92-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-515e05cd536adb92-1" class="language-sql">CREATE TABLE specimen_notes (
   id integer PRIMARY KEY,
@@ -168,7 +206,7 @@ end
             <ul class="blog-keywords" aria-label="Topics"><li>PostgreSQL</li><li>full-text search</li><li>pg_search</li><li>Rails</li><li>tsvector</li><li>GIN</li><li>indexing</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -185,7 +223,7 @@ end
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -243,17 +281,15 @@ end
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"Full-text search rules I can explain in SQL","description":"A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.","url":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png","headline":"Full-text search rules I can explain in SQL","mainEntityOfPage":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","full-text search","pg_search","Rails","tsvector","GIN","indexing"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"Full-text search rules I can explain in SQL","item":"/blog/full-text-search-rules-in-sql/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/blog.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","@id":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/#article","name":"Full-text search rules I can explain in SQL","description":"A small specimen-note search, with explicit matching rules, a stored search document, and a Rails scope that keeps the SQL understandable.","url":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/thumbnail.jpg","datePublished":"2026-10-12","dateModified":"2026-10-12T20:08:15+02:00","headline":"Full-text search rules I can explain in SQL","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"keywords":["PostgreSQL","full-text search","pg_search","Rails","tsvector","GIN","indexing"],"articleSection":"others","timeRequired":"PT5M"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://bioseqdb.com/blog/"},{"@type":"ListItem","position":3,"name":"Full-text search rules I can explain in SQL","item":"https://bioseqdb.com/blog/full-text-search-rules-in-sql/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/blog.mjs"></script>
 </body>
 </html>

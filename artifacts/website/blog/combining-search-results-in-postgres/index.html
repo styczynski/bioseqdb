@@ -1,62 +1,100 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Combining search results in PostgreSQL</title>
 <meta name="description" content="A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.">
 <link rel="canonical" href="https://bioseqdb.com/blog/combining-search-results-in-postgres/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Combining search results in PostgreSQL</Attribute>
+    <Attribute name="description">A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;12T20:08:08+02:00</Attribute>
+    <Attribute name="category">others</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;12</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/blog/combining&#45;search&#45;results&#45;in&#45;postgres/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Combining search results in PostgreSQL">
 <meta property="og:description" content="A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/blog/combining-search-results-in-postgres/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/blog/combining-search-results-in-postgres/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/blog/combining-search-results-in-postgres/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Combining search results in PostgreSQL on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Combining search results in PostgreSQL">
 <meta name="twitter:description" content="A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/blog/combining-search-results-in-postgres/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Combining search results in PostgreSQL on BioseqDB">
+
+<meta property="article:published_time" content="2026-10-12">
+<meta property="article:modified_time" content="2026-10-12T20:08:08+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="others">
+<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="hybrid search"><meta property="article:tag" content="vector search"><meta property="article:tag" content="full text search"><meta property="article:tag" content="pgvector"><meta property="article:tag" content="ranking">
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
 <link rel="alternate" type="text/markdown" href="/blog/combining-search-results-in-postgres/index.md" title="Combining search results in PostgreSQL">
 <meta name="keywords" content="PostgreSQL, SQL, hybrid search, vector search, full text search, pgvector, ranking">
 <meta name="author" content="Piotr Styczyński">
-<meta property="article:published_time" content="2026-10-12">
-<meta property="article:section" content="others">
-<meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="hybrid search"><meta property="article:tag" content="vector search"><meta property="article:tag" content="full text search"><meta property="article:tag" content="pgvector"><meta property="article:tag" content="ranking">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/blog.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
 
 <div data-screen-label="BioseqDB documentation">
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -105,7 +143,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." fetchpriority="high">
+        <img class="blog-cover" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=others">Others</a></p>
           <h1>Combining search results in PostgreSQL</h1>
@@ -147,7 +185,7 @@ FROM nearest WHERE study = 'A'
 UNION ALL
 SELECT 'filter then limit',
        array_agg(id ORDER BY distance, id)
-FROM filtered_first;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 2 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">approach<br><code>text</code></th><th scope="col">ids<br><code>integer[]</code></th></tr></thead><tbody><tr><td>limit then filter</td><td>&#123;12&#125;</td></tr><tr><td>filter then limit</td><td>&#123;12,14&#125;</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">The first answer contains only note 12. Note 14 never gets a chance because the inner query has already discarded it. Increasing the final limit cannot bring it back. This is a consequence of where I put the limit, even with perfectly accurate distances and no index involved.</p><p class="doc-paragraph">The ID is a tie-breaker, which makes the example reproducible if two distances become equal. PostgreSQL does not promise which tied rows a limited query will choose unless the ordering distinguishes them. That matters for tests and for a reader trying the example twice. <a href="https://www.postgresql.org/docs/current/queries-limit.html" rel="noreferrer">PostgreSQL's LIMIT documentation</a> describes this behaviour.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/search-candidates.svg"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/search-candidates.svg" alt="Study eligibility is applied separately to text and vector candidates before their ranked results are combined." loading="lazy"></a></p><h2 class="hx" id="where-an-approximate-index-changes-the-problem" data-toc data-title="Where an approximate index changes the problem">Where an approximate index changes the problem<a data-hash href="#where-an-approximate-index-changes-the-problem" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">With pgvector, an approximate index can find nearby candidates without comparing the query against every stored embedding. Filters are applied to those candidates, which means a restrictive study filter can leave fewer results than requested. Iterative scans, available since pgvector 0.8.0, can continue looking, but scan limits still matter. An ordered result also does not prove that every closer eligible row was found. <a href="https://github.com/pgvector/pgvector#filtering" rel="noreferrer">pgvector documents both filtering and iterative scans</a>.</p><p class="doc-paragraph">For a small eligible subset I would first measure an exact distance sort after filtering, then compare an approximate plan against that answer. There is no universal row count at which one becomes better; the distance calculation, the distribution of studies and the amount of data all enter the measurement.</p><p class="doc-paragraph">Having an index on the study column and another on embeddings does not by itself settle that choice. PostgreSQL can combine suitable index scans through bitmaps, but the bitmap represents matching table locations and loses the original index ordering. An ordered nearest-neighbour search needs more than a set of matching locations. <a href="https://www.postgresql.org/docs/current/indexes-bitmap-scans.html" rel="noreferrer">Combining multiple indexes</a> explains the bitmap part.</p><h2 class="hx" id="combining-two-ranked-lists" data-toc data-title="Combining two ranked lists">Combining two ranked lists<a data-hash href="#combining-two-ranked-lists" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Now suppose the eligible notes have been searched twice. A lexical search found note 21 first, while the embedding search preferred note 24. PostgreSQL's built-in text search can produce the lexical matches and a relevance ranking; its scores describe that ranking method, not a probability that a note answers the question. <a href="https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING" rel="noreferrer">The text-search documentation</a> explains the available ranking functions.</p><p class="doc-paragraph">I do not want to add a text score directly to a vector distance: their scales and directions have different meanings. For this experiment I use reciprocal rank fusion instead, adding <code>1 / (60 + position)</code> for each list containing a note. A missing note contributes nothing. The constant 60 comes from the original RRF paper; it is a choice to evaluate, not a property of PostgreSQL. <a href="https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf" rel="noreferrer">Cormack, Clarke and Buettcher, 2009</a>.</p><figure class="doc-code" data-term data-sql-example="hybrid_rank_fusion"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-63074a4e09f52f4a-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-63074a4e09f52f4a-1" class="language-sql">WITH lexical(note_id, position) AS (
+FROM filtered_first;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 2 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">approach<br><code>text</code></th><th scope="col">ids<br><code>integer[]</code></th></tr></thead><tbody><tr><td>limit then filter</td><td>&#123;12&#125;</td></tr><tr><td>filter then limit</td><td>&#123;12,14&#125;</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><p class="doc-paragraph">The first answer contains only note 12. Note 14 never gets a chance because the inner query has already discarded it. Increasing the final limit cannot bring it back. This is a consequence of where I put the limit, even with perfectly accurate distances and no index involved.</p><p class="doc-paragraph">The ID is a tie-breaker, which makes the example reproducible if two distances become equal. PostgreSQL does not promise which tied rows a limited query will choose unless the ordering distinguishes them. That matters for tests and for a reader trying the example twice. <a href="https://www.postgresql.org/docs/current/queries-limit.html" rel="noreferrer">PostgreSQL's LIMIT documentation</a> describes this behaviour.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/search-candidates.svg"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/search-candidates.svg" alt="Study eligibility is applied separately to text and vector candidates before their ranked results are combined." loading="lazy"></a></p><h2 class="hx" id="where-an-approximate-index-changes-the-problem" data-toc data-title="Where an approximate index changes the problem">Where an approximate index changes the problem<a data-hash href="#where-an-approximate-index-changes-the-problem" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">With pgvector, an approximate index can find nearby candidates without comparing the query against every stored embedding. Filters are applied to those candidates, which means a restrictive study filter can leave fewer results than requested. Iterative scans, available since pgvector 0.8.0, can continue looking, but scan limits still matter. An ordered result also does not prove that every closer eligible row was found. <a href="https://github.com/pgvector/pgvector#filtering" rel="noreferrer">pgvector documents both filtering and iterative scans</a>.</p><p class="doc-paragraph">For a small eligible subset I would first measure an exact distance sort after filtering, then compare an approximate plan against that answer. There is no universal row count at which one becomes better; the distance calculation, the distribution of studies and the amount of data all enter the measurement.</p><p class="doc-paragraph">Having an index on the study column and another on embeddings does not by itself settle that choice. PostgreSQL can combine suitable index scans through bitmaps, but the bitmap represents matching table locations and loses the original index ordering. An ordered nearest-neighbour search needs more than a set of matching locations. <a href="https://www.postgresql.org/docs/current/indexes-bitmap-scans.html" rel="noreferrer">Combining multiple indexes</a> explains the bitmap part.</p><h2 class="hx" id="combining-two-ranked-lists" data-toc data-title="Combining two ranked lists">Combining two ranked lists<a data-hash href="#combining-two-ranked-lists" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Now suppose the eligible notes have been searched twice. A lexical search found note 21 first, while the embedding search preferred note 24. PostgreSQL's built-in text search can produce the lexical matches and a relevance ranking; its scores describe that ranking method, not a probability that a note answers the question. <a href="https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING" rel="noreferrer">The text-search documentation</a> explains the available ranking functions.</p><p class="doc-paragraph">I do not want to add a text score directly to a vector distance: their scales and directions have different meanings. For this experiment I use reciprocal rank fusion instead, adding <code>1 / (60 + position)</code> for each list containing a note. A missing note contributes nothing. The constant 60 comes from the original RRF paper; it is a choice to evaluate, not a property of PostgreSQL. <a href="https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf" rel="noreferrer">Cormack, Clarke and Buettcher, 2009</a>.</p><figure class="doc-code" data-term data-sql-example="hybrid_rank_fusion"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-63074a4e09f52f4a-1" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-63074a4e09f52f4a-1" class="language-sql">WITH lexical(note_id, position) AS (
   VALUES (21, 1), (24, 2), (28, 3)
 ), semantic(note_id, position) AS (
   VALUES (24, 1), (31, 2), (21, 3)
@@ -167,7 +205,7 @@ ORDER BY sum(weight) DESC, note_id;</code></pre><div class="terminal-result" dat
             <ul class="blog-keywords" aria-label="Topics"><li>PostgreSQL</li><li>SQL</li><li>hybrid search</li><li>vector search</li><li>full text search</li><li>pgvector</li><li>ranking</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -184,7 +222,7 @@ ORDER BY sum(weight) DESC, note_id;</code></pre><div class="terminal-result" dat
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -242,17 +280,15 @@ ORDER BY sum(weight) DESC, note_id;</code></pre><div class="terminal-result" dat
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","name":"Combining search results in PostgreSQL","description":"A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.","url":"https://bioseqdb.com/blog/combining-search-results-in-postgres/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png","headline":"Combining search results in PostgreSQL","mainEntityOfPage":"https://bioseqdb.com/blog/combining-search-results-in-postgres/","datePublished":"2026-10-12","author":{"@type":"Person","name":"Piotr Styczyński"},"keywords":["PostgreSQL","SQL","hybrid search","vector search","full text search","pgvector","ranking"],"articleSection":"others","timeRequired":"PT6M"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"Blog","item":"/blog/"},{"@type":"ListItem","position":3,"name":"Combining search results in PostgreSQL","item":"/blog/combining-search-results-in-postgres/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/blog.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","@id":"https://bioseqdb.com/blog/combining-search-results-in-postgres/#article","name":"Combining search results in PostgreSQL","description":"A small SQL experiment with filtered nearest neighbours, text matches and reciprocal rank fusion, including the results that disappear when LIMIT comes too early.","url":"https://bioseqdb.com/blog/combining-search-results-in-postgres/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/combining-search-results-in-postgres/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/combining-search-results-in-postgres/thumbnail.jpg","datePublished":"2026-10-12","dateModified":"2026-10-12T20:08:08+02:00","headline":"Combining search results in PostgreSQL","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/blog/combining-search-results-in-postgres/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"keywords":["PostgreSQL","SQL","hybrid search","vector search","full text search","pgvector","ranking"],"articleSection":"others","timeRequired":"PT6M"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/combining-search-results-in-postgres/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://bioseqdb.com/blog/"},{"@type":"ListItem","position":3,"name":"Combining search results in PostgreSQL","item":"https://bioseqdb.com/blog/combining-search-results-in-postgres/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/blog.mjs"></script>
 </body>
 </html>

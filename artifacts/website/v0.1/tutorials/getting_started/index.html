@@ -1,38 +1,78 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Getting started with BioseqDB</title>
 <meta name="description" content="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.">
 <link rel="canonical" href="https://bioseqdb.com/v0.1/tutorials/getting_started/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">Getting started with BioseqDB</Attribute>
+    <Attribute name="description">BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;05T00:19:11+02:00</Attribute>
+    <Attribute name="category">tutorial</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;10&#45;04T23:35:34+02:00</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="Getting started with BioseqDB">
 <meta property="og:description" content="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.">
-<meta property="og:type" content="website">
+<meta property="og:type" content="article">
 <meta property="og:url" content="https://bioseqdb.com/v0.1/tutorials/getting_started/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of Getting started with BioseqDB on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Getting started with BioseqDB">
 <meta name="twitter:description" content="BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of Getting started with BioseqDB on BioseqDB">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
+<meta property="article:published_time" content="2026-10-04T23:35:34+02:00">
+<meta property="article:modified_time" content="2026-10-05T00:19:11+02:00">
+<meta property="article:author" content="https://github.com/styczynski">
+<meta property="article:section" content="Documentation">
+
+
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
 
 </head>
 <body id="page-top" class="docs-design-page">
@@ -41,17 +81,18 @@
 <div data-screen-label="BioseqDB documentation" class="dd-s0001">
 
   <!-- ============ TOP NAV ============ -->
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -448,7 +489,7 @@ SELECT bioseq.update_index(
     'samples', index_name) AS physical_rows
 FROM bioseq.list_metadata()
 WHERE table_name = 'samples'::regclass
-ORDER BY index_name;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 3 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table result-table-wide" aria-label="Executed SQL result"><thead><tr><th scope="col">index_name<br><code>text</code></th><th scope="col">update_policy<br><code>text</code></th><th scope="col">storage_size<br><code>text</code></th><th scope="col">time_since_update<br><code>interval</code></th><th scope="col">physical_rows<br><code>bigint</code></th></tr></thead><tbody><tr><td>minimizers_per_fragment</td><td>UPDATE_ON_INSERT</td><td>208 kB</td><td>PT0.007414S</td><td>33</td></tr><tr><td>minimizers_per_sequence</td><td>UPDATE_MANUALLY</td><td>0 bytes</td><td><em>NULL</em></td><td>0</td></tr><tr><td>symbol_counts</td><td>UPDATE_ON_INSERT</td><td>144 kB</td><td>PT0.002119S</td><td>4</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><h3 class="hx" id="20-try-scalar-minimizers-scalar-chaining-and-ksw2" data-toc-sub data-title="20. Try scalar minimizers, scalar chaining and KSW2">20. Try scalar minimizers, scalar chaining and KSW2<a data-hash href="#20-try-scalar-minimizers-scalar-chaining-and-ksw2" aria-label="Link to this section">#</a></h3><p class="doc-paragraph">The three algorithm codes are all 0. The query returns five matches.</p><p class="doc-paragraph">Adding read requirement 1 forbids persisted target-index reads for this call.<br>That matters because the stored index was  built with a different minimizer<br>algorithm and otherwise BioseqDB can produce an error</p><figure class="doc-code" data-term data-sql-example="readme_step_20"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-050150298d06dab9-29" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-050150298d06dab9-29" class="language-sql" data-entity-ranges="[{&quot;start&quot;:11,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.score(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-score-4e84dfe56ac3c56b/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:41,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.cigar(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-cigar-2c13a882e87557f3/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:87,&quot;len&quot;:8,&quot;id&quot;:&quot;sql:overload_group:$extension.mmsearch&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:143,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:169,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">SELECT id, bioseq.score(seq) AS score,
+ORDER BY index_name;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 3 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table result-table-wide" aria-label="Executed SQL result"><thead><tr><th scope="col">index_name<br><code>text</code></th><th scope="col">update_policy<br><code>text</code></th><th scope="col">storage_size<br><code>text</code></th><th scope="col">time_since_update<br><code>interval</code></th><th scope="col">physical_rows<br><code>bigint</code></th></tr></thead><tbody><tr><td>minimizers_per_fragment</td><td>UPDATE_ON_INSERT</td><td>208 kB</td><td>PT0.007959S</td><td>33</td></tr><tr><td>minimizers_per_sequence</td><td>UPDATE_MANUALLY</td><td>0 bytes</td><td><em>NULL</em></td><td>0</td></tr><tr><td>symbol_counts</td><td>UPDATE_ON_INSERT</td><td>144 kB</td><td>PT0.002057S</td><td>4</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p><h3 class="hx" id="20-try-scalar-minimizers-scalar-chaining-and-ksw2" data-toc-sub data-title="20. Try scalar minimizers, scalar chaining and KSW2">20. Try scalar minimizers, scalar chaining and KSW2<a data-hash href="#20-try-scalar-minimizers-scalar-chaining-and-ksw2" aria-label="Link to this section">#</a></h3><p class="doc-paragraph">The three algorithm codes are all 0. The query returns five matches.</p><p class="doc-paragraph">Adding read requirement 1 forbids persisted target-index reads for this call.<br>That matters because the stored index was  built with a different minimizer<br>algorithm and otherwise BioseqDB can produce an error</p><figure class="doc-code" data-term data-sql-example="readme_step_20"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-050150298d06dab9-29" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-050150298d06dab9-29" class="language-sql" data-entity-ranges="[{&quot;start&quot;:11,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.score(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-score-4e84dfe56ac3c56b/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:41,&quot;len&quot;:12,&quot;id&quot;:&quot;sql:function:bioseq.cigar(anyelement)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-cigar-2c13a882e87557f3/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:87,&quot;len&quot;:8,&quot;id&quot;:&quot;sql:overload_group:$extension.mmsearch&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/overload_group/extension-mmsearch-3425d4d7993bfdd8/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:143,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:169,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">SELECT id, bioseq.score(seq) AS score,
   bioseq.cigar(seq) AS cigar
 FROM samples
 WHERE mmsearch(seq,
@@ -485,10 +526,13 @@ SET bioseq.index.insert_maintenance.enabled = on;
 -- No update_index() call is needed for these new rows.
 </code></pre></figure><p class="doc-paragraph">This code snippet avoid recomputing minimizer each time. Note that joins without these defaults (grouped-MPF for bounded SIMD) still require <code data-entity-ranges="[{&quot;start&quot;:0,&quot;len&quot;:15,&quot;id&quot;:&quot;sql:sql_function:$extension.aligner_options(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,double precision,double precision,double precision,integer,double precision,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,boolean,boolean,boolean,integer)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/extension-aligner-options-7871c62f99053b21/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">aligner_options(index_read_requirement =&gt; 2)</code> to work correctly.</p></div>
 
+  <section class="document-sources" aria-label="External sources"><h2>External sources</h2><ul><li><a href="https://sourceforge.net/projects/bioseqdb/">SourceForge here</a> <span class="document-sources-host">(sourceforge.net)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-ubuntu26.04">0.1.0-alpha.1-pg17-ubuntu26.04</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-ubuntu26.04">0.1.0-alpha.1-pg18-ubuntu26.04</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-ubuntu26.04">0.1.0-alpha.1-pg19-ubuntu26.04</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-ubuntu26.04">0.1.0-alpha.1-pg20-ubuntu26.04</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-debian13">0.1.0-alpha.1-pg17-debian13</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-debian13">0.1.0-alpha.1-pg18-debian13</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-debian13">0.1.0-alpha.1-pg19-debian13</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-debian13">0.1.0-alpha.1-pg20-debian13</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg17-arch">0.1.0-alpha.1-pg17-arch</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg18-arch">0.1.0-alpha.1-pg18-arch</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg19-arch">0.1.0-alpha.1-pg19-arch</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags?name=0.1.0-alpha.1-pg20-arch">0.1.0-alpha.1-pg20-arch</a> <span class="document-sources-host">(hub.docker.com)</span></li><li><a href="https://sourceforge.net/projects/bioseqdb/files/0.1.0-alpha.1/">SourceForge release</a> <span class="document-sources-host">(sourceforge.net)</span></li><li><a href="https://hub.docker.com/r/styczynski/bioseqdb/tags">Docker images</a> <span class="document-sources-host">(hub.docker.com)</span></li></ul></section>
+
   
+  <nav class="tutorial-pagination" aria-label="Previous and next tutorial">
     
-    <nav class="dd-s0084" aria-label="Next tutorial"><div class="dd-s0085"><a href="/v0.1/tutorials/project_introduction/" class="dd-s0086 dd-h005"><span class="dd-s0087">Next &#8594;</span><span class="dd-s0088">Introduction</span></a></div></nav>
-    
+    <a href="/v0.1/tutorials/project_introduction/" class="tutorial-pagination-link tutorial-pagination-next" rel="next"><span class="tutorial-pagination-label">Next &#8594;</span><span class="tutorial-pagination-title">Introduction</span></a>
+  </nav>
   
 </section>
 
@@ -512,7 +556,7 @@ SET bioseq.index.insert_maintenance.enabled = on;
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -578,17 +622,15 @@ SET bioseq.index.insert_maintenance.enabled = on;
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","name":"Getting started with BioseqDB","description":"BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.","url":"https://bioseqdb.com/v0.1/tutorials/getting_started/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Getting started with BioseqDB","item":"/v0.1/tutorials/getting_started/"}]}]}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","@id":"https://bioseqdb.com/v0.1/tutorials/getting_started/#article","name":"Getting started with BioseqDB","description":"BioseqDB is a PostgreSQL extension for storing, indexing and searching biological sequences with SQL.","url":"https://bioseqdb.com/v0.1/tutorials/getting_started/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/v0.1/tutorials/getting_started/thumbnail.jpg","datePublished":"2026-10-04T23:35:34+02:00","dateModified":"2026-10-05T00:19:11+02:00","headline":"Getting started with BioseqDB","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/v0.1/tutorials/getting_started/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"articleSection":"tutorial"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/v0.1/tutorials/getting_started/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"https://bioseqdb.com/v0.1/"},{"@type":"ListItem","position":3,"name":"Tutorials","item":"https://bioseqdb.com/v0.1/tutorials/getting_started/"},{"@type":"ListItem","position":4,"name":"Getting started with BioseqDB","item":"https://bioseqdb.com/v0.1/tutorials/getting_started/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
 
 </body>
 </html>

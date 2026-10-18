@@ -1,55 +1,90 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" prefix="og: https://ogp.me/ns# article: https://ogp.me/ns/article#">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The BioseqDB blog</title>
 <meta name="description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <link rel="canonical" href="https://bioseqdb.com/blog/">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/theme.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/analytics.js"></script>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-989VYH5HT7"></script>
+<!--
+<PageMap>
+  <DataObject type="document">
+    <Attribute name="title">The BioseqDB blog</Attribute>
+    <Attribute name="description">Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.</Attribute>
+    <Attribute name="page_count">1</Attribute>
+    <Attribute name="last_update">2026&#45;10&#45;12T20:00:53+02:00</Attribute>
+    <Attribute name="category">blog_index</Attribute>
+    <Attribute name="author">Piotr Styczyński</Attribute>
+    <Attribute name="date">2026&#45;08&#45;10T02:58:57+02:00</Attribute>
+  </DataObject>
+  <DataObject type="thumbnail">
+    <Attribute name="src">https://bioseqdb.com/blog/thumbnail.jpg</Attribute>
+    <Attribute name="width">1200</Attribute>
+    <Attribute name="height">630</Attribute>
+  </DataObject>
+</PageMap>
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+
 <meta property="og:title" content="The BioseqDB blog">
 <meta property="og:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://bioseqdb.com/blog/">
-<meta property="og:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
+<meta property="og:site_name" content="BioseqDB">
+<meta property="og:locale" content="en_US">
+
+<meta property="og:image" content="https://bioseqdb.com/blog/thumbnail.jpg">
+<meta property="og:image:secure_url" content="https://bioseqdb.com/blog/thumbnail.jpg">
+<meta property="og:image:type" content="image/jpeg">
+
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Preview of The BioseqDB blog on BioseqDB">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="The BioseqDB blog">
 <meta name="twitter:description" content="Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.">
-<meta name="twitter:image" content="https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png">
-<link rel="icon" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/favicon.svg">
+<meta name="twitter:image" content="https://bioseqdb.com/blog/thumbnail.jpg">
+<meta name="twitter:image:alt" content="Preview of The BioseqDB blog on BioseqDB">
 
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/docs-design.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/code-theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-content.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/project-benchmarks.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-header.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/responsive.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/site-controls.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/announcement.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/theme.css">
-<link rel="stylesheet" href="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/css/blog.css">
+
+<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/blog.css">
 </head>
 <body id="page-top" class="docs-design-page blog-page">
 <a class="skip-link" href="#doc-main">Skip to main content</a>
 
 <div data-screen-label="BioseqDB documentation">
-  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
+  <header id="dnav" class="site-header" data-site-header data-search-loading="Loading search index…" data-search-no-matches="No matches for" data-search-unavailable="Search index is unavailable." data-search-error="Search is temporarily unavailable." data-search-tutorial="Tutorial" data-search-blog="Blog post" data-search-question="Question" data-search-function="Function" data-search-class="Class" data-search-type="Type" data-search-setting="Setting" data-search-sql="SQL object" data-search-domain-sql="SQL" data-search-domain-documentation="Documentation" data-search-domain-cpp="C++">
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
       <a href="/v0.1/tutorials/getting_started/" data-nav-prefix="/v0.1/">Docs</a>
       <a href="/benchmarks/">Benchmarks</a>
       <a href="/blog/">Blog</a>
+      <a href="/qa/">Q&amp;A</a>
     </nav>
     <div data-search-wrap class="site-search-wrap">
       <div data-search-box class="site-search-box">
@@ -279,7 +314,7 @@ figures = make_figures(
 )
 print(json.dumps(analysis[&quot;summary&quot;], indent=2))
  The exon panel is a closer view of the annotations. Exons are the parts retained in a mature transcript, The annotated erato transcript has two exons and the melpomene transcript has one in these files and I put everything into one simple graphic. The gene here tracks place the matching segments in their annotated neighbourhood. The ribbons show sequence resemblance under the alignment and the last one - GC tracks add a simple measurement of GC content made directly from the imported DNA. 13. What did we learn? The two regions have almost the same overall GC content, yet their alignment is a collection of local blocks with gaps and competing matches. The  optix  coding sequences are especially similar, while the surrounding DNA provides a larger and less uniform comparison. None of these plots alone identifies the regulatory change responsible for a wing pattern, but hey, we got some cool plots! What I find useful about this workflow is that the sequences, their accession identifiers and the analysis stay all withing SQL. Selecting another region means changing explicit coordinates in your code without the need to look for CLI docs in the internet or using different tools blues together via bash scripts. You can even search NCBI via SQL layer that directly uses their API. I didn&#39;t show it here but you can export the table into usual FASTA as well. To continue, try changing the display thresholds and compare the dot plot before interpreting an apparent break. Then select another gene neighbourhood, preserving the accession versions and coordinate conventions. Adding more genomes can turn this small pairwise exercise into a broader comparative analysis. with even more cool charts!">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/butterfly-gc-cover.svg" alt="Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/butterfly-gc-cover.svg" alt="Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-16">16 October 2026</time><span aria-hidden="true">·</span><span>25 min read</span></div>
@@ -312,7 +347,7 @@ WHERE key = &#39;sample_A&#39;;
 SELECT jsonb_object_agg(key, value ORDER BY key) AS stored_values,
        sum(value) AS total
 FROM sample_counts; The total is 16. PostgreSQL also provides transactions and savepoints for grouping changes and undoing work within a transaction, with defined behaviour rather than a replay request to a conversation.  The transaction tutorial  describes those operations.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>7 min read</span></div>
@@ -356,7 +391,7 @@ SELECT note_id, round(sum(weight), 6) AS fused_score
 FROM contributions
 GROUP BY note_id
 ORDER BY sum(weight) DESC, note_id; Note 24 wins because it appears near the top of both lists. Note 31 still appears even though the lexical search did not find it.  UNION ALL  is intentional: each list provides its own contribution. Within each input list, however, a note must occur only once; otherwise joins that duplicate rows would accidentally give it extra votes. This is a useful place to stop and inspect the candidates. Fusion cannot recover a note absent from both lists, and asking each method for only two candidates may remove a note that would have done well in the combined ranking. I would choose candidate limits separately from the number of results displayed to the reader. What I would measure For each test query I would keep the eligible IDs, each candidate list and the final ordering, together with the query time. This makes a missing result traceable: was it excluded by the study filter, absent from retrieval, or just ranked too low? A single response-time number cannot answer that. I would also include awkward cases: a rare study, a note containing an exact sample identifier, two notes with tied scores, and a query with no lexical match. The occasional empty answer is less suprising when those cases are part of the test data from the beginning. The tiny datasets here are a way to inspect the decisions in SQL before choosing an index or a larger retrieval setup.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>6 min read</span></div>
@@ -401,7 +436,7 @@ ORDER BY id; The result tells me which branch accepted each note, which is more 
     }
 end
  This scope is an integration example, not an implementation of the two-branch rule above. For that rule I would keep the SQL explicit and bind the inputs. Rails&#39;  query parameter guidance  matters here: parsing search text is different from safely passing that text to SQL. An input string still belongs in a parameter, not inside an interpolated SQL expression. The harder maintenance question appears when a search document includes another table. A  generated column  cannot reach across rows to follow an association, so I would first decide which change owns the refresh, then test updates to both the parent and the child. Searching stale text is a correctness problem even if the index makes it very quick. Finally, a highlighted excerpt is presentation, not proof of a match.  ts_headline  needs the original text and its output is not automatically safe HTML; the  highlighting documentation  explains the limitations. I would keep the matching booleans for debugging, and render excerpts through the application&#39;s escaping or sanitizing rules rather than marking arbitrary output as safe.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -432,7 +467,7 @@ CREATE TABLE encrypted_specimen_notes (
 
 SELECT pg_tde_is_encrypted(&#39;encrypted_specimen_notes&#39;);
  These calls follow the  function reference . They do not encrypt the earlier  specimen_notes  table merely because another table now uses TDE. A local file provider can help with a disposable experiment, but its key file is unencrypted; the  keyring guide  recommends proper key management for production. WAL and recovery need their own plan Table encryption alone does not settle the write-ahead log. WAL encryption became generally available in  pg_tde 2.0 , after some early introductions were written. It has a separate server-wide configuration, covers writes from all databases in the cluster, and needs a restart when enabled. Existing plaintext WAL does not become encrypted retrospectively. Follow the current  WAL instructions , including their required archive and restore wrappers. A logical dump is another copy of readable data:  pg_dump  reads through PostgreSQL&#39;s client interface, rather than preserving encrypted relation files. Protect the resulting dump separately. The  SQL dump documentation  explains that distinction in how the backup is made. For physical backups, I would make recovery the acceptance test: restore elsewhere, recover the required keys, replay WAL, and check the specimen rows. Percona&#39;s  backup procedure  specifies the encryption metadata and provider files needed, and warns against rotating keys during a backup. It is a seperate operational dependency worth rehearsing before there is an incident.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -463,7 +498,7 @@ SELECT &#39;[0.2,0.4,0.6]&#39;::vector(3)
  Here  &lt;-&gt;  means Euclidean distance for those operand types. Choosing a distance and generating comparable inputs remain separate from storing the values. The  pgvector reference  lists the supported operators. In an actual experiment I would record the embedding model and preprocessing alongside the data, so a later model change cannot quietly mix incompatible representations. The same operator can describe a different distance A point on a two-dimensional laboratory drawing does not need an embedding extension. PostgreSQL already has geometric types, including  point , and the point-to-point distance operator is also written  &lt;-&gt; : SELECT point(2, 3) AS storage_position,
        point(5, 7) AS workbench_position,
        point(2, 3) &lt;-&gt; point(5, 7) AS drawing_distance; This returns a distance of five drawing units. The type tells PostgreSQL which operation to perform, even though the operator spelling is shared with the previous example. These built-in coordinates describe a plane; they do not carry a geographic coordinate reference system.  Geometric types  and  their operators  specify the available operations. Vector graphics add another use of the word. The illustration above consists of shapes and text, while an SVG path can describe a shape through drawing commands and coordinates. The browser paints that description at the requested size. Those coordinates are instructions for an image, not a search representation of its meaning.  The SVG path specification  explains that format. A vector can also span many rows Vectorized execution refers to how a database processes data internally. For example, DuckDB&#39;s execution format passes batches of values through operators, and a batch can contain ordinary integers or strings. Its documentation distinguishes several physical representations, including flat and constant vectors. The SQL column does not have to contain embeddings for this execution method to be useful. DuckDB describes these representations in its  execution-format documentation . That distinction prevents an occassional misunderstanding: adding a  vector  column to a PostgreSQL table does not, by itself, turn the query executor into a batch-processing engine. A stored value&#39;s type and the way an executor moves through rows answer different questions. When reading about a vector feature, I therefore try to identify the stored value, the operation and the execution method separately. For the specimen example those questions lead to fairly ordinary choices: retain the note, define the measurements, name the coordinate system and test the search behaviour. The shared vocabulary becomes much less troublesome once those choices are written down.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -501,7 +536,7 @@ ORDER BY object_name; There are two objects here with two different jobs, even t
 FROM lab_observations
 WHERE needs_review
 ORDER BY read_count DESC, specimen; The expected result is small enough to check by eye. From there I would add updates, rollbacks, deleted rows and overlapping readers, keeping the expected answers seperate from the engine&#39;s implementation. A faster result is useful only after I know it is the right result. Reclaiming obsolete data also needs attention. PostgreSQL&#39;s heap requires  routine vacuuming ; a different storage design still needs a clear account of when old information can be removed. I would include a long-running reader in that experiment, because reclaiming something too early is harder to notice than retaining it too long. The part that survives a restart Write-ahead logging  provides the ordering needed to recover logged changes after a crash. A custom method needs its own coherent recovery story; PostgreSQL&#39;s table interface permits its WAL facilities or another implementation. An in-memory demonstration should not be mistaken for durable storage just because it accepts familiar SQL. There is an operational boundary too. In PostgreSQL 17, changing an existing table with  ALTER TABLE ... SET ACCESS METHOD  rewrites it and requires an  ACCESS EXCLUSIVE  lock. I would plan that as a migration, with room for the rewrite and a tested way back, rather than treat it as an inexpensive setting. The version-specific  ALTER TABLE documentation  is the place to check before doing it. What interests me here is the amount of PostgreSQL I can keep while investigating a different storage layout. The SQL examples above deliberately stay with heap; they establish the boundary and a few expected results, leaving the larger implementation questions visible instead of hiding them behind a successful demo.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -712,7 +747,7 @@ def bwt_exact_positions(text, query):
 
 assert bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;) == [3, 10]
  bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;)  returns  [3, 10] . The suffix sorting above materializes strings, so it is intentionally for small examples. The historical search added insertion, deletion and substitution branches and pruning, and could stop after a successful branch. It was not an exhaustive guarantee of the best approximate alignment. The final mapper used fragments covering about 10% of each query end, with an error budget of about 10% of that fragment length. If endpoint estimates were poor, a dynamic-programming fallback searched a larger suffix fragment, about 40% of the query. It also checked the resulting interval length and could retry before omitting a read. There was a surprising practical result here. On these small endpoint windows, sorting suffixes in a straightforward way could beat a more sophisticated suffix-array construction with more temporary objects. A better asymptotic bound does not remove setup costs. It also does not justify using this suffix sorter for the whole reference. Where minimap2 goes further Minimap2 follows a seed–chain–align design, but its chaining is not plain LIS. It rewards new seed coverage and penalizes gaps and differences between reference and query distances. Backtracking identifies candidate chains, and base alignment can fill the gaps and extend their ends. It also handles alternative placements and strand information. The  minimap2 paper  describes this architecture. Its  sketch implementation  also differs from our little minimizer function: it tracks forward and reverse-complement encodings, records strand and endpoint information, mixes the selected encoding into a hash and has its own tie handling. Our leftmost lexicographic minimum is a teaching choice, not a byte-compatible reimplementation. The  chaining implementation  searches earlier anchors with limits on how much work it performs. This is the more general direction: reward useful coverage, penalize implausible gaps, and bound the search. My Python cutoff was a much rougher attempt to keep distant matches from dominating a candidate. NumPy was useful, but not everywhere I used NumPy extensively in the prototype: compact base arrays, bulk comparisons, sorting, selecting window minima and joining seed positions. But some of the most interesting experiments were the ones where putting data into an array made the program slower. The original rolling-key computation used  frompyfunc  around a Python lambda and accumulated into an object array.  NumPy documents that object-array result . The expression looks like an array operation, but the callback still executes Python code. Converting the result with  astype , stacking columns, sorting and converting back to lists add allocations and representation changes. A sliding-window view is different: it shares memory with the source array rather than copying every window. The later reduction still has work to do. For a direct minimum across every window, that work grows with both the sequence length and the window width;  the NumPy documentation  explicitly discusses that cost. The local experiment files contain comparisons of list-based and NumPy-based dynamic programming. They belong to an  earlier v10 configuration with k=16 and w=7 , not the final  mapper.py  with k=17 and w=8. Keep them separate from the course results below. Only four or five DP calls were measured in each of these runs. The NumPy variant spent about 2.2–2.3 times as long in that phase. That is evidence about these implementations and inputs, not a general rule that lists beat NumPy. A Python loop which indexes one array cell at a time can pay scalar-conversion and indexing costs without getting the benefit of a compiled bulk operation. The BWT comparison tells a similar, size-dependent story. These were small local windows, where a simple implementation had little setup to pay for. The experiment changes more than one representation, so the whole-program timing cannot tell us exactly how much time was caused by allocation, copying or the suffix-array algorithm itself. The useful habit I took from this was to measure the phase I was changing. If reference indexing dominates a run, a large relative improvement in a rarely used fallback may barely change the total. If the next stage immediately converts an array back into Python objects, I need to include that conversion in the comparison. The final course results The course report was updated on 18 December 2024. The comparison below covers ten submissions I considered valid general-purpose implementations under the course rules. Each was tested on six datasets containing 1,000 reads of roughly 1,000 bases. The references were a 1 Mb yeast fragment, a 5 Mb bacterial fragment and a 20 Mb yeast fragment. Suffix  a  denotes about 5% read errors and  b  about 10%; 20% of those errors were indels.  PS  is my submission. The published PDF contains plots rather than a numeric runtime table. The redrawn runtime and memory values below are  approximate readings of those plots ; the downloadable data records that limitation. The mapping counts are read from the corresponding count plots. These are course-server measurements, not a controlled comparison with modern production aligners. PS was the fastest eligible submission on all six tests. It was tens to hundreds of times faster than the other nine submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads. The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left  zero reads unmapped  and had  eight incorrect mappings out of 6,000 : 1, 3, 0, 0, 4 and 0 in the report&#39;s order. That is about 99.87% correctly mapped overall under the assignment&#39;s endpoint tolerance. It does not mean every base of those reads was perfectly aligned. The memory chart also matters. PS approached the 1 GB limit on the 20 Mb reference, so this was not a design with unlimited room to grow. The reference was processed in roughly 800,000-base chunks while building the sketch, but the program still retained reference data. Chunking reduced temporary work; it did not turn the mapper into a constant-memory streaming algorithm. The old chunk boundaries had no overlap, so seeds crossing a boundary could be lost. The reference sketch also skipped selected singleton seed groups after a counter threshold was reached. Those were practical compromises in this implementation, and they should be visible when interpreting its measurements rather than hidden behind the final runtime. The  measurement data and provenance  describe the chart inputs. The  course results report  may require a university login; I used my downloaded copy. Local profiling data and the slides are in  the project sources . What I kept for BioseqDB The exercise made the stages much less mysterious. Seeds reduce the search space. Chaining asks whether their positions tell a plausible story. Refinement checks the details which exact fragments cannot explain. Each stage needs a useful limit, because a repetitive seed or an overlong candidate can undo all the savings from the previous stage. I also learned to be suspicious of optimizations which only look fast in the source. Python made that lesson fairly immediate: object arrays still contain objects, a suffix-array algorithm still has setup costs, and converting between representations is work even when it occupies one line. The current BioseqDB is a separate implementation with a much broader job: storing sequences alongside relational data and making alignment available through SQL. If you want to follow that next step, start with the  alignment foundations , then the  chaining chapter , or run the  SQL walkthrough . The Python mapper was an early way to learn the mechanics well enough to start asking those larger questions.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Small translucent DNA letter tiles in the BioseqDB colours." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Small translucent DNA letter tiles in the BioseqDB colours." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>26 min read</span></div>
@@ -817,7 +852,7 @@ VACUUM FULL specimens;
 --        through the clustering callback
  For this PostgreSQL 17.10 build, I also tested  ALTER TABLE ... SET ACCESS METHOD heap  on a separate six-row table. The conversion succeeded and preserved all six rows. That does not mean every  ALTER TABLE  or rewrite operation has been tested. The useful distinction is the operation and the path it actually takes, not whether its name sounds similar to another working command. The supplied smoke checks can be run in a fresh database with: psql -X -v ON_ERROR_STOP=1 -d your_disposable_database -f test.sql
  They check ordinary writes, rollback, bulk insertion, rejected indexes and primary keys, analysis, ordinary vacuum, a large text value and truncation. An assertion failure stops the script. During preparation I additionally checked two simultaneous connections: a repeatable-read transaction continued to see  121  while another session changed the row to  777 , both before and after that writer committed; a new transaction then saw  777 . The counters in the reader and writer remained independent. A clean server restart preserved the six rows and the committed value. This was a clean-restart check, not a crash-recovery test or a claim that a new storage implementation gets recovery for free. Our actual tuple operations still use heap. If those operations change, the evidence from this example no longer establishes their correctness. 8. Keep the C++ boundary deliberately boring The wrappers use plain pointers, scalar values and a trivial counter structure. They do not keep a  std::vector  or a file stream alive across a PostgreSQL call that may raise an error. PostgreSQL&#39;s error machinery can jump out of the call without running ordinary C++ destructors. Disabling C++ exceptions does not change that behaviour. This is why the example does not present RAII as automatic protection around every server API call. A real extension needs a deliberate boundary between PostgreSQL error handling, its memory contexts and any C++ objects which need cleanup.  PostgreSQL&#39;s C++ integration notes  are relevant here even if the first source file compiles without a warning. Our counter reset is intentionally simple, and the JSON returned by  traceheap.stats()  is allocated through PostgreSQL&#39;s allocation functions. The state is backend-local, covers all  traceheap  tables visited by that backend, is not transactional, and disappears when the process exits. Those properties make it useful for this tutorial and unsuitable as a database-wide monitoring system. Where this meets BioseqDB The part I want to carry into a larger storage engine is the habit of following each callback&#39;s inputs, output and lifetime. A successful  CREATE TABLE  tells us very little about updates, snapshots, large values or maintenance. Even this small heap-based experiment found two assumptions which were invisible in a copied  TableAmRoutine  declaration. BioseqDB&#39;s  table callback registration  binds its own columnar scan, write and maintenance functions instead of copying heap&#39;s routine. Its  storage chapter  explains the larger storage layout, and the  custom scan chapter  follows the separate path used for sequence-search execution. A table method and a custom scan solve related but different problems. For a next experiment, I would change one observable behaviour and keep the current SQL checks beside it. If that change requires a different slot representation or persistent layout, I would write down which other callbacks now have to agree with it before adding another feature. That gives me a callback I can exercise with a small query and a result I can inspect.">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>14 min read</span></div>
@@ -846,7 +881,7 @@ ORDER BY t.id, start; Anna has two occurrences and Ben has one. These are exact 
  Wait until PostgreSQL is ready, then open its SQL prompt: until docker exec bioseqdb-demo pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
 docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
  Follow the  walkthrough  to create the sample table, load a FASTA file and try the queries above. I would like to hear how it works with your data:  open an issue  or  contact me .">
-        <div class="blog-card-cover"><img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-01">1 October 2026</time><span aria-hidden="true">·</span><span>4 min read</span></div>
@@ -869,7 +904,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -927,17 +962,15 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
 </div>
 
 <div id="entity-pop"></div>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","isPartOf":"BioseqDB","image":"https://bioseqdb.com/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/media/social_card.png"}</script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-init.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/prism/prism.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/prism-languages.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/vendor/katex/katex.min.js"></script>
-<script src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-math.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/project-benchmarks.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/main.js"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/site-header.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/announcement.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/docs-design.mjs"></script>
-<script type="module" src="/assets/08f71d3f6028ef4c3cfdb19818e8f52f73661d43eff049cb1218516682c7e6eb/js/blog-index.mjs"></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage","@id":"https://bioseqdb.com/blog/#webpage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/thumbnail.jpg","datePublished":"2026-08-10T02:58:57+02:00","dateModified":"2026-10-12T20:00:53+02:00"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"The BioseqDB blog","item":"https://bioseqdb.com/blog/"}]}]}</script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
+<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/blog-index.mjs"></script>
 </body>
 </html>
