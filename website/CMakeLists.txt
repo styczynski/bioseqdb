@@ -113,6 +113,7 @@ endif()
 set(_site_config "${_source_dir}/site.yaml")
 set(_landing_content "${_source_dir}/landing.yaml")
 set(_contact_content "${_source_dir}/contact.yaml")
+set(_qa_content "${_source_dir}/qa.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
@@ -581,20 +582,17 @@ add_custom_command(
 # --- Pinned Python validation environment (§4.4) ------------------------------
 # The independent html5lib validator and the Playwright browser tests run in a
 # hash-locked virtualenv provisioned from tests/requirements.lock, so html5lib and
-# (when browser tests are on) Playwright's pinned Chromium are deterministic and
+# Playwright's pinned Chromium are deterministic and
 # offline-verifiable. html5lib is a hard prerequisite of publication, so a failed
 # provisioning fails the build rather than skipping the check.
 set(_venv_dir "${_output_root}/venv")
 set(_venv_python "${_venv_dir}/bin/python")
 set(_venv_stamp "${_output_root}/venv.stamp")
 set(_requirements_lock "${CMAKE_SOURCE_DIR}/website/tests/requirements.lock")
-set(_browser_provision "")
-if(BIOSEQ_WEBSITE_BROWSER_TESTS)
-  set(_browser_provision
+set(_browser_provision
     COMMAND "${CMAKE_COMMAND}" -E env
             "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
             "${_venv_python}" -m playwright install chromium)
-endif()
 add_custom_command(
   OUTPUT "${_venv_stamp}"
   COMMAND "${Python3_EXECUTABLE}" -m venv "${_venv_dir}"
@@ -666,7 +664,7 @@ add_custom_command(
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
           "${_render_static_stamp}"
-          "${_site_config}" "${_landing_content}" "${_contact_content}"
+          "${_site_config}" "${_landing_content}" "${_contact_content}" "${_qa_content}"
           ${_tutorial_md} ${_blog_inputs} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
@@ -1099,26 +1097,72 @@ add_custom_command(
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
   USES_TERMINAL VERBATIM)
 
-# --- render the resolved model into staging without a database (step 8) -------
+# --- page metadata and browser-generated thumbnail preview ------------------
+set(_page_dates "${_output_root}/page-dates.json")
+add_custom_command(
+  OUTPUT "${_page_dates}"
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/generate_page_dates.py"
+          --repository "${CMAKE_SOURCE_DIR}" --revision "${_revision}"
+          --output "${_page_dates}"
+  DEPENDS "${_source_dir}/tools/generate_page_dates.py" "${_plan_json}"
+  COMMENT "website: collect page dates from source history"
+  VERBATIM)
+set(_preview_dir "${_output_root}/seo-preview")
+set(_preview_manifest "${_preview_dir}/site-manifest.json")
+add_custom_command(
+  OUTPUT "${_preview_manifest}"
+  COMMAND "${_gen}" website render
+          --model "${_site_model}" --site-config "${_site_config}"
+          --templates "${_templates_dir}" --static "${_render_static_dir}"
+          --base-path "${_base_path}" --source-revision "${_revision}"
+          --page-dates "${_page_dates}" --output "${_preview_dir}"
+  DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
+          "${_render_static_stamp}" "${_landing_content}" "${_contact_content}"
+          "${_qa_content}" "${_page_dates}" ${_template_files} ${_static_files}
+  COMMENT "website: render thumbnail preview"
+  VERBATIM)
+set(_thumbnails_dir "${_output_root}/seo-thumbnails")
+set(_thumbnails_report "${_output_root}/seo-thumbnails.json")
+# A separate stamp also provisions Chromium when an existing venv was originally
+# configured with browser acceptance disabled.
+set(_thumbnail_browser_stamp "${_output_root}/thumbnail-browser.stamp")
+add_custom_command(
+  OUTPUT "${_thumbnail_browser_stamp}"
+  COMMAND "${CMAKE_COMMAND}" -E env
+          "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
+          "${_venv_python}" -m playwright install chromium
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_thumbnail_browser_stamp}"
+  DEPENDS "${_venv_stamp}"
+  COMMENT "website: provision pinned Chromium for thumbnails"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${_thumbnails_report}"
+  COMMAND "${CMAKE_COMMAND}" -E env
+          "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
+          "${_venv_python}" "${_source_dir}/tools/generate_page_thumbnails.py"
+          --site "${_preview_dir}" --output "${_thumbnails_dir}"
+          --cache "${_output_root}/thumbnail-cache" --report "${_thumbnails_report}"
+  DEPENDS "${_preview_manifest}" "${_thumbnail_browser_stamp}"
+          "${_source_dir}/tools/generate_page_thumbnails.py"
+  COMMENT "website: capture page thumbnails with Chromium"
+  VERBATIM)
+
+# --- final render imports thumbnails into the ordinary validated manifest ----
 set(_staging_dir "${_output_root}/staging")
 set(_staging_manifest "${_staging_dir}/site-manifest.json")
 set(_model_validation_stamp "${_output_root}/model-validation.stamp")
 add_custom_command(
   OUTPUT "${_staging_manifest}" "${_model_validation_stamp}"
   COMMAND "${_gen}" website render
-          --model "${_site_model}"
-          --site-config "${_site_config}"
-          --templates "${_templates_dir}"
-          --static "${_render_static_dir}"
-          --base-path "${_base_path}"
-          --source-revision "${_revision}"
+          --model "${_site_model}" --site-config "${_site_config}"
+          --templates "${_templates_dir}" --static "${_render_static_dir}"
+          --base-path "${_base_path}" --source-revision "${_revision}"
+          --page-dates "${_page_dates}" --thumbnails "${_thumbnails_dir}"
           --output "${_staging_dir}"
           --model-validation-stamp "${_model_validation_stamp}"
           --report-dir "${_report_dir}"
-  DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
-          "${_render_static_stamp}" "${_landing_content}" "${_contact_content}"
-          ${_template_files} ${_static_files}
-  COMMENT "website: render resolved model into owner-marked staging (no database)"
+  DEPENDS "${_preview_manifest}" "${_thumbnails_report}"
+  COMMENT "website: render resolved model and thumbnails into staging"
   VERBATIM)
 
 # --- independent html5lib validation of staging BEFORE the swap (step 9) ------
@@ -1127,6 +1171,9 @@ add_custom_command(
 set(_html_validation_stamp "${_output_root}/html-validation.stamp")
 add_custom_command(
   OUTPUT "${_html_validation_stamp}"
+  COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_seo_metadata.py"
+          --site "${_staging_dir}" --qa "${_qa_content}"
   COMMAND "${_venv_python}"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           --site "${_staging_dir}"
@@ -1153,7 +1200,8 @@ add_custom_command(
           --pg-config "${PostgreSQL_CONFIG}"
           --stage-root "${_stage_root}"
           --output-dir "${_output_root}/traceheap-validation"
-  DEPENDS "${_staging_manifest}" "${_venv_stamp}"
+  DEPENDS "${_staging_manifest}" "${_venv_stamp}" "${_qa_content}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_seo_metadata.py"
           "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_landing_content.py"
@@ -1197,10 +1245,12 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             --site-config "${_site_config}" --templates "${_templates_dir}"
             --static "${_render_static_dir}" --base-path "/"
             --source-revision "${_revision}" --output "${_fixture_root_slash}"
+            --page-dates "${_page_dates}" --thumbnails "${_thumbnails_dir}"
     COMMAND "${_gen}" website render --model "${_site_model}"
             --site-config "${_site_config}" --templates "${_templates_dir}"
             --static "${_render_static_dir}" --base-path "/bioseqdb/"
             --source-revision "${_revision}" --output "${_fixture_root_bioseqdb}"
+            --page-dates "${_page_dates}" --thumbnails "${_thumbnails_dir}"
     COMMAND "${_venv_python}"
             "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             --site "${_fixture_root_slash}"
