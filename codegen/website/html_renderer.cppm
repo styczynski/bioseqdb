@@ -959,7 +959,7 @@ struct html_content_writer {
         const bool source_page = link.host == "github.com" && path.contains("/blob/");
         if (!source_page) {
             for (const std::string_view suffix : {".deb", ".rpm", ".gz", ".bz2", ".xz", ".zst",
-                     ".zip", ".7z", ".tar", ".dmg", ".exe", ".msi", ".whl", ".so", ".dll",
+                     ".zip", ".7z", ".tar", ".dmg", ".pkg", ".exe", ".msi", ".whl", ".so", ".dll", ".rb",
                      ".json", ".txt", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".svg",
                      ".webp", ".gif", ".mp4", ".woff", ".woff2"}) {
                 if (path.ends_with(suffix)) return source_link{};

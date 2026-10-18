@@ -54,10 +54,26 @@ void run_website_contract_self_tests() {
     if (!mounted_sources.contains("https://example.org/one")) {
         throw std::runtime_error("Bibliography sources must resolve under a mounted base path");
     }
+    const std::string shared_bibliography =
+        "<a id=\"ref-dna\"></a><a href=\"https://example.org/dna\">DNA</a>"
+        "<a id=\"ref-align\"></a><a href=\"https://example.org/align\">Alignment</a>"
+        "<a id=\"ref-unrelated\"></a><a href=\"https://example.org/unrelated\">Unused source</a>";
+    const auto biology_sources = render_external_sources_html(
+        "<a href=\"../bibliography/#ref-dna\">1</a>", shared_bibliography, "https://bioseqdb.com");
+    const auto alignment_sources = render_external_sources_html(
+        "<a href=\"../bibliography/#ref-align\">2</a>", shared_bibliography, "https://bioseqdb.com");
+    if (!biology_sources.contains("https://example.org/dna")
+        || biology_sources.contains("https://example.org/align") || biology_sources.contains("unrelated")
+        || !alignment_sources.contains("https://example.org/align")
+        || alignment_sources.contains("https://example.org/dna") || alignment_sources.contains("unrelated")) {
+        throw std::runtime_error("Each document must include only its own cited bibliography entries");
+    }
     const std::string download_body =
         "<a href=\"https://downloads.sourceforge.net/project/bioseqdb/build.deb\">Package</a>"
         "<a href=\"https://sourceforge.net/projects/bioseqdb/files/build.tar.gz/download?use_mirror=auto\">Archive</a>"
         "<a href=\"https://downloads.sourceforge.net/project/bioseqdb/sdk.json\">Manifest</a>"
+        "<a href=\"https://downloads.sourceforge.net/project/bioseqdb/macos.pkg\">macOS package</a>"
+        "<a href=\"https://downloads.sourceforge.net/project/bioseqdb/postgresql%4020.rb\">Homebrew formula download</a>"
         "<a href=\"https://example.org/paper.pdf\">Scientific paper</a>"
         "<a href=\"https://github.com/example/project/blob/main/README.txt\">Source documentation</a>"
         "<a href=\"https://sourceforge.net/projects/bioseqdb/\">Release page</a>";
@@ -65,6 +81,7 @@ void run_website_contract_self_tests() {
     if (!download_body.contains("build.deb") || !download_body.contains("sdk.json")
         || reading_sources.contains("build.deb") || reading_sources.contains("build.tar.gz")
         || reading_sources.contains("sdk.json") || !reading_sources.contains("paper.pdf")
+        || reading_sources.contains("macos.pkg") || reading_sources.contains("postgresql%4020.rb")
         || !reading_sources.contains("README.txt") || !reading_sources.contains("Release page")) {
         throw std::runtime_error("Source footers must omit package downloads but retain papers and source pages");
     }
