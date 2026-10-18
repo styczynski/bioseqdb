@@ -90,6 +90,9 @@ html[data-theme="light"] { --blog-ink: #173247; --blog-muted: #455e73; --blog-su
 .blog-page :focus-visible { outline: 2px solid var(--blog-accent); outline-offset: 4px; }
 .blog-glossary-tip { position: fixed; z-index: 120; max-width: min(320px,calc(100vw - 24px)); padding: 13px 16px; border: 1px solid var(--blog-border); border-radius: 11px; background: var(--blog-surface); color: var(--blog-ink); box-shadow: 0 12px 35px var(--blog-shadow); font: 13px/1.6 'IBM Plex Sans',sans-serif; pointer-events: none; }
 .blog-glossary-tip strong { display: block; margin-bottom: 5px; color: var(--blog-accent); font-size: 12px; }
+.blog-glossary-tip .link-popover-actions { margin: 12px -4px -3px; padding: 8px 0 0; border-color: var(--blog-border); }
+.blog-glossary-tip .link-popover-more { color: var(--blog-accent); }
+.blog-glossary-tip .link-popover-close { color: var(--blog-ink); border-color: var(--blog-border); }
 @media (max-width: 420px) { .blog-page #doc-main { padding: 20px 12px 44px; } .blog-hero { padding: 26px 20px; border-radius: 15px; } .blog-page h1 { font-size: 30px; } .blog-description { font-size: 16px; } .blog-meta { gap: 6px 8px; font-size: 12px; } .blog-page .blog-content { font-size: 15.5px; } .blog-cta { padding: 24px 20px; } .blog-card-content { padding: 22px; } .blog-card h2 { font-size: 25px; } }
 @media (min-width: 421px) and (max-width: 568px) { .blog-page #doc-main { padding-inline: 18px; } .blog-hero { padding: 30px 24px; } }
 @media (min-width: 569px) and (max-width: 666px) { .blog-hero { padding: 34px 28px; } }

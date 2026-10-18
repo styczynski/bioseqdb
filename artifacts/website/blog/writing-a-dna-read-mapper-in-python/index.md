@@ -19,7 +19,7 @@ This tutorial follows that experiment, but starts with a smaller program you can
 
 The [historical mapper.py](https://github.com/styczynski/bioseqdb/blob/ca3651cc63ebc58f2bb6b948ce4d3cab7d6e44ea/research/python_aligner/mapper.py) is 938 lines. This is the last version before the research directory was removed, and it is identical to the earlier version linked from my notes. The short implementation below is a teaching version, with a few mistakes in the old representation deliberately corrected. It does not reproduce the competition timings.
 
-![The historical mapping pipeline goes from reference chunks and shared seeds through candidate regions to endpoint refinement and coordinates.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/mapper-pipeline.svg)
+![The historical mapping pipeline goes from reference chunks and shared seeds through candidate regions to endpoint refinement and coordinates.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/mapper-pipeline.svg)
 
 ## The task and its rather concrete limits
 
@@ -44,7 +44,7 @@ query               A C G - A C G T
 
 Mapping asks where the read belongs. Alignment explains the differences at that location. The two problems are related, but the first can often be answered without computing every alignment column. BioseqDB can expose those columns through `bioseq.cigar`; this early mapper only returned coordinates.
 
-![An illustrative alignment shows a substitution, an inserted base and a deleted base in separate columns.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/alignment-edits.svg)
+![An illustrative alignment shows a substitution, an inserted base and a deleted base in separate columns.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/alignment-edits.svg)
 
 A dynamic-programming matrix for a query of length `m` and a reference of length `n` needs `O(mn)` work. For one 1,000-base read and a 20-million-base reference, that is about 20 billion cells before considering the other reads. The useful question is therefore: can we cheaply find a small region which deserves that work?
 
@@ -52,7 +52,7 @@ This is the idea behind [seed-and-extend](/v0.1/tutorials/project_alignment_foun
 
 ## 2. Run the small version
 
-The Python blocks below belong to one file and use only the standard library. Copy them in order, or [download the complete Python example](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/examples/python-aligner.py) and run:
+The Python blocks below belong to one file and use only the standard library. Copy them in order, or [download the complete Python example](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/examples/python-aligner.py) and run:
 
 ```sh
 python3 python-aligner.py
@@ -103,7 +103,7 @@ def rolling_kmers(text, k):
 
 For `ACGTAC` with `k=3`, this gives `(6, 0), (27, 1), (44, 2), (49, 3)`: integer key followed by start position. Leading A bases are fine because the length is fixed. Python integers also have enough bits for a 17-mer; a 32-bit integer does not, because 17 bases need 34 bits.
 
-![Overlapping three-base windows become two-bit integer keys; shifting and masking retains the latest three bases.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/rolling-kmers.svg)
+![Overlapping three-base windows become two-bit integer keys; shifting and masking retains the latest three bases.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/rolling-kmers.svg)
 
 There is an awkward detail in my original code. It encoded C, A, T and G as 1, 2, 3 and 4, then used two-bit shifts. Four needs three bits, so different strings can produce the same key: `AG` and `TG` both become 12. The original mask also retained more bits than intended, and selected keys were eventually cast to `uint32`. The code could still find useful candidates, but that is not an exact two-bit encoding. The version above fixes those details rather than asking you to repeat them.
 
@@ -132,7 +132,7 @@ The tuple comparison makes ties choose the leftmost position. On a run of A base
 
 This implementation scans each window directly and therefore uses `O(nw)` work for fixed-size keys, plus `O(n)` stored k-mers. It is intentionally short. A monotonic deque can maintain the window minimum with amortized constant work per incoming key; the [minimizer chapter](/v0.1/tutorials/project_minimizers/) goes further into the design choices.
 
-![Three overlapping windows select three minima from the keys 6, 27, 44 and 49.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/minimizer-windows.svg)
+![Three overlapping windows select three minima from the keys 6, 27, 44 and 49.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/minimizer-windows.svg)
 
 If two sequences contain the same unchanged window of bases, this deterministic rule chooses a shared seed from it. An error may disrupt several adjacent k-mers, so larger `k` makes exact seeds harder to preserve. Smaller `k` creates more accidental matches. In the final historical program I used `k=17` and `w=8`; the tiny examples here use smaller values so we can inspect them.
 
@@ -196,7 +196,7 @@ Sorting equal reference coordinates by descending query coordinate is deliberate
 
 The core loop costs `O(a log a)` for `a` anchors. This is a considerable improvement over comparing every anchor with every earlier anchor, but the optimization target is still quite crude. LIS counts points. It does not know whether the gap between two points is ten bases or ten million.
 
-![An anchor plot contrasts a long increasing path across distant regions with a compact local cluster.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/anchors-and-locality.svg)
+![An anchor plot contrasts a long increasing path across distant regions with a compact local cluster.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/anchors-and-locality.svg)
 
 ## 7. Stop distant anchors from taking over the chain
 
@@ -273,7 +273,7 @@ def window_score(chain, query_length, k):
 
 For four anchors spaced ten bases apart on both axes, `k=17` and a 100-base query, the score is `0.3`. Stretch the reference gaps to thirty bases while keeping the query gaps at ten and it drops to `0.105`. This is a ranking heuristic, not percentage identity or a probability that the mapping is correct.
 
-![Two four-anchor windows with the same query span receive different scores because the sparse window has uncovered reference gaps.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/candidate-gap-score.svg)
+![Two four-anchor windows with the same query span receive different scores because the sparse window has uncovered reference gaps.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/candidate-gap-score.svg)
 
 The readable function recomputes one monotone window directly. The old code maintained rolling gap totals and searched for local maxima; its bookkeeping has edge cases I would not use as a teaching definition. Its candidate selection kept scores strictly above `0.1`, required more than three anchors in that branch, and retained at most five candidates. When no candidate survived, it tried ordinary LIS with a different local-window score. When several survived, dynamic programming helped choose between them.
 
@@ -426,15 +426,15 @@ A sliding-window view is different: it shares memory with the source array rathe
 
 The local experiment files contain comparisons of list-based and NumPy-based dynamic programming. They belong to an **earlier v10 configuration with k=16 and w=7**, not the final `mapper.py` with k=17 and w=8. Keep them separate from the course results below.
 
-![Local dynamic-programming timings compare lists and NumPy for two datasets, with the small number of calls shown.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/local-dp-implementations.svg)
+![Local dynamic-programming timings compare lists and NumPy for two datasets, with the small number of calls shown.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/local-dp-implementations.svg)
 
 Only four or five DP calls were measured in each of these runs. The NumPy variant spent about 2.2–2.3 times as long in that phase. That is evidence about these implementations and inputs, not a general rule that lists beat NumPy. A Python loop which indexes one array cell at a time can pay scalar-conversion and indexing costs without getting the benefit of a compiled bulk operation.
 
-![Local endpoint-search measurements compare straightforward suffix sorting with list and NumPy variants of skew suffix-array construction.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/local-bwt-implementations.svg)
+![Local endpoint-search measurements compare straightforward suffix sorting with list and NumPy variants of skew suffix-array construction.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/local-bwt-implementations.svg)
 
 The BWT comparison tells a similar, size-dependent story. These were small local windows, where a simple implementation had little setup to pay for. The experiment changes more than one representation, so the whole-program timing cannot tell us exactly how much time was caused by allocation, copying or the suffix-array algorithm itself.
 
-![Recorded local phase totals show where time went in the earlier prototype.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/local-runtime-phases.svg)
+![Recorded local phase totals show where time went in the earlier prototype.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/local-runtime-phases.svg)
 
 The useful habit I took from this was to measure the phase I was changing. If reference indexing dominates a run, a large relative improvement in a rarely used fallback may barely change the total. If the next stage immediately converts an array back into Python objects, I need to include that conversion in the comparison.
 
@@ -444,23 +444,23 @@ The course report was updated on 18 December 2024. The comparison below covers t
 
 The published PDF contains plots rather than a numeric runtime table. The redrawn runtime and memory values below are **approximate readings of those plots**; the downloadable data records that limitation. The mapping counts are read from the corresponding count plots. These are course-server measurements, not a controlled comparison with modern production aligners.
 
-![Course runtimes for ten eligible submissions across three reference sizes at approximately five percent read errors; PS is the fastest and is highlighted.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/course-runtime-a.svg)
+![Course runtimes for ten eligible submissions across three reference sizes at approximately five percent read errors; PS is the fastest and is highlighted.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/course-runtime-a.svg)
 
-![Course runtimes for the same submissions and reference sizes at approximately ten percent read errors.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/course-runtime-b.svg)
+![Course runtimes for the same submissions and reference sizes at approximately ten percent read errors.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/course-runtime-b.svg)
 
 PS was the fastest eligible submission on all six tests. It was tens to hundreds of times faster than the other nine submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads.
 
 The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left **zero reads unmapped** and had **eight incorrect mappings out of 6,000**: 1, 3, 0, 0, 4 and 0 in the report's order. That is about 99.87% correctly mapped overall under the assignment's endpoint tolerance. It does not mean every base of those reads was perfectly aligned.
 
-![PS maps all six thousand reads, with per-dataset incorrect counts of one, three, zero, zero, four and zero.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/course-ps-quality.svg)
+![PS maps all six thousand reads, with per-dataset incorrect counts of one, three, zero, zero, four and zero.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/course-ps-quality.svg)
 
 The memory chart also matters. PS approached the 1 GB limit on the 20 Mb reference, so this was not a design with unlimited room to grow. The reference was processed in roughly 800,000-base chunks while building the sketch, but the program still retained reference data. Chunking reduced temporary work; it did not turn the mapper into a constant-memory streaming algorithm.
 
-![PS reported memory rises with reference size and approaches the assignment's one-gigabyte limit.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/course-ps-memory.svg)
+![PS reported memory rises with reference size and approaches the assignment's one-gigabyte limit.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/course-ps-memory.svg)
 
 The old chunk boundaries had no overlap, so seeds crossing a boundary could be lost. The reference sketch also skipped selected singleton seed groups after a counter threshold was reached. Those were practical compromises in this implementation, and they should be visible when interpreting its measurements rather than hidden behind the final runtime.
 
-The [measurement data and provenance](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/python-aligner/measurements.json) describe the chart inputs. The [course results report](https://moodle.mimuw.edu.pl/pluginfile.php/330449/mod_page/content/7/results_rmap1.pdf) may require a university login; I used my downloaded copy. Local profiling data and the slides are in [the project sources](https://github.com/styczynski/bioseqdb/tree/b6aff3a0d8637bf1f01f392a485e9c76ad9465e5/papers/src/content/aadg/project1).
+The [measurement data and provenance](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/python-aligner/measurements.json) describe the chart inputs. The [course results report](https://moodle.mimuw.edu.pl/pluginfile.php/330449/mod_page/content/7/results_rmap1.pdf) may require a university login; I used my downloaded copy. Local profiling data and the slides are in [the project sources](https://github.com/styczynski/bioseqdb/tree/b6aff3a0d8637bf1f01f392a485e9c76ad9465e5/papers/src/content/aadg/project1).
 
 ## What I kept for BioseqDB
 

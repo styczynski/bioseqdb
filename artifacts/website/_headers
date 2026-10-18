@@ -1,3 +1,9 @@
+/assets/*
+  Cache-Control: public, max-age=172800, immutable
+
+/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json
+  Cache-Control: public, max-age=172800, immutable
+
 /blog/comparing-butterfly-genomes-with-bioseqdb/index.md
   Content-Type: text/plain; charset=utf-8
   Content-Disposition: inline

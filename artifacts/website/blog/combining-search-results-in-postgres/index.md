@@ -47,7 +47,7 @@ The first answer contains only note 12. Note 14 never gets a chance because the 
 
 The ID is a tie-breaker, which makes the example reproducible if two distances become equal. PostgreSQL does not promise which tied rows a limited query will choose unless the ordering distinguishes them. That matters for tests and for a reader trying the example twice. [PostgreSQL's LIMIT documentation](https://www.postgresql.org/docs/current/queries-limit.html) describes this behaviour.
 
-![Study eligibility is applied separately to text and vector candidates before their ranked results are combined.](/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/figures/blog/search-candidates.svg)
+![Study eligibility is applied separately to text and vector candidates before their ranked results are combined.](/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/search-candidates.svg)
 
 ## Where an approximate index changes the problem
 

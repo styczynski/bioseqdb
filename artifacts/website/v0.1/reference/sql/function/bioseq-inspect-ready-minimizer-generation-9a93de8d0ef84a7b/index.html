@@ -24,9 +24,43 @@
   </DataObject>
 </PageMap>
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
-<script src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/theme.js"></script>
-<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/analytics.js"></script>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com 'sha256-mtbtm4cibi1OtJ8S0SrK7pAdSdsr6FYsYs/aRUxsL4U='; script-src-attr 'none'; style-src 'self'; font-src 'self'; img-src 'self' data: https://img.shields.io https://www.googletagmanager.com https://*.google-analytics.com; media-src 'self'; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com https://formserve.io; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'; form-action 'self' https://formserve.io">
+<script data-theme-bootstrap>/* Apply the saved choice before styles paint. Dark is the deliberate default. */
+(() => {
+  const key = "bioseq-theme";
+  const root = document.documentElement;
+  const read = () => {
+    try { return localStorage.getItem(key) === "light" ? "light" : "dark"; }
+    catch { return "dark"; }
+  };
+  const apply = (theme) => {
+    root.dataset.theme = theme;
+    const button = document.querySelector("[data-theme-toggle]");
+    if (button) {
+      const label = theme === "light" ? button.dataset.lightLabel : button.dataset.darkLabel;
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+      button.setAttribute("aria-pressed", String(theme === "light"));
+      const tooltip = button.querySelector("[data-theme-tooltip]");
+      if (tooltip) tooltip.textContent = label;
+    }
+    document.dispatchEvent(new CustomEvent("bioseq:themechange", { detail: { theme } }));
+  };
+  apply(read());
+  document.addEventListener("DOMContentLoaded", () => {
+    apply(root.dataset.theme);
+    document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
+      const theme = root.dataset.theme === "light" ? "dark" : "light";
+      apply(theme);
+      try { localStorage.setItem(key, theme); } catch { /* The toggle still works in this tab. */ }
+    });
+  }, { once: true });
+  window.addEventListener("storage", (event) => {
+    if (event.key === key || event.key === null) apply(read());
+  });
+})();
+</script>
+<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/analytics.js"></script>
 
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
@@ -59,20 +93,20 @@
 
 
 
-<link rel="icon" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/favicon.svg">
-<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
-<link rel="preload" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="icon" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/favicon.svg">
+<link rel="preload" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/docs-design.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/code-theme.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/project-content.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-header.css" data-shared-styles>
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/responsive.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/site-controls.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/announcement.css">
-<link rel="stylesheet" href="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/css/theme.css">
+<link rel="stylesheet" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/css/page-7f9dede07699cf524ad748ec27326cbd83dd4023686623777cfc0fd0b4219687.css">
+
+
+
+
+<link rel="stylesheet" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/css/page-dde4510e08691d8397d2a8fde383a7380afebae40a7196348363556d6ef2da3d.css" data-shared-styles>
+
+
+
+
 
 </head>
 <body id="page-top" class="docs-design-page">
@@ -85,7 +119,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -229,7 +263,7 @@ ROLLBACK;</code></pre></figure></div>
   
   
   
-  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/7174e5750cbe9048446e6e6a3efa45f33d6cbf72/bioseq/backend/pg/extension/index.cppm#L1815" rel="noreferrer">bioseq.postgres.extension</a></p>
+  <p class="design-source-line">Source: <a href="https://github.com/styczynski/bioseqdb/blob/49aea72409b41b302b15a5acb2ee6344b67ec547/bioseq/backend/pg/extension/index.cppm#L1815" rel="noreferrer">bioseq.postgres.extension</a></p>
   <p class="design-provenance">Bioseq extension 1.0 · schema bioseq · PostgreSQL 17.10</p>
   
   
@@ -255,7 +289,7 @@ ROLLBACK;</code></pre></figure></div>
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -322,14 +356,14 @@ ROLLBACK;</code></pre></figure></div>
 
 <div id="entity-pop"></div>
 <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","@id":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/#article","name":"bioseq.inspect_ready_minimizer_generation","description":"Check a published minimizer generation against its source sequence. Validate its metadata and return the source locator, layout and algorithm settings. This inspection leaves the stored minimizer payload unread.","url":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/thumbnail.jpg","datePublished":"2026-08-10T02:58:57+02:00","dateModified":"2026-10-05T12:18:01+02:00","headline":"bioseq.inspect_ready_minimizer_generation","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"articleSection":"entity"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"v0.1","item":"https://bioseqdb.com/v0.1/"},{"@type":"ListItem","position":3,"name":"Reference","item":"https://bioseqdb.com/v0.1/reference/"},{"@type":"ListItem","position":4,"name":"SQL","item":"https://bioseqdb.com/v0.1/reference/sql/"},{"@type":"ListItem","position":5,"name":"bioseq.inspect_ready_minimizer_generation","item":"https://bioseqdb.com/v0.1/reference/sql/function/bioseq-inspect-ready-minimizer-generation-9a93de8d0ef84a7b/"}]}]}</script>
-<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-init.js"></script>
-<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/vendor/prism/prism.min.js"></script>
-<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/prism-languages.js"></script>
-<script defer src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/main.js"></script>
-<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/content-runtime.mjs"></script>
-<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/site-header.mjs"></script>
-<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/announcement.mjs"></script>
-<script type="module" src="/assets/5429149deec7cd4e1a59f651da7355773835cbb8e8dcd9fdc292c9e9df4ff6f5/js/docs-design.mjs"></script>
+<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/prism-init.js"></script>
+<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/prism-languages.js"></script>
+<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/main.js"></script>
+<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/site-header.mjs"></script>
+<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/announcement.mjs"></script>
+<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/docs-design.mjs"></script>
 
 </body>
 </html>

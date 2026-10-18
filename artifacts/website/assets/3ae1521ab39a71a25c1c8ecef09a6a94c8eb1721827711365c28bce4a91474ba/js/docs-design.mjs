@@ -2,6 +2,8 @@
 // The generated search, versions, and entity JSON files are the only data
 // sources; this module contains presentation metadata, never documentation data.
 
+import { linkPopover } from "./link-popover.mjs";
+
 const root = document.querySelector('[data-screen-label="BioseqDB documentation"]');
 
 function headerOffset() {
@@ -362,25 +364,17 @@ function popovers() {
   const pop = document.getElementById("entity-pop");
   if (!pop || pop.dataset.initialized) return;
   pop.dataset.initialized = "true";
-  const selector = "[data-entity-id][data-entity-data-url]";
-  let hideTimer = 0;
-  let activeAnchor = null;
-  let requestSerial = 0;
-  pop.setAttribute("role", "tooltip");
-  pop.setAttribute("aria-hidden", "true");
-
-  const position = (anchor) => {
-    const rect = anchor.getBoundingClientRect();
-    const width = 340;
-    const left = Math.max(12, Math.min(rect.left, innerWidth - width - 12));
-    const below = rect.bottom + 9;
-    const top = below + pop.offsetHeight > innerHeight - 12 ?
-      rect.top - pop.offsetHeight - 9 : below;
-    pop.style.left = `${left}px`;
-    pop.style.top = `${Math.max(12, top)}px`;
-  };
-  const render = (record) => {
+  const selector = "a[data-entity-id][data-entity-data-url], a.source-link";
+  const render = (content, anchor, records, loading) => {
+    const source = anchor.matches(".source-link");
+    const record = records?.[anchor.dataset.entityId] || {
+      kind: source ? "source" : "sql_object",
+      title: anchor.textContent.trim(),
+      summary: source ? "Open this source reference on GitHub." : loading ?
+        "Loading reference details…" : "The reference details could not be loaded. You can still open the full reference.",
+    };
     const meta = entityKind(record.kind);
+    if (source) meta.label = "Source code";
     const head = document.createElement("div");
     head.className = "entity-pop-head";
     const metadata = document.createElement("div");
@@ -393,7 +387,7 @@ function popovers() {
     kind.style.borderColor = meta.border;
     const where = document.createElement("span");
     where.className = "entity-pop-where";
-    where.textContent = entityLocation(record.kind);
+    where.textContent = source ? "GitHub" : entityLocation(record.kind);
     metadata.append(kind, where);
     const signature = document.createElement("pre");
     signature.textContent = record.signature || record.qualified_name || record.title || "";
@@ -492,77 +486,12 @@ function popovers() {
       view.style.color = meta.color;
       body.appendChild(view);
     }
-    pop.replaceChildren(head, body);
+    content.replaceChildren(head, body);
   };
-  const show = async (anchor) => {
-    window.clearTimeout(hideTimer);
-    const id = anchor.dataset.entityId;
-    const url = anchor.dataset.entityDataUrl;
-    if (!id || !url) return;
-    const serial = ++requestSerial;
-    if (activeAnchor && activeAnchor !== anchor) {
-      activeAnchor.removeAttribute("aria-describedby");
-    }
-    activeAnchor = anchor;
-    const records = await loadEntityDataset(url);
-    if (serial !== requestSerial || activeAnchor !== anchor || !anchor.isConnected) return;
-    const record = records[id];
-    if (!record) return;
-    render(record);
-    pop.style.display = "block";
-    pop.setAttribute("aria-hidden", "false");
-    anchor.setAttribute("aria-describedby", pop.id);
-    position(anchor);
-    requestAnimationFrame(() => {
-      if (serial !== requestSerial || activeAnchor !== anchor || !anchor.isConnected) return;
-      pop.style.opacity = "1";
-      pop.style.transform = "none";
-    });
-  };
-  const hide = () => {
-    window.clearTimeout(hideTimer);
-    requestSerial += 1;
-    if (activeAnchor) activeAnchor.removeAttribute("aria-describedby");
-    activeAnchor = null;
-    pop.style.opacity = "0";
-    pop.style.transform = "translateY(6px)";
-    pop.setAttribute("aria-hidden", "true");
-    window.setTimeout(() => {
-      if (pop.style.opacity === "0") pop.style.display = "none";
-    }, 160);
-  };
-  const scheduleHide = () => {
-    window.clearTimeout(hideTimer);
-    hideTimer = window.setTimeout(hide, 120);
-  };
-  const closestAnchor = (target) => target instanceof Element ? target.closest(selector) : null;
-  document.addEventListener("mouseover", (event) => {
-    const anchor = closestAnchor(event.target);
-    if (!anchor || anchor.contains(event.relatedTarget)) return;
-    show(anchor);
+  linkPopover({
+    pop, selector, render,
+    load: (anchor) => anchor.dataset.entityDataUrl ? loadEntityDataset(anchor.dataset.entityDataUrl) : null,
   });
-  document.addEventListener("mouseout", (event) => {
-    const anchor = closestAnchor(event.target);
-    if (!anchor || anchor.contains(event.relatedTarget)) return;
-    scheduleHide();
-  });
-  document.addEventListener("focusin", (event) => {
-    const anchor = closestAnchor(event.target);
-    if (anchor) show(anchor);
-  });
-  document.addEventListener("focusout", (event) => {
-    const anchor = closestAnchor(event.target);
-    if (anchor && !anchor.contains(event.relatedTarget)) scheduleHide();
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && activeAnchor) hide();
-  });
-  window.addEventListener("resize", () => {
-    if (activeAnchor) position(activeAnchor);
-  });
-  window.addEventListener("scroll", () => {
-    if (activeAnchor) position(activeAnchor);
-  }, { passive: true });
 }
 
 function copyButtons() {

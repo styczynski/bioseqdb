@@ -6,6 +6,18 @@
   --benchmark-width: 1920px;
 }
 
+/* The explorer's authored shell is a viewport tall. Reserve that same space
+   before its module loads so the methodology never jumps out from under readers. */
+.benchmarks-design-page #benchmarks-app { min-height: 100vh; }
+.benchmarks-design-page .benchmark-loading {
+  max-width: var(--benchmark-width);
+  margin: 0 auto;
+  padding: 32px var(--page-gutter);
+  color: var(--theme-9db1c2, #9db1c2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .landing-design-page :is(.ld-s0018, .ld-s0041, .ld-s0083, .ld-s0152,
     .ld-s0244, .ld-s0273, .ld-s0284, .ld-s0296) {
   width: 100%;
@@ -121,6 +133,23 @@
   max-width: var(--docs-width);
   grid-template-columns: minmax(0, 1fr);
 }
+/* The drawer must be out of the grid before JavaScript initializes. Otherwise
+   its viewport-sized row moves the article down, then back up on slow mobiles. */
+@media (max-width: 768px) {
+  .docs-design-page #sidebar {
+    position: fixed;
+    left: 0;
+    width: 284px;
+    max-width: 82vw;
+    z-index: 76;
+    background: var(--theme-081726, #081726);
+    transform: translateX(-105%);
+    visibility: hidden;
+  }
+  .docs-design-page:has([data-menu][aria-expanded="true"]) #sidebar { visibility: visible; }
+}
+/* Article titles are primary content, not a scroll-triggered reveal. */
+.docs-design-page .design-page-header[data-reveal] { opacity: 1; transform: none; transition: none; }
 .docs-design-page #doc-main { padding: 32px var(--page-gutter) 0; }
 .docs-design-page #doc-main > .design-page { padding: 0 0 56px; }
 .docs-design-page [data-rightrail] { display: none; }
