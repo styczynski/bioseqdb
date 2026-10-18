@@ -1941,6 +1941,8 @@ def _exercise_figure_viewer(page) -> None:
 
 def _exercise_project_content(page, tutorial: dict, base_path: str, version: str) -> None:
     """Original diagrams, mathematics, bibliography, and source links survive rendering."""
+    if page.locator("[data-math]").count():
+        page.locator('html[data-math-state="ready"]').wait_for(state="attached")
     slug = tutorial["slug"]
     header = page.locator(".design-page-header")
     _check(header.locator("h1").inner_text() == tutorial["title"],
@@ -2500,13 +2502,14 @@ def _exercise_media_band(page) -> None:
         video = videos.nth(index)
         _check(video.get_attribute("controls") is None,
                "decorative background video exposes native player controls")
-        _check(video.get_attribute("autoplay") is not None
+        _check(video.get_attribute("autoplay") is None
                and video.get_attribute("muted") is not None
-               and video.get_attribute("loop") is not None,
-               "decorative background video lost autoplay/muted/loop semantics")
+               and video.get_attribute("loop") is not None
+               and video.get_attribute("preload") == "none",
+               "decorative background video lost deferred muted-loop loading semantics")
         source = video.locator("source[type='video/mp4']")
         _check(source.count() == 1, "background video has no single MP4 source")
-        sources.append(source.get_attribute("src") or "")
+        sources.append(source.get_attribute("src") or source.get_attribute("data-src") or "")
     _check({urlsplit(source).path.rsplit("/", 1)[-1] for source in sources}
            == {"vials.mp4", "small_vid.mp4"},
            f"landing videos are not the supplied assets: {sources}")
