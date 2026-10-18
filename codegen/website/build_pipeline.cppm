@@ -5387,9 +5387,9 @@ void decorate_code_entity_ranges(
     // Only content-addressed resources are immutable. Stable URLs (HTML,
     // search indexes, thumbnails and logo aliases) must be able to refresh.
     std::string markdown_headers = url("assets/*") + "\n"
-        "  Cache-Control: public, max-age=31536000, immutable\n\n"
+        "  Cache-Control: public, max-age=172800, immutable\n\n"
         + tooltip_url + "\n"
-        "  Cache-Control: public, max-age=31536000, immutable\n\n";
+        "  Cache-Control: public, max-age=172800, immutable\n\n";
     const std::array<std::string_view, 12> month_names{
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"};

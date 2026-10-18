@@ -351,9 +351,9 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 if route != asset_rule and not entity_path:
                     problems.append(_fail(headers_path,
                         f"immutable cache rule includes a mutable URL: {route}"))
-                if "  Cache-Control: public, max-age=31536000, immutable" not in lines:
+                if "  Cache-Control: public, max-age=172800, immutable" not in lines:
                     problems.append(_fail(headers_path,
-                        f"hashed resource lacks the one-year cache policy: {route}"))
+                        f"hashed resource lacks the 48-hour cache policy: {route}"))
         if asset_rule not in immutable_routes:
             problems.append(_fail(headers_path, "hashed assets lack immutable caching"))
 

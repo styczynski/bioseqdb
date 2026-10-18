@@ -341,9 +341,9 @@ so a logo update does not leave an immutable cached copy behind.
 ## Hosting cache policy
 
 The generated `_headers` file gives the content-addressed `/assets/` tree and
-hashed entity records `Cache-Control: public, max-age=31536000, immutable`.
+hashed entity records `Cache-Control: public, max-age=172800, immutable`.
 An asset change creates a new URL, so these files can stay in the browser for
-one year. HTML, `search-index.json`, thumbnails and the stable logo are not
+48 hours. HTML, `search-index.json`, thumbnails and the stable logo are not
 immutable; their URLs can serve updated content.
 
 `_headers` is understood by hosts such as Cloudflare Pages. The current GitHub
@@ -351,9 +351,9 @@ Pages deployment does not apply that file as response headers. When Cloudflare
 proxies GitHub Pages, configure a Cache Rule for hostname `bioseqdb.com` and URI
 path starting with `/assets/`: set **Cache eligibility** to **Eligible for
 cache** (this includes `.mjs` modules), and set **Browser TTL** to **Override
-origin**, **1 year**. Leave HTML and other paths outside this rule. Keep error
+origin**, **2 days (48 hours)**. Leave HTML and other paths outside this rule. Keep error
 responses on their default short edge lifetime. This avoids keeping an old
-page or a missing-file response for a year.
+page or a missing-file response for 48 hours.
 
 Check the actual response after changing hosting settings; a meta tag or a file
 inside the published site cannot override the CDN's HTTP cache policy:
