@@ -947,6 +947,24 @@ struct html_content_writer {
         source_link link{.url = attribute(attributes, "href")};
         link.host = url_host(link.url);
         if (link.host.empty() || link.host == site_host) return source_link{};
+        // The source footer links to reading material, not every package in an
+        // installation matrix. Keep the original download links in the body.
+        // PDFs remain useful citations, and GitHub blob URLs are HTML pages
+        // even when their displayed source file ends in .json or .txt.
+        auto path = to_ascii_lower(link.url.substr(link.url.find("://") + 3));
+        path.erase(0, path.find('/') == std::string::npos ? path.size() : path.find('/'));
+        path.resize(path.find_first_of("?#") == std::string::npos
+            ? path.size() : path.find_first_of("?#"));
+        if (path.ends_with("/download")) path.resize(path.size() - 9);
+        const bool source_page = link.host == "github.com" && path.contains("/blob/");
+        if (!source_page) {
+            for (const std::string_view suffix : {".deb", ".rpm", ".gz", ".bz2", ".xz", ".zst",
+                     ".zip", ".7z", ".tar", ".dmg", ".exe", ".msi", ".whl", ".so", ".dll",
+                     ".json", ".txt", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".svg",
+                     ".webp", ".gif", ".mp4", ".woff", ".woff2"}) {
+                if (path.ends_with(suffix)) return source_link{};
+            }
+        }
         link.label = decode(std::regex_replace(inner, std::regex(R"(<[^>]*>)"), ""));
         link.label = std::regex_replace(link.label, std::regex(R"(\s+)"), " ");
         const auto first = link.label.find_first_not_of(' ');

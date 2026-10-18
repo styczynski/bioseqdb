@@ -126,6 +126,11 @@ def main():
                     docs["pager"] = boxes
 
                     first = open_page(f"/{args.version}/tutorials/getting_started/")
+                    check(page.locator('.tutorial-body a[href*="downloads.sourceforge.net"]').count() > 0, "Installation download links must remain in the article")
+                    reading_links = page.locator(".document-sources a").evaluate_all("nodes => nodes.map(x => x.getAttribute('href'))")
+                    check(len(reading_links) < 30, "The source footer should not duplicate the package matrix")
+                    check(all("downloads.sourceforge.net" not in urlsplit(x).netloc for x in reading_links), "Direct package downloads should not be repeated as reading sources")
+                    first["source_links"] = reading_links
                     pager = page.locator(".tutorial-pagination")
                     check(pager.locator(".tutorial-pagination-link").count() == 1, "First chapter should only have Next")
                     next_card = pager.locator(".tutorial-pagination-next")
