@@ -132,7 +132,7 @@ export function linkPopover({ pop, selector, load, render }) {
     if (!anchor || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     const touch = event.pointerType === "touch" || event.pointerType === "pen" ||
       event.sourceCapabilities?.firesTouchEvents ||
-      (event.detail > 0 && touchTarget === anchor && performance.now() - touchTime < 1500) ||
+      (event.detail > 0 && !event.pointerType && touchTarget === anchor && performance.now() - touchTime < 1500) ||
       (event.detail > 0 && !event.pointerType && matchMedia("(hover: none) and (pointer: coarse)").matches);
     if (!touch) return; // Keyboard Enter and mouse clicks still follow the link.
     event.preventDefault();

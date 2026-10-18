@@ -177,10 +177,11 @@ def main():
               for (const detail of [0, 1]) {
                 anchor.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, button:0, detail, ctrlKey:detail === 1}));
               }
+              anchor.dispatchEvent(new PointerEvent('click', {bubbles:true, cancelable:true, button:0, detail:1, pointerType:'mouse'}));
               document.removeEventListener('click', observe);
               return result;
             }''')
-            check(native == [False, False], 'Keyboard or modified click was intercepted')
+            check(native == [False, False, False], 'Keyboard, modified, or hybrid-device mouse click was intercepted')
             checks.append(f'{theme}: glossary, SQL, social, GitHub source, 7 viewport sizes, dismissal and switching')
             ctx.close()
 
