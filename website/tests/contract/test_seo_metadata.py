@@ -96,6 +96,26 @@ def jpeg_dimensions(path: Path) -> tuple[int, int]:
     raise ValueError(f"JPEG has no supported frame header: {path}")
 
 
+def validate_organization_logo(site: Path, base_path: str, url: str,
+                               outputs: dict[str, str]) -> None:
+    """Check the published SVG's intrinsic size, not its unrelated viewBox."""
+    require(absolute_http(url), "Organization logo URL must be absolute")
+    public_path = unquote(urlsplit(url).path)
+    require(public_path.startswith(base_path), "Organization logo is outside this deployment base")
+    relative = public_path[len(base_path):]
+    require(".." not in Path(relative).parts, "Organization logo path traversal")
+    path = site / relative
+    require(path.is_file(), "Organization logo is missing")
+    require(outputs.get("/" + relative) == hashlib.sha256(path.read_bytes()).hexdigest(),
+            "Organization logo differs from the publication manifest")
+    svg = ET.parse(path).getroot()
+    require(svg.tag == "{http://www.w3.org/2000/svg}svg", "Organization logo must be an SVG")
+    for dimension in ("width", "height"):
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(?:px)?", svg.get(dimension, ""))
+        require(bool(match) and float(match.group(1)) >= 112,
+                f"Organization logo intrinsic {dimension} must be at least 112 pixels")
+
+
 def find_class(element: ET.Element, name: str) -> ET.Element | None:
     return next((node for node in element.iter() if name in node.get("class", "").split()), None)
 
@@ -241,7 +261,8 @@ def validate(site: Path, qa_source: Path | None = None) -> dict[str, int]:
             require(organization is not None and organization.get("name") == "BioseqDB", "BioseqDB Organization is missing")
             organization_description = organization.get("description", "")
             require(all(term in organization_description for term in ["PostgreSQL", "up to 120", "selected", "benchmarks"]), "Organization speedup statement must be qualified by published workloads")
-            require(absolute_http(organization.get("logo", {}).get("url", "")), "Organization logo URL must be absolute")
+            validate_organization_logo(site, base_path,
+                                       organization.get("logo", {}).get("url", ""), outputs)
             require(primary.get("publisher", {}).get("@id") == organization.get("@id"), "page publisher must reference its Organization")
 
             thumbnail = {node.get("name"): node.get("value", node.text or "") for node in objects["thumbnail"].findall("Attribute")}
