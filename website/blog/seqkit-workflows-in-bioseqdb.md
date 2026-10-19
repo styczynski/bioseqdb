@@ -1712,7 +1712,7 @@ human_03	CGAGCCTGGTTGTTGGATCA
 </div>
 <!-- seqkit:concat:end -->
 
-Here `left.fa` contains the first ten bases of the first three human windows, and `right.fa` contains their last ten bases with the same IDs. The download's shell script prepares those files. The SQL common table expressions prepare the same two inputs, then `JOIN ... USING (id)` pairs them. <code>OPERATOR(bioseq.&#124;&#124;)</code> concatenates the BioseqDB sequence values. These joined fragments deliberately omit the middle 980 bases of each window.
+Here `left.fa` contains the first ten bases of the first three human windows, and `right.fa` contains their last ten bases with the same IDs. The download's shell script prepares those files. The SQL common table expressions prepare the same two inputs, then `JOIN ... USING (id)` pairs them. <code>OPERATOR(bioseq.||)</code> concatenates the BioseqDB sequence values. These joined fragments deliberately omit the middle 980 bases of each window.
 
 Duplicate names are another issue. `seqkit rename` adds suffixes to repeated IDs, while `seqkit rmdup -s` compares sequence contents. They solve different problems. The download's shell script creates a three-record fixture named `duplicates.fa`: two records share the ID `copy`, the second has an edited final base, and the third has ID `other` but repeats the first sequence exactly.
 
@@ -1816,7 +1816,7 @@ These are the cases I would keep nearby when moving between a FASTA workflow and
 | Change names with a pattern or mapping | Text concatenation, `regexp_replace`, or a metadata join | replace |
 | Make repeated IDs distinct | `row_number() OVER (PARTITION BY id ORDER BY ordinal)` plus a suffix | rename |
 | Edit a sequence copy | `overlay(seq::text placing 'T' from 5 for 1)` | mutate |
-| Join fragments sharing an ID | `JOIN ... USING (id)` and <code>OPERATOR(bioseq.&#124;&#124;)</code> | concat |
+| Join fragments sharing an ID | `JOIN ... USING (id)` and <code>OPERATOR(bioseq.\|\|)</code> | concat |
 | Keep one copy of each stored sequence | `DISTINCT ON (seq)` with an explicit choice of retained row | rmdup |
 
 The FAQ topics covered here include sequence statistics, GC content, extraction by ID, ambiguous bases, motif positions, duplicate sequences, length sorting, header groups, header replacement and matching-ID concatenation. SeqKit's tutorial also covers FASTQ quality, paired reads, live BAM monitoring, annotated feature extraction and other file-oriented work. This DNA-only exercise does not replace those workflows.
