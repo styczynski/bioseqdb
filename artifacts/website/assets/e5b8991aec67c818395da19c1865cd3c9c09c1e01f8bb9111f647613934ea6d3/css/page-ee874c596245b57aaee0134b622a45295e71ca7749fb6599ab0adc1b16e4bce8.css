@@ -798,6 +798,7 @@ html[data-theme="light"] {
   --theme-93a6b6: #435e74;
   --theme-9467bd: #5d3c7c;
   --theme-94a1ad: #445e76;
+  --theme-94a9ba: #425d73;
   --theme-94aabf: #415a72;
   --theme-94d5ed: #227695;
   --theme-96aabd: #415a72;
@@ -822,6 +823,7 @@ html[data-theme="light"] {
   --theme-a9bccb: #405c72;
   --theme-a9e0c8: #307356;
   --theme-aad7cd: #366d61;
+  --theme-b4a0e5: #482e8a;
   --theme-b4e5f6: #1c7b9b;
   --theme-b5a0e8: #472b8d;
   --theme-b9c5cf: #3a5164;
@@ -935,6 +937,7 @@ html[data-theme="light"] {
   --theme-f39762: #ad481b;
   --theme-f3f8fc: #2b3d4b;
   --theme-f4894f: #b44d1c;
+  --theme-f4a467: #a25216;
   --theme-f4b184: #9f4f18;
   --theme-f4e6c2: #836820;
   --theme-f4f8fb: #2b3d4b;
@@ -1021,64 +1024,64 @@ html[data-theme="light"] .code-entity-ref { text-decoration-color: rgba(17,120,1
 html[data-theme="light"] .tutorial-body img[src*="/figures/"] { color-scheme: light; }
 html[data-theme="dark"] .tutorial-body img[src*="/figures/"] { color-scheme: dark; }
 
-/* css/landing-badges.css */
-/* Shields stay independent of the hero copy and its entrance animation. */
-.landing-badges {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 30px;
+/* css/qa.css */
+/* Authored Q&A uses the site's paired dark/light palette. */
+.qa-page {
+  --qa-ink: #eef4f9;
+  --qa-muted: #9db1c2;
+  --qa-surface: #0e2337;
+  --qa-border: #28425b;
+  --qa-accent: #7fcbe8;
+  --qa-tint: #102c3d;
 }
-.landing-badge {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  min-height: 28px;
-  max-width: 100%;
-  text-decoration: none;
+html[data-theme="light"] .qa-page {
+  --qa-ink: #173247;
+  --qa-muted: #455e73;
+  --qa-surface: #fff;
+  --qa-border: #ccd9e4;
+  --qa-accent: #146c91;
+  --qa-tint: #e7f3f7;
 }
-.landing-badge img { display: block; width: auto; height: 20px; max-width: 100%; }
-.landing-badge:focus-visible { outline: 2px solid var(--theme-46b8de, #46b8de); outline-offset: 4px; }
-.landing-badge-fallback {
-  display: none;
-  padding: 4px 7px;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--theme-dbe6f0, #dbe6f0);
-  background: var(--theme-142b3c, #142b3c);
-  border: 1px solid var(--theme-46b8de, #46b8de);
-}
-.landing-badge[data-unavailable] img { display: none; }
-.landing-badge[data-unavailable] .landing-badge-fallback { display: block; }
-@media (max-width: 420px) {
-  .landing-badges { gap: 4px 7px; margin-bottom: 25px; }
-}
-@media (min-width: 568px) { .landing-badges { column-gap: 10px; } }
-@media (min-width: 666px) { .landing-badges { max-width: 620px; } }
-@media (min-width: 768px) { .landing-badges { max-width: 720px; margin-bottom: 36px; } }
-@media (min-width: 1024px) {
-  .landing-design-page .ld-s0018 { position: static; }
-  .landing-design-page .ld-s0019 { position: relative; z-index: 2; }
-  .landing-badges {
-    position: absolute;
-    z-index: 3;
-    top: 93px; /* The original hero begins 73px behind the header. */
-    left: 50%;
-    transform: translateX(-50%);
-    width: 100%;
-    max-width: var(--landing-width);
-    padding-inline: var(--page-gutter);
-    justify-content: flex-end;
-    margin: 0;
-  }
-}
-@media (min-width: 1300px) { .landing-badges { top: 97px; gap: 12px; } }
-@media (min-width: 1600px) {
-  .landing-badges { top: 101px; gap: 14px; }
-  .landing-badge { min-height: 32px; }
-  .landing-badge img { height: 28px; }
-  .landing-badge-fallback { font-size: 12px; padding: 6px 10px; }
-}
+.qa-page .site-menu { display: none !important; }
+.qa-page #doc-main { width: 100%; max-width: 1240px; min-width: 0; margin: 0 auto; padding: 26px 32px 72px; }
+.qa-breadcrumb { display: flex; flex-wrap: wrap; gap: 12px; color: var(--qa-muted); font-size: 13px; }
+.qa-breadcrumb a { color: inherit; text-decoration: none; }
+.qa-breadcrumb a:hover { color: var(--qa-accent); }
+.qa-intro { max-width: 810px; padding: 48px 0 42px; }
+.qa-eyebrow { margin: 0 0 18px; color: var(--qa-accent); font: 500 12px/1.5 'IBM Plex Mono',monospace; letter-spacing: .12em; }
+.qa-intro h1 { margin: 0 0 24px; color: var(--qa-ink); font: 600 clamp(32px,4.4vw,56px)/1.12 'Space Grotesk',sans-serif; letter-spacing: -.035em; text-wrap: balance; }
+.qa-intro > p:last-child { margin: 0; color: var(--qa-muted); font-size: 19px; line-height: 1.7; }
+.qa-layout { display: grid; grid-template-columns: 245px minmax(0,1fr); align-items: start; gap: 44px; }
+.qa-navigation { position: sticky; top: calc(var(--site-header-height,80px) + 24px); padding: 18px; border: 1px solid var(--qa-border); border-radius: 12px; background: var(--qa-surface); }
+.qa-navigation h2 { margin: 0 0 14px; color: var(--qa-muted); font-size: 12px; font-weight: 500; }
+.qa-navigation ul { list-style: none; padding: 0; margin: 0; }
+.qa-navigation a { display: block; padding: 8px 0; color: var(--qa-ink); font-size: 14px; line-height: 1.55; text-decoration: none; }
+.qa-navigation a:hover { color: var(--qa-accent); }
+.qa-groups { min-width: 0; }
+.qa-group { margin-bottom: 44px; }
+.qa-group > h2 { margin: 0 0 18px; color: var(--qa-ink); font: 500 28px/1.3 'Space Grotesk',sans-serif; letter-spacing: -.02em; }
+.qa-group > h2, .qa-question { scroll-margin-top: calc(var(--site-header-height,80px) + 24px); }
+.qa-question { padding: 25px 26px; margin-bottom: 14px; border: 1px solid var(--qa-border); border-radius: 12px; background: var(--qa-surface); }
+.qa-question:target { border-color: var(--qa-accent); box-shadow: 0 0 0 2px var(--qa-tint); }
+.qa-question h3 { margin: 0 0 12px; color: var(--qa-ink); font: 500 20px/1.4 'Space Grotesk',sans-serif; letter-spacing: -.01em; }
+.qa-question h3 a { color: inherit; text-decoration: none; overflow-wrap: anywhere; }
+.qa-anchor { margin-left: .45em; color: var(--qa-accent); font-size: .8em; opacity: .6; }
+.qa-question h3 a:hover .qa-anchor { opacity: 1; }
+.qa-answer { color: var(--qa-muted); font-size: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+.qa-answer p { margin: 0 0 12px; }
+.qa-answer > :last-child { margin-bottom: 0; }
+.qa-answer a { color: var(--qa-accent); text-underline-offset: 3px; }
+.qa-answer code { font-size: .86em; overflow-wrap: anywhere; white-space: normal; }
+.qa-contact { padding: 28px; border-radius: 14px; border: 1px solid var(--qa-border); background: linear-gradient(120deg,var(--qa-surface),var(--qa-tint)); }
+.qa-contact h2 { margin: 0 0 12px; color: var(--qa-ink); font: 500 25px/1.3 'Space Grotesk',sans-serif; }
+.qa-contact p { max-width: 66ch; color: var(--qa-muted); font-size: 16px; line-height: 1.7; }
+.qa-contact > a { display: inline-flex; gap: 16px; align-items: center; min-height: 44px; padding: 8px 14px; border: 1px solid var(--qa-border); border-radius: 8px; background: var(--qa-surface); color: var(--qa-accent); text-decoration: none; font-size: 14px; }
+.qa-page :focus-visible { outline: 2px solid var(--qa-accent); outline-offset: 4px; }
+@media (max-width: 1024px) { .qa-layout { grid-template-columns: minmax(0,1fr); gap: 30px; } .qa-navigation { position: static; padding: 18px 22px; } .qa-navigation ul { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); column-gap: 26px; } .qa-intro { padding-top: 36px; } }
+@media (max-width: 768px) { .qa-page #doc-main { padding: 24px 24px 56px; } .qa-intro { padding-bottom: 30px; } .qa-intro > p:last-child { font-size: 17px; } }
+@media (max-width: 666px) { .qa-question { padding: 22px; } .qa-group > h2 { font-size: 26px; } .qa-navigation a { font-size: 13px; } }
+@media (max-width: 568px) { .qa-page #doc-main { padding-inline: 18px; } .qa-navigation { padding: 16px; } .qa-navigation ul { column-gap: 15px; } .qa-question { padding: 20px 18px; } .qa-question h3 { font-size: 19px; } .qa-answer { font-size: 15px; } }
+@media (max-width: 420px) { .qa-page #doc-main { padding-inline: 14px; } .qa-intro { padding-top: 30px; } .qa-intro h1 { font-size: 32px; } .qa-question { padding: 18px 16px; } .qa-contact { padding: 22px 18px; } .qa-navigation a { font-size: 12px; } }
+@media (min-width: 1300px) { .qa-page #doc-main { padding-top: 34px; } .qa-layout { gap: 56px; } }
+@media (min-width: 1600px) { .qa-page #doc-main { max-width: 1400px; padding-inline: 64px; } .qa-layout { grid-template-columns: 270px minmax(0,1fr); gap: 64px; } .qa-question { padding: 28px 32px; } .qa-answer { font-size: 17px; } }
 

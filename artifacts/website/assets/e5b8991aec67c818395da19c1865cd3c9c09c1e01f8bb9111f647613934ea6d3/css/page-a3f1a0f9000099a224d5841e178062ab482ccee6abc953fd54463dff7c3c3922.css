@@ -569,7 +569,9 @@ a:is(.entity-ref,.glossary-link,.source-link,[data-social-description]) { -webki
 
 /* Touch descriptions are nonmodal dialogs. Their actions remain visible even
    when a setting has more detail than fits on a short phone screen. */
-.link-popover { box-sizing: border-box; max-height: calc(100dvh - 24px); }
+/* Position changes must stay immediate when a touch adds the dialog actions.
+   The global reduced-motion duration would otherwise animate default `all`. */
+.link-popover { box-sizing: border-box; max-height: calc(100dvh - 24px); transition-property: opacity, transform; }
 #entity-pop.link-popover { max-height: calc(100dvh - 24px); }
 #entity-pop.is-persistent, .blog-glossary-tip.is-persistent { pointer-events: auto; flex-direction: column; }
 .link-popover.is-persistent .link-popover-content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }

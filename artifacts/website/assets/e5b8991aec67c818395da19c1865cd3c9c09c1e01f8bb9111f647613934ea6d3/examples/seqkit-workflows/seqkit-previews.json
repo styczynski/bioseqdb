@@ -1,0 +1,199 @@
+{
+  "inspect": {
+    "key": "inspect",
+    "command": "seqkit head -n 6 windows.fa | seqkit subseq -r 1:12 | seqkit fx2tab -Q -i",
+    "output": "human_01\tGATCACAGGTCT\nhuman_02\tCCAGTTGACACA\nhuman_03\tCGAGCCTGGTGA\nhuman_04\tGGACATCCCGAT\nhuman_05\tTTATAATAAACA\nhuman_06\tATCTTAGCATAC",
+    "version": "SeqKit v2.14.0"
+  },
+  "stats": {
+    "key": "stats",
+    "command": "seqkit stats -T windows.fa",
+    "output": "file\tformat\ttype\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\nwindows.fa\tFASTA\tDNA\t51\t49464\t299\t969.9\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "species_stats": {
+    "key": "species_stats",
+    "command": "seqkit split --by-id --id-regexp '^([^_]+)_' --out-dir by-species windows.fa\nseqkit stats -T by-species/*.fa",
+    "output": "file\tformat\ttype\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\nby-species/windows.part_human.fa\tFASTA\tDNA\t17\t16569\t569\t974.6\t1000\nby-species/windows.part_mouse.fa\tFASTA\tDNA\t17\t16299\t299\t958.8\t1000\nby-species/windows.part_zebrafish.fa\tFASTA\tDNA\t17\t16596\t596\t976.2\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "short": {
+    "key": "short",
+    "command": "seqkit seq --max-len 999 windows.fa | seqkit fx2tab -n -i -l",
+    "output": "human_17\t569\nmouse_17\t299\nzebrafish_17\t596",
+    "version": "SeqKit v2.14.0"
+  },
+  "gc": {
+    "key": "gc",
+    "command": "seqkit fx2tab -n -i -l -g -C N genomes.fa",
+    "output": "danRer11\t16596\t39.93\t0\nhg38\t16569\t44.36\t1\nmm39\t16299\t36.74\t0",
+    "version": "SeqKit v2.14.0",
+    "note": "The FASTA IDs are assembly names (hg38=human, mm39=mouse, danRer11=zebrafish)."
+  },
+  "gc_filter": {
+    "key": "gc_filter",
+    "command": "seqkit fx2tab -n -i -g windows.fa | awk -F '\\t' '$2 >= 45'",
+    "output": "human_01\t45.60\nhuman_04\t47.75\nhuman_07\t47.30\nhuman_10\t46.00\nhuman_14\t47.00\nhuman_17\t45.87\nzebrafish_02\t45.70",
+    "version": "SeqKit v2.14.0"
+  },
+  "grep": {
+    "key": "grep",
+    "command": "seqkit grep -s -P -p GAATTC windows.fa | seqkit seq -n -i",
+    "output": "human_05\nhuman_06\nhuman_13\nmouse_02\nmouse_04\nmouse_05\nzebrafish_09\nzebrafish_15",
+    "version": "SeqKit v2.14.0"
+  },
+  "grep_gatc": {
+    "key": "grep_gatc",
+    "command": "seqkit grep -s -P -p GATC -C windows.fa",
+    "output": "42",
+    "version": "SeqKit v2.14.0"
+  },
+  "grep_names": {
+    "key": "grep_names",
+    "command": "seqkit grep -r -p '^human_0[1-3]$' windows.fa | seqkit fx2tab -n -i -l",
+    "output": "human_01\t1000\nhuman_02\t1000\nhuman_03\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "subseq": {
+    "key": "subseq",
+    "command": "seqkit grep -r -p '_01$' windows.fa | seqkit subseq -r 10:20 | seqkit fx2tab -Q -i",
+    "output": "human_01\tTCTATCACCCT\nmouse_01\tGCTTAATAACA\nzebrafish_01\tGACAATTTATA",
+    "version": "SeqKit v2.14.0"
+  },
+  "subseq_last": {
+    "key": "subseq_last",
+    "command": "seqkit grep -r -p '_01$' windows.fa | seqkit subseq -r -10:-1 | seqkit fx2tab -Q -i",
+    "output": "human_01\tGTAAAAAACT\nmouse_01\tAGGTAAGCAT\nzebrafish_01\tAAGATGGGCC",
+    "version": "SeqKit v2.14.0"
+  },
+  "reverse": {
+    "key": "reverse",
+    "command": "seqkit grep -r -p '_01$' windows.fa | seqkit subseq -r 1:20 | seqkit seq -t DNA -r -p | seqkit fx2tab -Q -i",
+    "output": "human_01\tAGGGTGATAGACCTGTGATC\nmouse_01\tTGTTATTAAGCTACATTAAC\nzebrafish_01\tTATAAATTGTCGCCGGCCGT",
+    "version": "SeqKit v2.14.0"
+  },
+  "base_counts": {
+    "key": "base_counts",
+    "command": "seqkit fx2tab -n -i -C A -C C -C G -C T -C N genomes.fa",
+    "output": "danRer11\t5301\t3969\t2658\t4668\t0\nhg38\t5124\t5181\t2169\t4094\t1\nmm39\t5629\t3976\t2013\t4681\t0",
+    "version": "SeqKit v2.14.0",
+    "note": "The FASTA IDs are assembly names (hg38=human, mm39=mouse, danRer11=zebrafish)."
+  },
+  "by_header": {
+    "key": "by_header",
+    "command": "seqkit split --by-id --id-regexp '^([^_]+)_' --out-dir by-species --force windows.fa\nseqkit stats -T by-species/*.fa",
+    "output": "file\tformat\ttype\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\nby-species/windows.part_human.fa\tFASTA\tDNA\t17\t16569\t569\t974.6\t1000\nby-species/windows.part_mouse.fa\tFASTA\tDNA\t17\t16299\t299\t958.8\t1000\nby-species/windows.part_zebrafish.fa\tFASTA\tDNA\t17\t16596\t596\t976.2\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "range": {
+    "key": "range",
+    "command": "seqkit range -r 4:8 windows.fa | seqkit fx2tab -n -i -l",
+    "output": "human_04\t1000\nhuman_05\t1000\nhuman_06\t1000\nhuman_07\t1000\nhuman_08\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "sort": {
+    "key": "sort",
+    "command": "seqkit sort -l windows.fa | seqkit head -n 3 | seqkit fx2tab -n -i -l",
+    "output": "mouse_17\t299\nhuman_17\t569\nzebrafish_17\t596",
+    "version": "SeqKit v2.14.0"
+  },
+  "sample": {
+    "key": "sample",
+    "command": "seqkit sample -p 0.1 -s 11 windows.fa | seqkit seq -n -i",
+    "output": "human_01\nhuman_11\nmouse_10\nzebrafish_08\nzebrafish_09\nzebrafish_16",
+    "version": "SeqKit v2.14.0",
+    "note": "Reproducible within SeqKit for this seed and input. SQL hash ordering produces a different order/subset. This proportion run returns six records; the SQL LIMIT 5 example returns five."
+  },
+  "locate": {
+    "key": "locate",
+    "command": "seqkit locate -P -p GAATTC windows.fa",
+    "output": "seqID\tpatternName\tpattern\tstrand\tstart\tend\tmatched\nhuman_05\tGAATTC\tGAATTC\t+\t121\t126\tGAATTC\nhuman_06\tGAATTC\tGAATTC\t+\t274\t279\tGAATTC\nhuman_13\tGAATTC\tGAATTC\t+\t640\t645\tGAATTC\nmouse_02\tGAATTC\tGAATTC\t+\t750\t755\tGAATTC\nmouse_04\tGAATTC\tGAATTC\t+\t803\t808\tGAATTC\nmouse_05\tGAATTC\tGAATTC\t+\t13\t18\tGAATTC\nzebrafish_09\tGAATTC\tGAATTC\t+\t778\t783\tGAATTC\nzebrafish_15\tGAATTC\tGAATTC\t+\t449\t454\tGAATTC",
+    "version": "SeqKit v2.14.0",
+    "note": "SeqKit reports every occurrence using one-based inclusive coordinates. This dataset happens to have exactly one GAATTC occurrence in each matching window; SQL strpos returns only the first."
+  },
+  "mutate": {
+    "key": "mutate",
+    "command": "seqkit head -n 3 windows.fa | seqkit subseq -r 1:20 | seqkit mutate -p 5:T | seqkit fx2tab -Q -i",
+    "output": "human_01\tGATCTCAGGTCTATCACCCT\nhuman_02\tCCAGTTGACACAAAATAGAC\nhuman_03\tCGAGTCTGGTGATAGCTGGT",
+    "version": "SeqKit v2.14.0"
+  },
+  "replace": {
+    "key": "replace",
+    "command": "seqkit head -n 3 windows.fa | seqkit replace -p '^' -r 'mito_' | seqkit seq -n -i",
+    "output": "mito_human_01\nmito_human_02\nmito_human_03",
+    "version": "SeqKit v2.14.0"
+  },
+  "concat": {
+    "key": "concat",
+    "command": "seqkit head -n 3 windows.fa > trio.fa\nseqkit subseq -r 1:10 trio.fa > left.fa\nseqkit subseq -r -10:-1 trio.fa > right.fa\nseqkit concat left.fa right.fa | seqkit sort | seqkit fx2tab -Q -i",
+    "output": "human_01\tGATCACAGGTGTAAAAAACT\nhuman_02\tCCAGTTGACAACAAACCTAC\nhuman_03\tCGAGCCTGGTTGTTGGATCA",
+    "version": "SeqKit v2.14.0"
+  },
+  "deduplicate": {
+    "key": "deduplicate",
+    "command": "seqkit head -n 1 windows.fa | seqkit subseq -r 1:20 | seqkit replace -p '^.*$' -r copy > copy.fa\nseqkit mutate -p 20:A copy.fa > edited.fa\nseqkit replace -p '^copy$' -r other copy.fa > other.fa\ncat copy.fa edited.fa other.fa > duplicates.fa\nseqkit rmdup -s -P -i duplicates.fa | seqkit fx2tab -Q -i",
+    "output": "copy\tGATCACAGGTCTATCACCCT\ncopy\tGATCACAGGTCTATCACCCA",
+    "version": "SeqKit v2.14.0"
+  },
+  "rename": {
+    "key": "rename",
+    "command": "seqkit head -n 1 windows.fa | seqkit subseq -r 1:20 | seqkit replace -p '^.*$' -r copy > copy.fa\nseqkit mutate -p 20:A copy.fa > edited.fa\nseqkit replace -p '^copy$' -r other copy.fa > other.fa\ncat copy.fa edited.fa other.fa > duplicates.fa\nseqkit rename duplicates.fa | seqkit seq -n -i",
+    "output": "copy\ncopy_2\nother",
+    "version": "SeqKit v2.14.0"
+  },
+  "ids": {
+    "key": "ids",
+    "command": "printf 'human_01\\nmouse_02\\n' > wanted.txt\nseqkit grep -f wanted.txt windows.fa | seqkit fx2tab -n -i -l",
+    "output": "human_01\t1000\nmouse_02\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "ambiguity": {
+    "key": "ambiguity",
+    "command": "seqkit grep -s -P -r -p '[^ACGT]' windows.fa | seqkit fx2tab -n -i -C N",
+    "output": "human_04\t1",
+    "version": "SeqKit v2.14.0"
+  },
+  "regex": {
+    "key": "regex",
+    "command": "seqkit grep -s -P -r -p 'TATA[AT]AA' windows.fa | seqkit seq -n -i",
+    "output": "human_07\nhuman_13\nmouse_01\nmouse_02\nmouse_03\nmouse_05\nmouse_08\nmouse_11\nmouse_12\nzebrafish_01",
+    "version": "SeqKit v2.14.0"
+  },
+  "prefix": {
+    "key": "prefix",
+    "command": "seqkit head -n 3 windows.fa | seqkit subseq -r 1:12 | seqkit fx2tab -Q -i",
+    "output": "human_01\tGATCACAGGTCT\nhuman_02\tCCAGTTGACACA\nhuman_03\tCGAGCCTGGTGA",
+    "version": "SeqKit v2.14.0"
+  },
+  "split": {
+    "key": "split",
+    "command": "seqkit split --by-id --id-regexp '^([^_]+)_' --out-dir by-species --force windows.fa\nseqkit head -n 3 by-species/windows.part_human.fa | seqkit fx2tab -n -i -l",
+    "output": "human_01\t1000\nhuman_02\t1000\nhuman_03\t1000",
+    "version": "SeqKit v2.14.0"
+  },
+  "exclude": {
+    "key": "exclude",
+    "command": "printf 'human_01\\nmouse_02\\n' > wanted.txt\nseqkit grep -v -f wanted.txt -C windows.fa",
+    "output": "49",
+    "version": "SeqKit v2.14.0"
+  },
+  "shuffle": {
+    "key": "shuffle",
+    "command": "seqkit shuffle -s 23 windows.fa | seqkit seq -n -i",
+    "output": "zebrafish_12\nmouse_15\nmouse_14\nmouse_08\nzebrafish_06\nhuman_06\nzebrafish_07\nhuman_16\nmouse_03\nmouse_09\nzebrafish_10\nmouse_12\nzebrafish_16\nhuman_09\nzebrafish_03\nmouse_10\nhuman_04\nhuman_07\nhuman_05\nhuman_12\nmouse_17\nhuman_01\nzebrafish_15\nzebrafish_05\nzebrafish_02\nhuman_13\nmouse_13\nhuman_08\nzebrafish_13\nmouse_02\nhuman_15\nzebrafish_09\nmouse_01\nhuman_10\nhuman_14\nzebrafish_04\nzebrafish_14\nmouse_07\nmouse_04\nmouse_06\nmouse_05\nzebrafish_17\nzebrafish_01\nhuman_02\nmouse_16\nzebrafish_11\nhuman_17\nhuman_03\nhuman_11\nmouse_11\nzebrafish_08",
+    "version": "SeqKit v2.14.0",
+    "note": "Reproducible within SeqKit for this seed and input. SQL hash ordering produces a different order/subset."
+  },
+  "gc_windows": {
+    "key": "gc_windows",
+    "command": "seqkit head -n 6 windows.fa | seqkit fx2tab -n -i -g",
+    "output": "human_01\t45.60\nhuman_02\t44.00\nhuman_03\t42.70\nhuman_04\t47.75\nhuman_05\t42.60\nhuman_06\t43.90",
+    "version": "SeqKit v2.14.0"
+  },
+  "gaps": {
+    "key": "gaps",
+    "command": "printf '>teaching_gap\\nAC-G.TN\\n' | seqkit seq -g | seqkit fx2tab -Q -i",
+    "output": "teaching_gap\tACGTN",
+    "version": "SeqKit v2.14.0"
+  }
+}

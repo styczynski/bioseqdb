@@ -60,7 +60,7 @@
   });
 })();
 </script>
-<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/analytics.js"></script>
+<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/analytics.js"></script>
 
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
@@ -87,16 +87,16 @@
 <meta name="twitter:image:alt" content="Preview of The BioseqDB blog on BioseqDB">
 
 
-<link rel="icon" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/favicon.svg">
-<link rel="preload" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
-<link rel="preload" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="icon" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/favicon.svg">
+<link rel="preload" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
-<link rel="stylesheet" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/css/page-7f9dede07699cf524ad748ec27326cbd83dd4023686623777cfc0fd0b4219687.css">
-
-
+<link rel="stylesheet" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/css/page-a3f1a0f9000099a224d5841e178062ab482ccee6abc953fd54463dff7c3c3922.css">
 
 
-<link rel="stylesheet" href="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/css/page-aef8451b81ea2546744a2a3c57d6b47e3c6c739516bd8c1e1b9e84e5c25774a7.css" data-shared-styles>
+
+
+<link rel="stylesheet" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/css/page-24785671a78783dab071d4e89e0748824cd3ca4327213a40ffe15c7c0134e258.css" data-shared-styles>
 
 
 
@@ -111,7 +111,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -183,6 +183,251 @@
       <div class="blog-results-summary"><p data-blog-result-count role="status" aria-live="polite" aria-atomic="true"></p><button class="blog-reset" type="button" data-blog-reset>Reset filters</button></div>
     </div>
     <div class="blog-posts" data-blog-posts>
+      
+      <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-19" data-blog-title="Working with sequence files in BioseqDB and SeqKit" data-blog-search-text="A FASTA header can carry quite a lot of information. The sequence has a name, somebody adds an organism, then an assembly and perhaps some coordinates, and eventually you need a little regular expression just to recover something that could have been a column in a table. A FASTA record starts with a header line beginning with  &gt; , followed by the sequence letters on one or more lines. I like having those columns. This is one reason I wanted sequence operations inside PostgreSQL when I started working on BioseqDB. You can keep the DNA next to its metadata and write a query that uses both, without exporting another intermediate file every time you change a filter. SeqKit&#39;s tutorial  has plenty of useful examples of the work people do with sequence files. I picked several of them and some tasks from the  FAQ  to try in SQL: checking lengths, counting bases, finding motifs, selecting records and dealing with names. We will use the same sequences in both tools. I checked the examples with SeqKit 2.14.0 and a BioseqDB development build with external database support. You can find the SQL, shell commands and chart code in  BioseqDB/examples/seqkit_workflows . 1. Get a small dataset from UCSC For this exercise I chose three mitochondrial chromosomes: human, mouse and zebrafish. Mitochondria have their own DNA, separate from the much larger nuclear chromosomes, so we get complete chromosome records small enough to inspect without waiting for a large download. These three records total 49,464 bases. Our source is the  UCSC Genome Browser API . BioseqDB&#39;s external tables can fetch sequence intervals from UCSC directly through SQL. We will use assembly names  hg38 ,  mm39  and  danRer11 , each with chromosome  chrM . Availability on 16 October 2026.  The published  0.1.0-alpha.1  Docker images and native package builds omit the external-database integration used here (due to my oversight). It is planned for the next alpha release, but you can obviously compile source from Github directly. Currently using runtime  SET , an API key, or a  GRANT  won&#39;t work as the code isn&#39;t present in the binary - when building one must use  BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON  to enable this feature. Start with the  installation instructions . The source-build procedure in the  butterfly example  also applies here. In an already configured source checkout, enable the external module before building and installing: cmake -S . -B build/seqkit -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON
+cmake --build build/seqkit --target postgresql_bioseq postgresql_bioseq_cache
+ Connect to a fresh database where that build is installed, run  CREATE EXTENSION bioseq; , then check for the external sequence table: SELECT to_regclass(&#39;bioseq_external.sequences&#39;) IS NOT NULL
+       AS external_sequences_available; The result must be  true . If the table exists but access is denied, your database owner needs to grant your role  USAGE  on  bioseq_external  and  SELECT  on  bioseq_external.sequences . Create a schema for this exercise and a table for the chromosome records: CREATE SCHEMA seqkit_lab;
+CREATE TABLE seqkit_lab.genomes (
+    assembly text NOT NULL,
+    species text NOT NULL,
+    seq bioseq.seq(&#39;dna5&#39;, 64) NOT NULL
+) USING bioseq; Column What we put there assembly UCSC assembly identifier, such as  hg38 species A short label for grouping and plotting seq The DNA sequence, stored as a BioseqDB value USING bioseq  selects BioseqDB&#39;s table storage. The  dna5  alphabet accepts A, C, G, T and N, where N means an unresolved base. The  64  selects 64-bit storage blocks, and a sequence can occupy many such blocks. The  sequence representation documentation  explains the storage details. Now fetch the three records. Each  INSERT ... SELECT  reads a remote interval and saves it locally. Subsequent analysis will use the saved rows. INSERT INTO seqkit_lab.genomes (assembly, species, seq)
+SELECT &#39;hg38&#39;, &#39;human&#39;, sequence::bioseq.seq(&#39;dna5&#39;, 64)
+FROM bioseq_external.sequences
+WHERE provider = &#39;ucsc&#39; AND assembly_database = &#39;hg38&#39;
+  AND chromosome = &#39;chrM&#39; AND start0 = 0 AND end0 = 16569;
+
+INSERT INTO seqkit_lab.genomes (assembly, species, seq)
+SELECT &#39;mm39&#39;, &#39;mouse&#39;, sequence::bioseq.seq(&#39;dna5&#39;, 64)
+FROM bioseq_external.sequences
+WHERE provider = &#39;ucsc&#39; AND assembly_database = &#39;mm39&#39;
+  AND chromosome = &#39;chrM&#39; AND start0 = 0 AND end0 = 16299;
+
+INSERT INTO seqkit_lab.genomes (assembly, species, seq)
+SELECT &#39;danRer11&#39;, &#39;zebrafish&#39;, sequence::bioseq.seq(&#39;dna5&#39;, 64)
+FROM bioseq_external.sequences
+WHERE provider = &#39;ucsc&#39; AND assembly_database = &#39;danRer11&#39;
+  AND chromosome = &#39;chrM&#39; AND start0 = 0 AND end0 = 16596;
+
+SELECT assembly, species, bioseq.len(seq) AS bp
+FROM seqkit_lab.genomes ORDER BY species; UCSC&#39;s  start0  is zero-based and  end0  is exclusive. The human interval  [0, 16569)  therefore contains 16,569 bases, including the first and last base of that record. These coordinates refer to each assembly separately. The records differ by only a few hundred bases. Their lengths match the intervals requested from UCSC, which gives us a quick check that all three imports returned complete records. 2. Make records we can filter and export Three rows would make a rather short filtering exercise. We will split each chromosome into non-overlapping windows of 1,000 bases and keep the remaining shorter piece at the end. This gives us 51 records to filter, with each record&#39;s position on its original chromosome saved alongside it. CREATE TABLE seqkit_lab.windows (
+    id text NOT NULL,
+    species text NOT NULL,
+    assembly text NOT NULL,
+    start0 integer NOT NULL,
+    end0 integer NOT NULL,
+    seq bioseq.seq(&#39;dna5&#39;, 64) NOT NULL
+) USING bioseq;
+INSERT INTO seqkit_lab.windows
+SELECT species || &#39;_&#39; || lpad((start0 / 1000 + 1)::text, 2, &#39;0&#39;),
+       species, assembly, start0,
+       least(start0 + 1000, bioseq.len(seq)),
+       seq[start0:least(start0 + 1000, bioseq.len(seq))]
+FROM seqkit_lab.genomes
+CROSS JOIN LATERAL generate_series(0, bioseq.len(seq) - 1, 1000) AS p(start0);
+
+SELECT species, count(*) AS windows FROM seqkit_lab.windows
+GROUP BY species ORDER BY species; generate_series  supplies the start positions. The slice  seq[start0:end0]  uses the same zero-based, half-open convention as the UCSC request, and  least  stops the final window at the end of the chromosome. We retain the coordinates because a motif position inside  human_05  is otherwise easy to confuse with a position on the original chromosome. Each row has an  id ,  species ,  assembly ,  start0 ,  end0  and  seq . Here are the first six: SELECT id, assembly, start0, end0, bioseq.len(seq) AS bp,
+       seq[:12]::text AS prefix
+FROM seqkit_lab.windows
+ORDER BY id
+LIMIT 6; For the command-line comparisons,  install SeqKit  and export these same rows. Run the following in  psql . The  \o  command saves the query output to a file in your terminal&#39;s current directory. \pset format unaligned
+\pset tuples_only on
+\o genomes.fa
+SELECT &#39;&gt;&#39; || assembly || E&#39;\n&#39; || seq::text
+FROM seqkit_lab.genomes ORDER BY assembly;
+\o windows.fa
+SELECT &#39;&gt;&#39; || id || &#39; species=&#39; || species || &#39; assembly=&#39; || assembly
+       || &#39; start0=&#39; || start0 || &#39; end0=&#39; || end0 || E&#39;\n&#39; || seq::text
+FROM seqkit_lab.windows ORDER BY id;
+\o
+ For example, a header will start with  &gt;human_01 species=human assembly=hg38 start0=0 end0=1000 . SeqKit uses the first whitespace-delimited part as the ID by default. The SQL table already has each field separately. The  example repository  includes these export commands in  02_export.sql . Run them after  01_import.sql  to create  genomes.fa  and  windows.fa  for the SeqKit examples below. 3. Check lengths before doing anything clever A missing record or a truncated import can ruin all the later analysis. Start by counting the rows and their bases. SELECT count(*) AS sequences, sum(bioseq.len(seq)) AS total_bp,
+       min(bioseq.len(seq)) AS min_bp,
+       round(avg(bioseq.len(seq)), 1) AS mean_bp,
+       max(bioseq.len(seq)) AS max_bp
+FROM seqkit_lab.windows; seqkit stats -T windows.fa
+ file	format	type	num_seqs	sum_len	min_len	avg_len	max_len
+windows.fa	FASTA	DNA	51	49464	299	969.9	1000
+ Both tools report 51 records and 49,464 bases. The shortest record is 299 bases, which is the final mouse window. The mean is about 970 bases because all three final windows are shorter than 1,000. To find those short records, use the sequence length as a filter: SELECT id, bioseq.len(seq) AS bp
+FROM seqkit_lab.windows
+WHERE bioseq.len(seq) &lt; 1000
+ORDER BY id; seqkit seq --max-len 999 windows.fa | seqkit fx2tab -n -i -l
+ human_17	569
+mouse_17	299
+zebrafish_17	596
+ bioseq.len  counts sequence symbols. SeqKit&#39;s  --max-len  ( -M ) accepts an inclusive maximum length, so  -M 999  corresponds to our SQL condition  &lt; 1000 . 4. Count bases and calculate GC content GC content is the percentage of known DNA bases that are G or C. A sequence with 30 Gs and 20 Cs among 100 known bases has 50% GC content. We can calculate it for a whole chromosome or for smaller windows to see where its base composition changes. First count the letters in each complete chromosome: SELECT species,
+       bioseq.symbol_count(seq, &#39;A&#39;) AS a,
+       bioseq.symbol_count(seq, &#39;C&#39;) AS c,
+       bioseq.symbol_count(seq, &#39;G&#39;) AS g,
+       bioseq.symbol_count(seq, &#39;T&#39;) AS t,
+       bioseq.symbol_count(seq, &#39;N&#39;) AS n
+FROM seqkit_lab.genomes ORDER BY species; There is one N in the human record and none in the other two. Dropping it would change the coordinate system, so we leave it in the stored sequence. For GC content, however, we exclude N from the denominator, matching SeqKit&#39;s calculation on these  dna5  records. SELECT species, bioseq.len(seq) AS bp,
+       round(100.0 * (bioseq.symbol_count(seq, &#39;G&#39;) + bioseq.symbol_count(seq, &#39;C&#39;))
+             / nullif(bioseq.len(seq) - bioseq.symbol_count(seq, &#39;N&#39;), 0), 2) AS gc_percent,
+       bioseq.symbol_count(seq, &#39;N&#39;) AS unknown_bases
+FROM seqkit_lab.genomes ORDER BY species; seqkit fx2tab -n -i -l -g -C N genomes.fa
+ danRer11	16596	39.93	0
+hg38	16569	44.36	1
+mm39	16299	36.74	0
+ bioseq.symbol_count  counts one letter. The  100.0  makes this a percentage calculation with a decimal result, and  nullif(..., 0)  avoids dividing by zero if a future record contains only Ns. With alphabets containing other ambiguity symbols, the denominator should explicitly count A, C, G and T instead. The whole human mitochondrial record has 44.36% GC, the mouse record 36.74%, and zebrafish 39.93%. Now calculate the same statistic per window: SELECT id,
+       round(100.0 * (bioseq.symbol_count(seq, &#39;G&#39;) + bioseq.symbol_count(seq, &#39;C&#39;))
+             / nullif(bioseq.len(seq) - bioseq.symbol_count(seq, &#39;N&#39;), 0), 2) AS gc_percent
+FROM seqkit_lab.windows ORDER BY id LIMIT 6; seqkit head -n 6 windows.fa | seqkit fx2tab -n -i -g
+ human_01	45.60
+human_02	44.00
+human_03	42.70
+human_04	47.75
+human_05	42.60
+human_06	43.90
+ Each point sits at the midpoint of a window. The final window is shorter, and the lines connect neighbouring measurements so we can follow how GC content changes along each chromosome. The horizontal position is an offset within each species&#39; own chromosome. To find corresponding regions between species, we would align the sequences, as in the  butterfly tutorial . 5. Select records by ID and by their contents The SeqKit FAQ starts several workflows with a list of wanted IDs. SQL&#39;s  IN  expression is enough for a short list: SELECT id, bioseq.len(seq) AS bp
+FROM seqkit_lab.windows
+WHERE id IN (&#39;human_01&#39;, &#39;mouse_02&#39;)
+ORDER BY id; printf &#39;human_01\nmouse_02\n&#39; &gt; wanted.txt
+seqkit grep -f wanted.txt windows.fa | seqkit fx2tab -n -i -l
+ human_01	1000
+mouse_02	1000
+ If you have thousands of IDs, put them in a table and join on  id . The SeqKit equivalent accepts a file with  grep -f ids.txt . To exclude the two IDs instead, reverse the condition: SELECT count(*) AS retained
+FROM seqkit_lab.windows
+WHERE id NOT IN (&#39;human_01&#39;, &#39;mouse_02&#39;); printf &#39;human_01\nmouse_02\n&#39; &gt; wanted.txt
+seqkit grep -v -f wanted.txt -C windows.fa
+ 49
+ Both retain 49 records. The SeqKit tutorial uses this filtering step to remove contaminated reads. Once you have identified those reads, put their IDs in the exclusion list and use the same query. We can also find the window containing the unresolved base: SELECT id, bioseq.symbol_count(seq, &#39;N&#39;) AS unknown_bases
+FROM seqkit_lab.windows
+WHERE bioseq.symbol_count(seq, &#39;N&#39;) &gt; 0
+ORDER BY id; seqkit grep -s -P -r -p &#39;[^ACGT]&#39; windows.fa | seqkit fx2tab -n -i -C N
+ human_04	1
+ The result is  human_04 . On the SeqKit side,  -s  searches the sequence rather than its ID,  -r  enables a regular expression and  -P  searches only the positive strand.  [^ACGT]  means any character outside those four letters. Our SQL test is equivalent for this  dna5  dataset, whose only possible extra symbol is N. A motif is a short sequence pattern we want to find inside a longer sequence. For a literal motif, try  GAATTC : SELECT id
+FROM seqkit_lab.windows
+WHERE seq::text LIKE &#39;%GAATTC%&#39;
+ORDER BY id; seqkit grep -s -P -p GAATTC windows.fa | seqkit seq -n -i
+ human_05
+human_06
+human_13
+mouse_02
+mouse_04
+mouse_05
+zebrafish_09
+zebrafish_15
+ Eight windows contain it. SQL&#39;s  %  matches any text before or after the motif, while SeqKit&#39;s  grep -s  performs the corresponding sequence search. We keep  -P  because an ordinary SQL text search examines the stored strand. SeqKit also checks the reverse complement by default. A variable position in a motif can be written as a regular expression.  TATA[AT]AA  allows A or T in the fifth position: SELECT id FROM seqkit_lab.windows
+WHERE seq::text ~ &#39;TATA[AT]AA&#39;
+ORDER BY id; seqkit grep -s -P -r -p &#39;TATA[AT]AA&#39; windows.fa | seqkit seq -n -i
+ human_07
+human_13
+mouse_01
+mouse_02
+mouse_03
+mouse_05
+mouse_08
+mouse_11
+mouse_12
+zebrafish_01
+ This matches ten windows. The FAQ also demonstrates IUPAC degenerate symbols with SeqKit&#39;s  -d  option. Here we use an explicit character class so the two listings have the same meaning. These searches find motifs contained within individual windows. To include matches spanning two windows, search the complete chromosomes in  seqkit_lab.genomes . Mitochondrial DNA is circular, so a search across the chromosome&#39;s origin also needs a sequence slice joining its last bases to its first bases. 6. Locate a motif and take a slice To extract the bases around a motif, we need its position inside the record: SELECT id, strpos(seq::text, &#39;GAATTC&#39;) - 1 AS first_start0
+FROM seqkit_lab.windows
+WHERE seq::text LIKE &#39;%GAATTC%&#39;
+ORDER BY id; seqkit locate -P -p GAATTC windows.fa
+ seqID	patternName	pattern	strand	start	end	matched
+human_05	GAATTC	GAATTC	+	121	126	GAATTC
+human_06	GAATTC	GAATTC	+	274	279	GAATTC
+human_13	GAATTC	GAATTC	+	640	645	GAATTC
+mouse_02	GAATTC	GAATTC	+	750	755	GAATTC
+mouse_04	GAATTC	GAATTC	+	803	808	GAATTC
+mouse_05	GAATTC	GAATTC	+	13	18	GAATTC
+zebrafish_09	GAATTC	GAATTC	+	778	783	GAATTC
+zebrafish_15	GAATTC	GAATTC	+	449	454	GAATTC
+ strpos  returns the first occurrence using PostgreSQL&#39;s one-based string positions. Subtracting one converts it to a zero-based offset inside the window. SeqKit reports one-based inclusive start and end coordinates, so a SQL offset of 120 corresponds to SeqKit start 121. Add the window&#39;s  start0  to get the chromosome offset. There is one  GAATTC  occurrence in each of these eight matching windows, so both listings return eight positions. With repeated occurrences in a window,  strpos  returns the first one and  seqkit locate  returns all of them. Taking the first twelve bases is shorter to write: SELECT id, seq[:12]::text AS first_12
+FROM seqkit_lab.windows ORDER BY id LIMIT 3; seqkit head -n 3 windows.fa | seqkit subseq -r 1:12 | seqkit fx2tab -Q -i
+ human_01	GATCACAGGTCT
+human_02	CCAGTTGACACA
+human_03	CGAGCCTGGTGA
+ BioseqDB&#39;s  seq[:12]  selects offsets 0 through 11. SeqKit&#39;s  1:12  names the same bases using inclusive positions. Similarly,  seq[-10:]  takes the last ten bases, while  seq[9:20]  takes bases 10 through 20. To inspect the opposite strand, reverse the sequence and complement A with T and C with G: SELECT id, seq[:20]::text AS forward,
+       bioseq.reverse_complement(seq[:20])::text AS reverse_complement
+FROM seqkit_lab.windows
+WHERE id IN (&#39;human_01&#39;, &#39;mouse_01&#39;, &#39;zebrafish_01&#39;)
+ORDER BY id; seqkit grep -r -p &#39;_01$&#39; windows.fa | seqkit subseq -r 1:20 | seqkit seq -t DNA -r -p | seqkit fx2tab -Q -i
+ human_01	AGGGTGATAGACCTGTGATC
+mouse_01	TGTTATTAAGCTACATTAAC
+zebrafish_01	TATAAATTGTCGCCGGCCGT
+ The query uses only the first twenty bases of the first window from each species so that the result fits on screen. SeqKit&#39;s  -r -p  options apply the same reverse-complement operation. Reversing alone changes their order without complementing A to T or C to G. 7. Group by species, then choose an order The  FAQ&#39;s header-splitting example  extracts a group name from each FASTA header and writes separate files. We already have a  species  column, so we can inspect the groups directly: SELECT species, count(*) AS records
+FROM seqkit_lab.windows
+GROUP BY species ORDER BY species; seqkit split --by-id --id-regexp &#39;^([^_]+)_&#39; --out-dir by-species --force windows.fa
+seqkit stats -T by-species/*.fa
+ file	format	type	num_seqs	sum_len	min_len	avg_len	max_len
+by-species/windows.part_human.fa	FASTA	DNA	17	16569	569	974.6	1000
+by-species/windows.part_mouse.fa	FASTA	DNA	17	16299	299	958.8	1000
+by-species/windows.part_zebrafish.fa	FASTA	DNA	17	16596	596	976.2	1000
+ There are seventeen windows per species. To work with the human group, filter the column. The SeqKit command below writes three files by extracting the prefix before the underscore in each ID. SELECT id, bioseq.len(seq) AS bp
+FROM seqkit_lab.windows WHERE species = &#39;human&#39;
+ORDER BY id LIMIT 3; seqkit split --by-id --id-regexp &#39;^([^_]+)_&#39; --out-dir by-species --force windows.fa
+seqkit head -n 3 by-species/windows.part_human.fa | seqkit fx2tab -n -i -l
+ human_01	1000
+human_02	1000
+human_03	1000
+ The SQL listing previews three human rows. You can apply  WHERE species = &#39;human&#39;  to any subsequent query to work with that group. To save it as a FASTA file for another program, add the same condition to the export query from section 2. For length sorting, the three short tail windows make the result easy to check: SELECT id, bioseq.len(seq) AS bp
+FROM seqkit_lab.windows
+ORDER BY bioseq.len(seq), id
+LIMIT 3; seqkit sort -l windows.fa | seqkit head -n 3 | seqkit fx2tab -n -i -l
+ mouse_17	299
+human_17	569
+zebrafish_17	596
+ SQL adds  id  as a tie-breaker because the other 48 records all have length 1,000.  ORDER BY bioseq.len(seq), id  gives these equal-length records a consistent order too. In SQL, use  ORDER BY  whenever the order of the results matters. That last detail matters when selecting a range of records: SELECT id, bioseq.len(seq) AS bp
+FROM seqkit_lab.windows
+ORDER BY id
+LIMIT 5 OFFSET 3; seqkit range -r 4:8 windows.fa | seqkit fx2tab -n -i -l
+ human_04	1000
+human_05	1000
+human_06	1000
+human_07	1000
+human_08	1000
+ These are records four through eight in ID order.  OFFSET 3  skips the first three and  LIMIT 5  takes the next five. SeqKit&#39;s  range  selects whole records in file order, which agrees here because we exported with  ORDER BY id . 8. Rename, edit and join small sequence fragments Adding a prefix to a name is a string operation: SELECT id, &#39;mito_&#39; || id AS renamed
+FROM seqkit_lab.windows ORDER BY id LIMIT 3; seqkit head -n 3 windows.fa | seqkit replace -p &#39;^&#39; -r &#39;mito_&#39; | seqkit seq -n -i
+ mito_human_01
+mito_human_02
+mito_human_03
+ ||  concatenates ordinary PostgreSQL text here. For more complicated header changes, PostgreSQL has  regexp_replace . For a lookup table of old and new names, use a join. SeqKit&#39;s  replace  also supports regular expressions and key-value replacement files. We can make a copy with its fifth base set to T: SELECT id, seq[:20]::text AS before,
+       overlay(seq[:20]::text placing &#39;T&#39; from 5 for 1) AS after
+FROM seqkit_lab.windows ORDER BY id LIMIT 3; seqkit head -n 3 windows.fa | seqkit subseq -r 1:20 | seqkit mutate -p 5:T | seqkit fx2tab -Q -i
+ human_01	GATCTCAGGTCTATCACCCT
+human_02	CCAGTTGACACAAAATAGAC
+human_03	CGAGTCTGGTGATAGCTGGT
+ PostgreSQL&#39;s text function  overlay  uses one-based positions, so  from 5 for 1  agrees with  seqkit mutate -p 5:T . This  SELECT  returns the edited twenty-base text beside the original while leaving the stored sequence unchanged. Cast a complete edited string back to  bioseq.seq(&#39;dna5&#39;, 64)  when you want to store it as DNA. SeqKit&#39;s  concat  joins sequences with matching IDs across files. We can do the same with a SQL join: WITH left_part AS (
+  SELECT id, seq[:10] AS seq
+  FROM seqkit_lab.windows ORDER BY id LIMIT 3
+), right_part AS (
+  SELECT id, seq[-10:] AS seq
+  FROM seqkit_lab.windows ORDER BY id LIMIT 3
+)
+SELECT l.id,
+       (l.seq OPERATOR(bioseq.||) r.seq)::text AS joined
+FROM left_part l JOIN right_part r USING (id)
+ORDER BY l.id; seqkit head -n 3 windows.fa &gt; trio.fa
+seqkit subseq -r 1:10 trio.fa &gt; left.fa
+seqkit subseq -r -10:-1 trio.fa &gt; right.fa
+seqkit concat left.fa right.fa | seqkit sort | seqkit fx2tab -Q -i
+ human_01	GATCACAGGTGTAAAAAACT
+human_02	CCAGTTGACAACAAACCTAC
+human_03	CGAGCCTGGTTGTTGGATCA
+ Here  left.fa  contains the first ten bases of the first three human windows, and  right.fa  contains their last ten bases with the same IDs. The repository&#39;s  seqkit.sh  script prepares those files. The SQL common table expressions prepare the same two inputs, then  JOIN ... USING (id)  pairs them.  OPERATOR(bioseq.||)  concatenates the BioseqDB sequence values. The result is a twenty-base sequence containing the two ends of each window. seqkit rename  adds suffixes to repeated IDs, while  seqkit rmdup -s  compares sequence contents. To try both,  seqkit.sh  creates three records in  duplicates.fa : two records share the ID  copy , the second has an edited final base, and the third has ID  other  but repeats the first sequence exactly. For that input,  seqkit rename duplicates.fa  returns IDs  copy ,  copy_2 ,  other . In SQL, number the rows within each ID using  row_number() OVER (PARTITION BY id ORDER BY ordinal)  and append the number after the first occurrence. Keep an input-order column such as  ordinal  if the identity of the first record matters. To remove repeated sequence contents,  seqkit rmdup -s -P -i duplicates.fa  retains the two distinct sequences. PostgreSQL&#39;s  DISTINCT ON (seq)  does the same forward-strand grouping, with  ORDER BY seq, ordinal  choosing the first copy.  -P  restricts SeqKit&#39;s comparison to the forward strand, matching the SQL grouping. The complete runnable queries for both operations are in  03_queries.sql . 9. Shuffle and take a reproducible subset For an exploratory subset in SQL, you can write  ORDER BY random() LIMIT 5 . Re-running it changes the sample. Here we use a fixed ordering derived from each ID and the label  &#39;2026:&#39; , so you can repeat the query and get the same five records: SELECT id
+FROM seqkit_lab.windows
+ORDER BY md5(&#39;2026:&#39; || id)
+LIMIT 5; seqkit sample -p 0.1 -s 11 windows.fa | seqkit seq -n -i
+ human_01
+human_11
+mouse_10
+zebrafish_08
+zebrafish_09
+zebrafish_16
+ Changing  &#39;2026:&#39;  changes the SQL ordering. Remove  LIMIT 5  to reorder all rows using the same method. SeqKit has  shuffle -s 23 windows.fa  for a seeded shuffle and  sample -p 0.1 -s 11 windows.fa  for a seeded fraction sample. The SQL example returns exactly five rows. SeqKit&#39;s  -p 0.1  gives each record a 10% chance of inclusion and returned six rows on this input with seed 11. The chosen IDs differ because these are two different ways of selecting a subset. For sampling a fixed number from large files, read the  SeqKit sample documentation  and its notes on the count option. A short command map Here are the commands and expressions from the examples above, gathered in one table for reference. Task BioseqDB / PostgreSQL expression SeqKit command Count records and inspect lengths count(*) ,  min(bioseq.len(seq)) ,  max(bioseq.len(seq)) stats Reverse-complement DNA or filter length bioseq.reverse_complement(seq) ,  WHERE bioseq.len(seq) &lt; 1000 seq Keep IDs or sequences matching a pattern WHERE id IN (...) ,  WHERE seq::text LIKE &#39;%GAATTC%&#39; grep Select records by position in an ordered input ORDER BY id LIMIT 5 OFFSET 3 range Order records by sequence length ORDER BY bioseq.len(seq), id sort Change record order ORDER BY random() shuffle Select a subset ORDER BY random() LIMIT 5  for five rows sample Separate groups encoded in headers Filter a metadata column, export groups if files are needed split Change names with a pattern or mapping Text concatenation,  regexp_replace , or a metadata join replace Make repeated IDs distinct row_number() OVER (PARTITION BY id ORDER BY ordinal)  plus a suffix rename Edit a sequence copy overlay(seq::text placing &#39;T&#39; from 5 for 1) mutate Join fragments sharing an ID JOIN ... USING (id)  and  OPERATOR(bioseq.||) concat Keep one copy of each stored sequence DISTINCT ON (seq)  with an explicit choice of retained row rmdup For me the useful difference appears when the next question involves metadata. Once the sequences are in  seqkit_lab.windows , adding a species condition or joining a list of interesting regions is an ordinary SQL query. The data stays beside the information explaining where it came from. SeqKit remains convenient when I need to inspect or transform a file from the terminal, and the FASTA export means I can use it on exactly the same records. For a comparison of longer regions that allows substitutions, insertions and deletions, try the  BioseqDB alignment tutorial . The queries there return matching intervals you can plot, along with the species and coordinate columns used throughout the analysis. Sources This tutorial was inspired by the awesome work of  Wei Shen on SeqKit . His  FAQ  and  command reference  explain the SeqKit commands used here and many more. The sequences come from the  UCSC Genome Browser API . You can find the import queries, SeqKit commands and Python code for all three charts in  BioseqDB/examples/seqkit_workflows .">
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-sql-cover.svg" alt="Large translucent DNA letters behind SELECT, WHERE and GROUP BY statements." width="1200" height="240"></div>
+        <div class="blog-card-content">
+          <p class="blog-card-category">BioseqDB</p>
+          <div class="blog-meta"><time datetime="2026-10-19">19 October 2026</time><span aria-hidden="true">·</span><span>23 min read</span></div>
+          <h2><a href="/blog/seqkit-workflows-in-bioseqdb/">Working with sequence files in BioseqDB and SeqKit</a></h2>
+          <p>Import mitochondrial DNA from UCSC into PostgreSQL, then compare BioseqDB SQL with SeqKit for sequence statistics, GC content, motifs, slicing, sorting and FASTA housekeeping.</p>
+          <ul class="blog-card-keywords" aria-label="Topics"><li data-blog-keyword>BioseqDB</li><li data-blog-keyword>SeqKit</li><li data-blog-keyword>PostgreSQL</li><li data-blog-keyword>SQL</li><li data-blog-keyword>FASTA</li><li data-blog-keyword>UCSC</li><li data-blog-keyword>mitochondrial DNA</li><li data-blog-keyword>GC content</li><li data-blog-keyword>sequence analysis</li><li data-blog-keyword>bioinformatics</li><li data-blog-keyword>regular expressions</li></ul>
+          <a class="blog-action" href="/blog/seqkit-workflows-in-bioseqdb/">Read the post <span aria-hidden="true">→</span></a>
+        </div>
+      </article>
       
       <article class="blog-card" data-blog-card data-blog-category="bioseqdb" data-blog-date="2026-10-16" data-blog-title="Comparing butterfly genomes with BioseqDB, SQLAlchemy and Plotly" data-blog-search-text="Two butterflies can look remarkably similar without belonging to the same species. For  Heliconius , part of the story why that happens, involves  optix , a gene whose activity helps determine where red patterns appear on the wings. It encodes a transcription factor - so a protein which helps control the activity of other genes, that in very simplified terms works like sompphisticated switch, because changes in regulatory regions can affect not only if, but where and when a gene is used.  Reed and colleagues studied this connection across Heliconius species. I decided to write this tutorial to showcase very simple example of analysis that one can do for single selected organism. As similar topics were always an interest of mine, I dedicated few last years to create a software that combines power of usual relational databases and software used commonly in compuatational biology to perform alignments (one can view them as problem of searching text in the database and understanding text similarity in specific biological way). In this tutorial we will align a piece of chromosome or scaffold from two  Heliconius  species that includes  optix . We will fetch the sequences from NCBI, keep them in PostgreSQL, ask BioseqDB (the database software I created and do little self-promotion :)) to find matching regions, and use SQLAlchemy and Plotly to inspect the results in Python. We won&#39;t need any separate alignment executable or tools. I inspired myself by excellent blog post:   butterfly genome-alignment tutorial using Minimap2 and R . I wanted to work through the same kind of comparison with BioseqDB. This version uses newer NCBI assemblies and their own gene annotations, so the coordinates and results below will be different obviously! You can find all the full code, SQL, dependencies and Python notebook in  BioseqDB/examples/butterfies_alignments . You can also  download this tutorial’s code snapshot , but please note that neither provide FASTA files as I rely on NCBI datasets. 1. Very short biological introduction on what we will be doing A DNA sequence is commonly written with four letters:  A ,  C ,  G  and  T , representing adenine, cytosine, guanine and thymine. These are the bases of its nucleotides. A sequence file may also contain  N , meaning the base is unresolved. Removing those letters would move every coordinate after them, so we keep them for simplicity. DNA has two complementary strands - A pairs with T, and C with G and the strands also run in opposite directions. To read the same region from the other strand, we need to reverse the sequence and complement each letter. For example, the reverse complement of  AACGT  is  ACGTT . I mentioning this, because this detail will matter quite a lot in our butterfly plots. A genome is an organism&#39;s complete set of DNA, and an assembly is a reconstruction of it from sequencing data collected from some instruments (this process goes into &quot;wet lab&quot; so you ask your fellow collegues to run Illumina machine, which yields many many parts of the sequence you are interested in along with some noise. I won&#39;t go into details now how exactly this is done, but we have our sequence already in the dataset!). A chromosome record can represent a reconstructed chromosome, while a scaffold is an assembled sequence whose placement may still be incomplete. We will be usiong record for two species - our  H. melpomene rosina  record is chromosome 18, while the  H. erato demophoon  record is an  unplaced scaffold  named  ntLink_18 Now the core of any genomic/metagenomic analysis pipeline is the problem of alignment. An alignment is a process that places two sequences in columns so that corresponding bases (nucleotites A,C,T,G) can be compared. Equal letters are matches, different letters are substitutions, and gaps mean insertions or deletions relative to the other sequence. This allows us to understand for example where specific nucleotides were changed during evolutionary processes (how mutations arise, where etc.) We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence (that is a lot of text, so our alignment algorithm would be ridiciously slow!). Thankfully in BioseqDB&#39;s I provided search function mmsearch . Internally it starts with short shared fragments, connects promising matches into chains, then aligns selected regions in more detail. This approach is called the  seed-and-extend idea  and it allows more efficient processing so you can align ridiciously long sequences with no issue. If you are interested in writing your own aligner, my  Python read-mapper tutorial  goes through the algorithms specifically written in very simple Python. Here we start analysis with a pairwise comparison across two species, caluclating alignemnt of fragments per every pair of sequences. It is a useful first exercise in comparative genomics. 2. Setting things up! We will import two one-million-base sequence fragments, inspect their lengths and nucleotide counts, calculate GC content, align them, and progressively draw one match, all retained matches, and the neighbourhood of  optix . PostgreSQL via BioseqDB extension stores the sequences and BioseqDB performs the alignment. We will write Python code using SQLAlchemy, that will send SQL and receive rows, which later will be used by Plotly to constrtuct some figures. You can do that same thing with plain SQL client like  psql  as every step of data processing will happen inside the database itself. 3. Install BioseqDB and check external access Availability on 16 October 2026.  The published  0.1.0-alpha.1  Docker images and native package builds omit the external-database integration used here (due to my oversight). It is planned for the next alpha release, but you can obviously compile source from Github directly. Currently using runtime  SET , an API key, or a  GRANT  won&#39;t work as the code isn&#39;t present in the binary - when building one must use  BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON  to enable this feature. The  installation page  covers the regular Docker and native packages. For this tutorial, use the external-enabled development build described in the  example&#39;s setup instructions : cmake -S . -B build/butterflies -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON
 cmake --build build/butterflies --target postgresql_bioseq postgresql_bioseq_cache
@@ -348,7 +593,7 @@ figures = make_figures(
 )
 print(json.dumps(analysis[&quot;summary&quot;], indent=2))
  The exon panel is a closer view of the annotations. Exons are the parts retained in a mature transcript, The annotated erato transcript has two exons and the melpomene transcript has one in these files and I put everything into one simple graphic. The gene here tracks place the matching segments in their annotated neighbourhood. The ribbons show sequence resemblance under the alignment and the last one - GC tracks add a simple measurement of GC content made directly from the imported DNA. 13. What did we learn? The two regions have almost the same overall GC content, yet their alignment is a collection of local blocks with gaps and competing matches. The  optix  coding sequences are especially similar, while the surrounding DNA provides a larger and less uniform comparison. None of these plots alone identifies the regulatory change responsible for a wing pattern, but hey, we got some cool plots! What I find useful about this workflow is that the sequences, their accession identifiers and the analysis stay all withing SQL. Selecting another region means changing explicit coordinates in your code without the need to look for CLI docs in the internet or using different tools blues together via bash scripts. You can even search NCBI via SQL layer that directly uses their API. I didn&#39;t show it here but you can export the table into usual FASTA as well. To continue, try changing the display thresholds and compare the dot plot before interpreting an apparent break. Then select another gene neighbourhood, preserving the accession versions and coordinate conventions. Adding more genomes can turn this small pairwise exercise into a broader comparative analysis. with even more cool charts!">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/butterfly-gc-cover.svg" alt="Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterfly-gc-cover.svg" alt="Teal and blue butterfly silhouettes with red wing marks above fine GC-content traces from the two sequence windows." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-16">16 October 2026</time><span aria-hidden="true">·</span><span>25 min read</span></div>
@@ -381,7 +626,7 @@ WHERE key = &#39;sample_A&#39;;
 SELECT jsonb_object_agg(key, value ORDER BY key) AS stored_values,
        sum(value) AS total
 FROM sample_counts; The total is 16. PostgreSQL also provides transactions and savepoints for grouping changes and undoing work within a transaction, with defined behaviour rather than a replay request to a conversation.  The transaction tutorial  describes those operations.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>7 min read</span></div>
@@ -425,7 +670,7 @@ SELECT note_id, round(sum(weight), 6) AS fused_score
 FROM contributions
 GROUP BY note_id
 ORDER BY sum(weight) DESC, note_id; Note 24 wins because it appears near the top of both lists. Note 31 still appears even though the lexical search did not find it.  UNION ALL  is intentional: each list provides its own contribution. Within each input list, however, a note must occur only once; otherwise joins that duplicate rows would accidentally give it extra votes. This is a useful place to stop and inspect the candidates. Fusion cannot recover a note absent from both lists, and asking each method for only two candidates may remove a note that would have done well in the combined ranking. I would choose candidate limits separately from the number of results displayed to the reader. What I would measure For each test query I would keep the eligible IDs, each candidate list and the final ordering, together with the query time. This makes a missing result traceable: was it excluded by the study filter, absent from retrieval, or just ranked too low? A single response-time number cannot answer that. I would also include awkward cases: a rare study, a note containing an exact sample identifier, two notes with tied scores, and a query with no lexical match. The occasional empty answer is less suprising when those cases are part of the test data from the beginning. The tiny datasets here are a way to inspect the decisions in SQL before choosing an index or a larger retrieval setup.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Translucent boxes containing coloured DNA letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>6 min read</span></div>
@@ -470,7 +715,7 @@ ORDER BY id; The result tells me which branch accepted each note, which is more 
     }
 end
  This scope is an integration example, not an implementation of the two-branch rule above. For that rule I would keep the SQL explicit and bind the inputs. Rails&#39;  query parameter guidance  matters here: parsing search text is different from safely passing that text to SQL. An input string still belongs in a parameter, not inside an interpolated SQL expression. The harder maintenance question appears when a search document includes another table. A  generated column  cannot reach across rows to follow an association, so I would first decide which change owns the refresh, then test updates to both the parent and the child. Searching stale text is a correctness problem even if the index makes it very quick. Finally, a highlighted excerpt is presentation, not proof of a match.  ts_headline  needs the original text and its output is not automatically safe HTML; the  highlighting documentation  explains the limitations. I would keep the matching booleans for debugging, and render excerpts through the application&#39;s escaping or sanitizing rules rather than marking arbitrary output as safe.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -501,7 +746,7 @@ CREATE TABLE encrypted_specimen_notes (
 
 SELECT pg_tde_is_encrypted(&#39;encrypted_specimen_notes&#39;);
  These calls follow the  function reference . They do not encrypt the earlier  specimen_notes  table merely because another table now uses TDE. A local file provider can help with a disposable experiment, but its key file is unencrypted; the  keyring guide  recommends proper key management for production. WAL and recovery need their own plan Table encryption alone does not settle the write-ahead log. WAL encryption became generally available in  pg_tde 2.0 , after some early introductions were written. It has a separate server-wide configuration, covers writes from all databases in the cluster, and needs a restart when enabled. Existing plaintext WAL does not become encrypted retrospectively. Follow the current  WAL instructions , including their required archive and restore wrappers. A logical dump is another copy of readable data:  pg_dump  reads through PostgreSQL&#39;s client interface, rather than preserving encrypted relation files. Protect the resulting dump separately. The  SQL dump documentation  explains that distinction in how the backup is made. For physical backups, I would make recovery the acceptance test: restore elsewhere, recover the required keys, replay WAL, and check the specimen rows. Percona&#39;s  backup procedure  specifies the encryption metadata and provider files needed, and warns against rotating keys during a backup. It is a seperate operational dependency worth rehearsing before there is an incident.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="A quiet pattern of coloured sequence letters." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -532,7 +777,7 @@ SELECT &#39;[0.2,0.4,0.6]&#39;::vector(3)
  Here  &lt;-&gt;  means Euclidean distance for those operand types. Choosing a distance and generating comparable inputs remain separate from storing the values. The  pgvector reference  lists the supported operators. In an actual experiment I would record the embedding model and preprocessing alongside the data, so a later model change cannot quietly mix incompatible representations. The same operator can describe a different distance A point on a two-dimensional laboratory drawing does not need an embedding extension. PostgreSQL already has geometric types, including  point , and the point-to-point distance operator is also written  &lt;-&gt; : SELECT point(2, 3) AS storage_position,
        point(5, 7) AS workbench_position,
        point(2, 3) &lt;-&gt; point(5, 7) AS drawing_distance; This returns a distance of five drawing units. The type tells PostgreSQL which operation to perform, even though the operator spelling is shared with the previous example. These built-in coordinates describe a plane; they do not carry a geographic coordinate reference system.  Geometric types  and  their operators  specify the available operations. Vector graphics add another use of the word. The illustration above consists of shapes and text, while an SVG path can describe a shape through drawing commands and coordinates. The browser paints that description at the requested size. Those coordinates are instructions for an image, not a search representation of its meaning.  The SVG path specification  explains that format. A vector can also span many rows Vectorized execution refers to how a database processes data internally. For example, DuckDB&#39;s execution format passes batches of values through operators, and a batch can contain ordinary integers or strings. Its documentation distinguishes several physical representations, including flat and constant vectors. The SQL column does not have to contain embeddings for this execution method to be useful. DuckDB describes these representations in its  execution-format documentation . That distinction prevents an occassional misunderstanding: adding a  vector  column to a PostgreSQL table does not, by itself, turn the query executor into a batch-processing engine. A stored value&#39;s type and the way an executor moves through rows answer different questions. When reading about a vector feature, I therefore try to identify the stored value, the operation and the execution method separately. For the specimen example those questions lead to fairly ordinary choices: retain the note, define the measurements, name the coordinate system and test the search behaviour. The shared vocabulary becomes much less troublesome once those choices are written down.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Muted coloured A, C, T and G letters in translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -570,7 +815,7 @@ ORDER BY object_name; There are two objects here with two different jobs, even t
 FROM lab_observations
 WHERE needs_review
 ORDER BY read_count DESC, specimen; The expected result is small enough to check by eye. From there I would add updates, rollbacks, deleted rows and overlapping readers, keeping the expected answers seperate from the engine&#39;s implementation. A faster result is useful only after I know it is the right result. Reclaiming obsolete data also needs attention. PostgreSQL&#39;s heap requires  routine vacuuming ; a different storage design still needs a clear account of when old information can be removed. I would include a long-running reader in that experiment, because reclaiming something too early is harder to notice than retaining it too long. The part that survives a restart Write-ahead logging  provides the ordering needed to recover logged changes after a crash. A custom method needs its own coherent recovery story; PostgreSQL&#39;s table interface permits its WAL facilities or another implementation. An in-memory demonstration should not be mistaken for durable storage just because it accepts familiar SQL. There is an operational boundary too. In PostgreSQL 17, changing an existing table with  ALTER TABLE ... SET ACCESS METHOD  rewrites it and requires an  ACCESS EXCLUSIVE  lock. I would plan that as a migration, with room for the rewrite and a tested way back, rather than treat it as an inexpensive setting. The version-specific  ALTER TABLE documentation  is the place to check before doing it. What interests me here is the amount of PostgreSQL I can keep while investigating a different storage layout. The SQL examples above deliberately stay with heap; they establish the boundary and a few expected results, leaving the larger implementation questions visible instead of hiding them behind a successful demo.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Muted coloured DNA letters arranged in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">Others</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>5 min read</span></div>
@@ -781,7 +1026,7 @@ def bwt_exact_positions(text, query):
 
 assert bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;) == [3, 10]
  bwt_exact_positions(&quot;GATTACAGATTACA&quot;, &quot;TACA&quot;)  returns  [3, 10] . The suffix sorting above materializes strings, so it is intentionally for small examples. The historical search added insertion, deletion and substitution branches and pruning, and could stop after a successful branch. It was not an exhaustive guarantee of the best approximate alignment. The final mapper used fragments covering about 10% of each query end, with an error budget of about 10% of that fragment length. If endpoint estimates were poor, a dynamic-programming fallback searched a larger suffix fragment, about 40% of the query. It also checked the resulting interval length and could retry before omitting a read. There was a surprising practical result here. On these small endpoint windows, sorting suffixes in a straightforward way could beat a more sophisticated suffix-array construction with more temporary objects. A better asymptotic bound does not remove setup costs. It also does not justify using this suffix sorter for the whole reference. Where minimap2 goes further Minimap2 follows a seed–chain–align design, but its chaining is not plain LIS. It rewards new seed coverage and penalizes gaps and differences between reference and query distances. Backtracking identifies candidate chains, and base alignment can fill the gaps and extend their ends. It also handles alternative placements and strand information. The  minimap2 paper  describes this architecture. Its  sketch implementation  also differs from our little minimizer function: it tracks forward and reverse-complement encodings, records strand and endpoint information, mixes the selected encoding into a hash and has its own tie handling. Our leftmost lexicographic minimum is a teaching choice, not a byte-compatible reimplementation. The  chaining implementation  searches earlier anchors with limits on how much work it performs. This is the more general direction: reward useful coverage, penalize implausible gaps, and bound the search. My Python cutoff was a much rougher attempt to keep distant matches from dominating a candidate. NumPy was useful, but not everywhere I used NumPy extensively in the prototype: compact base arrays, bulk comparisons, sorting, selecting window minima and joining seed positions. But some of the most interesting experiments were the ones where putting data into an array made the program slower. The original rolling-key computation used  frompyfunc  around a Python lambda and accumulated into an object array.  NumPy documents that object-array result . The expression looks like an array operation, but the callback still executes Python code. Converting the result with  astype , stacking columns, sorting and converting back to lists add allocations and representation changes. A sliding-window view is different: it shares memory with the source array rather than copying every window. The later reduction still has work to do. For a direct minimum across every window, that work grows with both the sequence length and the window width;  the NumPy documentation  explicitly discusses that cost. The local experiment files contain comparisons of list-based and NumPy-based dynamic programming. They belong to an  earlier v10 configuration with k=16 and w=7 , not the final  mapper.py  with k=17 and w=8. Keep them separate from the course results below. Only four or five DP calls were measured in each of these runs. The NumPy variant spent about 2.2–2.3 times as long in that phase. That is evidence about these implementations and inputs, not a general rule that lists beat NumPy. A Python loop which indexes one array cell at a time can pay scalar-conversion and indexing costs without getting the benefit of a compiled bulk operation. The BWT comparison tells a similar, size-dependent story. These were small local windows, where a simple implementation had little setup to pay for. The experiment changes more than one representation, so the whole-program timing cannot tell us exactly how much time was caused by allocation, copying or the suffix-array algorithm itself. The useful habit I took from this was to measure the phase I was changing. If reference indexing dominates a run, a large relative improvement in a rarely used fallback may barely change the total. If the next stage immediately converts an array back into Python objects, I need to include that conversion in the comparison. The final course results The course report was updated on 18 December 2024. The comparison below covers ten submissions I considered valid general-purpose implementations under the course rules. Each was tested on six datasets containing 1,000 reads of roughly 1,000 bases. The references were a 1 Mb yeast fragment, a 5 Mb bacterial fragment and a 20 Mb yeast fragment. Suffix  a  denotes about 5% read errors and  b  about 10%; 20% of those errors were indels.  PS  is my submission. The published PDF contains plots rather than a numeric runtime table. The redrawn runtime and memory values below are  approximate readings of those plots ; the downloadable data records that limitation. The mapping counts are read from the corresponding count plots. These are course-server measurements, not a controlled comparison with modern production aligners. PS was the fastest eligible submission on all six tests. It was tens to hundreds of times faster than the other nine submissions, depending on the test. Its six runs took roughly 0.19–0.57 minutes each, or about 11–34 seconds for 1,000 reads. The result I was particularly happy with was combining those runtimes with a mapping for every read. Across the six datasets, PS left  zero reads unmapped  and had  eight incorrect mappings out of 6,000 : 1, 3, 0, 0, 4 and 0 in the report&#39;s order. That is about 99.87% correctly mapped overall under the assignment&#39;s endpoint tolerance. It does not mean every base of those reads was perfectly aligned. The memory chart also matters. PS approached the 1 GB limit on the 20 Mb reference, so this was not a design with unlimited room to grow. The reference was processed in roughly 800,000-base chunks while building the sketch, but the program still retained reference data. Chunking reduced temporary work; it did not turn the mapper into a constant-memory streaming algorithm. The old chunk boundaries had no overlap, so seeds crossing a boundary could be lost. The reference sketch also skipped selected singleton seed groups after a counter threshold was reached. Those were practical compromises in this implementation, and they should be visible when interpreting its measurements rather than hidden behind the final runtime. The  measurement data and provenance  describe the chart inputs. The  course results report  may require a university login; I used my downloaded copy. Local profiling data and the slides are in  the project sources . What I kept for BioseqDB The exercise made the stages much less mysterious. Seeds reduce the search space. Chaining asks whether their positions tell a plausible story. Refinement checks the details which exact fragments cannot explain. Each stage needs a useful limit, because a repetitive seed or an overlong candidate can undo all the savings from the previous stage. I also learned to be suspicious of optimizations which only look fast in the source. Python made that lesson fairly immediate: object arrays still contain objects, a suffix-array algorithm still has setup costs, and converting between representations is work even when it occupies one line. The current BioseqDB is a separate implementation with a much broader job: storing sequences alongside relational data and making alignment available through SQL. If you want to follow that next step, start with the  alignment foundations , then the  chaining chapter , or run the  SQL walkthrough . The Python mapper was an early way to learn the mechanics well enough to start asking those larger questions.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Small translucent DNA letter tiles in the BioseqDB colours." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Small translucent DNA letter tiles in the BioseqDB colours." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>26 min read</span></div>
@@ -886,7 +1131,7 @@ VACUUM FULL specimens;
 --        through the clustering callback
  For this PostgreSQL 17.10 build, I also tested  ALTER TABLE ... SET ACCESS METHOD heap  on a separate six-row table. The conversion succeeded and preserved all six rows. That does not mean every  ALTER TABLE  or rewrite operation has been tested. The useful distinction is the operation and the path it actually takes, not whether its name sounds similar to another working command. The supplied smoke checks can be run in a fresh database with: psql -X -v ON_ERROR_STOP=1 -d your_disposable_database -f test.sql
  They check ordinary writes, rollback, bulk insertion, rejected indexes and primary keys, analysis, ordinary vacuum, a large text value and truncation. An assertion failure stops the script. During preparation I additionally checked two simultaneous connections: a repeatable-read transaction continued to see  121  while another session changed the row to  777 , both before and after that writer committed; a new transaction then saw  777 . The counters in the reader and writer remained independent. A clean server restart preserved the six rows and the committed value. This was a clean-restart check, not a crash-recovery test or a claim that a new storage implementation gets recovery for free. Our actual tuple operations still use heap. If those operations change, the evidence from this example no longer establishes their correctness. 8. Keep the C++ boundary deliberately boring The wrappers use plain pointers, scalar values and a trivial counter structure. They do not keep a  std::vector  or a file stream alive across a PostgreSQL call that may raise an error. PostgreSQL&#39;s error machinery can jump out of the call without running ordinary C++ destructors. Disabling C++ exceptions does not change that behaviour. This is why the example does not present RAII as automatic protection around every server API call. A real extension needs a deliberate boundary between PostgreSQL error handling, its memory contexts and any C++ objects which need cleanup.  PostgreSQL&#39;s C++ integration notes  are relevant here even if the first source file compiles without a warning. Our counter reset is intentionally simple, and the JSON returned by  traceheap.stats()  is allocated through PostgreSQL&#39;s allocation functions. The state is backend-local, covers all  traceheap  tables visited by that backend, is not transactional, and disappears when the process exits. Those properties make it useful for this tutorial and unsuitable as a database-wide monitoring system. Where this meets BioseqDB The part I want to carry into a larger storage engine is the habit of following each callback&#39;s inputs, output and lifetime. A successful  CREATE TABLE  tells us very little about updates, snapshots, large values or maintenance. Even this small heap-based experiment found two assumptions which were invisible in a copied  TableAmRoutine  declaration. BioseqDB&#39;s  table callback registration  binds its own columnar scan, write and maintenance functions instead of copying heap&#39;s routine. Its  storage chapter  explains the larger storage layout, and the  custom scan chapter  follows the separate path used for sequence-search execution. A table method and a custom scan solve related but different problems. For a next experiment, I would change one observable behaviour and keep the current SQL checks beside it. If that change requires a different slot representation or persistent layout, I would write down which other callbacks now have to agree with it before adding another feature. That gives me a callback I can exercise with a small query and a result I can inspect.">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in a shallow grid." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Coloured DNA letters in a shallow grid." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-12">12 October 2026</time><span aria-hidden="true">·</span><span>14 min read</span></div>
@@ -915,7 +1160,7 @@ ORDER BY t.id, start; Anna has two occurrences and Ben has one. These are exact 
  Wait until PostgreSQL is ready, then open its SQL prompt: until docker exec bioseqdb-demo pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
 docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
  Follow the  walkthrough  to create the sample table, load a FASTA file and try the queries above. I would like to hear how it works with your data:  open an issue  or  contact me .">
-        <div class="blog-card-cover"><img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
+        <div class="blog-card-cover"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-letters.svg" alt="Rows of softly coloured A, C, T and G letters in small translucent boxes." width="1200" height="240"></div>
         <div class="blog-card-content">
           <p class="blog-card-category">BioseqDB</p>
           <div class="blog-meta"><time datetime="2026-10-01">1 October 2026</time><span aria-hidden="true">·</span><span>4 min read</span></div>
@@ -938,7 +1183,7 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -997,14 +1242,14 @@ docker exec -it -u postgres bioseqdb-demo psql -U postgres -d postgres
 
 <div id="entity-pop"></div>
 <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage","@id":"https://bioseqdb.com/blog/#webpage","name":"The BioseqDB blog","description":"Notes on BioseqDB, PostgreSQL, and the ideas behind databases. Things to read, question, and try with SQL.","url":"https://bioseqdb.com/blog/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/thumbnail.jpg","datePublished":"2026-08-10T02:58:57+02:00","dateModified":"2026-10-12T20:00:53+02:00"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"The BioseqDB blog","item":"https://bioseqdb.com/blog/"}]}]}</script>
-<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/prism-init.js"></script>
-<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/vendor/prism/prism.min.js"></script>
-<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/prism-languages.js"></script>
-<script defer src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/main.js"></script>
-<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/content-runtime.mjs"></script>
-<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/site-header.mjs"></script>
-<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/announcement.mjs"></script>
-<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/docs-design.mjs"></script>
-<script type="module" src="/assets/3ae1521ab39a71a25c1c8ecef09a6a94c8eb1721827711365c28bce4a91474ba/js/blog-index.mjs"></script>
+<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/prism-init.js"></script>
+<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/prism-languages.js"></script>
+<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/main.js"></script>
+<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/site-header.mjs"></script>
+<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/announcement.mjs"></script>
+<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/docs-design.mjs"></script>
+<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/blog-index.mjs"></script>
 </body>
 </html>
