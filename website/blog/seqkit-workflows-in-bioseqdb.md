@@ -17,9 +17,9 @@ A FASTA record starts with a header line beginning with `>`, followed by the seq
 
 I like having those columns. This is one reason I wanted sequence operations inside PostgreSQL when I started working on BioseqDB. You can keep the DNA next to its metadata and write a query that uses both, without exporting another intermediate file every time you change a filter.
 
-[SeqKit's tutorial](https://bioinf.shenwei.me/seqkit/tutorial/) has plenty of useful examples of the work people do with sequence files. I went through it and the [FAQ](https://bioinf.shenwei.me/seqkit/faq/) and picked a set of tasks to try in SQL: checking lengths, counting bases, finding motifs, selecting records and dealing with names. Below, BioseqDB is on the left and SeqKit is on the right. On a phone, the SQL comes first.
+[SeqKit's tutorial](https://bioinf.shenwei.me/seqkit/tutorial/) has plenty of useful examples of the work people do with sequence files. I picked several of them and some tasks from the [FAQ](https://bioinf.shenwei.me/seqkit/faq/) to try in SQL: checking lengths, counting bases, finding motifs, selecting records and dealing with names.
 
-We will use the same sequences in both tools. These examples were checked against SeqKit 2.14.0 and an external-enabled BioseqDB development build. The tables under the SQL listings are produced by the website builder, which executes the queries against PostgreSQL. This is a workflow comparison, with no timing benchmark attached to it.
+We will use the same sequences in both tools. I checked the examples with SeqKit 2.14.0 and a BioseqDB development build with external database support. You can find the SQL, shell commands and chart code in [BioseqDB/examples/seqkit_workflows](https://github.com/BioseqDB/examples/tree/main/seqkit_workflows).
 
 ## 1. Get a small dataset from UCSC
 
@@ -53,7 +53,7 @@ SELECT 1;
 ```
 <!-- seqkit:preflight:end -->
 
-The result must be `true`. If the table exists but access is denied, your database owner needs to grant your role `USAGE` on `bioseq_external` and `SELECT` on `bioseq_external.sequences`. A permission change cannot enable a module omitted from the binary.
+The result must be `true`. If the table exists but access is denied, your database owner needs to grant your role `USAGE` on `bioseq_external` and `SELECT` on `bioseq_external.sequences`.
 
 Create a schema for this exercise and a table for the chromosome records:
 
@@ -81,7 +81,7 @@ DROP SCHEMA seqkit_lab CASCADE;
 | `species` | A short label for grouping and plotting |
 | `seq` | The DNA sequence, stored as a BioseqDB value |
 
-<code>USING bioseq</code> selects BioseqDB's table storage. The `dna5` alphabet accepts A, C, G, T and N, where N means an unresolved base. The `64` is the sequence type's block-size parameter, not a limit of 64 bases. The [sequence representation documentation](/v0.1/tutorials/project_sequence_abstractions/) explains the storage details.
+<code>USING bioseq</code> selects BioseqDB's table storage. The `dna5` alphabet accepts A, C, G, T and N, where N means an unresolved base. The `64` selects 64-bit storage blocks, and a sequence can occupy many such blocks. The [sequence representation documentation](/v0.1/tutorials/project_sequence_abstractions/) explains the storage details.
 
 Now fetch the three records. Each `INSERT ... SELECT` reads a remote interval and saves it locally. Subsequent analysis will use the saved rows.
 
@@ -127,11 +127,11 @@ UCSC's `start0` is zero-based and `end0` is exclusive. The human interval `[0, 1
 
 ![Lengths of the three mitochondrial chromosome records retrieved from UCSC.](/static/figures/blog/seqkit-workflows/chromosome-lengths.svg)
 
-The records differ by only a few hundred bases. We have one reference record per species, so this plot says nothing about variation within a species. It is useful here as a quick check that the import returned the complete requested intervals.
+The records differ by only a few hundred bases. Their lengths match the intervals requested from UCSC, which gives us a quick check that all three imports returned complete records.
 
 ## 2. Make records we can filter and export
 
-Three rows would make a rather short filtering exercise. We will split each chromosome into non-overlapping windows of 1,000 bases and keep the remaining shorter piece at the end. These windows are chunks made for this tutorial. They are not genes or sequencing reads.
+Three rows would make a rather short filtering exercise. We will split each chromosome into non-overlapping windows of 1,000 bases and keep the remaining shorter piece at the end. This gives us 51 records to filter, with each record's position on its original chromosome saved alongside it.
 
 <!-- seqkit:windows:start -->
 ```sql runnable id=seqkit_windows timeout=60s
@@ -231,7 +231,7 @@ DROP SCHEMA seqkit_lab CASCADE;
 ```
 <!-- seqkit:inspect:end -->
 
-For the command-line comparisons, [install SeqKit](https://bioinf.shenwei.me/seqkit/download/) and export these same rows. Run the following in `psql`. The `\o` command writes to a file on the client machine, so you do not need PostgreSQL's server-file permissions.
+For the command-line comparisons, [install SeqKit](https://bioinf.shenwei.me/seqkit/download/) and export these same rows. Run the following in `psql`. The `\o` command saves the query output to a file in your terminal's current directory.
 
 ```sql
 \pset format unaligned
@@ -248,7 +248,7 @@ FROM seqkit_lab.windows ORDER BY id;
 
 For example, a header will start with `>human_01 species=human assembly=hg38 start0=0 end0=1000`. SeqKit uses the first whitespace-delimited part as the ID by default. The SQL table already has each field separately.
 
-You can [download all the SQL, shell commands and chart code](/static/examples/seqkit-workflows.zip). The public workflow fetches its input from UCSC. For repeatable website builds, later listings load a pinned copy of those same three records in hidden setup code, rather than requesting UCSC again for every small example. The download includes the retrieval details and sequence hashes.
+The [example repository](https://github.com/BioseqDB/examples/tree/main/seqkit_workflows) includes these export commands in `02_export.sql`. Run them after `01_import.sql` to create `genomes.fa` and `windows.fa` for the SeqKit examples below.
 
 ## 3. Check lengths before doing anything clever
 
@@ -398,7 +398,7 @@ zebrafish_17	596
 
 ## 4. Count bases and calculate GC content
 
-GC content is the percentage of known DNA bases that are G or C. A sequence with 30 Gs and 20 Cs among 100 known bases has 50% GC content. It is a common first description of a sequence, although a similar GC percentage does not establish that two regions are related.
+GC content is the percentage of known DNA bases that are G or C. A sequence with 30 Gs and 20 Cs among 100 known bases has 50% GC content. We can calculate it for a whole chromosome or for smaller windows to see where its base composition changes.
 
 First count the letters in each complete chromosome:
 
@@ -602,7 +602,7 @@ human_06	43.90
 
 ![GC percentage along each mitochondrial chromosome, measured in the tutorial's non-overlapping windows.](/static/figures/blog/seqkit-workflows/gc-windows.svg)
 
-Each point sits at the midpoint of a window. The final window is shorter, and the lines only connect neighbouring measurements to make the plot readable. The three chromosomes have not been aligned, so matching horizontal positions across species do not imply matching genes. For a sequence alignment and coordinate-aware comparison, see the [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/).
+Each point sits at the midpoint of a window. The final window is shorter, and the lines connect neighbouring measurements so we can follow how GC content changes along each chromosome. The horizontal position is an offset within each species' own chromosome. To find corresponding regions between species, we would align the sequences, as in the [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/).
 
 ## 5. Select records by ID and by their contents
 
@@ -744,7 +744,7 @@ seqkit grep -v -f wanted.txt -C windows.fa
 </div>
 <!-- seqkit:exclude:end -->
 
-Both retain 49 records. This also covers the contaminated-read exclusion pattern in the SeqKit tutorial, provided another step has already identified which records to remove. The filtering itself does not detect contamination.
+Both retain 49 records. The SeqKit tutorial uses this filtering step to remove contaminated reads. Once you have identified those reads, put their IDs in the exclusion list and use the same query.
 
 We can also find the window containing the unresolved base:
 
@@ -971,11 +971,11 @@ zebrafish_01
 
 This matches ten windows. The FAQ also demonstrates IUPAC degenerate symbols with SeqKit's `-d` option. Here we use an explicit character class so the two listings have the same meaning.
 
-These searches operate within each window. A motif crossing a window boundary will be missed, and we are not wrapping a search around the end of the circular mitochondrial chromosome. For chromosome-wide motif analysis, query `seqkit_lab.genomes` directly and decide how to handle that circular boundary.
+These searches find motifs contained within individual windows. To include matches spanning two windows, search the complete chromosomes in `seqkit_lab.genomes`. Mitochondrial DNA is circular, so a search across the chromosome's origin also needs a sequence slice joining its last bases to its first bases.
 
 ## 6. Locate a motif and take a slice
 
-Sometimes the ID of a matching record is not enough. We need a coordinate.
+To extract the bases around a motif, we need its position inside the record:
 
 <!-- seqkit:locate:start -->
 <div class="tool-comparison" role="group" aria-label="Locate comparison">
@@ -1053,7 +1053,7 @@ zebrafish_15	GAATTC	GAATTC	+	449	454	GAATTC
 
 `strpos` returns the first occurrence using PostgreSQL's one-based string positions. Subtracting one converts it to a zero-based offset inside the window. SeqKit reports one-based inclusive start and end coordinates, so a SQL offset of 120 corresponds to SeqKit start 121. Add the window's `start0` to get the chromosome offset.
 
-There happens to be one `GAATTC` occurrence in each of these eight matching windows. This short SQL expression finds only the first occurrence, whereas `seqkit locate` can return every occurrence. Do not use it as an all-sites counter for a different dataset.
+There is one `GAATTC` occurrence in each of these eight matching windows, so both listings return eight positions. With repeated occurrences in a window, `strpos` returns the first one and `seqkit locate` returns all of them.
 
 Taking the first twelve bases is shorter to write:
 
@@ -1341,7 +1341,7 @@ human_03	1000
 </div>
 <!-- seqkit:split:end -->
 
-The SQL listing previews three human rows. It does not create three files: subsequent SQL queries can use `WHERE species = 'human'` without a file split. When you need a FASTA file for another program, repeat the export query from section 2 with that condition.
+The SQL listing previews three human rows. You can apply `WHERE species = 'human'` to any subsequent query to work with that group. To save it as a FASTA file for another program, add the same condition to the export query from section 2.
 
 For length sorting, the three short tail windows make the result easy to check:
 
@@ -1413,7 +1413,7 @@ zebrafish_17	596
 </div>
 <!-- seqkit:sort:end -->
 
-SQL adds `id` as a tie-breaker. The other 48 records all have length 1,000, so sorting by length alone does not define their relative order. A SQL table has no inherent row order, even if it was loaded from an ordered FASTA file.
+SQL adds `id` as a tie-breaker because the other 48 records all have length 1,000. `ORDER BY bioseq.len(seq), id` gives these equal-length records a consistent order too. In SQL, use `ORDER BY` whenever the order of the results matters.
 
 That last detail matters when selecting a range of records:
 
@@ -1487,7 +1487,7 @@ human_08	1000
 </div>
 <!-- seqkit:range:end -->
 
-These are records four through eight in ID order. `OFFSET 3` skips the first three and `LIMIT 5` takes the next five. SeqKit's `range` selects records in file order, which agrees here because we exported with `ORDER BY id`. It does not slice bases out of a sequence.
+These are records four through eight in ID order. `OFFSET 3` skips the first three and `LIMIT 5` takes the next five. SeqKit's `range` selects whole records in file order, which agrees here because we exported with `ORDER BY id`.
 
 ## 8. Rename, edit and join small sequence fragments
 
@@ -1630,9 +1630,9 @@ human_03	CGAGTCTGGTGATAGCTGGT
 </div>
 <!-- seqkit:mutate:end -->
 
-This is an editing example, not a claim about a biological mutation. PostgreSQL's text function `overlay` uses one-based positions, so `from 5 for 1` agrees with `seqkit mutate -p 5:T`. We return the modified twenty-base text beside the original. No stored sequence is updated. Cast a complete edited string back to `bioseq.seq('dna5', 64)` when you want to store it as DNA.
+PostgreSQL's text function `overlay` uses one-based positions, so `from 5 for 1` agrees with `seqkit mutate -p 5:T`. This `SELECT` returns the edited twenty-base text beside the original while leaving the stored sequence unchanged. Cast a complete edited string back to `bioseq.seq('dna5', 64)` when you want to store it as DNA.
 
-SeqKit's `concat` deserves a separate example because it joins sequences with matching IDs across files. Appending FASTA files with `cat` does something else.
+SeqKit's `concat` joins sequences with matching IDs across files. We can do the same with a SQL join:
 
 <!-- seqkit:concat:start -->
 <div class="tool-comparison" role="group" aria-label="Concat comparison">
@@ -1712,17 +1712,17 @@ human_03	CGAGCCTGGTTGTTGGATCA
 </div>
 <!-- seqkit:concat:end -->
 
-Here `left.fa` contains the first ten bases of the first three human windows, and `right.fa` contains their last ten bases with the same IDs. The download's shell script prepares those files. The SQL common table expressions prepare the same two inputs, then `JOIN ... USING (id)` pairs them. <code>OPERATOR(bioseq.||)</code> concatenates the BioseqDB sequence values. These joined fragments deliberately omit the middle 980 bases of each window.
+Here `left.fa` contains the first ten bases of the first three human windows, and `right.fa` contains their last ten bases with the same IDs. The repository's `seqkit.sh` script prepares those files. The SQL common table expressions prepare the same two inputs, then `JOIN ... USING (id)` pairs them. <code>OPERATOR(bioseq.||)</code> concatenates the BioseqDB sequence values. The result is a twenty-base sequence containing the two ends of each window.
 
-Duplicate names are another issue. `seqkit rename` adds suffixes to repeated IDs, while `seqkit rmdup -s` compares sequence contents. They solve different problems. The download's shell script creates a three-record fixture named `duplicates.fa`: two records share the ID `copy`, the second has an edited final base, and the third has ID `other` but repeats the first sequence exactly.
+`seqkit rename` adds suffixes to repeated IDs, while `seqkit rmdup -s` compares sequence contents. To try both, `seqkit.sh` creates three records in `duplicates.fa`: two records share the ID `copy`, the second has an edited final base, and the third has ID `other` but repeats the first sequence exactly.
 
 For that input, `seqkit rename duplicates.fa` returns IDs `copy`, `copy_2`, `other`. In SQL, number the rows within each ID using `row_number() OVER (PARTITION BY id ORDER BY ordinal)` and append the number after the first occurrence. Keep an input-order column such as `ordinal` if the identity of the first record matters.
 
-To remove repeated sequence contents, `seqkit rmdup -s -P -i duplicates.fa` retains the two distinct sequences. PostgreSQL's `DISTINCT ON (seq)` does the same forward-strand grouping, with `ORDER BY seq, ordinal` choosing the first copy. `-P` is deliberate: without it, SeqKit also treats reverse complements as duplicates. The complete runnable queries for both operations are in the download.
+To remove repeated sequence contents, `seqkit rmdup -s -P -i duplicates.fa` retains the two distinct sequences. PostgreSQL's `DISTINCT ON (seq)` does the same forward-strand grouping, with `ORDER BY seq, ordinal` choosing the first copy. `-P` restricts SeqKit's comparison to the forward strand, matching the SQL grouping. The complete runnable queries for both operations are in [`03_queries.sql`](https://github.com/BioseqDB/examples/blob/main/seqkit_workflows/03_queries.sql).
 
 ## 9. Shuffle and take a reproducible subset
 
-For an exploratory subset in SQL, you can write `ORDER BY random() LIMIT 5`. Re-running it changes the sample. A small tutorial is easier to follow when the displayed IDs stay put, so here I sort a hash of a fixed label and each ID:
+For an exploratory subset in SQL, you can write `ORDER BY random() LIMIT 5`. Re-running it changes the sample. Here we use a fixed ordering derived from each ID and the label `'2026:'`, so you can repeat the query and get the same five records:
 
 <!-- seqkit:sample:start -->
 <div class="tool-comparison" role="group" aria-label="Sample comparison">
@@ -1795,13 +1795,13 @@ zebrafish_16
 </div>
 <!-- seqkit:sample:end -->
 
-Changing `'2026:'` changes the SQL ordering. This is a deterministic hash-based subset, not a promise of a statistically designed sample. Remove `LIMIT 5` to obtain a repeatable permutation of all rows. SeqKit has `shuffle -s 23 windows.fa` for a seeded shuffle and `sample -p 0.1 -s 11 windows.fa` for a seeded fraction sample.
+Changing `'2026:'` changes the SQL ordering. Remove `LIMIT 5` to reorder all rows using the same method. SeqKit has `shuffle -s 23 windows.fa` for a seeded shuffle and `sample -p 0.1 -s 11 windows.fa` for a seeded fraction sample.
 
-The two programs use different selection methods, so their chosen IDs need not agree. The SQL example returns exactly five rows. SeqKit's `-p 0.1` includes each record with the requested sampling probability and returned six rows on this input with seed 11. For sampling a fixed number from large files, read the [SeqKit sample documentation](https://bioinf.shenwei.me/seqkit/usage/#sample) and its notes on the count option.
+The SQL example returns exactly five rows. SeqKit's `-p 0.1` gives each record a 10% chance of inclusion and returned six rows on this input with seed 11. The chosen IDs differ because these are two different ways of selecting a subset. For sampling a fixed number from large files, read the [SeqKit sample documentation](https://bioinf.shenwei.me/seqkit/usage/#sample) and its notes on the count option.
 
 ## A short command map
 
-These are the cases I would keep nearby when moving between a FASTA workflow and SQL. The examples above contain the coordinate and ordering details that a compact table cannot show.
+Here are the commands and expressions from the examples above, gathered in one table for reference.
 
 | Task | BioseqDB / PostgreSQL expression | SeqKit command |
 | --- | --- | --- |
@@ -1810,7 +1810,7 @@ These are the cases I would keep nearby when moving between a FASTA workflow and
 | Keep IDs or sequences matching a pattern | `WHERE id IN (...)`, `WHERE seq::text LIKE '%GAATTC%'` | grep |
 | Select records by position in an ordered input | `ORDER BY id LIMIT 5 OFFSET 3` | range |
 | Order records by sequence length | `ORDER BY bioseq.len(seq), id` | sort |
-| Change record order | `ORDER BY random()` or a documented deterministic hash | shuffle |
+| Change record order | `ORDER BY random()` | shuffle |
 | Select a subset | `ORDER BY random() LIMIT 5` for five rows | sample |
 | Separate groups encoded in headers | Filter a metadata column, export groups if files are needed | split |
 | Change names with a pattern or mapping | Text concatenation, `regexp_replace`, or a metadata join | replace |
@@ -1819,14 +1819,12 @@ These are the cases I would keep nearby when moving between a FASTA workflow and
 | Join fragments sharing an ID | `JOIN ... USING (id)` and <code>OPERATOR(bioseq.\|\|)</code> | concat |
 | Keep one copy of each stored sequence | `DISTINCT ON (seq)` with an explicit choice of retained row | rmdup |
 
-The FAQ topics covered here include sequence statistics, GC content, extraction by ID, ambiguous bases, motif positions, duplicate sequences, length sorting, header groups, header replacement and matching-ID concatenation. SeqKit's tutorial also covers FASTQ quality, paired reads, live BAM monitoring, annotated feature extraction and other file-oriented work. This DNA-only exercise does not replace those workflows.
-
 For me the useful difference appears when the next question involves metadata. Once the sequences are in `seqkit_lab.windows`, adding a species condition or joining a list of interesting regions is an ordinary SQL query. The data stays beside the information explaining where it came from. SeqKit remains convenient when I need to inspect or transform a file from the terminal, and the FASTA export means I can use it on exactly the same records.
 
-To continue with actual sequence similarity rather than exact motifs, use the [BioseqDB alignment tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/). The queries there return matching intervals you can plot, along with the species and coordinate columns used throughout the analysis.
+For a comparison of longer regions that allows substitutions, insertions and deletions, try the [BioseqDB alignment tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/). The queries there return matching intervals you can plot, along with the species and coordinate columns used throughout the analysis.
 
-## Sources and reproducibility
+## Sources
 
-The workflow choices were informed by [Wei Shen's SeqKit tutorial](https://bioinf.shenwei.me/seqkit/tutorial/), [FAQ](https://bioinf.shenwei.me/seqkit/faq/) and [command reference](https://bioinf.shenwei.me/seqkit/usage/). The examples here use a fresh UCSC dataset and independently checked SQL queries. The code download includes the upstream documentation's MIT notice in `ATTRIBUTION.txt`.
+This tutorial was inspired by the awesome work of [Wei Shen on SeqKit](https://bioinf.shenwei.me/seqkit/tutorial/). His [FAQ](https://bioinf.shenwei.me/seqkit/faq/) and [command reference](https://bioinf.shenwei.me/seqkit/usage/) explain the SeqKit commands used here and many more.
 
-Sequence provenance is recorded in [the UCSC retrieval manifest](/static/examples/seqkit-workflows/provenance.json), including the assembly identifiers, request URLs and SHA-256 hashes. [UCSC's API reference](https://genome.ucsc.edu/goldenPath/help/api.html) describes the sequence endpoint and coordinates. Chart data comes from the same imported rows, and the download includes the measured values and plotting script.
+The sequences come from the [UCSC Genome Browser API](https://genome.ucsc.edu/goldenPath/help/api.html). You can find the import queries, SeqKit commands and Python code for all three charts in [BioseqDB/examples/seqkit_workflows](https://github.com/BioseqDB/examples/tree/main/seqkit_workflows).
