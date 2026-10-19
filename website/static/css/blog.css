@@ -24,6 +24,23 @@ html[data-theme="light"] { --blog-ink: #173247; --blog-muted: #455e73; --blog-su
 .blog-content :is(h2,h3) { scroll-margin-top: calc(var(--site-header-height) + 24px); }
 .blog-content :is(pre,table,figure,.doc-code,.sql-example) { max-width: 100%; }
 .blog-content img { width: 100%; height: auto; }
+/* Keep comparison examples in the normal Markdown/SQL pipeline. The first
+   authored panel remains first in both the visual and keyboard reading order. */
+.tool-comparison { display: grid; grid-template-columns: minmax(0,1fr); gap: 18px; margin: 26px 0 32px; align-items: start; }
+.tool-comparison-panel { min-width: 0; border: 1px solid var(--blog-border); border-radius: 14px; background: var(--blog-surface); padding: 14px; }
+.blog-content .tool-comparison-label { margin: 0 0 12px; color: var(--blog-accent); font-family: 'IBM Plex Mono',monospace; font-size: 12px; font-weight: 500; letter-spacing: .03em; }
+.tool-comparison-panel > .doc-code { width: 100%; margin: 0; border-radius: 10px; box-shadow: none; }
+.tool-comparison-panel > .doc-code + .doc-code { margin-top: 14px; }
+.tool-comparison-panel > .doc-paragraph { margin: 12px 2px 0; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.tool-comparison-panel .doc-code-bar { padding: 10px 12px; gap: 5px; }
+.tool-comparison-panel .term-dot { width: 8px; height: 8px; }
+.tool-comparison-panel .doc-code-lang { margin-left: 6px; font-size: 11px; }
+.tool-comparison-panel .doc-code > pre { padding: 14px 12px; font-size: 12px; line-height: 1.75; }
+.tool-comparison-panel .terminal-result { padding: 12px; }
+.tool-comparison-panel .result-table { font-size: 11.5px; }
+@media (min-width: 1024px) { .tool-comparison { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width: 420px) { .tool-comparison { gap: 12px; } .tool-comparison-panel { padding: 10px; } }
+@media (min-width: 1600px) { .tool-comparison-panel .doc-code > pre { font-size: 13px; } }
 .blog-content a.glossary-link { text-decoration-style: dotted; text-decoration-thickness: 1px; text-underline-offset: 4px; }
 .blog-tools { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
 .blog-social-links { display: flex; align-items: center; gap: 8px; }
@@ -101,3 +118,9 @@ html[data-theme="light"] { --blog-ink: #173247; --blog-muted: #455e73; --blog-su
 @media (min-width: 1024px) { .blog-page #doc-main { padding-inline: 40px; } .blog-posts { max-width: 940px; } .blog-card-cover { height: 190px; } }
 @media (min-width: 1300px) { .blog-layout { grid-template-columns: minmax(0,1fr) 210px; gap: 52px; } .blog-toc { display: block; position: sticky; top: calc(var(--site-header-height) + 32px); align-self: start; padding-top: 18px; } }
 @media (min-width: 1600px) { .blog-page #doc-main { max-width: 1440px; padding-inline: 56px; } .blog-hero { padding: 56px; } .blog-hero h1 { max-width: 26ch; } .blog-layout { grid-template-columns: minmax(0,1fr) 230px; gap: 64px; } .blog-page .blog-content { font-size: 18px; } }
+
+/* seqkit-figure-ratios:start */
+.blog-content img[src$="/figures/blog/seqkit-workflows/base-composition.svg"] { aspect-ratio: 864 / 453.6; }
+.blog-content img[src$="/figures/blog/seqkit-workflows/chromosome-lengths.svg"] { aspect-ratio: 864 / 410.4; }
+.blog-content img[src$="/figures/blog/seqkit-workflows/gc-windows.svg"] { aspect-ratio: 864 / 489.6; }
+/* seqkit-figure-ratios:end */

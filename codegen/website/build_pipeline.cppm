@@ -3589,6 +3589,57 @@ void verify_reference_pipeline() {
     expect(render_content_html({make_text_node("{\"plan\":{}}")})
                == "&#123;\"plan\":&#123;&#125;&#125;",
            "literal JSON braces remain visible without resembling template delimiters");
+
+    // Blank lines let normal Markdown fences live inside authored comparison
+    // panels. Their setup, results and SQL links must use the usual pipeline.
+    const std::string comparison_source =
+        "<div class=\"tool-comparison\" role=\"group\" aria-label=\"Count sequences\">\n"
+        "<div class=\"tool-comparison-panel\">\n"
+        "<p class=\"tool-comparison-label\">BioseqDB</p>\n\n"
+        "```sql runnable id=comparison_probe\n"
+        "-- bioseq:setup\nSELECT 'private_fixture';\n"
+        "-- bioseq:visible\nSELECT 'ACGT'::bioseq.seq;\n"
+        "-- bioseq:teardown\nSELECT 'private_cleanup';\n```\n\n"
+        "</div>\n<div class=\"tool-comparison-panel\">\n"
+        "<p class=\"tool-comparison-label\">SeqKit</p>\n\n"
+        "```sh\nseqkit seq sequences.fa\n```\n\n</div>\n</div>\n";
+    auto comparison = parse_markdown_content(comparison_source);
+    std::vector<sql_example> comparison_examples;
+    std::vector<unresolved_entity_query> comparison_queries;
+    collect_examples_and_queries(comparison, "comparison", "v0.1",
+                                comparison_examples, comparison_queries);
+    expect(comparison_examples.size() == 1
+               && comparison_examples.front().visible_sql == "SELECT 'ACGT'::bioseq.seq;",
+           "comparison panels retain runnable SQL collection");
+    strip_runnable_fence_hidden_sql(comparison.children);
+    sql_example_result comparison_result;
+    comparison_result.example_id = "comparison_probe";
+    comparison_result.visible_results.push_back(sql_result_set{
+        .shape = result_shape::rows,
+        .columns = {{.name = "seq", .type_name = "bioseq.seq"}},
+        .rows = {{{.text = "ACGT"}}}});
+    inject_tutorial_results(comparison.children,
+                            {{"comparison_probe", comparison_result}}, "0.1", "17");
+    decorate_code_entity_ranges(comparison.children,
+        {{"sql:type:bioseq.seq", "/sequence/"}},
+        {{"sql:type:bioseq.seq", "bioseq.seq"}}, "/entities.json", "comparison");
+    const std::string comparison_html = render_content_html(comparison.children);
+    const auto left = comparison_html.find(">BioseqDB</p>");
+    const auto result = comparison_html.find("class=\"result-table\"");
+    const auto right = comparison_html.find(">SeqKit</p>");
+    expect(left < result && result < right && right != std::string::npos
+               && comparison_html.contains("data-sql-example=\"comparison_probe\"")
+               && comparison_html.contains("sql:type:bioseq.seq")
+               && !comparison_html.contains("private_fixture")
+               && !comparison_html.contains("private_cleanup"),
+           "comparison SQL results and entity links stay in the first panel");
+    const auto comparison_markdown = blog_public_markdown(comparison_source);
+    expect(comparison_markdown.contains("class=\"tool-comparison\"")
+               && comparison_markdown.contains("```sql\nSELECT 'ACGT'::bioseq.seq;")
+               && comparison_markdown.contains("seqkit seq sequences.fa")
+               && !comparison_markdown.contains("private_fixture")
+               && !comparison_markdown.contains("private_cleanup"),
+           "comparison Markdown preserves both tools while hiding SQL fixtures");
 }
 
 /// @brief Runs website plan to parse tutorials and save the build plan.
