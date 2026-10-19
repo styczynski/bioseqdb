@@ -51,6 +51,7 @@ def main():
     overrides = {'js/link-popover.mjs', 'js/docs-design.mjs', 'js/blog.mjs', 'css/project-content.css', 'css/blog.css'}
     errors = []
     checks = []
+    position_promotions = []
     with StaticFixtureServer(args.site, args.base_path) as server, sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
 
@@ -108,6 +109,27 @@ def main():
             glossary = page.locator('a[data-glossary-description]')
             popup = page.locator('#blog-glossary-tip')
             first = glossary.first
+            # Touch focuses a link before its click promotes the smaller hover
+            # tooltip to a dialog. Both layouts must use their new position in
+            # the same frame, even under the global reduced-motion duration.
+            first.scroll_into_view_if_needed()
+            promotion = first.evaluate('''(anchor, popupId) => {
+              anchor.focus({preventScroll:true});
+              const tip = document.getElementById(popupId);
+              const before = tip.getBoundingClientRect().toJSON();
+              anchor.dispatchEvent(new PointerEvent('click', {
+                bubbles:true, cancelable:true, button:0, detail:1, pointerType:'touch'
+              }));
+              const after = tip.getBoundingClientRect().toJSON();
+              return {before, after, left:parseFloat(tip.style.left), top:parseFloat(tip.style.top)};
+            }''', popup.get_attribute('id'))
+            check(abs(promotion['after']['x'] - promotion['left']) < 1
+                  and abs(promotion['after']['y'] - promotion['top']) < 1,
+                  f"Popover position animated during touch promotion: {promotion}")
+            bounds(page, popup)
+            position_promotions.append({'theme': theme, **promotion})
+            page.keyboard.press('Escape')
+            expect(popup).to_be_hidden()
             tap(page, first, popup)
             expect(popup).to_contain_text(first.get_attribute('data-glossary-description'))
             page.wait_for_timeout(250)
@@ -226,7 +248,7 @@ def main():
         ctx.close()
         browser.close()
     check(not errors, f'Browser errors: {errors}')
-    (args.output / 'report.json').write_text(json.dumps({'checks': checks, 'errors': errors}, indent=2) + '\n')
+    (args.output / 'report.json').write_text(json.dumps({'checks': checks, 'errors': errors, 'position_promotions': position_promotions}, indent=2) + '\n')
     print(f'Touch popover audit passed: {len(checks)} groups; dark/light, 7 viewport sizes')
 
 
