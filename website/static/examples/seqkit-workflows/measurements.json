@@ -1,0 +1,917 @@
+{
+  "source": "UCSC via BioseqDB bioseq_external.sequences",
+  "fetched": "2026-10-19",
+  "genomes": [
+    {
+      "assembly": "hg38",
+      "species": "human",
+      "length": 16569,
+      "counts": {
+        "A": 5124,
+        "C": 5181,
+        "G": 2169,
+        "T": 4094,
+        "N": 1
+      },
+      "gc_percent": 44.3626,
+      "sha256": "f156ff3f65bbcc80c7ebb9936dceb96b1477b4f8f535c4e1dbe7baea225cbc66"
+    },
+    {
+      "assembly": "mm39",
+      "species": "mouse",
+      "length": 16299,
+      "counts": {
+        "A": 5629,
+        "C": 3976,
+        "G": 2013,
+        "T": 4681,
+        "N": 0
+      },
+      "gc_percent": 36.7446,
+      "sha256": "edaa6a92345bb0554b7b0e178c1d205cd83a9a40686d97aa1e85ca9e03503604"
+    },
+    {
+      "assembly": "danRer11",
+      "species": "zebrafish",
+      "length": 16596,
+      "counts": {
+        "A": 5301,
+        "C": 3969,
+        "G": 2658,
+        "T": 4668,
+        "N": 0
+      },
+      "gc_percent": 39.9313,
+      "sha256": "2c964a8176d913570e466187c9620b20742c3c8898e8a0a9edd7a8b28afcd4f9"
+    }
+  ],
+  "windows": [
+    {
+      "id": "human_01",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 0,
+      "end0": 1000,
+      "length": 1000,
+      "counts": {
+        "A": 311,
+        "C": 310,
+        "G": 146,
+        "T": 233,
+        "N": 0
+      },
+      "gc_percent": 45.6,
+      "sha256": "a7ba68873aead8a142592796b80c36b11d552a29d43209dfc0f1ca1164fddbbd"
+    },
+    {
+      "id": "human_02",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 1000,
+      "end0": 2000,
+      "length": 1000,
+      "counts": {
+        "A": 355,
+        "C": 253,
+        "G": 187,
+        "T": 205,
+        "N": 0
+      },
+      "gc_percent": 44.0,
+      "sha256": "063b0baf9926be67a39534cf6cdda726845003862fa263728e294376708eb1f7"
+    },
+    {
+      "id": "human_03",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 2000,
+      "end0": 3000,
+      "length": 1000,
+      "counts": {
+        "A": 348,
+        "C": 257,
+        "G": 170,
+        "T": 225,
+        "N": 0
+      },
+      "gc_percent": 42.7,
+      "sha256": "e9700e8bb597844b92fef5f27f10ec62d4a18690d6946f94e7c9c875a771defc"
+    },
+    {
+      "id": "human_04",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 3000,
+      "end0": 4000,
+      "length": 1000,
+      "counts": {
+        "A": 283,
+        "C": 328,
+        "G": 149,
+        "T": 239,
+        "N": 1
+      },
+      "gc_percent": 47.7477,
+      "sha256": "77f91ab20995e1a1d72587c631491e3d66e406ce048e6a7ba1b61d2cda659cba"
+    },
+    {
+      "id": "human_05",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 4000,
+      "end0": 5000,
+      "length": 1000,
+      "counts": {
+        "A": 317,
+        "C": 312,
+        "G": 114,
+        "T": 257,
+        "N": 0
+      },
+      "gc_percent": 42.6,
+      "sha256": "732156e68b8411ad07710667da1891e28aba2f18f8c30999d57e8afe2aef945c"
+    },
+    {
+      "id": "human_06",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 5000,
+      "end0": 6000,
+      "length": 1000,
+      "counts": {
+        "A": 311,
+        "C": 317,
+        "G": 122,
+        "T": 250,
+        "N": 0
+      },
+      "gc_percent": 43.9,
+      "sha256": "d5389a94f6778e26b75bffe0eb1c6e17ec3125dcf06938ce21fef8a5a7df3b22"
+    },
+    {
+      "id": "human_07",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 6000,
+      "end0": 7000,
+      "length": 1000,
+      "counts": {
+        "A": 260,
+        "C": 305,
+        "G": 168,
+        "T": 267,
+        "N": 0
+      },
+      "gc_percent": 47.3,
+      "sha256": "3bf1c8adf14f7ce7c7faaf8159363e98d57c55ef48ca01977e9c8fedda8c2e0d"
+    },
+    {
+      "id": "human_08",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 7000,
+      "end0": 8000,
+      "length": 1000,
+      "counts": {
+        "A": 299,
+        "C": 301,
+        "G": 139,
+        "T": 261,
+        "N": 0
+      },
+      "gc_percent": 44.0,
+      "sha256": "411f14413d4f6bef6b32f0fe587064494d72f55711e0f6508460ffa4ecdc584a"
+    },
+    {
+      "id": "human_09",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 8000,
+      "end0": 9000,
+      "length": 1000,
+      "counts": {
+        "A": 327,
+        "C": 319,
+        "G": 112,
+        "T": 242,
+        "N": 0
+      },
+      "gc_percent": 43.1,
+      "sha256": "f6addca52ccac3e7c2222e13cb7b06a7c9fc26e3e69a8fa30334e718a436f17b"
+    },
+    {
+      "id": "human_10",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 9000,
+      "end0": 10000,
+      "length": 1000,
+      "counts": {
+        "A": 271,
+        "C": 321,
+        "G": 139,
+        "T": 269,
+        "N": 0
+      },
+      "gc_percent": 46.0,
+      "sha256": "fdcdd7657e94f6e1256a8b388ee4b932679891239809a1d96bb7e2af59c3adc5"
+    },
+    {
+      "id": "human_11",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 10000,
+      "end0": 11000,
+      "length": 1000,
+      "counts": {
+        "A": 316,
+        "C": 294,
+        "G": 99,
+        "T": 291,
+        "N": 0
+      },
+      "gc_percent": 39.3,
+      "sha256": "f437fc5662cd45db0e62b8b17dbcc88d3839e3164ec0f6db1244b852e2adf02a"
+    },
+    {
+      "id": "human_12",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 11000,
+      "end0": 12000,
+      "length": 1000,
+      "counts": {
+        "A": 296,
+        "C": 335,
+        "G": 112,
+        "T": 257,
+        "N": 0
+      },
+      "gc_percent": 44.7,
+      "sha256": "ffe547a165049598e8dca1801d802e4eb2e46e3519d9a293ff484be82dda7a6b"
+    },
+    {
+      "id": "human_13",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 12000,
+      "end0": 13000,
+      "length": 1000,
+      "counts": {
+        "A": 310,
+        "C": 313,
+        "G": 116,
+        "T": 261,
+        "N": 0
+      },
+      "gc_percent": 42.9,
+      "sha256": "9fa94ee345a36590b56a88fc03d0779c8bd1290e406e760222113ea8a1e7025d"
+    },
+    {
+      "id": "human_14",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 13000,
+      "end0": 14000,
+      "length": 1000,
+      "counts": {
+        "A": 299,
+        "C": 359,
+        "G": 111,
+        "T": 231,
+        "N": 0
+      },
+      "gc_percent": 47.0,
+      "sha256": "8015fa401fd04e5815f57d0c7f666c82c6707cc3be90afb7eaa5ee77f3c83502"
+    },
+    {
+      "id": "human_15",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 14000,
+      "end0": 15000,
+      "length": 1000,
+      "counts": {
+        "A": 350,
+        "C": 354,
+        "G": 81,
+        "T": 215,
+        "N": 0
+      },
+      "gc_percent": 43.5,
+      "sha256": "167d3901ef92d6694249a1cc381fe04a3ff99eff764897264666b9dc5409a53f"
+    },
+    {
+      "id": "human_16",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 15000,
+      "end0": 16000,
+      "length": 1000,
+      "counts": {
+        "A": 296,
+        "C": 321,
+        "G": 125,
+        "T": 258,
+        "N": 0
+      },
+      "gc_percent": 44.6,
+      "sha256": "a60736a32ed9457eaada5f21ded37c9fa6daa7a40f5bce12c07de50a04851aa5"
+    },
+    {
+      "id": "human_17",
+      "species": "human",
+      "assembly": "hg38",
+      "start0": 16000,
+      "end0": 16569,
+      "length": 569,
+      "counts": {
+        "A": 175,
+        "C": 182,
+        "G": 79,
+        "T": 133,
+        "N": 0
+      },
+      "gc_percent": 45.8699,
+      "sha256": "01287d5e3d99a191e67f5ba393483557eb4b746705f6426fe414b7b7bc6b3d4c"
+    },
+    {
+      "id": "mouse_01",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 0,
+      "end0": 1000,
+      "length": 1000,
+      "counts": {
+        "A": 382,
+        "C": 197,
+        "G": 158,
+        "T": 263,
+        "N": 0
+      },
+      "gc_percent": 35.5,
+      "sha256": "484a2ca08bb31866db07acf962fb52e44cd75ce452a89ff57c4ce0af09c88c6b"
+    },
+    {
+      "id": "mouse_02",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 1000,
+      "end0": 2000,
+      "length": 1000,
+      "counts": {
+        "A": 406,
+        "C": 193,
+        "G": 150,
+        "T": 251,
+        "N": 0
+      },
+      "gc_percent": 34.3,
+      "sha256": "ac23b7edfb31400d1c48cb9a068ff2f89a5e30a0fb773579130e70a78dd62a15"
+    },
+    {
+      "id": "mouse_03",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 2000,
+      "end0": 3000,
+      "length": 1000,
+      "counts": {
+        "A": 335,
+        "C": 213,
+        "G": 166,
+        "T": 286,
+        "N": 0
+      },
+      "gc_percent": 37.9,
+      "sha256": "eae4f7f49fe92a7b6494241c22e60d635bf75faf0c14bc33752cb20c5fd07a91"
+    },
+    {
+      "id": "mouse_04",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 3000,
+      "end0": 4000,
+      "length": 1000,
+      "counts": {
+        "A": 328,
+        "C": 252,
+        "G": 121,
+        "T": 299,
+        "N": 0
+      },
+      "gc_percent": 37.3,
+      "sha256": "28ee911c8d240e9a00a93c337b25ebae4a3f89040bae0a0cb9a0517286b74d95"
+    },
+    {
+      "id": "mouse_05",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 4000,
+      "end0": 5000,
+      "length": 1000,
+      "counts": {
+        "A": 372,
+        "C": 273,
+        "G": 87,
+        "T": 268,
+        "N": 0
+      },
+      "gc_percent": 36.0,
+      "sha256": "93aa9f21c2945b7b992351a6f9585a4b92838a59a0bd56e420c56b499b99965a"
+    },
+    {
+      "id": "mouse_06",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 5000,
+      "end0": 6000,
+      "length": 1000,
+      "counts": {
+        "A": 316,
+        "C": 230,
+        "G": 155,
+        "T": 299,
+        "N": 0
+      },
+      "gc_percent": 38.5,
+      "sha256": "1b8e27f774ae1a9f68584c2aef75413909f67110ef17b6ef82f3eba1dd4ce665"
+    },
+    {
+      "id": "mouse_07",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 6000,
+      "end0": 7000,
+      "length": 1000,
+      "counts": {
+        "A": 303,
+        "C": 225,
+        "G": 157,
+        "T": 315,
+        "N": 0
+      },
+      "gc_percent": 38.2,
+      "sha256": "952bc4069e8686e053319dae064c10fb562c43129569c9f3cf4d234cb3040333"
+    },
+    {
+      "id": "mouse_08",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 7000,
+      "end0": 8000,
+      "length": 1000,
+      "counts": {
+        "A": 350,
+        "C": 245,
+        "G": 119,
+        "T": 286,
+        "N": 0
+      },
+      "gc_percent": 36.4,
+      "sha256": "b65262c245e18556e6831f1def1275bf94c5299c89c4cf9c5ef75f22af627bb7"
+    },
+    {
+      "id": "mouse_09",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 8000,
+      "end0": 9000,
+      "length": 1000,
+      "counts": {
+        "A": 325,
+        "C": 268,
+        "G": 113,
+        "T": 294,
+        "N": 0
+      },
+      "gc_percent": 38.1,
+      "sha256": "0f5343c032d6ae6ed03f6c2a9655f894ffdccc84846b65334af711d1db47a665"
+    },
+    {
+      "id": "mouse_10",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 9000,
+      "end0": 10000,
+      "length": 1000,
+      "counts": {
+        "A": 321,
+        "C": 222,
+        "G": 121,
+        "T": 336,
+        "N": 0
+      },
+      "gc_percent": 34.3,
+      "sha256": "808b9ca575818ae752d48cd96a45d19d0795aa0bd45bf84a66bdd2e4d8dffd17"
+    },
+    {
+      "id": "mouse_11",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 10000,
+      "end0": 11000,
+      "length": 1000,
+      "counts": {
+        "A": 345,
+        "C": 258,
+        "G": 100,
+        "T": 297,
+        "N": 0
+      },
+      "gc_percent": 35.8,
+      "sha256": "41ff034c3afed9db98a4e7c122f2d96cc5d63c60bf33bd7fe45d58c672dacb9a"
+    },
+    {
+      "id": "mouse_12",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 11000,
+      "end0": 12000,
+      "length": 1000,
+      "counts": {
+        "A": 359,
+        "C": 251,
+        "G": 94,
+        "T": 296,
+        "N": 0
+      },
+      "gc_percent": 34.5,
+      "sha256": "db35049038d45a91e660dab1ed28cc36c72e85de5b9f483f02acf087b5778340"
+    },
+    {
+      "id": "mouse_13",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 12000,
+      "end0": 13000,
+      "length": 1000,
+      "counts": {
+        "A": 328,
+        "C": 273,
+        "G": 128,
+        "T": 271,
+        "N": 0
+      },
+      "gc_percent": 40.1,
+      "sha256": "410416c4fea7eea2cfed6e64054b4141a20a49a0f115361c66daa60d2fbddcad"
+    },
+    {
+      "id": "mouse_14",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 13000,
+      "end0": 14000,
+      "length": 1000,
+      "counts": {
+        "A": 391,
+        "C": 285,
+        "G": 68,
+        "T": 256,
+        "N": 0
+      },
+      "gc_percent": 35.3,
+      "sha256": "a17029d76a57ddfdd417cca20148b0f73187f51bb3ddfc68491023c6fdc1fcce"
+    },
+    {
+      "id": "mouse_15",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 14000,
+      "end0": 15000,
+      "length": 1000,
+      "counts": {
+        "A": 334,
+        "C": 263,
+        "G": 122,
+        "T": 281,
+        "N": 0
+      },
+      "gc_percent": 38.5,
+      "sha256": "48a9a8354945da7525e2802f48c2c81b16cf44a686baf1ea264823e45877722d"
+    },
+    {
+      "id": "mouse_16",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 15000,
+      "end0": 16000,
+      "length": 1000,
+      "counts": {
+        "A": 320,
+        "C": 252,
+        "G": 131,
+        "T": 297,
+        "N": 0
+      },
+      "gc_percent": 38.3,
+      "sha256": "f7446d48ae5c6a06bbf36e38c2af8351f826aaf0e802934f1c12a1b868c37139"
+    },
+    {
+      "id": "mouse_17",
+      "species": "mouse",
+      "assembly": "mm39",
+      "start0": 16000,
+      "end0": 16299,
+      "length": 299,
+      "counts": {
+        "A": 114,
+        "C": 76,
+        "G": 23,
+        "T": 86,
+        "N": 0
+      },
+      "gc_percent": 33.1104,
+      "sha256": "7317ea43dd9076955176e50da894030e4dfb1ebe5a027ed4151c3843c9701a96"
+    },
+    {
+      "id": "zebrafish_01",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 0,
+      "end0": 1000,
+      "length": 1000,
+      "counts": {
+        "A": 336,
+        "C": 188,
+        "G": 143,
+        "T": 333,
+        "N": 0
+      },
+      "gc_percent": 33.1,
+      "sha256": "bd4cc4073b841d8a4c7852cafb8ab802a0f4e41ce062c658160bc6a873ea9716"
+    },
+    {
+      "id": "zebrafish_02",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 1000,
+      "end0": 2000,
+      "length": 1000,
+      "counts": {
+        "A": 339,
+        "C": 245,
+        "G": 212,
+        "T": 204,
+        "N": 0
+      },
+      "gc_percent": 45.7,
+      "sha256": "963ea82a4c123fcb7e833bb45ebaa421a63a376959a5131219d62bf6fc12abcb"
+    },
+    {
+      "id": "zebrafish_03",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 2000,
+      "end0": 3000,
+      "length": 1000,
+      "counts": {
+        "A": 404,
+        "C": 209,
+        "G": 182,
+        "T": 205,
+        "N": 0
+      },
+      "gc_percent": 39.1,
+      "sha256": "d06a55611eaa84e3faf24b7ccf426cf5f9ed9428fb90cd57c8ec7b4df3290fb0"
+    },
+    {
+      "id": "zebrafish_04",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 3000,
+      "end0": 4000,
+      "length": 1000,
+      "counts": {
+        "A": 327,
+        "C": 235,
+        "G": 206,
+        "T": 232,
+        "N": 0
+      },
+      "gc_percent": 44.1,
+      "sha256": "989870767019964aeb27454cdf64a7a5f3d15842000085c7d4525ef9f2ea1fe4"
+    },
+    {
+      "id": "zebrafish_05",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 4000,
+      "end0": 5000,
+      "length": 1000,
+      "counts": {
+        "A": 299,
+        "C": 254,
+        "G": 165,
+        "T": 282,
+        "N": 0
+      },
+      "gc_percent": 41.9,
+      "sha256": "c599e7b8daf0986b320ec2790082de08ebedcc0082190851f5b6b8f76eeeaa53"
+    },
+    {
+      "id": "zebrafish_06",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 5000,
+      "end0": 6000,
+      "length": 1000,
+      "counts": {
+        "A": 320,
+        "C": 262,
+        "G": 142,
+        "T": 276,
+        "N": 0
+      },
+      "gc_percent": 40.4,
+      "sha256": "5cdb77d100d9d9b40f2b89627acccd95c75db1040e8b6ff9b54e00638731746e"
+    },
+    {
+      "id": "zebrafish_07",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 6000,
+      "end0": 7000,
+      "length": 1000,
+      "counts": {
+        "A": 283,
+        "C": 245,
+        "G": 180,
+        "T": 292,
+        "N": 0
+      },
+      "gc_percent": 42.5,
+      "sha256": "812d12a8a5e17bda3f498377f66acfb1a6ae23b822e40d1194ae6e43067a8a36"
+    },
+    {
+      "id": "zebrafish_08",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 7000,
+      "end0": 8000,
+      "length": 1000,
+      "counts": {
+        "A": 291,
+        "C": 226,
+        "G": 178,
+        "T": 305,
+        "N": 0
+      },
+      "gc_percent": 40.4,
+      "sha256": "9631d26eea54c59ceab876d5eec2f0c0973c879e96b29059f1384670f19e76c4"
+    },
+    {
+      "id": "zebrafish_09",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 8000,
+      "end0": 9000,
+      "length": 1000,
+      "counts": {
+        "A": 313,
+        "C": 237,
+        "G": 149,
+        "T": 301,
+        "N": 0
+      },
+      "gc_percent": 38.6,
+      "sha256": "bce24b7e4930cb8408b261cc703cafcf1843e22c8301e8d6a8011429d2d18b60"
+    },
+    {
+      "id": "zebrafish_10",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 9000,
+      "end0": 10000,
+      "length": 1000,
+      "counts": {
+        "A": 297,
+        "C": 268,
+        "G": 135,
+        "T": 300,
+        "N": 0
+      },
+      "gc_percent": 40.3,
+      "sha256": "0ef746e5cf9cd34eb1c6b92326a5841dbfb861c14079e4136d1ac054b65ae612"
+    },
+    {
+      "id": "zebrafish_11",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 10000,
+      "end0": 11000,
+      "length": 1000,
+      "counts": {
+        "A": 279,
+        "C": 229,
+        "G": 178,
+        "T": 314,
+        "N": 0
+      },
+      "gc_percent": 40.7,
+      "sha256": "9821471eca66a95ac791087d9f6470945c95ec56ab803cf37127aeb6c8f17030"
+    },
+    {
+      "id": "zebrafish_12",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 11000,
+      "end0": 12000,
+      "length": 1000,
+      "counts": {
+        "A": 309,
+        "C": 256,
+        "G": 134,
+        "T": 301,
+        "N": 0
+      },
+      "gc_percent": 39.0,
+      "sha256": "06ec0bd102a64a7fc39a28e13081b693657ea28cb01e3353b90444ad01b47498"
+    },
+    {
+      "id": "zebrafish_13",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 12000,
+      "end0": 13000,
+      "length": 1000,
+      "counts": {
+        "A": 329,
+        "C": 226,
+        "G": 150,
+        "T": 295,
+        "N": 0
+      },
+      "gc_percent": 37.6,
+      "sha256": "d244ec76e0fd0f5053ffb8a05b79bc5637e3caa3a955d18e6f18f0c1f39706e5"
+    },
+    {
+      "id": "zebrafish_14",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 13000,
+      "end0": 14000,
+      "length": 1000,
+      "counts": {
+        "A": 316,
+        "C": 233,
+        "G": 142,
+        "T": 309,
+        "N": 0
+      },
+      "gc_percent": 37.5,
+      "sha256": "e60e874eaae1f3a9a78793322d236fb2aa72f2b3717c7464759e2de244c82dc5"
+    },
+    {
+      "id": "zebrafish_15",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 14000,
+      "end0": 15000,
+      "length": 1000,
+      "counts": {
+        "A": 356,
+        "C": 263,
+        "G": 123,
+        "T": 258,
+        "N": 0
+      },
+      "gc_percent": 38.6,
+      "sha256": "b02beb866dfd6d3cac69bf237679fb28ce21fd8f1cd84f11dd60489d4afa8138"
+    },
+    {
+      "id": "zebrafish_16",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 15000,
+      "end0": 16000,
+      "length": 1000,
+      "counts": {
+        "A": 320,
+        "C": 246,
+        "G": 155,
+        "T": 279,
+        "N": 0
+      },
+      "gc_percent": 40.1,
+      "sha256": "500c6e9fadb4aab6c001bd313c86b8ddf3e60ac6eb0d9e73fdc1a586e8e0cf52"
+    },
+    {
+      "id": "zebrafish_17",
+      "species": "zebrafish",
+      "assembly": "danRer11",
+      "start0": 16000,
+      "end0": 16596,
+      "length": 596,
+      "counts": {
+        "A": 183,
+        "C": 147,
+        "G": 84,
+        "T": 182,
+        "N": 0
+      },
+      "gc_percent": 38.7584,
+      "sha256": "989d695cb4bc5d19077e3f2ec7b612438e88de77c7520a60df844fb1e369f62e"
+    }
+  ]
+}

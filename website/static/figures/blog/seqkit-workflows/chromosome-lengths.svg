@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="864" height="410.4" viewBox="0 0 864 410.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<title id="chart-title">UCSC mitochondrial chromosome lengths</title>
+<desc id="chart-description">Human hg38:16,569 bases. Mouse mm39:16,299 bases. Zebrafish danRer11:16,596 bases. All bars start at zero.</desc>
+<style>@media(prefers-color-scheme:light){:root{--theme-eef4f9:#173247;--theme-a9bccb:#405c72;--theme-28425b:#ccd9e4;--theme-74c8a8:#167251;--theme-65b9dd:#146c91;--theme-f4a467:#a54a12;--theme-b4a0e5:#7552a8;--theme-94a9ba:#526a80;--theme-071320:#ffffff;}}</style>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB render_charts.py</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 410.4 
+L 864 410.4 
+L 864 0 
+L 0 0 
+L 0 410.4 
+z
+" style="fill: none; opacity: 0"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 216 328.32 
+L 743.04 328.32 
+L 743.04 114.912 
+L 216 114.912 
+L 216 328.32 
+z
+" style="fill: none; opacity: 0"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 216 328.32 
+L 216 114.912 
+" clip-path="url(#p9a09ce4fd8)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.75; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="216" y="347.957813" transform="rotate(-0 216 347.957813)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 361.59116 328.32 
+L 361.59116 114.912 
+" clip-path="url(#p9a09ce4fd8)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.75; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="361.59116" y="347.957813" transform="rotate(-0 361.59116 347.957813)">5,000</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 507.18232 328.32 
+L 507.18232 114.912 
+" clip-path="url(#p9a09ce4fd8)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.75; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="507.18232" y="347.957813" transform="rotate(-0 507.18232 347.957813)">10,000</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 652.773481 328.32 
+L 652.773481 114.912 
+" clip-path="url(#p9a09ce4fd8)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.75; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="652.773481" y="347.957813" transform="rotate(-0 652.773481 347.957813)">15,000</text>
+     </g>
+    </g>
+    <g id="text_5">
+     <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-eef4f9, #eef4f9)" x="479.52" y="376.507188" transform="rotate(-0 479.52 376.507188)">Sequence length (bp)</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_9"/>
+     <g id="text_6">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="207" y="148.706167" transform="rotate(-0 207 148.706167)">Human (hg38)</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_10"/>
+     <g id="text_7">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="207" y="226.934906" transform="rotate(-0 207 226.934906)">Mouse (mm39)</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_11"/>
+     <g id="text_8">
+      <text style="font-size: 14px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="207" y="305.163645" transform="rotate(-0 207 305.163645)">Zebrafish (danRer11)</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 216 124.612364 
+L 698.459987 124.612364 
+L 698.459987 162.162158 
+L 216 162.162158 
+z
+" clip-path="url(#p9a09ce4fd8)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 216 202.841103 
+L 690.598064 202.841103 
+L 690.598064 240.390897 
+L 216 240.390897 
+z
+" clip-path="url(#p9a09ce4fd8)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 216 281.069842 
+L 699.246179 281.069842 
+L 699.246179 318.619636 
+L 216 318.619636 
+z
+" clip-path="url(#p9a09ce4fd8)" style="fill: var(--theme-f4a467, #f4a467)"/>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="705.15718" y="147.526323" transform="rotate(-0 705.15718 147.526323)">16,569 bp</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="697.295257" y="225.755063" transform="rotate(-0 697.295257 225.755063)">16,299 bp</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="705.943372" y="303.983802" transform="rotate(-0 705.943372 303.983802)">16,596 bp</text>
+   </g>
+  </g>
+  <g id="text_12">
+   <text style="font-weight: 700; font-size: 21px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="34.56" y="40.580719" transform="rotate(-0 34.56 40.580719)">Three mitochondrial chromosomes from UCSC</text>
+  </g>
+  <g id="text_13">
+   <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="34.56" y="67.333969" transform="rotate(-0 34.56 67.333969)">The bars cover chrM, not a species' whole nuclear genome.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p9a09ce4fd8">
+   <rect x="216" y="114.912" width="527.04" height="213.408"/>
+  </clipPath>
+ </defs>
+</svg>

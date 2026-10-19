@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="240" viewBox="0 0 1440 240" role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid slice">
 <style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c9a8ff:#735091;--theme-f4894f:#b44d1c;}}</style>
 <title id="title">Sequence letters meet SQL</title>
-<desc id="desc">Large translucent A, C, G and T letters run behind SELECT, WHERE and GROUP BY labels. Thin lines connect sequence positions to a small table, suggesting filtering and grouping. This is a decorative diagram, with no measured data.</desc>
+<desc id="desc">Large translucent A, C, G and T letters run behind SELECT seq, WHERE gc &gt; 45 and GROUP BY species snippets. Thin lines connect sequence positions to a small table, suggesting filtering and grouping. This is a decorative diagram, with no measured data.</desc>
 <defs>
   <linearGradient id="cover-fade" x1="0" x2="1">
     <stop stop-color="white" stop-opacity=".25"/>
@@ -33,10 +33,10 @@
     <path d="M166 59 H347 M605 59 H791 M1083 59 H1282"/>
     <path d="M215 174 V188 H345 V174 M605 174 V188 H735 V174 M1125 174 V188 H1255 V174"/>
   </g>
-  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="28" font-weight="600" letter-spacing="3" opacity=".8">
-    <text x="169" y="47" fill="var(--theme-65b9dd, #65b9dd)">SELECT</text>
-    <text x="607" y="47" fill="var(--theme-f4894f, #f4894f)">WHERE</text>
-    <text x="1085" y="47" fill="var(--theme-74c8a8, #74c8a8)">GROUP BY</text>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" font-weight="600" letter-spacing="1" opacity=".8">
+    <text x="169" y="47" fill="var(--theme-65b9dd, #65b9dd)">SELECT seq</text>
+    <text x="607" y="47" fill="var(--theme-f4894f, #f4894f)">WHERE gc &gt; 45</text>
+    <text x="1040" y="47" fill="var(--theme-74c8a8, #74c8a8)">GROUP BY species</text>
   </g>
   <g fill="var(--theme-74c8a8, #74c8a8)" opacity=".34">
     <rect x="97" y="213" width="42" height="8" rx="2"/>
