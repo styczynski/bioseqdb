@@ -2,9 +2,10 @@
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="864" height="489.6" viewBox="0 0 864 489.6" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-28425b:#bfcedc;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4a467:#a25216;}}</style>
 <title id="chart-title">GC content in mitochondrial chromosome windows</title>
 <desc id="chart-description">Seventeen windows for each species, plotted at their physical midpoint. Final windows have 569,299 and596 bases. GC excludes N. Lines connect neighboring summaries, not aligned positions across species.</desc>
-<style>@media(prefers-color-scheme:light){:root{--theme-eef4f9:#173247;--theme-a9bccb:#405c72;--theme-28425b:#ccd9e4;--theme-74c8a8:#167251;--theme-65b9dd:#146c91;--theme-f4a467:#a54a12;--theme-b4a0e5:#7552a8;--theme-94a9ba:#526a80;--theme-071320:#ffffff;}}</style>
+
  <metadata>
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
@@ -248,7 +249,7 @@ z
    </g>
    <g id="line2d_28">
     <path d="M 789.8904 220.105164 
-" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: #1f77b4; stroke-width: 1.5; stroke-linecap: square"/>
+" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: var(--theme-74c8a8, #74c8a8); stroke-width: 1.5; stroke-linecap: square"/>
     <defs>
      <path id="m7c08ee6fea" d="M 0 5 
 C 1.326016 5 2.597899 4.473168 3.535534 3.535534 
@@ -315,7 +316,7 @@ z
    </g>
    <g id="line2d_30">
     <path d="M 784.0584 295.069778 
-" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: #ff7f0e; stroke-width: 1.5; stroke-linecap: square"/>
+" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: var(--theme-65b9dd, #65b9dd); stroke-width: 1.5; stroke-linecap: square"/>
     <defs>
      <path id="m164badd13d" d="M -5 5 
 L 5 5 
@@ -376,7 +377,7 @@ z
    </g>
    <g id="line2d_32">
     <path d="M 790.4736 261.886648 
-" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: #2ca02c; stroke-width: 1.5; stroke-linecap: square"/>
+" clip-path="url(#p7f24a5bb73)" style="fill: none; stroke: var(--theme-f4a467, #f4a467); stroke-width: 1.5; stroke-linecap: square"/>
     <defs>
      <path id="ma209cf2389" d="M 0 -5 
 L -5 5 

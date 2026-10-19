@@ -27,10 +27,12 @@ DARK = {
     'A': '#74c8a8', 'C': '#65b9dd', 'G': '#f4a467',
     'T': '#b4a0e5', 'N': '#94a9ba', 'bar_text': '#071320',
 }
+# Canonical BioseqDB theme_palette.light_color mappings for the nine chart paints.
+# Kept here so this downloadable script can regenerate SVGs without the repository.
 LIGHT = {
-    '#eef4f9': '#173247', '#a9bccb': '#405c72', '#28425b': '#ccd9e4',
-    '#74c8a8': '#167251', '#65b9dd': '#146c91', '#f4a467': '#a54a12',
-    '#b4a0e5': '#7552a8', '#94a9ba': '#526a80', '#071320': '#ffffff',
+    '#eef4f9': '#173247', '#a9bccb': '#405c72', '#28425b': '#bfcedc',
+    '#74c8a8': '#167251', '#65b9dd': '#146c91', '#f4a467': '#a25216',
+    '#b4a0e5': '#482e8a', '#94a9ba': '#425d73', '#071320': '#f5f8fc',
 }
 LABELS = {'human': 'Human (hg38)', 'mouse': 'Mouse (mm39)',
           'zebrafish': 'Zebrafish (danRer11)'}
@@ -70,11 +72,13 @@ def write_svg(fig, path, label, description):
     for dark in LIGHT:
         source = source.replace('fill: '+dark, 'fill: var(--theme-'+dark[1:]+', '+dark+')')
         source = source.replace('stroke: '+dark, 'stroke: var(--theme-'+dark[1:]+', '+dark+')')
-    style = '<style>@media(prefers-color-scheme:light){:root{' + ''.join(
-        '--theme-'+dark[1:]+':'+light+';' for dark, light in LIGHT.items()) + '}}</style>'
+    used_tokens = sorted(set(re.findall(r'var\((--theme-[0-9a-f]+),', source)))
+    declarations = ''.join(token+':'+LIGHT['#'+token.removeprefix('--theme-')]+';'
+                           for token in used_tokens)
+    style = '<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{' + declarations + '}}</style>'
     from html import escape
     first_end = source.index('>', source.index('<svg ')) + 1
-    source = source[:first_end] + '\n<title id="chart-title">'+escape(label)+'</title>\n<desc id="chart-description">'+escape(description)+'</desc>\n'+style + source[first_end:]
+    source = source[:first_end] + '\n'+style+'\n<title id="chart-title">'+escape(label)+'</title>\n<desc id="chart-description">'+escape(description)+'</desc>\n' + source[first_end:]
     path.write_text(source)
     parsed = ET.fromstring(source)
     assert parsed.attrib.get('viewBox')
@@ -141,7 +145,7 @@ def render(measurements, output):
                 markersize=5.5, linewidth=2.1, label=LABELS[species])
         last = rows[-1]
         ax.plot([(last['start0']+last['end0'])/2000], [last['gc_percent']],
-                marker=marker, markersize=10, markerfacecolor='none',
+                color=DARK[species], marker=marker, markersize=10, markerfacecolor='none',
                 markeredgecolor=DARK[species], markeredgewidth=1.5)
     ax.set_xlim(0,17)
     ax.set_ylim(20,55)

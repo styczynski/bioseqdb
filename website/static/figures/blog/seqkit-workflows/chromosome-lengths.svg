@@ -2,9 +2,10 @@
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="864" height="410.4" viewBox="0 0 864 410.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-28425b:#bfcedc;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4a467:#a25216;}}</style>
 <title id="chart-title">UCSC mitochondrial chromosome lengths</title>
 <desc id="chart-description">Human hg38:16,569 bases. Mouse mm39:16,299 bases. Zebrafish danRer11:16,596 bases. All bars start at zero.</desc>
-<style>@media(prefers-color-scheme:light){:root{--theme-eef4f9:#173247;--theme-a9bccb:#405c72;--theme-28425b:#ccd9e4;--theme-74c8a8:#167251;--theme-65b9dd:#146c91;--theme-f4a467:#a54a12;--theme-b4a0e5:#7552a8;--theme-94a9ba:#526a80;--theme-071320:#ffffff;}}</style>
+
  <metadata>
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
