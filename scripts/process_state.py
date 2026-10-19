@@ -99,8 +99,7 @@ _STATE_LOCK_CONTEXT = threading.local()
 def _global_lock():
     """Reentrant thread/process lock around state-file mutations.
 
-    MCP servers are spawned per Claude Code session, so two sessions can
-    race on start_build for the same mode. The lock makes the read-check-
+    The lock makes the read-check-
     spawn-write critical section atomic across processes. A process-local
     RLock and thread-local depth make nested state helpers safe: opening a
     second independent fd and calling flock again can otherwise deadlock the
