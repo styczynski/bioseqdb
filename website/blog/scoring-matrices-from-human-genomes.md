@@ -402,10 +402,10 @@ Get the SQL files, accession metadata and plotting code from [BioseqDB/examples/
 ```sh
 git clone https://github.com/BioseqDB/examples.git
 cd examples/scoring_matrices
-export DATABASE_URL='dbname=bioseq_examples'
+export DATABASE_URL=bioseq_examples
 ```
 
-Replace the connection string with your database and role. Use a fresh database or one without a `scoring` schema. The pipeline keeps its intermediate tables in that schema so we can inspect each step.
+Set `DATABASE_URL` to your database name. For a remote server, set `PGHOST`, `PGPORT` and `PGUSER` for your connection. Use a fresh database or one without a `scoring` schema. The pipeline keeps its intermediate tables in that schema so we can inspect each step.
 
 ### Download and inspect the sequences
 
