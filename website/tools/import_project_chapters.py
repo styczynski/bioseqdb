@@ -710,8 +710,72 @@ def bibliography() -> str:
     return "\n\n".join(parts)
 
 
+def scoring_publication_context(slug: str, body: str) -> str:
+    """Keep website reading links and two Z-drop corrections reproducible.
+
+    The print source remains historical. These additions connect its scoring
+    chapters to the worked website tutorial without rewriting the chapters.
+    """
+    substitutions = {
+        "project_alignment_foundations": [
+            (
+                "This scoring model isn’t sufficient to define entire problem:",
+                "For a worked explanation of how to choose $s(a,b)$, see "
+                "[scoring matrices, PAM and BLOSUM](/blog/scoring-matrices-from-human-genomes/). "
+                "It follows the counts behind substitution scores and shows how the choice "
+                "of gap costs changes an alignment.\n\n"
+                "This scoring model isn’t sufficient to define entire problem:",
+            ),
+            (
+                "We can introduce Z-drop stop condition: the same as X-drop, but if the distance "
+                "from diagonal is too high then stop as well (this means that we stop when there "
+                "are too many gaps cummulatively)",
+                "We can introduce Z-drop stop condition: stop when the score drop exceeds a "
+                "threshold adjusted for the change in diagonal since the best-scoring position. "
+                "This adjustment allows a long insertion or deletion to pass without stopping "
+                "extension solely because of its gap-extension cost.",
+            ),
+        ],
+        "project_chaining": [
+            (
+                '<a id="sec-chaining-score-model"></a>',
+                '<a id="sec-chaining-score-model"></a>\n\n'
+                "The score in this section uses anchor coordinates and the distances between "
+                "them. The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) "
+                "explains how this fits beside the residue-pair scores used during base-level "
+                "alignment, including PAM and BLOSUM for proteins.",
+            ),
+        ],
+        "project_final_alignment_postprocessing_and_preprocessing": [
+            (
+                "In BioseqDB I used existing implementation of KSW2",
+                "The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) "
+                "works through the substitution scores and gap costs used to evaluate alignment "
+                "columns. It also explains how to count the observed letter pairs once a "
+                "base-level alignment is available.\n\n"
+                "In BioseqDB I used existing implementation of KSW2",
+            ),
+            (
+                "$e_{g}$ here is gap-extension penalty, which in this context means that we can "
+                "disard all symbols from the best score to the current position by introducing "
+                "a gap. This means that effectively we just stop earlier if the distance from "
+                "the diagonal gets to large, so practically Z-drop is more restrictive for correct setup.",
+                "$e_{g}$ here is the gap-extension penalty. The extra term raises the allowed "
+                "score drop when the alignment changes diagonal, so a long insertion or deletion "
+                "can pass without stopping extension solely because of its gap-extension cost.",
+            ),
+        ],
+    }
+    for before, after in substitutions.get(slug, []):
+        if body.count(before) != 1:
+            raise ValueError(f"Scoring publication context no longer matches {slug}")
+        body = body.replace(before, after, 1)
+    return body
+
+
 def write_page(slug: str, title: str, order: int, body: str) -> None:
     header = "---\n" + f"title: {json.dumps(title, ensure_ascii=False)}\nslug: {slug}\ndescription: {json.dumps(title, ensure_ascii=False)}\norder: {order}\nkeywords: [BioseqDB, project]\ndraft: false\n---\n\n"
+    body = scoring_publication_context(slug, body)
     (DEST / f"{slug}.md").write_text(header + body + "\n")
 
 

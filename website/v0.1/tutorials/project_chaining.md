@@ -153,6 +153,8 @@ Similar to the minimizer chapter here we will discuss different approaches to ch
 
 <a id="sec-chaining-score-model"></a>
 
+The score in this section uses anchor coordinates and the distances between them. The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) explains how this fits beside the residue-pair scores used during base-level alignment, including PAM and BLOSUM for proteins.
+
 Let’s say we have two anchors with coordinates $q_j, q_i$ and $r_j, r_i$ on the query and reference. Let’s assume the minimizer span is always $k$. We now can say that after incorporating $(r_j, r_i)$ anchor we will cover $q_i-q_j$ symbols on the query and $r_i-r_j$ symbols on the reference, however those two jumps can be interpreted as taking some symbols from query and assuming they form replacement and the rest forms a gap. For example let’s say $q_i-q_j > r_i-r_j$. This means that we match more symbols in query than in reference, so indicates some deletion in the reference. So we can say $r_i-r_j$ symbols are replaced (or stay the same) while the leftover $(q_i-q_j)-(r_i-r_j)$ symbols form this deletion. This thinking is symmetrical so we just only need to use minimum and absolute value to make it more generic.
 
 Now we introduced $g(j,i)$ (the advance shared by the reference and query) and $\delta(j,i)$ (the remaining advance in whichever sequence moves farther). As k-mers represent hashed fragment of length $k$ we can assume that in our match we have exactly $\min\{q_i-q_j, r_i-r_j, k\}$ new symbols that matched. Hence we now define our first primitive score as $\min\{q_i-q_j, r_i-r_j, k\} = \min\{g(j,i), k\}$.

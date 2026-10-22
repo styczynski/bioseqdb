@@ -498,6 +498,8 @@ Mapping quality, or **MAPQ**, concerns confidence in a placement among alternati
 
 Requesting `bioseq.cigar` asks BioseqDB for the base-level alignment rather than only an estimates of positions (other base-level projections, including `bioseq.edit`, also request this step; without them the start/end of query/target might change! ASking for cigar improves the accuracy to the positions of individual bases). In a CIGAR string, `M` consumes a base from each sequence and can include both matches and mismatches; `I` marks inserted query bases and `D` marks deleted target bases. The numbers are run lengths. Use `bioseq.edit()` to retrieve the number of substitutions and inserted/deleted bases.
 
+To separate those substitutions into counts such as A-to-G and C-to-T, we need to read the aligned letter pairs. The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) shows that calculation in SQL and follows it through to substitution frequencies and log-odds scores.
+
 The validated run returned **661 blocks**, of which **592** had reverse query orientation (the aligners consider reverse strand which means that we not only search for some sequence X, but also it's reverse-complement. In very simple terms this is because of how DNA work and the reverse complement of ACTG is CAGT). For the plots we keep blocks with at least 300 alignment columns, mapping quality at least 20 and identity at least 70%. That leaves **355 blocks**, including **342 reverse matches**.
 
 ## 8. Set up Python with Poetry

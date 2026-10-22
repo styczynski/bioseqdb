@@ -18,6 +18,8 @@ In this short chapter I want to discuss last parts of the pipeline’s algorithm
 >
 > BioseqDB doesn’t call base-level alignment if no `bioseq.cigar()` is requested [xdrop zdrop strategies](../project_alignment_foundations/#lst-xdrop-zdrop-strategies), so then `bioseq.score()` only reflects the chaining score. If `bioseq.cigar()` call is present in the SQL query, then score represents results of the final alignment (thus score can differ depending on the query). This is explained in the walkthrough appendix [tutorial](../getting_started/).
 
+The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) works through the substitution scores and gap costs used to evaluate alignment columns. It also explains how to count the observed letter pairs once a base-level alignment is available.
+
 In BioseqDB I used existing implementation of KSW2 (the algorithm by the author of minimap2 that uses AVX SIMD C intrinsics to implement DP calculations) from minimap2 and Block Aligner \[[21](../bibliography/#ref-minimap2_paper), [38](../bibliography/#ref-block_aligner_paper)\]. The DP formulations follow what was described already easlier [exact dp](../project_alignment_foundations/#sec-exact-dp), where KSW2 provides various flavours of functions in its API primarily left/right extension and local mode [alignment boundary modes](../project_alignment_foundations/#fig-alignment-boundary-modes). KSW2 uses banded alignment where the maximum distances are fixed (for more details on that see chaining for maximum diagonal distance (bandwith) [chaining dotplot](../project_chaining/#fig-chaining-dotplot)) The block aligner is more complex and uses moving square blocks to adaptively set this size of "bandwith", where we compute scores in the score matrix.
 
 *CPU aligners incorporated into BioseqDB.*
@@ -34,7 +36,7 @@ In BioseqDB I used existing implementation of KSW2 (the algorithm by the author 
 I previously introduced X-drop and Z-drop concepts [xdrop zdrop strategies](../project_alignment_foundations/#lst-xdrop-zdrop-strategies), but formally they can be formulated as follows. Let’s say $S^\star$ is the best score reached at $(i^\star,j^\star)$ and we test this best score against the current score $S$ at $(i,j)$ (meaning that we are matching $i\text{th}$ symbol of target vs. $j\text{th}$ symbol of query): <a id="eq-zdrop"></a> $$\begin{aligned}
   \text{X-drop:}\quad&S^\star-S>X,\\
   \text{Z-drop:}\quad&S^\star-S>Z+e_{g}\left|(i-i^\star)-(j-j^\star)\right|.
-\end{aligned}$$ $e_{g}$ here is gap-extension penalty, which in this context means that we can disard all symbols from the best score to the current position by introducing a gap. This means that effectively we just stop earlier if the distance from the diagonal gets to large, so practically Z-drop is more restrictive for correct setup.
+\end{aligned}$$ $e_{g}$ here is the gap-extension penalty. The extra term raises the allowed score drop when the alignment changes diagonal, so a long insertion or deletion can pass without stopping extension solely because of its gap-extension cost.
 
 ## How Block Aligner follows the alignment
 

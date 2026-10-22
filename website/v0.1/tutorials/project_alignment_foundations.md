@@ -31,6 +31,8 @@ This alignment is an optimized sequence correspondence under a scoring model. Fo
 
 A gap of size one costs then $q+e$. Some scientific papers mentioning $q+(\ell-1)e$ use a different parameter convention. Affine scoring charges one opening cost per gap run and can be evaluated with a fixed number of states per matrix cell \[[28](../bibliography/#ref-gotoh_1982_affine)\].
 
+For a worked explanation of how to choose $s(a,b)$, see [scoring matrices, PAM and BLOSUM](/blog/scoring-matrices-from-human-genomes/). It follows the counts behind substitution scores and shows how the choice of gap costs changes an alignment.
+
 This scoring model isn’t sufficient to define entire problem:
 
 1.  Global alignment consumes both complete sequences \[[29](../bibliography/#ref-needleman_wunsch_1970)\]
@@ -102,7 +104,7 @@ For large datasets evaluating entire large $O(nm)$ matrix can make significant p
 
 - We can introduce X-drop stop condition: stop when score falls below best score seen so far by more than X
 
-- We can introduce Z-drop stop condition: the same as X-drop, but if the distance from diagonal is too high then stop as well (this means that we stop when there are too many gaps cummulatively) <a id="lst-xdrop-zdrop-strategies"></a>
+- We can introduce Z-drop stop condition: stop when the score drop exceeds a threshold adjusted for the change in diagonal since the best-scoring position. This adjustment allows a long insertion or deletion to pass without stopping extension solely because of its gap-extension cost. <a id="lst-xdrop-zdrop-strategies"></a>
 
 Smart evaluation startegy can combine all these approaches. KSW2 and Block aligner for example use all of them. Block aligner \[[38](../bibliography/#ref-block_aligner_paper)\] evaluates only the most promising rectangular region in the matrix while KSW2 \[[31](../bibliography/#ref-suzuki_kasahara_2018)\] focuses on diagonal-centered evaluation.
 

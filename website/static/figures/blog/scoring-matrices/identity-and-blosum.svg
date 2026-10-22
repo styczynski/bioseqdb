@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="690" viewBox="0 0 720 690" role="img" aria-labelledby="title desc">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-20364a:#ccd9e4;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="title">Identity scores and BLOSUM62 protein scores</title>
+<desc id="desc">For amino acids L, I, G and W, an identity matrix gives every mismatch minus one. BLOSUM62 instead gives leucine-isoleucine plus two and glycine-tryptophan minus two. The matrix rows and columns are L, I, G, W: 4,2,-4,-2; 2,4,-4,-3; -4,-4,6,-2; -2,-3,-2,11. These are protein scores, not nucleotide scores.</desc>
+<text x="24" y="42" font-family="Arial, sans-serif" font-size="28" font-weight="bold" text-anchor="start" fill="var(--theme-eef4f9, #eef4f9)">A different score for each amino-acid pair</text>
+<text x="24" y="80" font-family="Arial, sans-serif" font-size="22" font-weight="normal" text-anchor="start" fill="var(--theme-a9bccb, #a9bccb)">The same four protein letters, two scoring schemes</text>
+<text x="180" y="133" font-family="Arial, sans-serif" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-eef4f9, #eef4f9)">Identity: +1 / −1</text>
+<text x="106" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">L</text>
+<text x="43" y="221" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">L</text>
+<rect x="79" y="187" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.152"/>
+<text x="105.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+1</text>
+<rect x="136" y="187" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="162.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="193" y="187" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="219.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="250" y="187" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="276.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<text x="163" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">I</text>
+<text x="43" y="278" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">I</text>
+<rect x="79" y="244" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="105.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="136" y="244" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.152"/>
+<text x="162.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+1</text>
+<rect x="193" y="244" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="219.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="250" y="244" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="276.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<text x="220" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">G</text>
+<text x="43" y="335" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">G</text>
+<rect x="79" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="105.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="136" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="162.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="193" y="301" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.152"/>
+<text x="219.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+1</text>
+<rect x="250" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="276.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<text x="277" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">W</text>
+<text x="43" y="392" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">W</text>
+<rect x="79" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="105.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="136" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="162.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="193" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.152"/>
+<text x="219.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−1</text>
+<rect x="250" y="358" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.152"/>
+<text x="276.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+1</text>
+<text x="530" y="133" font-family="Arial, sans-serif" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-eef4f9, #eef4f9)">BLOSUM62 extract</text>
+<text x="456" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">L</text>
+<text x="393" y="221" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">L</text>
+<rect x="429" y="187" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.218"/>
+<text x="455.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+4</text>
+<rect x="486" y="187" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.174"/>
+<text x="512.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+2</text>
+<rect x="543" y="187" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.218"/>
+<text x="569.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−4</text>
+<rect x="600" y="187" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.174"/>
+<text x="626.5" y="222" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−2</text>
+<text x="513" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">I</text>
+<text x="393" y="278" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">I</text>
+<rect x="429" y="244" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.174"/>
+<text x="455.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+2</text>
+<rect x="486" y="244" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.218"/>
+<text x="512.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+4</text>
+<rect x="543" y="244" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.218"/>
+<text x="569.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−4</text>
+<rect x="600" y="244" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.196"/>
+<text x="626.5" y="279" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−3</text>
+<text x="570" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">G</text>
+<text x="393" y="335" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">G</text>
+<rect x="429" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.218"/>
+<text x="455.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−4</text>
+<rect x="486" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.218"/>
+<text x="512.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−4</text>
+<rect x="543" y="301" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.262"/>
+<text x="569.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+6</text>
+<rect x="600" y="301" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.174"/>
+<text x="626.5" y="336" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−2</text>
+<text x="627" y="180" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">W</text>
+<text x="393" y="392" font-family="monospace" font-size="27" font-weight="bold" text-anchor="middle" fill="var(--theme-a9bccb, #a9bccb)">W</text>
+<rect x="429" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.174"/>
+<text x="455.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−2</text>
+<rect x="486" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.196"/>
+<text x="512.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−3</text>
+<rect x="543" y="358" width="53" height="53" rx="7" fill="var(--theme-f4894f, #f4894f)" fill-opacity="0.174"/>
+<text x="569.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-f4894f, #f4894f)">−2</text>
+<rect x="600" y="358" width="53" height="53" rx="7" fill="var(--theme-74c8a8, #74c8a8)" fill-opacity="0.372"/>
+<text x="626.5" y="393" font-family="monospace" font-size="25" font-weight="bold" text-anchor="middle" fill="var(--theme-74c8a8, #74c8a8)">+11</text>
+<path d="M24 445L696 445" fill="none" stroke="var(--theme-20364a, #20364a)" stroke-width="2" />
+<text x="24" y="485" font-family="monospace" font-size="29" font-weight="bold" text-anchor="start" fill="var(--theme-74c8a8, #74c8a8)">L ↔ I</text>
+<text x="185" y="485" font-family="Arial, sans-serif" font-size="25" font-weight="normal" text-anchor="start" fill="var(--theme-74c8a8, #74c8a8)">+2: observed above chance</text>
+<text x="24" y="529" font-family="monospace" font-size="29" font-weight="bold" text-anchor="start" fill="var(--theme-f4894f, #f4894f)">G ↔ W</text>
+<text x="185" y="529" font-family="Arial, sans-serif" font-size="25" font-weight="normal" text-anchor="start" fill="var(--theme-f4894f, #f4894f)">−2: observed below chance</text>
+<text x="24" y="582" font-family="Arial, sans-serif" font-size="23" font-weight="normal" text-anchor="start" fill="var(--theme-a9bccb, #a9bccb)">L leucine · I isoleucine</text>
+<text x="24" y="616" font-family="Arial, sans-serif" font-size="23" font-weight="normal" text-anchor="start" fill="var(--theme-a9bccb, #a9bccb)">G glycine · W tryptophan</text>
+<text x="24" y="661" font-family="Arial, sans-serif" font-size="22" font-weight="normal" text-anchor="start" fill="var(--theme-a9bccb, #a9bccb)">BLOSUM62 entries are rounded half-bit scores.</text>
+</svg>

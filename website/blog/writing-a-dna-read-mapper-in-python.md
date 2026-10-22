@@ -295,6 +295,8 @@ def candidate_region(chain, reference_length, query_length, k, padding=9):
 
 We now align the full query against a substring of that small reference window. This is a semiglobal edit-distance problem: unmatched reference bases before or after the read are free, but every query base must be accounted for. A substitution, insertion or deletion costs one.
 
+You can assign different costs to particular substitutions and to opening or extending a gap. The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) explains those choices, including the protein matrices PAM and BLOSUM and their relationship to observed sequence differences.
+
 Initialize the first row to zero, allowing the alignment to begin anywhere in the target. Initialize the first column to the cost of deleting the query prefix. At the end, choose the cheapest cell in the last row, rather than insisting that the alignment reaches the final target base.
 
 ```python id=py_aligner_alignment
