@@ -992,6 +992,7 @@ set(_site_model "${_output_root}/site-model.json")
 set(_landing_fasta "${_source_dir}/tests/fixtures/landing_reads.fasta")
 set(_readme_fasta "${_source_dir}/tests/fixtures/readme_samples.fasta")
 set(_seqkit_fasta "${_source_dir}/tests/fixtures/seqkit_ucsc_chrM.fasta")
+set(_scoring_fasta "${_source_dir}/tests/fixtures/scoring_matrices_cohort.fasta")
 if(NOT EXISTS "${_landing_fasta}")
   message(FATAL_ERROR "website: real bioseq.load fixture is missing: ${_landing_fasta}")
 endif()
@@ -1029,6 +1030,7 @@ file(WRITE "${_cluster_child}"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_readme_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/readme_samples.fasta\"\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_seqkit_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/seqkit_ucsc_chrM.fasta\"\n"
+"\"${CMAKE_COMMAND}\" -E copy_if_different '${_scoring_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/scoring_matrices_cohort.fasta\"\n"
 "\"${Python3_EXECUTABLE}\" '${_source_dir}/tests/integration/test_external_example_acl.py' \\\n"
 "  --generator '${_gen}' --pg-bin-dir '${_staged_bindir}' \\\n"
 "  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
@@ -1090,7 +1092,7 @@ add_custom_command(
           "${_cache_extension_sql_manifest}"
           "${_bioseq_extension_sql_manifest}"
           "${_bioseq_settings_documentation_manifest}"
-          "${_landing_fasta}" "${_readme_fasta}" "${_seqkit_fasta}"
+          "${_landing_fasta}" "${_readme_fasta}" "${_seqkit_fasta}" "${_scoring_fasta}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_sql_documentation_coverage.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract/test_setting_documentation.py"
           "${_source_dir}/tests/integration/test_external_example_acl.py"
@@ -1198,6 +1200,8 @@ add_custom_command(
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_seqkit_tutorial.py" --check
   COMMAND "${_venv_python}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_scoring_matrices_tutorial.py" --check
+  COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_traceheap_sources.py" --check
   COMMAND "${_venv_python}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_traceheap.py"
@@ -1214,6 +1218,10 @@ add_custom_command(
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_python_aligner.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_butterfly_tutorial.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_seqkit_tutorial.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_scoring_matrices_tutorial.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/blog/scoring-matrices-from-human-genomes.md"
+          "${_static_dir}/examples/scoring-matrices.zip"
+          "${_scoring_fasta}"
           "${CMAKE_CURRENT_SOURCE_DIR}/blog/seqkit-workflows-in-bioseqdb.md"
           "${_static_dir}/examples/seqkit-workflows.zip"
           "${CMAKE_CURRENT_SOURCE_DIR}/blog/comparing-butterfly-genomes-with-bioseqdb.md"
@@ -1405,6 +1413,7 @@ add_custom_target(bioseq_website_content_check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_python_aligner.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/sync_butterfly_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/sync_seqkit_tutorial.py" --check
+  COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/sync_scoring_matrices_tutorial.py" --check
   COMMAND "${Python3_EXECUTABLE}" "${_source_dir}/tools/check_traceheap_sources.py" --check
   DEPENDS "${_venv_stamp}" "${_source_dir}/tests/contract/test_theme_palette.py"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
