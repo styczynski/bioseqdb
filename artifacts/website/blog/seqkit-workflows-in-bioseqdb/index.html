@@ -60,7 +60,7 @@
   });
 })();
 </script>
-<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/analytics.js"></script>
+<script defer src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/analytics.js"></script>
 
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
@@ -93,20 +93,20 @@
 <meta property="article:tag" content="BioseqDB"><meta property="article:tag" content="SeqKit"><meta property="article:tag" content="PostgreSQL"><meta property="article:tag" content="SQL"><meta property="article:tag" content="FASTA"><meta property="article:tag" content="UCSC"><meta property="article:tag" content="mitochondrial DNA"><meta property="article:tag" content="GC content"><meta property="article:tag" content="sequence analysis"><meta property="article:tag" content="bioinformatics"><meta property="article:tag" content="regular expressions">
 
 
-<link rel="icon" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/favicon.svg">
-<link rel="preload" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
-<link rel="preload" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="icon" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/favicon.svg">
+<link rel="preload" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/fonts/space-grotesk-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+<link rel="preload" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/fonts/ibm-plex-sans-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
 <link rel="alternate" type="text/markdown" href="/blog/seqkit-workflows-in-bioseqdb/index.md" title="Working with sequence files in BioseqDB and SeqKit">
 <meta name="keywords" content="BioseqDB, SeqKit, PostgreSQL, SQL, FASTA, UCSC, mitochondrial DNA, GC content, sequence analysis, bioinformatics, regular expressions">
 <meta name="author" content="Piotr Styczyński">
 
-<link rel="stylesheet" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/css/page-a3f1a0f9000099a224d5841e178062ab482ccee6abc953fd54463dff7c3c3922.css">
+<link rel="stylesheet" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/css/page-a3f1a0f9000099a224d5841e178062ab482ccee6abc953fd54463dff7c3c3922.css">
 
 
 
 
-<link rel="stylesheet" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/css/page-24785671a78783dab071d4e89e0748824cd3ca4327213a40ffe15c7c0134e258.css" data-shared-styles>
+<link rel="stylesheet" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/css/page-98737e16ffb39314885a94450ba3fc41c28fb6b4574fa2e24dc7ac820469753d.css" data-shared-styles>
 
 
 
@@ -121,7 +121,7 @@
   <div class="site-header-inner">
     <button type="button" data-menu class="site-menu" aria-label="Documentation menu"><span></span><span></span><span></span></button>
     <a data-nav class="site-brand" href="/" aria-label="BioseqDB home">
-      <img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/bioseq-mark.svg" width="30" height="30" alt="">
+      <img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/bioseq-mark.svg" width="30" height="30" alt="">
       <span>Bioseq<span>DB</span></span>
     </a>
     <nav data-topnav class="site-navigation" aria-label="Main navigation">
@@ -177,7 +177,7 @@
     <nav class="blog-breadcrumb" aria-label="Breadcrumb"><a href="/blog/">← All posts</a></nav>
     <article class="blog-article">
       <header class="blog-hero">
-        <img class="blog-cover" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequence-sql-cover.svg" alt="Large translucent DNA letters behind SELECT, WHERE and GROUP BY statements." fetchpriority="high">
+        <img class="blog-cover" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/sequence-sql-cover.svg" alt="Large translucent DNA letters behind SELECT, WHERE and GROUP BY statements." fetchpriority="high">
         <div class="blog-hero-copy">
           <p class="blog-eyebrow"><a href="/blog/?category=bioseqdb">BioseqDB</a></p>
           <h1>Working with sequence files in BioseqDB and SeqKit</h1>
@@ -234,7 +234,7 @@ WHERE provider = 'ucsc' AND assembly_database = 'danRer11'
 
 SELECT assembly, species, bioseq.len(seq) AS bp
 FROM seqkit_lab.genomes ORDER BY species;</code></pre></figure><p class="doc-paragraph"><em>INSERT 0 1</em> — 1 row affected</p><p class="doc-paragraph"><em>INSERT 0 1</em> — 1 row affected</p><p class="doc-paragraph"><em>INSERT 0 1</em> — 1 row affected</p><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table" aria-label="Executed SQL result"><thead><tr><th scope="col">assembly<br><code>text</code></th><th scope="col">species<br><code>text</code></th><th scope="col">bp<br><code>bigint</code></th></tr></thead><tbody><tr><td>hg38</td><td>human</td><td>16569</td></tr><tr><td>mm39</td><td>mouse</td><td>16299</td></tr><tr><td>danRer11</td><td>zebrafish</td><td>16596</td></tr></tbody></table></div><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p>
-<p class="doc-paragraph">UCSC's <code>start0</code> is zero-based and <code>end0</code> is exclusive. The human interval <code>[0, 16569)</code> therefore contains 16,569 bases, including the first and last base of that record. These coordinates refer to each assembly separately.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/chromosome-lengths.svg"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/chromosome-lengths.svg" alt="Lengths of the three mitochondrial chromosome records retrieved from UCSC." loading="lazy"></a></p><p class="doc-paragraph">The records differ by only a few hundred bases. Their lengths match the intervals requested from UCSC, which gives us a quick check that all three imports returned complete records.</p><h2 class="hx" id="2-make-records-we-can-filter-and-export" data-toc data-title="2. Make records we can filter and export">2. Make records we can filter and export<a data-hash href="#2-make-records-we-can-filter-and-export" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Three rows would make a rather short filtering exercise. We will split each chromosome into non-overlapping windows of 1,000 bases and keep the remaining shorter piece at the end. This gives us 51 records to filter, with each record's position on its original chromosome saved alongside it.</p>
+<p class="doc-paragraph">UCSC's <code>start0</code> is zero-based and <code>end0</code> is exclusive. The human interval <code>[0, 16569)</code> therefore contains 16,569 bases, including the first and last base of that record. These coordinates refer to each assembly separately.</p><p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/chromosome-lengths.svg"><img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/chromosome-lengths.svg" alt="Lengths of the three mitochondrial chromosome records retrieved from UCSC." loading="lazy"></a></p><p class="doc-paragraph">The records differ by only a few hundred bases. Their lengths match the intervals requested from UCSC, which gives us a quick check that all three imports returned complete records.</p><h2 class="hx" id="2-make-records-we-can-filter-and-export" data-toc data-title="2. Make records we can filter and export">2. Make records we can filter and export<a data-hash href="#2-make-records-we-can-filter-and-export" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">Three rows would make a rather short filtering exercise. We will split each chromosome into non-overlapping windows of 1,000 bases and keep the remaining shorter piece at the end. This gives us 51 records to filter, with each record's position on its original chromosome saved alongside it.</p>
 <figure class="doc-code" data-term data-sql-example="seqkit_windows"><figcaption class="doc-code-bar"><span class="term-dot term-dot-red" aria-hidden="true"></span><span class="term-dot term-dot-amber" aria-hidden="true"></span><span class="term-dot term-dot-blue" aria-hidden="true"></span><span class="doc-code-lang">SQL</span><button type="button" class="copy-button" data-copy data-copy-target="code-6967707e0d0b0a6a-4" aria-label="Copy code to clipboard">Copy</button></figcaption><pre data-code><code id="code-6967707e0d0b0a6a-4" class="language-sql" data-entity-ranges="[{&quot;start&quot;:175,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:type:bioseq.seq&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/type/bioseq-seq-8c069b667ce622ef/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:382,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:439,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;},{&quot;start&quot;:519,&quot;len&quot;:10,&quot;id&quot;:&quot;sql:function:bioseq.len(bioseq.seq)&quot;,&quot;route&quot;:&quot;/v0.1/reference/sql/function/bioseq-len-0347ee6e6a415910/&quot;,&quot;tooltip&quot;:&quot;/v0.1/entities.1f8c4f73ad8621f1376d2d4b006e94aee0c549ff91e947b1055615c7a2e2ef44.json&quot;}]">CREATE TABLE seqkit_lab.windows (
     id text NOT NULL,
     species text NOT NULL,
@@ -311,7 +311,7 @@ zebrafish_17	596
        bioseq.symbol_count(seq, 'T') AS t,
        bioseq.symbol_count(seq, 'N') AS n
 FROM seqkit_lab.genomes ORDER BY species;</code></pre><div class="terminal-result" data-result><div class="terminal-result-label">Result · 3 rows</div><div class="result-scroll" tabindex="0" role="region" aria-label="SQL result table; scroll horizontally for more columns"><table class="result-table result-table-wide" aria-label="Executed SQL result"><thead><tr><th scope="col">species<br><code>text</code></th><th scope="col">a<br><code>bigint</code></th><th scope="col">c<br><code>bigint</code></th><th scope="col">g<br><code>bigint</code></th><th scope="col">t<br><code>bigint</code></th><th scope="col">n<br><code>bigint</code></th></tr></thead><tbody><tr><td>human</td><td>5124</td><td>5181</td><td>2169</td><td>4094</td><td>1</td></tr><tr><td>mouse</td><td>5629</td><td>3976</td><td>2013</td><td>4681</td><td>0</td></tr><tr><td>zebrafish</td><td>5301</td><td>3969</td><td>2658</td><td>4668</td><td>0</td></tr></tbody></table></div></div></figure><p class="doc-paragraph"><em>Executed against Bioseq extension 1.0 on PostgreSQL 17.10</em></p>
-<p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/base-composition.svg"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/base-composition.svg" alt="Counts of A, C, G and T in the three mitochondrial records, with the unresolved-base count shown separately." loading="lazy"></a></p><p class="doc-paragraph">There is one N in the human record and none in the other two. Dropping it would change the coordinate system, so we leave it in the stored sequence. For GC content, however, we exclude N from the denominator, matching SeqKit's calculation on these <code>dna5</code> records.</p>
+<p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/base-composition.svg"><img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/base-composition.svg" alt="Counts of A, C, G and T in the three mitochondrial records, with the unresolved-base count shown separately." loading="lazy"></a></p><p class="doc-paragraph">There is one N in the human record and none in the other two. Dropping it would change the coordinate system, so we leave it in the stored sequence. For GC content, however, we exclude N from the denominator, matching SeqKit's calculation on these <code>dna5</code> records.</p>
 <div class="tool-comparison" role="group" aria-label="Gc comparison">
 <div class="tool-comparison-panel">
 <p class="tool-comparison-label">BioseqDB</p>
@@ -349,7 +349,7 @@ human_06	43.90
 </code></pre></figure></div>
 </div>
 
-<p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/gc-windows.svg"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/gc-windows.svg" alt="GC percentage along each mitochondrial chromosome, measured in the tutorial&#39;s non-overlapping windows." loading="lazy"></a></p><p class="doc-paragraph">Each point sits at the midpoint of a window. The final window is shorter, and the lines connect neighbouring measurements so we can follow how GC content changes along each chromosome. The horizontal position is an offset within each species' own chromosome. To find corresponding regions between species, we would align the sequences, as in the <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a>.</p><h2 class="hx" id="5-select-records-by-id-and-by-their-contents" data-toc data-title="5. Select records by ID and by their contents">5. Select records by ID and by their contents<a data-hash href="#5-select-records-by-id-and-by-their-contents" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">The SeqKit FAQ starts several workflows with a list of wanted IDs. SQL's <code>IN</code> expression is enough for a short list:</p>
+<p class="doc-paragraph"><a class="project-figure-link" aria-label="Open full-size diagram" href="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/gc-windows.svg"><img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/gc-windows.svg" alt="GC percentage along each mitochondrial chromosome, measured in the tutorial&#39;s non-overlapping windows." loading="lazy"></a></p><p class="doc-paragraph">Each point sits at the midpoint of a window. The final window is shorter, and the lines connect neighbouring measurements so we can follow how GC content changes along each chromosome. The horizontal position is an offset within each species' own chromosome. To find corresponding regions between species, we would align the sequences, as in the <a href="/blog/comparing-butterfly-genomes-with-bioseqdb/">butterfly tutorial</a>.</p><h2 class="hx" id="5-select-records-by-id-and-by-their-contents" data-toc data-title="5. Select records by ID and by their contents">5. Select records by ID and by their contents<a data-hash href="#5-select-records-by-id-and-by-their-contents" aria-label="Link to this section">#</a></h2><p class="doc-paragraph">The SeqKit FAQ starts several workflows with a list of wanted IDs. SQL's <code>IN</code> expression is enough for a short list:</p>
 <div class="tool-comparison" role="group" aria-label="Ids comparison">
 <div class="tool-comparison-panel">
 <p class="tool-comparison-label">BioseqDB</p>
@@ -652,7 +652,7 @@ zebrafish_16
             <ul class="blog-keywords" aria-label="Topics"><li>BioseqDB</li><li>SeqKit</li><li>PostgreSQL</li><li>SQL</li><li>FASTA</li><li>UCSC</li><li>mitochondrial DNA</li><li>GC content</li><li>sequence analysis</li><li>bioinformatics</li><li>regular expressions</li></ul>
           </footer>
           <aside class="blog-cta" aria-labelledby="blog-cta-title">
-            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
+            <a class="blog-cta-brand" href="/v0.1/tutorials/getting_started/"><img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/bioseq-mark.svg" width="42" height="42" alt=""><span>BioseqDB</span></a>
             <h2 id="blog-cta-title">Try it yourself now!</h2>
             <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
             <a class="blog-action" href="/v0.1/tutorials/getting_started/">Read the docs <span aria-hidden="true">→</span></a>
@@ -669,7 +669,7 @@ zebrafish_16
       <div data-footcols class="dd-s0240">
         <div>
           <div class="dd-s0241">
-            <img src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <img src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
             <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
             <span class="dd-s0244">DOCS</span>
           </div>
@@ -728,14 +728,14 @@ zebrafish_16
 
 <div id="entity-pop"></div>
 <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting","@id":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/#article","name":"Working with sequence files in BioseqDB and SeqKit","description":"Import mitochondrial DNA from UCSC into PostgreSQL, then compare BioseqDB SQL with SeqKit for sequence statistics, GC content, motifs, slicing, sorting and FASTA housekeeping.","url":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"},"isPartOf":{"@id":"https://bioseqdb.com/#website"},"image":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/thumbnail.jpg","thumbnailUrl":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/thumbnail.jpg","datePublished":"2026-10-19","dateModified":"2026-10-19T17:45:02+02:00","headline":"Working with sequence files in BioseqDB and SeqKit","mainEntityOfPage":{"@type":"WebPage","@id":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/"},"author":{"@type":"Person","name":"Piotr Styczyński","url":"https://github.com/styczynski"},"keywords":["BioseqDB","SeqKit","PostgreSQL","SQL","FASTA","UCSC","mitochondrial DNA","GC content","sequence analysis","bioinformatics","regular expressions"],"articleSection":"bioseqdb","timeRequired":"PT23M"},{"@type":"WebSite","@id":"https://bioseqdb.com/#website","url":"https://bioseqdb.com/","name":"BioseqDB","inLanguage":"en","publisher":{"@id":"https://bioseqdb.com/#organization"}},{"@type":"Organization","@id":"https://bioseqdb.com/#organization","name":"BioseqDB","url":"https://bioseqdb.com/","description":"Independent open-source project developing a PostgreSQL extension for biological sequence storage and alignment. Published benchmarks report speedups of up to 120× for selected workloads and baselines.","logo":{"@type":"ImageObject","url":"https://bioseqdb.com/bioseq-mark.svg"},"sameAs":["https://github.com/styczynski/bioseqdb","https://www.linkedin.com/company/bioseqdb/","https://www.crunchbase.com/organization/bioseq-db"],"subjectOf":{"@type":"WebPage","url":"https://bioseqdb.com/benchmarks/","name":"BioseqDB benchmarks"}},{"@type":"BreadcrumbList","@id":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://bioseqdb.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://bioseqdb.com/blog/"},{"@type":"ListItem","position":3,"name":"Working with sequence files in BioseqDB and SeqKit","item":"https://bioseqdb.com/blog/seqkit-workflows-in-bioseqdb/"}]}]}</script>
-<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/prism-init.js"></script>
-<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/vendor/prism/prism.min.js"></script>
-<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/prism-languages.js"></script>
-<script defer src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/main.js"></script>
-<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/content-runtime.mjs"></script>
-<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/site-header.mjs"></script>
-<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/announcement.mjs"></script>
-<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/docs-design.mjs"></script>
-<script type="module" src="/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/js/blog.mjs"></script>
+<script defer src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/prism-init.js"></script>
+<script defer src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/vendor/prism/prism.min.js"></script>
+<script defer src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/prism-languages.js"></script>
+<script defer src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/main.js"></script>
+<script type="module" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/content-runtime.mjs"></script>
+<script type="module" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/site-header.mjs"></script>
+<script type="module" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/announcement.mjs"></script>
+<script type="module" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/docs-design.mjs"></script>
+<script type="module" src="/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/js/blog.mjs"></script>
 </body>
 </html>

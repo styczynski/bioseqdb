@@ -15,7 +15,7 @@ BioseqDB is a PostgreSQL extension for storing, indexing and searching biologica
 
 I wanted to keep sequences and their metadata together. If a sample has an organism, collection date or patient identifier, those values should be ordinary columns beside its DNA. Searching for a similar sequence should fit into the same query as filtering those columns.
 
-![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/sequences-in-sql.svg)
+![Load FASTA or FASTQ and metadata into a BioseqDB table, then combine metadata filters and sequence alignment in one SQL query.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/sequences-in-sql.svg)
 
 ## How it started
 

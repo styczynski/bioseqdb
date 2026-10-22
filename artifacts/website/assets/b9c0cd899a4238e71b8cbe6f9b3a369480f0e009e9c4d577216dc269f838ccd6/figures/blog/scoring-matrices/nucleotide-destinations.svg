@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg data-bioseq-palette="explicit" role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="792" height="504" viewBox="0 0 792 504" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-071320:#f5f8fc;--theme-65b9dd:#146c91;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-c9a8ff:#735091;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="chart-title">Reference-to-sample nucleotide differences</title>
+<desc id="chart-description">Four stacked bars show the fraction of each alternate base among callable differences. Reference direction does not identify the ancestral mutation direction.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB scoring_matrices/render_charts.py</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 504 
+L 792 504 
+L 792 0 
+L 0 0 
+L 0 504 
+z
+" style="fill: none; opacity: 0"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 102.96 423.36 
+L 752.4 423.36 
+L 752.4 100.8 
+L 102.96 100.8 
+L 102.96 423.36 
+z
+" style="fill: none; opacity: 0"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 102.96 115.461818 
+L 108.801947 115.461818 
+L 108.801947 161.588887 
+L 102.96 161.588887 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 108.801947 115.461818 
+L 749.817245 115.461818 
+L 749.817245 161.588887 
+L 108.801947 161.588887 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 749.817245 115.461818 
+L 752.4 115.461818 
+L 752.4 161.588887 
+L 749.817245 161.588887 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-c9a8ff, #c9a8ff)"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 102.96 197.831583 
+L 157.690048 197.831583 
+L 157.690048 243.958652 
+L 102.96 243.958652 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 157.690048 197.831583 
+L 160.304541 197.831583 
+L 160.304541 243.958652 
+L 157.690048 243.958652 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 160.304541 197.831583 
+L 752.4 197.831583 
+L 752.4 243.958652 
+L 160.304541 243.958652 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-c9a8ff, #c9a8ff)"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 102.96 280.201348 
+L 742.53903 280.201348 
+L 742.53903 326.328417 
+L 102.96 326.328417 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 742.53903 280.201348 
+L 750.324006 280.201348 
+L 750.324006 326.328417 
+L 742.53903 326.328417 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 750.324006 280.201348 
+L 752.4 280.201348 
+L 752.4 326.328417 
+L 750.324006 326.328417 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-c9a8ff, #c9a8ff)"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 102.96 362.571113 
+L 105.223295 362.571113 
+L 105.223295 408.698182 
+L 102.96 408.698182 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 105.223295 362.571113 
+L 747.873409 362.571113 
+L 747.873409 408.698182 
+L 105.223295 408.698182 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-65b9dd, #65b9dd)"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 747.873409 362.571113 
+L 752.4 362.571113 
+L 752.4 408.698182 
+L 747.873409 408.698182 
+z
+" clip-path="url(#p97368245ab)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1"/>
+     <g id="text_1">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="102.96" y="442.237969" transform="rotate(-0 102.96 442.237969)">0%</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_2"/>
+     <g id="text_2">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="232.848" y="442.237969" transform="rotate(-0 232.848 442.237969)">20%</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_3"/>
+     <g id="text_3">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="362.736" y="442.237969" transform="rotate(-0 362.736 442.237969)">40%</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_4"/>
+     <g id="text_4">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="492.624" y="442.237969" transform="rotate(-0 492.624 442.237969)">60%</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_5"/>
+     <g id="text_5">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="622.512" y="442.237969" transform="rotate(-0 622.512 442.237969)">80%</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_6"/>
+     <g id="text_6">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-a9bccb, #a9bccb)" x="752.4" y="442.237969" transform="rotate(-0 752.4 442.237969)">100%</text>
+     </g>
+    </g>
+    <g id="text_7">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-eef4f9, #eef4f9)" x="427.68" y="458.819531" transform="rotate(-0 427.68 458.819531)">Fraction of differences from this reference base</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_7"/>
+     <g id="text_8">
+      <text style="font-size: 19px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="93.96" y="145.743868" transform="rotate(-0 93.96 145.743868)">A →</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_8"/>
+     <g id="text_9">
+      <text style="font-size: 19px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="93.96" y="228.113633" transform="rotate(-0 93.96 228.113633)">C →</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_9"/>
+     <g id="text_10">
+      <text style="font-size: 19px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="93.96" y="310.483398" transform="rotate(-0 93.96 310.483398)">G →</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_10"/>
+     <g id="text_11">
+      <text style="font-size: 19px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="93.96" y="392.853163" transform="rotate(-0 93.96 392.853163)">T →</text>
+     </g>
+    </g>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(423.498268 134.266056)">G</text>
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(405.484205 151.062774)">98.7%</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(451.771411 216.635821)">T</text>
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(432.52688 233.432539)">91.2%</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(417.619046 299.005586)">A</text>
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(398.924125 315.802304)">98.5%</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(421.311243 381.375351)">C</text>
+    <text style="font-size: 15px; font-family: Arial, sans-serif; fill: var(--theme-071320, #071320)" transform="translate(402.722962 398.172069)">99.0%</text>
+   </g>
+   <g id="legend_1">
+    <g id="patch_15">
+     <path d="M 297.888203 496.547569 
+L 323.888203 496.547569 
+L 323.888203 487.447569 
+L 297.888203 487.447569 
+z
+" style="fill: var(--theme-74c8a8, #74c8a8); stroke: var(--theme-74c8a8, #74c8a8); stroke-linejoin: miter"/>
+    </g>
+    <g id="text_16">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="334.288203" y="496.547569" transform="rotate(-0 334.288203 496.547569)">A</text>
+    </g>
+    <g id="patch_16">
+     <path d="M 369.181016 496.547569 
+L 395.181016 496.547569 
+L 395.181016 487.447569 
+L 369.181016 487.447569 
+z
+" style="fill: var(--theme-65b9dd, #65b9dd); stroke: var(--theme-65b9dd, #65b9dd); stroke-linejoin: miter"/>
+    </g>
+    <g id="text_17">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="405.581016" y="496.547569" transform="rotate(-0 405.581016 496.547569)">C</text>
+    </g>
+    <g id="patch_17">
+     <path d="M 440.658672 496.547569 
+L 466.658672 496.547569 
+L 466.658672 487.447569 
+L 440.658672 487.447569 
+z
+" style="fill: var(--theme-f4894f, #f4894f); stroke: var(--theme-f4894f, #f4894f); stroke-linejoin: miter"/>
+    </g>
+    <g id="text_18">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="477.058672" y="496.547569" transform="rotate(-0 477.058672 496.547569)">G</text>
+    </g>
+    <g id="patch_18">
+     <path d="M 513.131641 496.547569 
+L 539.131641 496.547569 
+L 539.131641 487.447569 
+L 513.131641 487.447569 
+z
+" style="fill: var(--theme-c9a8ff, #c9a8ff); stroke: var(--theme-c9a8ff, #c9a8ff); stroke-linejoin: miter"/>
+    </g>
+    <g id="text_19">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="549.531641" y="496.547569" transform="rotate(-0 549.531641 496.547569)">T</text>
+    </g>
+   </g>
+  </g>
+  <g id="text_20">
+   <text style="font-weight: 700; font-size: 22px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="63.36" y="36.876563" transform="rotate(-0 63.36 36.876563)">Where reference-base differences go</text>
+  </g>
+  <g id="text_21">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="63.36" y="55.44" transform="rotate(-0 63.36 55.44)">Each bar includes differences only; unchanged bases are outside this denominator.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p97368245ab">
+   <rect x="102.96" y="100.8" width="649.44" height="322.56"/>
+  </clipPath>
+ </defs>
+</svg>

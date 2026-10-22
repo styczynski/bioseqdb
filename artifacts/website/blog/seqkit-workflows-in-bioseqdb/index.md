@@ -98,7 +98,7 @@ FROM seqkit_lab.genomes ORDER BY species;
 
 UCSC's `start0` is zero-based and `end0` is exclusive. The human interval `[0, 16569)` therefore contains 16,569 bases, including the first and last base of that record. These coordinates refer to each assembly separately.
 
-![Lengths of the three mitochondrial chromosome records retrieved from UCSC.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/chromosome-lengths.svg)
+![Lengths of the three mitochondrial chromosome records retrieved from UCSC.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/chromosome-lengths.svg)
 
 The records differ by only a few hundred bases. Their lengths match the intervals requested from UCSC, which gives us a quick check that all three imports returned complete records.
 
@@ -250,7 +250,7 @@ FROM seqkit_lab.genomes ORDER BY species;
 ```
 <!-- seqkit:base_counts:end -->
 
-![Counts of A, C, G and T in the three mitochondrial records, with the unresolved-base count shown separately.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/base-composition.svg)
+![Counts of A, C, G and T in the three mitochondrial records, with the unresolved-base count shown separately.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/base-composition.svg)
 
 There is one N in the human record and none in the other two. Dropping it would change the coordinate system, so we leave it in the stored sequence. For GC content, however, we exclude N from the denominator, matching SeqKit's calculation on these `dna5` records.
 
@@ -322,7 +322,7 @@ human_06	43.90
 </div>
 <!-- seqkit:gc_windows:end -->
 
-![GC percentage along each mitochondrial chromosome, measured in the tutorial's non-overlapping windows.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/seqkit-workflows/gc-windows.svg)
+![GC percentage along each mitochondrial chromosome, measured in the tutorial's non-overlapping windows.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/seqkit-workflows/gc-windows.svg)
 
 Each point sits at the midpoint of a window. The final window is shorter, and the lines connect neighbouring measurements so we can follow how GC content changes along each chromosome. The horizontal position is an offset within each species' own chromosome. To find corresponding regions between species, we would align the sequences, as in the [butterfly tutorial](/blog/comparing-butterfly-genomes-with-bioseqdb/).
 

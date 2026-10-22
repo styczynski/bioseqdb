@@ -124,3 +124,23 @@ html[data-theme="light"] { --blog-ink: #173247; --blog-muted: #455e73; --blog-su
 .blog-content img[src$="/figures/blog/seqkit-workflows/chromosome-lengths.svg"] { aspect-ratio: 864 / 410.4; }
 .blog-content img[src$="/figures/blog/seqkit-workflows/gc-windows.svg"] { aspect-ratio: 864 / 489.6; }
 /* seqkit-figure-ratios:end */
+
+/* scoring-matrices-figure-ratios:start */
+.blog-content img[src$="/figures/blog/scoring-matrices/blosum62.svg"] { aspect-ratio: 792 / 756; }
+.blog-content img[src$="/figures/blog/scoring-matrices/column-pair-counts.svg"] { aspect-ratio: 720 / 765; }
+.blog-content img[src$="/figures/blog/scoring-matrices/cover.svg"] { aspect-ratio: 1200 / 260; }
+.blog-content img[src$="/figures/blog/scoring-matrices/gap-penalties.svg"] { aspect-ratio: 720 / 895; }
+.blog-content img[src$="/figures/blog/scoring-matrices/genome-differences.svg"] { aspect-ratio: 936 / 576; }
+.blog-content img[src$="/figures/blog/scoring-matrices/identity-and-blosum.svg"] { aspect-ratio: 720 / 690; }
+.blog-content img[src$="/figures/blog/scoring-matrices/nucleotide-destinations.svg"] { aspect-ratio: 792 / 504; }
+.blog-content img[src$="/figures/blog/scoring-matrices/nucleotide-partners.svg"] { aspect-ratio: 792 / 633.6; }
+.blog-content img[src$="/figures/blog/scoring-matrices/nucleotide-scores.svg"] { aspect-ratio: 792 / 633.6; }
+.blog-content img[src$="/figures/blog/scoring-matrices/pam250.svg"] { aspect-ratio: 792 / 756; }
+.blog-content img[src$="/figures/blog/scoring-matrices/protein-coverage.svg"] { aspect-ratio: 864 / 504; }
+.blog-content img[src$="/figures/blog/scoring-matrices/protein-partners-blosum62.svg"] { aspect-ratio: 792 / 756; }
+.blog-content img[src$="/figures/blog/scoring-matrices/protein-partners-cohort.svg"] { aspect-ratio: 792 / 756; }
+.blog-content img[src$="/figures/blog/scoring-matrices/protein-scores.svg"] { aspect-ratio: 792 / 756; }
+.blog-content img[src$="/figures/blog/scoring-matrices/record-quality.svg"] { aspect-ratio: 936 / 432; }
+.blog-content img[src$="/figures/blog/scoring-matrices/sample-distances.svg"] { aspect-ratio: 792 / 720; }
+.blog-content img[src$="/figures/blog/scoring-matrices/seed-chain-alignment.svg"] { aspect-ratio: 720 / 905; }
+/* scoring-matrices-figure-ratios:end */

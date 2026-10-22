@@ -18,9 +18,9 @@ In this tutorial we will align a piece of chromosome or scaffold from two *Helic
 
 I inspired myself by excellent blog post:  [butterfly genome-alignment tutorial using Minimap2 and R](https://stevenvb12.github.io/misc/2023/03/30/Minimap2-alignment.html). I wanted to work through the same kind of comparison with BioseqDB. This version uses newer NCBI assemblies and their own gene annotations, so the coordinates and results below will be different obviously!
 
-![A schematic comparison of Heliconius butterflies and the optix region.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/butterflies-optix.svg)
+![A schematic comparison of Heliconius butterflies and the optix region.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/butterflies-optix.svg)
 
-You can find all the full code, SQL, dependencies and Python notebook in [BioseqDB/examples/butterfies_alignments](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments). You can also [download this tutorial’s code snapshot](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/examples/butterfly-alignments.zip), but please note that neither provide FASTA files as I rely on NCBI datasets.
+You can find all the full code, SQL, dependencies and Python notebook in [BioseqDB/examples/butterfies_alignments](https://github.com/BioseqDB/examples/tree/main/butterfies_alignments). You can also [download this tutorial’s code snapshot](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/examples/butterfly-alignments.zip), but please note that neither provide FASTA files as I rely on NCBI datasets.
 
 ## 1. Very short biological introduction on what we will be doing
 
@@ -33,7 +33,7 @@ A chromosome record can represent a reconstructed chromosome, while a scaffold i
 
 Now the core of any genomic/metagenomic analysis pipeline is the problem of alignment. An alignment is a process that places two sequences in columns so that corresponding bases (nucleotites A,C,T,G) can be compared. Equal letters are matches, different letters are substitutions, and gaps mean insertions or deletions relative to the other sequence. This allows us to understand for example where specific nucleotides were changed during evolutionary processes (how mutations arise, where etc.)
 
-![DNA letters and a small alignment with a mismatch and a gap.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/dna-alignment.svg)
+![DNA letters and a small alignment with a mismatch and a gap.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/dna-alignment.svg)
 
 We cannot sensibly compare every position in a million-base sequence with every position in another million-base sequence (that is a lot of text, so our alignment algorithm would be ridiciously slow!). Thankfully in BioseqDB's I provided search function`mmsearch`. Internally it starts with short shared fragments, connects promising matches into chains, then aligns selected regions in more detail. This approach is called the [seed-and-extend idea](/v0.1/tutorials/project_alignment_foundations/#seed-and-extend) and it allows more efficient processing so you can align ridiciously long sequences with no issue. If you are interested in writing your own aligner, my [Python read-mapper tutorial](/blog/writing-a-dna-read-mapper-in-python/) goes through the algorithms specifically written in very simple Python.
 
@@ -43,7 +43,7 @@ Here we start analysis with a pairwise comparison across two species, caluclatin
 
 We will import two one-million-base sequence fragments, inspect their lengths and nucleotide counts, calculate GC content, align them, and progressively draw one match, all retained matches, and the neighbourhood of *optix*.
 
-![NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/sql-workflow.svg)
+![NCBI sequences enter BioseqDB through SQL; SQLAlchemy retrieves results and Plotly draws them.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/sql-workflow.svg)
 
 PostgreSQL via BioseqDB extension stores the sequences and BioseqDB performs the alignment. We will write Python code using SQLAlchemy, that will send SQL and receive rows, which later will be used by Plotly to constrtuct some figures. You can do that same thing with plain SQL client like `psql` as every step of data processing will happen inside the database itself.
 
@@ -107,7 +107,7 @@ Each interval contains one million bases, or **1 Mb** (in this notation **kb** i
 
 We use zero-based, half-open coordinates throughout: `[start, end)` includes `start` and excludes `end`, so its length is `end - start`. NCBI GFF annotations use one-based inclusive coordinates; convert them with `start0 = start1 - 1`, leaving the end unchanged. [NCBI documents the GFF convention here.](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/reference-docs/file-formats/annotation-files/about-ncbi-gff3/)
 
-![Coordinate conversion from one-based annotation positions to zero-based slices and local window positions.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/coordinate-systems.svg)
+![Coordinate conversion from one-based annotation positions to zero-based slices and local window positions.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/coordinate-systems.svg)
 
 ## 5. Now the storage!
 
@@ -209,21 +209,21 @@ $$\mathrm{GC\%} = 100\frac{G+C}{A+C+G+T}.$$
 
 We exclude N from the denominator as N represents an unresolved base and in practice it can be anything of A/C/T/G, but we never know for sure. Usually Ns are small part of the sequence overall and we are not interested in them so much. `NULLIF` here avoids dividing by zero if a sequence contains no called bases. That case is unknown GC content, not zero GC. Lucily for us, both windows we saved and used here happen to contain no Ns (hooray!)
 
-![Lengths of the two imported sequence windows.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/sequence-lengths.svg)
+![Lengths of the two imported sequence windows.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/sequence-lengths.svg)
 
-![Lengths of the complete NCBI source records, distinct from the imported windows.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/source-record-lengths.svg)
+![Lengths of the complete NCBI source records, distinct from the imported windows.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/source-record-lengths.svg)
 
 Both analysis windows are exactly 1 Mb. The source erato scaffold is 5,549,739 bases, the source melpomene chromosome is 16,989,447 bases.
 
-![Measured counts of A, C, G, T and N in the two NCBI windows.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/base-counts.svg)
+![Measured counts of A, C, G, T and N in the two NCBI windows.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/base-counts.svg)
 
 A and T are more frequent than C and G in both windows. Erato contains 329,927 A, 172,322 C, 170,873 G and 326,878 T bases. Melpomene contains 327,164 A, 171,599 C, 171,833 G and 329,404 T bases.
 
-![GC percentage of called bases in each imported sequence.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/gc-content.svg)
+![GC percentage of called bases in each imported sequence.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/gc-content.svg)
 
 The GC values are close: **34.3195%** and **34.3432%**, but note that this isn't reflecting their similarity as we don't measure here any position-based properties.
 
-![GC content measured in consecutive 10 kb windows along both sequences.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/gc-windows.svg)
+![GC content measured in consecutive 10 kb windows along both sequences.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/gc-windows.svg)
 
 More interesting is measuring GC content in windows of specified length, because they we have more than only one single data point per entire sequence of interest (they are long so any mutations will average to very similar total GC content percentage. Using smaller windows on sequences allow us to see some regions where "something happens" and the structure of sequence changes - all this without actually comparing all nucleotides themselves on our screen  - in practice this can be used as very primitive tool to quickly search for regions of interest)
 
@@ -303,6 +303,8 @@ The `bioseq.*` projections describe the match we get from aligning of`t.seq` in 
 Mapping quality, or **MAPQ**, concerns confidence in a placement among alternatives. It is different from the fraction of identical bases in an alignment, it says us how many different regions where there for some part of the query, so a high MAPQ does not mean the two sequences are identical, but means that for each region we were aligning there weren't many regions that can match as well so result is likely around correct place.
 
 Requesting `bioseq.cigar` asks BioseqDB for the base-level alignment rather than only an estimates of positions (other base-level projections, including `bioseq.edit`, also request this step; without them the start/end of query/target might change! ASking for cigar improves the accuracy to the positions of individual bases). In a CIGAR string, `M` consumes a base from each sequence and can include both matches and mismatches; `I` marks inserted query bases and `D` marks deleted target bases. The numbers are run lengths. Use `bioseq.edit()` to retrieve the number of substitutions and inserted/deleted bases.
+
+To separate those substitutions into counts such as A-to-G and C-to-T, we need to read the aligned letter pairs. The [scoring-matrices tutorial](/blog/scoring-matrices-from-human-genomes/) shows that calculation in SQL and follows it through to substitution frequencies and log-odds scores.
 
 The validated run returned **661 blocks**, of which **592** had reverse query orientation (the aligners consider reverse strand which means that we not only search for some sequence X, but also it's reverse-complement. In very simple terms this is because of how DNA work and the reverse complement of ACTG is CAGT). For the plots we keep blocks with at least 300 alignment columns, mapping quality at least 20 and identity at least 70%. That leaves **355 blocks**, including **342 reverse matches**.
 
@@ -416,11 +418,11 @@ The `matches` list contains the same 661 rows as the SQL query. The full runner 
 
 There's a think called ribbon diagram, where a sequence track is just a rectangle whose x coordinates are sequence positions and its height and y position are display choices:
 
-![A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/rectangle-coordinates.svg)
+![A sequence interval drawn as a rectangle with genomic x coordinates and arbitrary display y coordinates.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/rectangle-coordinates.svg)
 
 An alignment connects two intervals with a four-corner polygon. For a forward match, the target's left endpoint corresponds to the query's left endpoint. For a reverse match, it corresponds to the query's right endpoint. No rocket science here, right? Only butterfly science! Huh.
 
-![The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/ribbon-coordinates.svg)
+![The four corners of an alignment ribbon, with the endpoint swap needed for a reverse match.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/ribbon-coordinates.svg)
 
 Here is the small plotting operation behind a ribbon:
 
@@ -446,7 +448,7 @@ figure.show()
 
 The figures on this page are static SVGs, but the notebook and generated HTML versions also let you zoom and hover over a match to inspect its coordinates and it feel much cooler to see them update after your code changes. You can give it a try.
 
-![One real alignment block connects its target and query intervals.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/first-alignment-ribbon.svg)
+![One real alignment block connects its target and query intervals.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/first-alignment-ribbon.svg)
 
 Its target interval is `[639721, 644608)` and its query interval is `[332091, 337300)`, with reverse orientation. The spans need not have equal lengths because the alignment includes insertions and deletions. This block has 5,307 alignment columns and 894 edits, giving about 83.15% identity.
 
@@ -454,21 +456,21 @@ Its target interval is `[639721, 644608)` and its query interval is `[332091, 33
 
 One plot won't satisfy my needs for colourful graphs. We can use a dot plot. A dot plot is a useful first view of many matches - each line segment plots target position against query position and its slope shows orientation.
 
-![A dot plot of the 355 retained alignments, distinguishing forward and reverse matches.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/alignment-dot-plot.svg)
+![A dot plot of the 355 retained alignments, distinguishing forward and reverse matches.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/alignment-dot-plot.svg)
 
 The broad reverse trend agrees with the opposite orientations of the annotated *optix* regions in records, but it does **not** by itself mean a biological inversion between the species and somehow they reversed everyrthing just by randon accident - an assembly record can be deposited in either orientation to NCBI so it's likely that.
 
 Now draw all retained ribbons in the original coordinate systems:
 
-![All retained alignment ribbons between the two one-million-base windows.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/alignment-ribbons.svg)
+![All retained alignment ribbons between the two one-million-base windows.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/alignment-ribbons.svg)
 
 Overlapping blocks are possible, especially around repeated sequence, so summing their lengths would overstate coverage. After merging overlapping intervals, the displayed blocks cover 374,441 target bases and 387,528 query bases. These are the spans touched by the selected alignments.
 
 For a closer look at *optix*, we centre each gene on zero and reverse the erato display axis. In local window coordinates, the gene midpoints are 493,223.5 for melpomene and 495,840 for erato. The display transformations are therefore `x = target_position - 493223.5` and `x = -(query_position - 495840)`.
 
-![The optix neighbourhood after centring the gene models and reversing the erato display direction.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/optix-centered-ribbons.svg)
+![The optix neighbourhood after centring the gene models and reversing the erato display direction.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/optix-centered-ribbons.svg)
 
-![The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/alignment-display-transform.svg)
+![The display transformation shifts each gene midpoint to zero and reverses the query axis without changing stored coordinates.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/alignment-display-transform.svg)
 
 We need to make a choice how to  center the genome and it's compltely arbitrary - their annotated transcript spans differ, so corresponding coding bases need not fall at exactly the same x position. This transformation makes the comparison easier to read. In the interactive notebook and HTML versions, the hover text retains the original local coordinates. When selecting a zoom, we keep blocks that overlap it, including blocks crossing its boundary, requiring both endpoints to lie inside the zoom would silently discard useful matches. If you have better idea how to draw this, go ahead!
 
@@ -498,9 +500,9 @@ print(json.dumps(analysis["summary"], indent=2))
 ```
 <!-- butterfly:python-analysis:end -->
 
-![Current NCBI gene models, local GC measurements and BioseqDB alignments around optix.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/optix-neighborhood.svg)
+![Current NCBI gene models, local GC measurements and BioseqDB alignments around optix.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/optix-neighborhood.svg)
 
-![The current optix gene and exon models in their transcript-oriented display.](/assets/e5b8991aec67c818395da19c1865cd3c9c09c1e01f8bb9111f647613934ea6d3/figures/blog/butterflies/optix-gene-models.svg)
+![The current optix gene and exon models in their transcript-oriented display.](/assets/b9c0cd899a4238e71b8cbe6f9b3a369480f0e009e9c4d577216dc269f838ccd6/figures/blog/butterflies/optix-gene-models.svg)
 
 The exon panel is a closer view of the annotations. Exons are the parts retained in a mature transcript, The annotated erato transcript has two exons and the melpomene transcript has one in these files and I put everything into one simple graphic. The gene here tracks place the matching segments in their annotated neighbourhood. The ribbons show sequence resemblance under the alignment and the last one - GC tracks add a simple measurement of GC content made directly from the imported DNA.
 
