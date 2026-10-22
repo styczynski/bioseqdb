@@ -142,7 +142,7 @@ This also explains how sequences can be more than 100 PAM units apart. A site ca
 
 Lower-numbered matrices, such as PAM40, describe relatively little change. Higher-numbered matrices, such as PAM250, are useful when searching for more distant protein relationships.
 
-[![PAM250 amino-acid scores, divided by three to display log odds in bits.](/static/figures/blog/scoring-matrices/pam250.svg)](/static/figures/blog/scoring-matrices/pam250.svg)
+![PAM250 amino-acid scores, divided by three to display log odds in bits.](/static/figures/blog/scoring-matrices/pam250.svg)
 
 The PAM250 plot puts the amino acids on both axes. Each cell scores one pair. Dividing its integer entries by three expresses them in bits, which lets us compare their colors with the BLOSUM62 plot below.
 
@@ -257,7 +257,7 @@ The larger and more varied training collection was an advantage over the origina
 
 The blocks emphasize conserved regions. They provide reliable alignment columns, but they also select a particular part of protein sequence space. A matrix learned from those regions averages over many functions and structural environments. Short domains can present another difficulty: a permissive matrix aimed at distant relationships may accumulate too little information over a short alignment, or extend a good domain match into neighboring unrelated sequence.
 
-[![BLOSUM62 amino-acid scores, divided by two to display log odds in bits.](/static/figures/blog/scoring-matrices/blosum62.svg)](/static/figures/blog/scoring-matrices/blosum62.svg)
+![BLOSUM62 amino-acid scores, divided by two to display log odds in bits.](/static/figures/blog/scoring-matrices/blosum62.svg)
 
 The diagonal rewards identical residues. Off the diagonal, pairs such as L/I retain a positive score because they occur more frequently than their background abundances predict. Both reference matrix plots use the same bit scale.
 
@@ -14568,7 +14568,7 @@ DROP SCHEMA IF EXISTS scoring CASCADE;
 ```
 <!-- scoring:protein-matrix:end -->
 
-[![Twenty-by-twenty amino-acid log-odds matrix from corresponding mitochondrial coding positions.](/static/figures/blog/scoring-matrices/protein-scores.svg)](/static/figures/blog/scoring-matrices/protein-scores.svg)
+![Twenty-by-twenty amino-acid log-odds matrix from corresponding mitochondrial coding positions.](/static/figures/blog/scoring-matrices/protein-scores.svg)
 
 The slashed cells mark pairs we never observed. For a zero observed frequency, the unsmoothed log odds is $-\infty$. The SQL leaves those scores empty rather than replacing them with an arbitrary finite penalty. Smoothing would require an explicit prior and its weight, especially for rare pairs.
 
@@ -17542,9 +17542,9 @@ DROP SCHEMA IF EXISTS scoring CASCADE;
 ```
 <!-- scoring:protein-ratios:end -->
 
-[![Conditional amino-acid partner frequencies calculated from NCBI's original BLOSUM62 probabilities.](/static/figures/blog/scoring-matrices/protein-partners-blosum62.svg)](/static/figures/blog/scoring-matrices/protein-partners-blosum62.svg)
+![Conditional amino-acid partner frequencies calculated from NCBI's original BLOSUM62 probabilities.](/static/figures/blog/scoring-matrices/protein-partners-blosum62.svg)
 
-[![Conditional amino-acid partner frequencies calculated from the mitochondrial cohort.](/static/figures/blog/scoring-matrices/protein-partners-cohort.svg)](/static/figures/blog/scoring-matrices/protein-partners-cohort.svg)
+![Conditional amino-acid partner frequencies calculated from the mitochondrial cohort.](/static/figures/blog/scoring-matrices/protein-partners-cohort.svg)
 
 Both plots use the same alphabet and percentage scale. Open either matrix to inspect it at full size. Read across a row to compare the destinations. The underlying joint frequencies are symmetric, while these conditional rows can differ between directions because their denominators differ.
 
@@ -18749,7 +18749,7 @@ DROP SCHEMA IF EXISTS scoring CASCADE;
 ```
 <!-- scoring:distances:end -->
 
-[![Pairwise callable-site mismatch percentages for eight sample mitochondrial genomes.](/static/figures/blog/scoring-matrices/sample-distances.svg)](/static/figures/blog/scoring-matrices/sample-distances.svg)
+![Pairwise callable-site mismatch percentages for eight sample mitochondrial genomes.](/static/figures/blog/scoring-matrices/sample-distances.svg)
 
 This distance table is the kind of input a distance-based tree method can use. A phylogenetic analysis can then choose a substitution model, estimate branch lengths and test how strongly the data support the relationships. Models that correct for repeated changes become more relevant as divergence grows. A raw BLOSUM alignment score alone does not specify that evolutionary distance: alignment length, composition and the scoring settings all affect it.
 
