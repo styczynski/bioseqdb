@@ -415,26 +415,26 @@ z
    </g>
    <g id="legend_1">
     <g id="patch_29">
-     <path d="M 343.025469 77.324406 
-L 369.025469 77.324406 
-L 369.025469 68.224406 
-L 343.025469 68.224406 
+     <path d="M 295.550078 77.324406 
+L 321.550078 77.324406 
+L 321.550078 68.224406 
+L 295.550078 68.224406 
 z
 " style="fill: var(--theme-74c8a8, #74c8a8)"/>
     </g>
     <g id="text_25">
-     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="379.425469" y="77.324406" transform="rotate(-0 379.425469 77.324406)">Retained</text>
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="331.950078" y="77.324406" transform="rotate(-0 331.950078 77.324406)">Retained</text>
     </g>
     <g id="patch_30">
-     <path d="M 463.037812 77.324406 
-L 489.037812 77.324406 
-L 489.037812 68.224406 
-L 463.037812 68.224406 
+     <path d="M 415.562422 77.324406 
+L 441.562422 77.324406 
+L 441.562422 68.224406 
+L 415.562422 68.224406 
 z
 " style="fill: var(--theme-f4894f, #f4894f)"/>
     </g>
     <g id="text_26">
-     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="499.437812" y="77.324406" transform="rotate(-0 499.437812 77.324406)">Excluded CDS</text>
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="451.962422" y="77.324406" transform="rotate(-0 451.962422 77.324406)">Excluded CDS (count above)</text>
     </g>
    </g>
   </g>
@@ -443,9 +443,6 @@ z
   </g>
   <g id="text_28">
    <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="60.48" y="55.44" transform="rotate(-0 60.48 55.44)">Exclude a CDS for gaps, missing alignment, a premature stop or an unusable start.</text>
-  </g>
-  <g id="text_29">
-   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="103.68" y="448.56" transform="rotate(-0 103.68 448.56)">Numbers above bars show excluded coding regions.</text>
   </g>
  </g>
  <defs>
