@@ -47,10 +47,10 @@ social:
   linkedin_post_tooltip: Join the discussion about this article on LinkedIn
 # Optional article destinations override the profile links from landing.yaml.
 # Only add public URLs; omit posts that have not been published yet.
-# medium_posts:
-#   introducing-bioseqdb: https://medium.com/@styczynski/introducing-bioseqdb-28587b24fa5d
-# linkedin_posts:
-#   introducing-bioseqdb: https://www.linkedin.com/feed/update/urn:li:activity:...
+medium_posts:
+  scoring-matrices-from-human-genomes: https://medium.com/@styczynski/pam-blosum-and-scoring-matrices-from-1-000-human-mitochondrial-genomes-4927e84698ec
+linkedin_posts:
+  scoring-matrices-from-human-genomes: https://www.linkedin.com/feed/update/urn:li:share:7519084263078621184
 cta:
   title: Try it yourself now!
   docs: Read the docs
