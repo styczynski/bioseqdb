@@ -14588,7 +14588,7 @@ $$
 P(b\mid a,\ b\ne a)=\frac{Q_{ab}}{\sum_{c\ne a}Q_{ac}}.
 $$
 
-Apply that equation to both the cohort and BLOSUM62, and each row becomes a distribution over differing partners. For example, the L row asks how much of the leucine pairing with a different residue involves isoleucine, valine and the other amino acids.
+Apply that equation to both the cohort and BLOSUM62, and each row with observed differences becomes a distribution over differing partners. For example, the L row asks how much of the leucine pairing with a different residue involves isoleucine, valine and the other amino acids.
 
 <!-- scoring:protein-ratios:start -->
 ```sql runnable id=scoring_protein_ratios timeout=60s
@@ -17546,7 +17546,7 @@ DROP SCHEMA IF EXISTS scoring CASCADE;
 
 ![Conditional amino-acid partner frequencies calculated from the mitochondrial cohort.](/static/figures/blog/scoring-matrices/protein-partners-cohort.svg)
 
-Both plots use the same alphabet and percentage scale. Open either matrix to inspect it at full size. Read across a row to compare the destinations. The underlying joint frequencies are symmetric, while these conditional rows can differ between directions because their denominators differ.
+Both plots use the same alphabet and percentage scale. Open either matrix to inspect it at full size. Read across a row to compare the destinations. The underlying joint frequencies are symmetric, while these conditional rows can differ between directions because their denominators differ. In this cohort W, tryptophan, has no observed differing partner, so its denominator is zero and the whole row is undefined, shown by slashes.
 
 The leucine row gives a visible example. In the cohort, isoleucine accounts for 51.30% of differing partners of leucine and phenylalanine for 44.57%. The corresponding BLOSUM62 proportions are 18.43% and 8.77%. Alanine pairs with threonine in 88.61% of its differing cohort pairs, compared with 7.05% in BLOSUM62.
 
