@@ -5967,6 +5967,12 @@ void decorate_code_entity_ranges(
             || manifest_route == "/contact_thanks/index.html") {
             continue; // Confirmation and error pages are deliberately noindex.
         }
+        // Submit authored reading material rather than the much larger generated
+        // API catalog. Reference pages remain linked, searchable and crawlable.
+        if (manifest_route.starts_with(route(version + "/reference/cpp/"))
+            || manifest_route.starts_with(route(version + "/reference/sql/"))) {
+            continue;
+        }
         std::string rel = manifest_route.substr(1);
         sitemap += "  <url><loc>" + canonical(rel) + "</loc></url>\n";
     }

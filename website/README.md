@@ -37,8 +37,12 @@ the landing installation commands. These events omit query parameters, command
 arguments and contact form contents. Browser tests intercept analytics requests.
 
 The generator creates `robots.txt` and `sitemap.xml` for every build, using the
-canonical site URL from `site.yaml`. The sitemap lists each indexable page once;
-the error and contact-confirmation pages use `noindex` and are omitted. Heading
+canonical site URL from `site.yaml`. The sitemap lists tutorials, blog posts and
+the main site pages once. Generated C++ and SQL reference branches are omitted
+to keep the submitted URLs focused on reading material. Reference pages remain
+crawlable, linked from the documentation and available in site search; sitemap
+omission does not prevent indexing. The error and contact-confirmation pages use
+`noindex` and are omitted. Heading
 anchors remain ordinary links in the rendered documentation; fragment URLs are
 not separate canonical pages. Validation checks sitemap coverage and the
 `Sitemap` directive in `robots.txt` before publication.

@@ -657,8 +657,8 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         problems.append(f"{missing}: declared in the manifest but absent from the site")
 
     # (3) canonical <-> sitemap agreement and no duplicate canonical URL. Every
-    #     sitemap URL must be some page's canonical; non-indexable pages (e.g. the
-    #     404 page) may carry a canonical without a sitemap row.
+    #     sitemap URL must be some page's canonical. Utility pages and the
+    #     generated C++/SQL catalog are omitted; all other index pages remain.
     sitemap_urls: set[str] = set()
     sitemap_path = site / "sitemap.xml"
     if sitemap_path.is_file():
@@ -682,11 +682,15 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                                         f"(also on {seen_canonical[canonical]})"))
         else:
             seen_canonical[canonical] = path
-        utility_page = path.relative_to(site).as_posix() in {"error.html", "contact_thanks/index.html"}
+        relative = path.relative_to(site).as_posix()
+        utility_page = relative in {"error.html", "contact_thanks/index.html"}
+        generated_reference = re.match(r"^[^/]+/reference/(?:cpp|sql)/", relative) is not None
         if utility_page and canonical in sitemap_urls:
             problems.append(_fail(path, "noindex utility page must not appear in sitemap.xml"))
-        if path.name == "index.html" and not utility_page and canonical not in sitemap_urls:
-            problems.append(_fail(path, "indexable page is missing from sitemap.xml"))
+        if generated_reference and canonical in sitemap_urls:
+            problems.append(_fail(path, "generated C++/SQL reference must not appear in sitemap.xml"))
+        if path.name == "index.html" and not utility_page and not generated_reference and canonical not in sitemap_urls:
+            problems.append(_fail(path, "reading or navigation page is missing from sitemap.xml"))
     for url in sorted(sitemap_urls):
         if url not in seen_canonical:
             problems.append(f"sitemap.xml: {url} is not the canonical URL of any page")
