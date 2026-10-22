@@ -107,6 +107,10 @@ def tokenize_html(content: str) -> str:
 
 
 def theme_svg(content: str) -> str:
+    # Scientific colormaps have paired, continuous palettes authored by their
+    # renderer. Generic hue mapping can create false bands in numeric scales.
+    if re.search(r'<svg\b[^>]*\bdata-bioseq-palette=["\']explicit["\']', content):
+        return content
     content = SVG_THEME_RE.sub("\n", content)
     themed = tokenize_html(content)
     # Matplotlib includes embedded paint rules as well as presentation attrs.

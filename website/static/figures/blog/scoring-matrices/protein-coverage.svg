@@ -1,0 +1,456 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg data-bioseq-palette="explicit" role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="864" height="504" viewBox="0 0 864 504" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<style id="bioseq-light-palette">@media(prefers-color-scheme:light){:root{--theme-28425b:#bfcedc;--theme-74c8a8:#167251;--theme-a9bccb:#405c72;--theme-eef4f9:#173247;--theme-f4894f:#b44d1c;}}</style>
+<title id="chart-title">Coding regions retained for amino-acid counting</title>
+<desc id="chart-description">Each bar starts with the full cohort. A coding region is excluded for insertions, deletions, incomplete alignment, premature stops, or invalid or ambiguous initiation codons. Ambiguous internal codons are counted separately.</desc>
+
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>BioseqDB scoring_matrices/render_charts.py</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 504 
+L 864 504 
+L 864 0 
+L 0 0 
+L 0 504 
+z
+" style="fill: none; opacity: 0"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 103.68 413.28 
+L 829.44 413.28 
+L 829.44 120.96 
+L 103.68 120.96 
+L 103.68 413.28 
+z
+" style="fill: none; opacity: 0"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(134.677975 449.572112) rotate(-45)">ATP6</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_2"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(186.22343 449.572112) rotate(-45)">ATP8</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_3"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(235.338647 452.00235) rotate(-45)">COX1</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_4"/>
+     <g id="text_4">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(286.884101 452.00235) rotate(-45)">COX2</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_5"/>
+     <g id="text_5">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(338.429556 452.00235) rotate(-45)">COX3</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_6"/>
+     <g id="text_6">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(391.286252 450.691109) rotate(-45)">CYTB</text>
+     </g>
+    </g>
+    <g id="xtick_7">
+     <g id="line2d_7"/>
+     <g id="text_7">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(446.514849 447.007966) rotate(-45)">ND1</text>
+     </g>
+    </g>
+    <g id="xtick_8">
+     <g id="line2d_8"/>
+     <g id="text_8">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(498.060303 447.007966) rotate(-45)">ND2</text>
+     </g>
+    </g>
+    <g id="xtick_9">
+     <g id="line2d_9"/>
+     <g id="text_9">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(549.605758 447.007966) rotate(-45)">ND3</text>
+     </g>
+    </g>
+    <g id="xtick_10">
+     <g id="line2d_10"/>
+     <g id="text_10">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(601.151212 447.007966) rotate(-45)">ND4</text>
+     </g>
+    </g>
+    <g id="xtick_11">
+     <g id="line2d_11"/>
+     <g id="text_11">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(647.968774 451.735859) rotate(-45)">ND4L</text>
+     </g>
+    </g>
+    <g id="xtick_12">
+     <g id="line2d_12"/>
+     <g id="text_12">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(704.242121 447.007966) rotate(-45)">ND5</text>
+     </g>
+    </g>
+    <g id="xtick_13">
+     <g id="line2d_13"/>
+     <g id="text_13">
+      <text style="font-size: 12px; font-family: Arial, sans-serif; fill: var(--theme-a9bccb, #a9bccb)" transform="translate(755.787576 447.007966) rotate(-45)">ND6</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_14">
+      <path d="M 103.68 413.28 
+L 829.44 413.28 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_15"/>
+     <g id="text_14">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="418.218984" transform="rotate(-0 94.68 418.218984)">0</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_16">
+      <path d="M 103.68 354.816 
+L 829.44 354.816 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_17"/>
+     <g id="text_15">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="359.754984" transform="rotate(-0 94.68 359.754984)">200</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_18">
+      <path d="M 103.68 296.352 
+L 829.44 296.352 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_19"/>
+     <g id="text_16">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="301.290984" transform="rotate(-0 94.68 301.290984)">400</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_20">
+      <path d="M 103.68 237.888 
+L 829.44 237.888 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_21"/>
+     <g id="text_17">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="242.826984" transform="rotate(-0 94.68 242.826984)">600</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_22">
+      <path d="M 103.68 179.424 
+L 829.44 179.424 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_23"/>
+     <g id="text_18">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="184.362984" transform="rotate(-0 94.68 184.362984)">800</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_24">
+      <path d="M 103.68 120.96 
+L 829.44 120.96 
+" clip-path="url(#pda6e0bfd73)" style="fill: none; stroke: var(--theme-28425b, #28425b); stroke-opacity: 0.35; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_25"/>
+     <g id="text_19">
+      <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: end; fill: var(--theme-a9bccb, #a9bccb)" x="94.68" y="125.898984" transform="rotate(-0 94.68 125.898984)">1000</text>
+     </g>
+    </g>
+    <g id="text_20">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-eef4f9, #eef4f9)" x="54.891406" y="267.12" transform="rotate(-90 54.891406 267.12)">Sample coding regions</text>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 136.669091 413.28 
+L 177.905455 413.28 
+L 177.905455 120.96 
+L 136.669091 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 188.214545 413.28 
+L 229.450909 413.28 
+L 229.450909 120.96 
+L 188.214545 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 239.76 413.28 
+L 280.996364 413.28 
+L 280.996364 121.54464 
+L 239.76 121.54464 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 291.305455 413.28 
+L 332.541818 413.28 
+L 332.541818 120.96 
+L 291.305455 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 342.850909 413.28 
+L 384.087273 413.28 
+L 384.087273 120.96 
+L 342.850909 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 394.396364 413.28 
+L 435.632727 413.28 
+L 435.632727 120.96 
+L 394.396364 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 445.941818 413.28 
+L 487.178182 413.28 
+L 487.178182 120.96 
+L 445.941818 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 497.487273 413.28 
+L 538.723636 413.28 
+L 538.723636 120.96 
+L 497.487273 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 549.032727 413.28 
+L 590.269091 413.28 
+L 590.269091 121.54464 
+L 549.032727 121.54464 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 600.578182 413.28 
+L 641.814545 413.28 
+L 641.814545 120.96 
+L 600.578182 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 652.123636 413.28 
+L 693.36 413.28 
+L 693.36 123.59088 
+L 652.123636 123.59088 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 703.669091 413.28 
+L 744.905455 413.28 
+L 744.905455 121.25232 
+L 703.669091 121.25232 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 755.214545 413.28 
+L 796.450909 413.28 
+L 796.450909 120.96 
+L 755.214545 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 136.669091 120.96 
+L 177.905455 120.96 
+L 177.905455 120.96 
+L 136.669091 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_17">
+    <path d="M 188.214545 120.96 
+L 229.450909 120.96 
+L 229.450909 120.96 
+L 188.214545 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_18">
+    <path d="M 239.76 121.54464 
+L 280.996364 121.54464 
+L 280.996364 120.96 
+L 239.76 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_19">
+    <path d="M 291.305455 120.96 
+L 332.541818 120.96 
+L 332.541818 120.96 
+L 291.305455 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_20">
+    <path d="M 342.850909 120.96 
+L 384.087273 120.96 
+L 384.087273 120.96 
+L 342.850909 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_21">
+    <path d="M 394.396364 120.96 
+L 435.632727 120.96 
+L 435.632727 120.96 
+L 394.396364 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_22">
+    <path d="M 445.941818 120.96 
+L 487.178182 120.96 
+L 487.178182 120.96 
+L 445.941818 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_23">
+    <path d="M 497.487273 120.96 
+L 538.723636 120.96 
+L 538.723636 120.96 
+L 497.487273 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_24">
+    <path d="M 549.032727 121.54464 
+L 590.269091 121.54464 
+L 590.269091 120.96 
+L 549.032727 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_25">
+    <path d="M 600.578182 120.96 
+L 641.814545 120.96 
+L 641.814545 120.96 
+L 600.578182 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_26">
+    <path d="M 652.123636 123.59088 
+L 693.36 123.59088 
+L 693.36 120.96 
+L 652.123636 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_27">
+    <path d="M 703.669091 121.25232 
+L 744.905455 121.25232 
+L 744.905455 120.96 
+L 703.669091 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="patch_28">
+    <path d="M 755.214545 120.96 
+L 796.450909 120.96 
+L 796.450909 120.96 
+L 755.214545 120.96 
+z
+" clip-path="url(#pda6e0bfd73)" style="fill: var(--theme-f4894f, #f4894f)"/>
+   </g>
+   <g id="text_21">
+    <text style="font-weight: 700; font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-f4894f, #f4894f)" x="260.378182" y="113.464375" transform="rotate(-0 260.378182 113.464375)">2</text>
+   </g>
+   <g id="text_22">
+    <text style="font-weight: 700; font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-f4894f, #f4894f)" x="569.650909" y="113.464375" transform="rotate(-0 569.650909 113.464375)">2</text>
+   </g>
+   <g id="text_23">
+    <text style="font-weight: 700; font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-f4894f, #f4894f)" x="672.741818" y="113.464375" transform="rotate(-0 672.741818 113.464375)">9</text>
+   </g>
+   <g id="text_24">
+    <text style="font-weight: 700; font-size: 12px; font-family: Arial, sans-serif; text-anchor: middle; fill: var(--theme-f4894f, #f4894f)" x="724.287273" y="113.464375" transform="rotate(-0 724.287273 113.464375)">1</text>
+   </g>
+   <g id="legend_1">
+    <g id="patch_29">
+     <path d="M 343.025469 77.324406 
+L 369.025469 77.324406 
+L 369.025469 68.224406 
+L 343.025469 68.224406 
+z
+" style="fill: var(--theme-74c8a8, #74c8a8)"/>
+    </g>
+    <g id="text_25">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="379.425469" y="77.324406" transform="rotate(-0 379.425469 77.324406)">Retained</text>
+    </g>
+    <g id="patch_30">
+     <path d="M 463.037812 77.324406 
+L 489.037812 77.324406 
+L 489.037812 68.224406 
+L 463.037812 68.224406 
+z
+" style="fill: var(--theme-f4894f, #f4894f)"/>
+    </g>
+    <g id="text_26">
+     <text style="font-size: 13px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="499.437812" y="77.324406" transform="rotate(-0 499.437812 77.324406)">Excluded CDS</text>
+    </g>
+   </g>
+  </g>
+  <g id="text_27">
+   <text style="font-weight: 700; font-size: 21px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-eef4f9, #eef4f9)" x="60.48" y="36.116719" transform="rotate(-0 60.48 36.116719)">Coding regions retained for protein comparisons</text>
+  </g>
+  <g id="text_28">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="60.48" y="55.44" transform="rotate(-0 60.48 55.44)">Exclude a CDS for gaps, missing alignment, a premature stop or an unusable start.</text>
+  </g>
+  <g id="text_29">
+   <text style="font-size: 12px; font-family: Arial, sans-serif; text-anchor: start; fill: var(--theme-a9bccb, #a9bccb)" x="103.68" y="448.56" transform="rotate(-0 103.68 448.56)">Numbers above bars show excluded coding regions.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pda6e0bfd73">
+   <rect x="103.68" y="120.96" width="725.76" height="292.32"/>
+  </clipPath>
+ </defs>
+</svg>

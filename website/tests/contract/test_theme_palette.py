@@ -33,6 +33,14 @@ class SvgPaintReferences(unittest.TestCase):
         self.assertNotIn('--theme-ffaadd', themed)
         self.assertEqual(theme_svg(themed), themed)
 
+    def test_explicit_scientific_palette_survives_regeneration(self):
+        svg = ('<svg data-bioseq-palette="explicit">'
+               '<style id="bioseq-light-palette">@media(prefers-color-scheme:light)'
+               '{:root{--theme-223a4f:#e1eaf2;}}</style>'
+               '<path style="fill:var(--theme-223a4f, #223a4f)"/></svg>')
+        self.assertEqual(theme_svg(svg), svg)
+        self.assertEqual(theme_svg(theme_svg(svg)), svg)
+
     def test_authored_qa_palette_is_not_converted_a_second_time(self):
         authored = '.qa-page{--qa-ink:#eef4f9;--qa-surface:#0e2337}\nhtml[data-theme="light"] .qa-page{--qa-ink:#173247;--qa-surface:#fff}\n'
         with tempfile.TemporaryDirectory() as temporary:
