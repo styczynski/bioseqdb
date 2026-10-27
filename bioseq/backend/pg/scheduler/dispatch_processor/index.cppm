@@ -67,6 +67,8 @@ import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.postgres.storage.indexing.minimizer_read_stats;
 export import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.pipeline.runtime_contract;
+// Generated dispatch signatures return the collection owned by :execution_stats.
+export import bioseq.pipeline.minimap_port;
 export import bioseq.pipeline.minimap_port.match_result_contract;
 export import bioseq.pipeline.minimizer_execution_contract;
 export import bioseq.pipeline.stats;
