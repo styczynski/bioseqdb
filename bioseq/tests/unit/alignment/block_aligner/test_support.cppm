@@ -317,7 +317,11 @@ void check_region_alignment_identical(const alignment_region& optimized,
     CHECK(optimized.dp_max_score == forced_dp.dp_max_score);
     CHECK(optimized.has_alignment == forced_dp.has_alignment);
     CHECK(optimized.cigar.size() == forced_dp.cigar.size());
-    CHECK(bioseq::format_cigar(optimized.cigar) == bioseq::format_cigar(forced_dp.cigar));
+    const auto optimized_cigar_text = bioseq::format_cigar(optimized.cigar);
+    const auto forced_dp_cigar_text = bioseq::format_cigar(forced_dp.cigar);
+    REQUIRE(optimized_cigar_text.has_value());
+    REQUIRE(forced_dp_cigar_text.has_value());
+    CHECK(*optimized_cigar_text == *forced_dp_cigar_text);
 }
 
 /** Scores and a label used to generate a test scoring matrix. */

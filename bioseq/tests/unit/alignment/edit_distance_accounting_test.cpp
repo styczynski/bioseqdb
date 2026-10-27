@@ -308,7 +308,9 @@ TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
     std::vector<bioseq::cigar_run> existing{
         bioseq::cigar_run{.length = 3u, .operation = bioseq::cigar_symbol{}.assign_char('M')}};
     REQUIRE(append_implicit_seed_cigar(existing, 5u, 7u));
-    CHECK(bioseq::format_cigar(existing) == "8M2D");
+    const auto existing_cigar_text = bioseq::format_cigar(existing);
+    REQUIRE(existing_cigar_text.has_value());
+    CHECK(*existing_cigar_text == "8M2D");
 }
 
 TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
@@ -322,9 +324,15 @@ TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
         check_exact_region(regions.ksw2, 2, 8, 8);
         check_exact_region(regions.block, 2, 8, 8);
         check_exact_region(regions.batched, 2, 8, 8);
-        CHECK(bioseq::format_cigar(regions.ksw2.cigar) == "8M");
-        CHECK(bioseq::format_cigar(regions.block.cigar) == "8M");
-        CHECK(bioseq::format_cigar(regions.batched.cigar) == "8M");
+        const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
+        REQUIRE(ksw2_cigar_text.has_value());
+        CHECK(*ksw2_cigar_text == "8M");
+        const auto block_cigar_text = bioseq::format_cigar(regions.block.cigar);
+        REQUIRE(block_cigar_text.has_value());
+        CHECK(*block_cigar_text == "8M");
+        const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
+        REQUIRE(batched_cigar_text.has_value());
+        CHECK(*batched_cigar_text == "8M");
     }
 }
 
@@ -354,9 +362,15 @@ TEST_CASE("Exact edit accounting forces traceback when CIGAR was not requested",
         CHECK(regions.ksw2.edit_distance == 2);
         CHECK(regions.block.edit_distance == 2);
         CHECK(regions.batched.edit_distance == 2);
-        CHECK(bioseq::format_cigar(regions.ksw2.cigar) == "40M");
-        CHECK(bioseq::format_cigar(regions.block.cigar) == "40M");
-        CHECK(bioseq::format_cigar(regions.batched.cigar) == "40M");
+        const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
+        REQUIRE(ksw2_cigar_text.has_value());
+        CHECK(*ksw2_cigar_text == "40M");
+        const auto block_cigar_text = bioseq::format_cigar(regions.block.cigar);
+        REQUIRE(block_cigar_text.has_value());
+        CHECK(*block_cigar_text == "40M");
+        const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
+        REQUIRE(batched_cigar_text.has_value());
+        CHECK(*batched_cigar_text == "40M");
     }
 }
 
@@ -375,7 +389,11 @@ TEST_CASE("Left-extension exact counting uses source-order CIGAR windows",
         CHECK(regions.batched.query_end == regions.ksw2.query_end);
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
-        CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
+        const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
+        const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
+        REQUIRE(batched_cigar_text.has_value());
+        REQUIRE(ksw2_cigar_text.has_value());
+        CHECK(*batched_cigar_text == *ksw2_cigar_text);
         check_exact_region(regions.ksw2, 3, 16, 13);
         check_exact_region(regions.batched, 3, 16, 13);
     }
@@ -425,7 +443,11 @@ TEST_CASE("Exact mandatory gaps are unbanded before SneakySnake rejection",
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
         CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
-        CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
+        const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
+        const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
+        REQUIRE(batched_cigar_text.has_value());
+        REQUIRE(ksw2_cigar_text.has_value());
+        CHECK(*batched_cigar_text == *ksw2_cigar_text);
         CHECK(prefilter.lower_bound == regions.ksw2.edit_distance);
     }
 }
@@ -449,7 +471,11 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
             CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
             CHECK(regions.batched.match_length == regions.ksw2.match_length);
             CHECK(regions.batched.block_length == regions.ksw2.block_length);
-            CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
+            const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
+            const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
+            REQUIRE(batched_cigar_text.has_value());
+            REQUIRE(ksw2_cigar_text.has_value());
+            CHECK(*batched_cigar_text == *ksw2_cigar_text);
 
             const cigar_consumption consumed =
                 measure_cigar_consumption(std::span<const bioseq::cigar_run>{
