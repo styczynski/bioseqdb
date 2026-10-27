@@ -159,7 +159,7 @@ static_assert(index_table_shard_codec::field_count == 9);
 static_assert(seq_sub_table_codec::field_count == 11);
 static_assert(minimizer_generation_storage_codec::field_count == 18);
 static_assert(minimizer_generation_reaper_codec::field_count == 5);
-static_assert(sequence_source_version_codec::field_count == 20);
+static_assert(sequence_source_version_codec::field_count == 23);
 static_assert(aligner_options_codec::field_count == 36);
 static_assert(column_mapping_codec::field_count == 2);
 static_assert(
@@ -254,7 +254,61 @@ static_assert(
 static_assert(
     sequence_source_version_codec::expected_descriptor[10].nullable);
 static_assert(
+    sequence_source_version_codec::attribute_number<
+        &sequence_source_version_row::encoding>() == 19);
+static_assert(
+    sequence_source_version_codec::attribute_number<
+        &sequence_source_version_row::cigar_space>() == 20);
+static_assert(
+    sequence_source_version_codec::attribute_number<
+        &sequence_source_version_row::encoded_payload_bytes>() == 21);
+static_assert(
+    sequence_source_version_codec::attribute_number<
+        &sequence_source_version_row::source_content_checksum>() == 22);
+static_assert(
+    sequence_source_version_codec::attribute_number<
+        &sequence_source_version_row::state>() == 23);
+static_assert(
+    sequence_source_version_codec::expected_descriptor[18].name
+    == "encoding");
+static_assert(
+    sequence_source_version_codec::expected_descriptor[18].type_oid
+    == INT2OID);
+static_assert(
+    !sequence_source_version_codec::expected_descriptor[18].nullable);
+static_assert(std::same_as<
+              sequence_source_version_codec::member_type<
+                  &sequence_source_version_row::encoding>,
+              std::int16_t>);
+static_assert(
     sequence_source_version_codec::expected_descriptor[19].name
+    == "cigar_space");
+static_assert(
+    sequence_source_version_codec::expected_descriptor[19].type_oid
+    == INT2OID);
+static_assert(
+    !sequence_source_version_codec::expected_descriptor[19].nullable);
+static_assert(std::same_as<
+              sequence_source_version_codec::member_type<
+                  &sequence_source_version_row::cigar_space>,
+              std::int16_t>);
+static_assert(
+    sequence_source_version_codec::expected_descriptor[20].name
+    == "encoded_payload_bytes");
+static_assert(
+    sequence_source_version_codec::expected_descriptor[20].type_oid
+    == INT8OID);
+static_assert(
+    !sequence_source_version_codec::expected_descriptor[20].nullable);
+static_assert(std::same_as<
+              sequence_source_version_codec::member_type<
+                  &sequence_source_version_row::encoded_payload_bytes>,
+              std::int64_t>);
+static_assert(
+    sequence_source_version_codec::expected_descriptor[21].name
+    == "source_content_checksum");
+static_assert(
+    sequence_source_version_codec::expected_descriptor[22].name
     == "state");
 static_assert(
     aligner_options_codec::expected_descriptor[0].name

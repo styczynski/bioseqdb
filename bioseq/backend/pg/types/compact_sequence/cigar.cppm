@@ -116,11 +116,6 @@ inline void require_cigar_success(std::expected<void, bioseq::cigar_error> value
     __builtin_unreachable();
 }
 
-/** Return the registered operation alphabet code without a copied numeric identifier. */
-[[nodiscard]] constexpr std::uint8_t cigar_alphabet_code() noexcept {
-    return pgseq_supported_alphabets::index_of<bioseq::cigar_symbol>();
-}
-
 /** Resolve an external alphabet/space name through the alphabet-owned parser. */
 [[nodiscard]] inline bioseq::cigar_space checked_cigar_space(std::string_view name) {
     const auto space = bioseq::cigar_space_from_name(name);
@@ -150,7 +145,7 @@ inline void require_cigar_success(std::expected<void, bioseq::cigar_error> value
 
 /** Validate a typed letter and recover its semantic CIGAR operation. */
 [[nodiscard]] inline bioseq::cigar_symbol checked_cigar_letter(bioseq::pg_types::letter operation) {
-    if (operation.alphabet_code != cigar_alphabet_code()
+    if (operation.alphabet_code != pgseq_cigar_alphabet_code
         || operation.rank >= seqan3::alphabet_size<bioseq::cigar_symbol>)
         cigar_argument_error("CIGAR operation must be a bioseq.letter('cigar')");
     return bioseq::cigar_symbol{}.assign_rank(operation.rank);
@@ -212,7 +207,7 @@ template<std::size_t Count>
 /** Convert a checked canonical run to a SQL cigar_op record. */
 [[nodiscard]] inline Datum form_cigar_op(Oid type, const bioseq::cigar_run& operation) {
     return form_cigar_record(type, std::array{
-        make_letter_datum(cigar_alphabet_code(), static_cast<std::uint8_t>(seqan3::to_rank(operation.operation))),
+        make_letter_datum(pgseq_cigar_alphabet_code, static_cast<std::uint8_t>(seqan3::to_rank(operation.operation))),
         Int64GetDatum(static_cast<std::int64_t>(operation.length))});
 }
 
@@ -803,7 +798,7 @@ Datum cigar_replace_text(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum old_cigar,
     const std::string& new_cigar, std::int64_t start_pos, std::int64_t end_pos) {
     const auto target = compact_sequence_stdc_type_params{
-        .alphabet_code = cigar_alphabet_code(),
+        .alphabet_code = pgseq_cigar_alphabet_code,
         .storage_unit_byte_width = sizeof(bioseq::cigar_run),
         .encoding = bioseq::sequence_encoding::cigar_rle,
         .space = bioseq::cigar_space::compatibility};
@@ -934,6 +929,19 @@ Datum cigar_to_msa(
 } // namespace bioseq::pg_types::sql_routines
 
 export namespace bioseq::pg_types::sql_wrappers {
+
+/** Bind one text operation to the CIGAR letter alphabet, then use the checked run constructor. */
+[[bioseq_sql::sql_function({.schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable, .parallel = bioseq::sql::parallel_safety::safe})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op">})]]
+[[bioseq_sql::depends(bioseq::pg_types::sql_routines::cigar_op)]]
+[[nodiscard]] bioseq::sql::sql_function_body<Datum> cigar_op(
+    const std::string& operation, std::int64_t length) {
+    static_cast<void>(operation);
+    static_cast<void>(length);
+    return {.body = bioseq::sql::checked_sql{
+        "SELECT bioseq.cigar_op($1::bioseq.letter('cigar'),$2)"}};
+}
 
 /** Request compact run-array export; the required typed witness is deliberately ignored. */
 [[bioseq_sql::sql_function({.schema = bioseq::sql::fixed_schema<"bioseq">,

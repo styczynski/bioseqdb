@@ -1338,8 +1338,8 @@ template<sequence_alphabet Alphabet, class TextOwner>
         TextOwner& output, storage::lazy_sequence_view<Alphabet> sequence,
         storage::sequence_size_t from, storage::sequence_size_t length) {
     constexpr std::size_t chunk_capacity = 1024u;
-    std::array<std::uint8_t, chunk_capacity> ranks{};
-    std::array<char, chunk_capacity> characters{};
+    std::array<std::uint8_t, chunk_capacity> ranks;
+    std::array<char, chunk_capacity> characters;
     for (storage::sequence_size_t consumed = 0u; consumed < length;) {
         const auto count = static_cast<std::size_t>(std::min<storage::sequence_size_t>(length - consumed, chunk_capacity));
         sequence.template copy_ranks<false, false>(std::span<std::uint8_t>{ranks.data(), count},
