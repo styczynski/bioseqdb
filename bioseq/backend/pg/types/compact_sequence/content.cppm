@@ -227,6 +227,37 @@ template<bool p_match_order>
     Datum right_input,
     bioseq::postgres::support::function_call_context const* call = nullptr)
 {
+    const auto left_header = classify_and_describe_sequence_header(left_input);
+    const auto right_header = classify_and_describe_sequence_header(right_input);
+    if (left_header.alphabet_bound && right_header.alphabet_bound
+        && pgseq_is_cigar_alphabet(left_header.alphabet_code)
+        && pgseq_is_cigar_alphabet(right_header.alphabet_code)
+        && left_header.kind != pg_sequence_datum_kind::locator
+        && right_header.kind != pg_sequence_datum_kind::locator) {
+        // The read backend performs full flat validation exactly once. Do not
+        // validate through content_operand and then repeat it during promotion.
+        if constexpr (p_match_order) {
+            DEBUG_ASSERT(call != nullptr, "CIGAR ordering requires an explicit scratch provider");
+            pg_cigar_comparison_scratch_provider scratch{*call};
+            const auto comparison = with_pg_cigar_sequences<
+                std::expected<std::strong_ordering, bioseq::cigar_error>>(
+                left_input, right_input,
+                [&scratch](auto& backend, auto left_view, auto right_view) {
+                    return bioseq::compare_cigar(backend, left_view, right_view, scratch);
+                });
+            if (!comparison) pg_raise_cigar_error(comparison.error());
+            return *comparison < 0 ? -1 : *comparison > 0 ? 1 : 0;
+        } else {
+            const auto equal = with_pg_cigar_sequences<
+                std::expected<bool, bioseq::cigar_error>>(
+                left_input, right_input,
+                [](auto& backend, auto left_view, auto right_view) {
+                    return bioseq::equal_cigar(backend, left_view, right_view);
+                });
+            if (!equal) pg_raise_cigar_error(equal.error());
+            return *equal ? 0 : 1;
+        }
+    }
     content_operand left = describe_content_operand(left_input);
     content_operand right = describe_content_operand(right_input);
     if (left.descriptor.kind == pg_sequence_datum_kind::locator
@@ -244,28 +275,6 @@ template<bool p_match_order>
                != right.descriptor.alphabet_code) {
         result = left.descriptor.alphabet_code
                 < right.descriptor.alphabet_code ? -1 : 1;
-    } else if (pgseq_is_cigar_alphabet(left.descriptor.alphabet_code)) {
-        if constexpr (p_match_order) {
-            DEBUG_ASSERT(call != nullptr, "CIGAR ordering requires an explicit scratch provider");
-            pg_cigar_comparison_scratch_provider scratch{*call};
-            const auto comparison = with_pg_cigar_sequences<
-                std::expected<std::strong_ordering, bioseq::cigar_error>>(
-                left.dispatch, right.dispatch,
-                [&scratch](auto& backend, auto left_view, auto right_view) {
-                    return bioseq::compare_cigar(backend, left_view, right_view, scratch);
-                });
-            if (!comparison) pg_raise_cigar_error(comparison.error());
-            result = *comparison < 0 ? -1 : *comparison > 0 ? 1 : 0;
-        } else {
-            const auto equal = with_pg_cigar_sequences<
-                std::expected<bool, bioseq::cigar_error>>(
-                left.dispatch, right.dispatch,
-                [](auto& backend, auto left_view, auto right_view) {
-                    return bioseq::equal_cigar(backend, left_view, right_view);
-                });
-            if (!equal) pg_raise_cigar_error(equal.error());
-            result = *equal ? 0 : 1;
-        }
     } else {
         result = with_pg_sequence_views<int>(
             left_input, right_input,
@@ -622,6 +631,18 @@ Datum seq_larger(
     Datum input,
     std::uint64_t seed)
 {
+    const auto header = classify_and_describe_sequence_header(input);
+    if (header.alphabet_bound && pgseq_is_cigar_alphabet(header.alphabet_code)
+        && header.kind != pg_sequence_datum_kind::locator) {
+        const auto hash = with_pg_cigar_sequence<
+            std::expected<std::uint64_t, bioseq::cigar_error>>(
+            input,
+            [seed](auto& backend, auto view) {
+                return bioseq::hash_cigar(backend, view, seed);
+            });
+        if (!hash) pg_raise_cigar_error(hash.error());
+        return *hash;
+    }
     content_operand operand = describe_content_operand(input);
     if (operand.descriptor.kind == pg_sequence_datum_kind::locator) {
         content_locator_error();
@@ -630,15 +651,6 @@ Datum seq_larger(
     if (!operand.descriptor.alphabet_bound) {
         result = hash_unbound(
             operand, prefix_hash_seed(seed, 0u, false, 0u));
-    } else if (pgseq_is_cigar_alphabet(operand.descriptor.alphabet_code)) {
-        const auto hash = with_pg_cigar_sequence<
-            std::expected<std::uint64_t, bioseq::cigar_error>>(
-            operand.dispatch,
-            [seed](auto& backend, auto view) {
-                return bioseq::hash_cigar(backend, view, seed);
-            });
-        if (!hash) pg_raise_cigar_error(hash.error());
-        result = *hash;
     } else {
         const std::uint64_t prefixed = prefix_hash_seed(
             seed, 1u, true, operand.descriptor.alphabet_code);

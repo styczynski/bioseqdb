@@ -324,15 +324,21 @@ template<cigar_sequence_backend Backend>
 template<cigar_sequence_backend Backend>
 [[nodiscard]] std::expected<std::optional<typename Backend::run_type>, cigar_error> cigar_op_at(
         Backend& backend, typename Backend::sequence_view_type view, std::int64_t index) {
-    auto count = cigar_op_count(backend, view);
-    if (!count) return std::unexpected(count.error());
-    const auto normalized = storage::normalize_element_index(index, *count);
-    if (!normalized) return std::optional<typename Backend::run_type>{};
+    storage::sequence_size_t normalized_index{};
+    if (index >= 0) {
+        normalized_index = static_cast<storage::sequence_size_t>(index);
+    } else {
+        const auto count = cigar_op_count(backend, view);
+        if (!count) return std::unexpected(count.error());
+        const auto normalized = storage::normalize_element_index(index, *count);
+        if (!normalized) return std::optional<typename Backend::run_type>{};
+        normalized_index = *normalized;
+    }
     auto cursor = backend.runs(view, 0u, backend.length(view));
-    for (std::size_t position = 0;; ++position) {
+    for (storage::sequence_size_t position = 0;; ++position) {
         auto next = cursor.next();
         if (!next) return std::unexpected(next.error());
-        if (!*next || position == *normalized) return *next;
+        if (!*next || position == normalized_index) return *next;
     }
 }
 

@@ -1909,7 +1909,12 @@ export struct pg_cigar_datum_payload_reader {
             auto* slice = PG_DETOAST_DATUM_SLICE(input,
                 static_cast<std::int32_t>(slice_offset),
                 static_cast<std::int32_t>(output.size()));
-            std::memcpy(output.data(), VARDATA(slice), output.size());
+            if (VARSIZE_ANY_EXHDR(slice) != output.size()) {
+                pfree(slice);
+                return std::unexpected(bioseq::cigar_error{
+                    bioseq::cigar_error_code::invalid_encoding, offset});
+            }
+            std::memcpy(output.data(), VARDATA_ANY(slice), output.size());
             pfree(slice);
         }
         return {};
@@ -1948,6 +1953,12 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             const bioseq::cigar_rle_reader<bioseq::cigar_symbol,
                 pg_cigar_datum_payload_reader> reader{
                     {input, bytes}, static_cast<std::uint32_t>(descriptor.bp_length), descriptor.space};
+            const auto payload_header = reader.read_header();
+            if (!payload_header) pg_raise_cigar_error(payload_header.error());
+            const auto expected_bytes = bioseq::measure_cigar_payload(payload_header->run_count);
+            if (!expected_bytes || *expected_bytes != bytes) {
+                pg_raise_cigar_error({bioseq::cigar_error_code::invalid_encoding});
+            }
             const auto position = reader.seek(static_cast<std::uint32_t>(index));
             if (!position) pg_raise_cigar_error(position.error());
             const auto operation = reader.run_at(position->run_index);
