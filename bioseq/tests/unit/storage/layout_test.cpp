@@ -179,9 +179,6 @@ TEST_CASE("canonical locator payload codec validates exact framing",
     locator.payload_version = bioseq::storage::sequence_locator_payload_version;
     locator.reserved_16 = 1u;
     REQUIRE_FALSE(bioseq::storage::encode_sequence_locator_payload(payload, locator));
-    locator.reserved_16 = 0u;
-    locator.reserved_16 = 1u;
-    REQUIRE_FALSE(bioseq::storage::encode_sequence_locator_payload(payload, locator));
 
     REQUIRE(bioseq::storage::is_sequence_locator_stub_width(
         bioseq::storage::sequence_locator_stub_width_marker));
