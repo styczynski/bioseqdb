@@ -46,6 +46,7 @@ import bioseq.simd.sorting;
 import bioseq.storage.batch_sort;              // sequence_batch_sorter, sequence_sort_options
 import bioseq.storage.lazy_sequence;           // Lazy sequence views and packed sequence copies.
 import bioseq.storage.scanner;                 // sequence_access_requirement
+import bioseq.storage.size;                    // sequence_size_t
 import bioseq.postgres.storage.manager;        // is_locator_stub
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
