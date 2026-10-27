@@ -58,6 +58,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
 import bioseq.indexing.symbol_counts;
 import bioseq.sequences.cigar;
 import bioseq.postgres.storage.indexing.admin.policy_catalog;
