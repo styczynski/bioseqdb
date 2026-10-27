@@ -43,7 +43,7 @@ import bioseq.indexing.minimizer_hashmap;
 import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor.vulkan;
 import bioseq.postgres.support;

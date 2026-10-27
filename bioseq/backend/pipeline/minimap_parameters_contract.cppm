@@ -9,9 +9,9 @@ module;
 #include <exception>
 #include <limits>
 #include <mutex>
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 #include <memory>
-#endif
+#include <stdexcept>
+#include <utility>
 
 export module bioseq.pipeline.minimap_parameters_contract;
 
@@ -1167,3 +1167,132 @@ struct minimap2_parameters {
 };
 
 } // namespace bioseq::simd
+
+// Statement ownership depends on settings and selected kernels, not execution algorithms.
+export namespace bioseq::simd::pipe {
+
+/// CPU or Vulkan choices for seeding and chaining in one request.
+enum class seed_chain_route : std::uint8_t {
+    host_seed_host_chain,
+    host_seed_vulkan_chain,
+    vulkan_seed_host_chain,
+    vulkan_seed_vulkan_chain,
+};
+
+/// Classify seeding and chaining independently, from later alignment stages.
+[[nodiscard]] inline seed_chain_route classify_seed_chain_route(
+    const minimap2_parameters& params) {
+    bool device_seed = false;
+    switch (params.minimizer_algorithm) {
+    case minimizer_algorithm::scalar:
+    case minimizer_algorithm::simd_minimap2_reference:
+    case minimizer_algorithm::two_stack_nthash:
+    case minimizer_algorithm::bounded_nthash_simd:
+        break;
+    case minimizer_algorithm::vulkan_minimap_integer:
+        device_seed = true;
+        break;
+    default:
+        throw std::invalid_argument("statement plan has an unknown minimizer algorithm");
+    }
+    bool device_chain = false;
+    switch (params.chaining_algorithm) {
+    case chaining_algorithm::scalar_minimap2:
+    case chaining_algorithm::simd_minimap2:
+    case chaining_algorithm::range_minimum_query:
+        break;
+    case chaining_algorithm::vulkan_tiled_dynamic_programming:
+        device_chain = true;
+        break;
+    default:
+        throw std::invalid_argument("statement plan has an unknown chaining algorithm");
+    }
+    return device_seed
+        ? (device_chain ? seed_chain_route::vulkan_seed_vulkan_chain
+                        : seed_chain_route::vulkan_seed_host_chain)
+        : (device_chain ? seed_chain_route::host_seed_vulkan_chain
+                        : seed_chain_route::host_seed_host_chain);
+}
+
+/// Shared statement settings and route, fixed before pipeline preparation.
+struct statement_execution_plan final {
+    const minimap2_parameters frozen_parameters;
+    const seed_chain_route route;
+
+    /// Check the stored route for Vulkan seeding.
+    [[nodiscard]] bool uses_vulkan_seed() const {
+        switch (route) {
+        case seed_chain_route::host_seed_host_chain:
+        case seed_chain_route::host_seed_vulkan_chain:
+            return false;
+        case seed_chain_route::vulkan_seed_host_chain:
+        case seed_chain_route::vulkan_seed_vulkan_chain:
+            return true;
+        }
+        throw std::logic_error{"statement plan contains an invalid seed/chain route"};
+    }
+};
+
+using statement_execution_plan_owner = std::shared_ptr<const statement_execution_plan>;
+
+/// Check the selected algorithms and required runtime bindings, then create
+/// the shared statement plan. Invalid settings throw before allocation.
+[[nodiscard]] inline statement_execution_plan_owner make_statement_execution_plan(
+    minimap2_parameters frozen_parameters) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (frozen_parameters.prefilter_enabled ||
+        frozen_parameters.base_alignment_algorithm == base_alignment_algorithm::ksw2_batched) {
+        throw std::invalid_argument(
+            "E2E execution excludes prefilter and legacy batched alignment");
+    }
+#endif
+    if (frozen_parameters.kmer_size <= 0 || frozen_parameters.window_size <= 0) {
+        throw std::invalid_argument("statement plan requires positive minimizer k and w");
+    }
+    switch (frozen_parameters.base_alignment_algorithm) {
+    case base_alignment_algorithm::ksw2:
+    case base_alignment_algorithm::block_aligner:
+    case base_alignment_algorithm::ksw2_batched:
+        // Batched KSW2 remains valid for ordinary calls. E2E benchmarks reject
+        // it in  the check above.
+        break;
+    default:
+        throw std::invalid_argument("statement plan has an unknown alignment algorithm");
+    }
+    const auto route = classify_seed_chain_route(frozen_parameters);
+    switch (route) {
+    case seed_chain_route::host_seed_host_chain:
+        break;
+    case seed_chain_route::host_seed_vulkan_chain:
+        if (!frozen_parameters.vulkan_enabled) {
+            throw std::invalid_argument{"selected Vulkan chaining is disabled"};
+        }
+        break;
+    case seed_chain_route::vulkan_seed_host_chain:
+    case seed_chain_route::vulkan_seed_vulkan_chain:
+        if (!frozen_parameters.vulkan_enabled ||
+            !frozen_parameters.vulkan_seed_hits_enabled) {
+            throw std::invalid_argument{"selected Vulkan seeding is disabled"};
+        }
+        break;
+    }
+    if (frozen_parameters.highway_kernels == nullptr) {
+        // PostgreSQL and standalone callers must supply their selected Highway
+        // kernels. Shared core code cannot choose a binding for the caller.
+        throw std::invalid_argument{
+            "statement plan requires an explicit Highway binding"};
+    }
+    const auto owner = std::make_shared<const statement_execution_plan>(
+        std::move(frozen_parameters), route);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (owner->frozen_parameters.downstream_active_wall != nullptr &&
+        !owner->frozen_parameters.downstream_active_wall
+             ->bind_benchmark_e2e_statement_owner(owner)) {
+        throw std::logic_error{"E2E observation tracker belongs to a different statement owner"};
+    }
+#endif
+    return owner;
+}
+
+
+} // namespace bioseq::simd::pipe
