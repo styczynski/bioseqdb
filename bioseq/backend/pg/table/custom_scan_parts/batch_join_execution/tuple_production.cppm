@@ -10,6 +10,7 @@ module;
 #include <exception>
 #include <limits>
 #include <new>
+#include <span>
 #include <string>
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
@@ -113,10 +114,13 @@ export {
         } else if (site.funcid == oids.divergence_oid) {
             value = Float4GetDatum(match.divergence);
         } else if (site.funcid == oids.cigar_oid) {
-            const std::string cigar = bioseq::simd::format_cigar(match.cigar);
-            MemoryContext previous = MemoryContextSwitchTo(output_context);
-            value = CStringGetTextDatum(cigar.c_str());
-            MemoryContextSwitchTo(previous);
+            is_null = !match.has_cigar;
+            if (match.has_cigar) {
+                MemoryContext previous = MemoryContextSwitchTo(output_context);
+                value = bioseq::postgres::support::pg_datum::from_pointer(make_pg_cigar_from_runs(
+                    std::span<const bioseq::cigar_run>{match.cigar.data(), match.cigar.size()})).raw();
+                MemoryContextSwitchTo(previous);
+            }
         } else {
             is_null = true;
         }

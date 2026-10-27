@@ -50,6 +50,8 @@ export struct feature_flag_visitor {
             if (is_mmsearch_funcid(fe->funcid, *o)) {
                 detector.flags.has_mmsearch = true;
             }
+            // The full CIGAR seq projection requests the same base-alignment
+            // stage as has_cigar; its result alphabet is not a reference filter.
             if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
                 detector.flags.uses_cigar = true;
             }

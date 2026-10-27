@@ -356,12 +356,11 @@ export {
     /**
      * @brief Fills the installed match placeholders fhom one alignment result.
      *
-     * Skip placeholders that are absent. Allocate CIGAR text in the current
+     * Skip placeholders that are absent. Allocate the CIGAR sequence in the current
      * PostgreSQL memory context, where it remains available  for row projection.
      */
     void populate_placeholder_consts(placeholder_constants& consts,
                                      const bioseq::simd::match_result& match) {
-        using bioseq::simd::format_cigar;
         // Assert that the value fits in INT4 before filling its placeholder.
         auto set_int = [](Const* node, int64_t value) {
             if (node == nullptr)
@@ -420,10 +419,11 @@ export {
         set_float(consts.divergence_node, match.divergence);
 
         if (consts.cigar_node != nullptr) {
-            std::string cigar_str = format_cigar(match.cigar);
-            consts.cigar_node->constvalue =
-                bioseq::postgres::support::pg_datum::from_text_cstring(cigar_str.c_str()).raw();
-            consts.cigar_node->constisnull = false;
+            consts.cigar_node->constisnull = !match.has_cigar;
+            consts.cigar_node->constvalue = match.has_cigar
+                ? bioseq::postgres::support::pg_datum::from_pointer(make_pg_cigar_from_runs(
+                      std::span<const bioseq::cigar_run>{match.cigar.data(), match.cigar.size()})).raw()
+                : Datum{0};
         }
     }
 

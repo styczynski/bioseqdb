@@ -373,9 +373,9 @@ TEST_CASE("Multiple Const mmsearch quals fail closed",
 }
 
 TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
-          "lexicographic max CIGAR",
+          "greatest CIGAR by reported matches",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // MAX must receive the CIGAR strings produced by mmsearch.
+    // MAX must receive the CIGAR sequences produced by mmsearch.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 

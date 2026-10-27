@@ -933,7 +933,7 @@ float divergence(
  * @ingroup bioseq_sql_public_api
 
  * @param el The same target sequence expression passed as the first argument of the owning mmsearch call; it identifies the current alignment result.
- * @return CIGAR operation string for the current alignment; selecting it requests base alignment.
+ * @return Full CIGAR sequence for the current alignment; selecting it requests base alignment.
  *
  * ```sql
  * -- Requesting cigar enables additional pipeline stage for base alignment, because the pipeline needs to know exactly which bases were substituted/inserted or deleted. However, score alone does not enable it and can return zero (less exact score is used based only on chaining).
@@ -959,7 +959,10 @@ float divergence(
  * ROLLBACK;
  * ```
 */
-std::string cigar(
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::custom_type<"bioseq.seq">,
+})]]
+Datum cigar(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
         })]]

@@ -86,7 +86,7 @@ constexpr std::array<projection_probe, 14> k_projection_helpers = {{
     {"bioseq.target_len(pk)",             "int8"},
     {"bioseq.query_len(pk)",              "int8"},
     {"bioseq.divergence(pk)",             "float4"},
-    {"bioseq.cigar(pk)",                  "text"},
+    {"bioseq.cigar(pk)",                  "bioseq.seq"},
 }};
 
 void check_projection_helper(const projection_probe& probe) {

@@ -16,6 +16,7 @@ extern "C" {
 #include "storage/dsm.h"
 #include "storage/shmem.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
 #include "rewrite/rewriteManip.h"
@@ -129,6 +130,13 @@ export {
             if (!exact_function_exists_missing_ok("bioseq", function_name, {ANYELEMENTOID})) {
                 return false;
             }
+        }
+        // A CIGAR projection carries a sequence Datum, including its alphabet;
+        // accepting the former text result would corrupt rewritten placeholders.
+        const Oid cigar_oid = exact_function_oid(
+            "bioseq", "cigar", {ANYELEMENTOID}, /*missing_ok=*/true);
+        if (!OidIsValid(cigar_oid) || get_func_rettype(cigar_oid) != seq_oid) {
+            return false;
         }
 
         return exact_function_exists_missing_ok("bioseq", "seq_concat", {seq_oid, seq_oid}) &&

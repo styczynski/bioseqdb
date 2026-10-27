@@ -304,24 +304,6 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
     return gap_count != 0u;
 }
 
-/** Decodes packed GPU CIGAR words into @p destination and merges adjacent identical opcodes. */
-template <class p_cigar_storage>
-inline void append_packed_cigar_slice(p_cigar_storage& destination,
-                                      std::span<const std::uint32_t> packed) {
-    for (std::uint32_t entry : packed) {
-        const std::uint32_t opcode = entry & 0xfU;
-        const std::uint32_t op_length = entry >> 4;
-        if (op_length == 0u) {
-            continue;
-        }
-        if (!destination.empty() && destination.back().opcode == opcode) {
-            destination.back().length += op_length;
-        } else {
-            destination.push_back(cigar_operation{op_length, opcode});
-        }
-    }
-}
-
 /** Runs ordinary minimap alignment and reports known failures to PostgreSQL. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_raw_pg_checked(p_arguments&&... args) {

@@ -32,6 +32,7 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
+import bioseq.sequences.cigar_alphabet;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.scanner;
 
@@ -48,6 +49,37 @@ struct sequence_sort_options {
     bool nulls_first = false;
     bool vulkan_enabled = false;
 };
+
+/**
+ * Sort immutable batch keys with a caller-supplied three-way comparison policy.
+ * The policy must be allocation-free and worker-safe when worker_shareable is true.
+ * Equal keys use the original source index, including the existing DESC tie rule.
+ */
+template<std::ranges::sized_range Batch, class Compare>
+    requires std::ranges::random_access_range<Batch>
+[[nodiscard]] std::vector<std::size_t> sort_batch_permutation(
+        const Batch& batch, const sequence_sort_options& options,
+        Compare comparison, bool worker_shareable,
+        bioseq::parallelism::tracked_job_observer observer = {}) {
+    const std::size_t sequence_count = std::ranges::size(batch);
+    std::vector<std::size_t> order(sequence_count);
+    std::iota(order.begin(), order.end(), std::size_t{0u});
+    const bool descending = options.descending;
+    const auto less = [&batch, comparison, descending](
+            std::size_t left, std::size_t right) {
+        const auto order = comparison(batch[left], batch[right]);
+        if (order != 0) return descending ? order > 0 : order < 0;
+        return descending ? left > right : left < right;
+    };
+    if (worker_shareable) {
+        bioseq::parallelism::global_pool::instance().parallel_sort_tracked(
+            order.begin(), order.end(), less, observer);
+    } else {
+        std::stable_sort(order.begin(), order.end(), less);
+    }
+    return order;
+}
+
 
 }  // namespace bioseq::storage
 
@@ -371,6 +403,7 @@ template <
     class p_batch = std::span<const lazy_sequence_view<p_alphabet>>>
     requires std::ranges::sized_range<p_batch>
         && std::ranges::random_access_range<p_batch>
+        && (!bioseq::cigar_operation_alphabet<p_alphabet>)
         && std::same_as<
             std::remove_cvref_t<std::ranges::range_value_t<p_batch>>,
             lazy_sequence_view<p_alphabet>>
@@ -384,33 +417,15 @@ struct sequence_batch_sorter {
             const batch_type& batch,
             const sequence_sort_options& options,
             bioseq::parallelism::tracked_job_observer observer = {}) {
-        const std::size_t sequence_count = std::ranges::size(batch);
-        std::vector<std::size_t> order(sequence_count);
-        std::iota(order.begin(), order.end(), std::size_t{0u});
-
-        const bool descending = options.descending;
-        auto less = [&batch, descending](
-                std::size_t left,
-                std::size_t right) {
-            const int comparison = compare_lazy_sequences(
-                batch[left], batch[right]);
-            if (comparison != 0) {
-                return descending ? comparison > 0 : comparison < 0;
-            }
-            return descending ? left > right : left < right;
-        };
         const bool worker_shareable = std::ranges::all_of(
             batch,
             [](sequence_view_type view) {
                 return is_worker_shareable(view);
             });
-        if (worker_shareable) {
-            bioseq::parallelism::global_pool::instance().parallel_sort_tracked(
-                order.begin(), order.end(), less, observer);
-        } else {
-            std::stable_sort(order.begin(), order.end(), less);
-        }
-        return order;
+        return sort_batch_permutation(batch, options,
+            [](sequence_view_type left, sequence_view_type right) {
+                return compare_lazy_sequences(left, right);
+            }, worker_shareable, observer);
     }
 
     /** Tries Vulkan when enabled, then sorts on the CPU if the GPU path declines. */

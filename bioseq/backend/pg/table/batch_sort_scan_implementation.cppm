@@ -12,6 +12,8 @@ module;
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 extern "C" {
+#include "catalog/pg_am_d.h"
+#include "commands/defrem.h"
 #include "utils/expandeddatum.h"
 }
 
@@ -22,10 +24,14 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <expected>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -33,6 +39,10 @@ module bioseq.postgres.table.batch_sort_scan;
 
 import bioseq.common.logging; // bioseq_log
 import bioseq.common.checked_arithmetic;
+import bioseq.common.context;
+import bioseq.sequences.cigar;
+import bioseq.sequences.compact_sequence_typmod;
+import bioseq.simd.sorting;
 import bioseq.storage.batch_sort;              // sequence_batch_sorter, sequence_sort_options
 import bioseq.storage.lazy_sequence;           // Lazy sequence views and packed sequence copies.
 import bioseq.storage.scanner;                 // sequence_access_requirement
@@ -61,6 +71,7 @@ enum class batch_sort_private_field : int {
     sequence_key,
     source_relation_oid,
     source_attribute_number,
+    alphabet_code,
     count,
 };
 
@@ -111,6 +122,7 @@ struct bioseq_batch_sort_runtime {
     std::uint64_t sort_runtime_ns = 0;
     Oid source_relation_oid = InvalidOid;
     AttrNumber source_attno = InvalidAttrNumber;
+    std::uint8_t expected_alphabet = pgseq_unbound_alphabet_code;
     bioseq::storage::pg_sequence_source_route_set source_routes{};
     bool source_routes_acquired = false;
     std::uint64_t admitted_source_rows = 0;
@@ -205,6 +217,181 @@ struct batch_sort_datum {
     });
 }
 
+/** Raise a checked CIGAR failure only after converting PostgreSQL ERROR to C++. */
+[[noreturn]] void batch_sort_cigar_error(bioseq::cigar_error error) {
+    bioseq::postgres::support::invoke_pg_as_cpp([error] { pg_raise_cigar_error(error); });
+    pg_unreachable();
+}
+
+/** Reuse one admitted context across the rare serial comparison fallback. */
+struct batch_cigar_scratch_provider {
+    MemoryContext owner;
+    void*& memory_slot;
+    [[nodiscard]] std::expected<std::reference_wrapper<context::context>, bioseq::cigar_error>
+    acquire() const {
+        try {
+            return std::ref(acquire_pg_sequence_admitted_context(owner, memory_slot));
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::allocation_rejected});
+        } catch (const std::length_error&) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::output_too_large});
+        }
+    }
+};
+
+/**
+ * Prepare immutable encoded CIGAR keys on the backend thread, then reuse the
+ * shared CPU permutation sorter. Flat payloads are borrowed; only trees and
+ * source-backed values copy canonical encoded runs. Workers never read PG state.
+ */
+[[nodiscard]] std::vector<std::size_t> sort_cigar_batch(
+        bioseq_batch_sort_runtime& runtime, pg_sequence_read_session& session,
+        std::span<const Datum> datums, std::span<const pg_sequence_descriptor> descriptors,
+        MemoryContext scratch, bioseq::parallelism::tracked_job_observer observer) {
+    using alphabet_type = bioseq::cigar_symbol;
+    using range_type = compact_sequence_range<alphabet_type>;
+    using key_type = bioseq::cigar_order_key<alphabet_type>;
+    using length_type = bioseq::storage::sequence_size_t;
+    void* memory_slot = nullptr;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::size_t> order;
+    bool preparation_denied = false;
+    try {
+        auto& memory = acquire_pg_sequence_admitted_context(scratch, memory_slot);
+        const auto scope = memory.push<context::arena::scratch>();
+        auto keys = memory.make_scratch_vector<key_type>(datums.size());
+        auto sources = memory.make_scratch_vector<pg_sequence_read_handle>(datums.size());
+        auto run_counts = memory.make_scratch_vector<std::uint32_t>(datums.size());
+        keys.resize(datums.size());
+        sources.resize(datums.size());
+        run_counts.resize(datums.size());
+        std::optional<pg_cigar_backend> backend;
+        bioseq::postgres::support::invoke_pg_as_cpp([&backend, &session] {
+            backend.emplace(session);
+        });
+        std::size_t payload_bytes = 0u;
+        std::size_t profile_count = 0u;
+        std::uint64_t materialized_rows = 0u;
+        for (std::size_t index = 0u; index < datums.size(); ++index) {
+            bioseq::cigar_match_interval_collector collector;
+            if (descriptors[index].kind == pg_sequence_datum_kind::flat_bound) {
+                const auto* flat = reinterpret_cast<const bioseq::pg_types::seq*>(DatumGetPointer(datums[index]));
+                const auto selected = range_type::from_payload(
+                    std::span<const std::byte>{reinterpret_cast<const std::byte*>(flat->data),
+                        static_cast<std::size_t>(VARSIZE(flat)) - bioseq::pg_types::seq::header_bytes()},
+                    static_cast<std::uint32_t>(descriptors[index].bp_length), descriptors[index].space);
+                if (!selected) batch_sort_cigar_error(selected.error());
+                keys[index].canonical = *selected;
+                for (const auto run : selected->runs()) collector.observe(run);
+            } else {
+                sources[index] = bioseq::postgres::support::invoke_pg_as_cpp(
+                    [&backend, datum = datums[index]] { return backend->borrow_input(datum); });
+                auto cursor = backend->runs(sources[index], 0u, descriptors[index].bp_length);
+                bioseq::postgres::support::invoke_pg_as_cpp(
+                    [&cursor, &collector, &run_counts, index] {
+                        for (;;) {
+                            const auto next = cursor.next();
+                            if (!next) batch_sort_cigar_error(next.error());
+                            if (!*next) break;
+                            collector.observe(**next);
+                            if (run_counts[index] == (std::numeric_limits<std::uint32_t>::max)())
+                                batch_sort_cigar_error({bioseq::cigar_error_code::output_too_large});
+                            ++run_counts[index];
+                        }
+                    });
+                const auto encoded_bytes = bioseq::measure_cigar_payload<alphabet_type>(run_counts[index]);
+                if (!encoded_bytes) batch_sort_cigar_error(encoded_bytes.error());
+                const auto combined = bioseq::common::checked_add(payload_bytes, *encoded_bytes);
+                if (!combined) throw std::length_error{"CIGAR batch payload size overflow"};
+                payload_bytes = *combined;
+                ++materialized_rows;
+            }
+            collector.flush();
+            keys[index].summary = collector.summary;
+            const auto combined = bioseq::common::checked_add(profile_count, collector.summary.match_intervals);
+            if (!combined) throw std::length_error{"CIGAR batch profile size overflow"};
+            profile_count = *combined;
+        }
+        auto payload = memory.alloc_scratch_array<std::byte>(payload_bytes);
+        auto profiles = memory.alloc_scratch_array<length_type>(profile_count);
+        std::size_t payload_offset = 0u;
+        std::size_t profile_offset = 0u;
+        for (std::size_t index = 0u; index < keys.size(); ++index) {
+            auto profile = profiles.subspan(profile_offset, keys[index].summary.match_intervals);
+            profile_offset += profile.size();
+            bioseq::cigar_match_interval_collector collector;
+            if (sources[index].alphabet_bound) {
+                const auto encoded_bytes = bioseq::measure_cigar_payload<alphabet_type>(run_counts[index]);
+                if (!encoded_bytes) batch_sort_cigar_error(encoded_bytes.error());
+                const auto destination = payload.subspan(payload_offset, *encoded_bytes);
+                payload_offset += *encoded_bytes;
+                bioseq::cigar_payload_writer<alphabet_type> writer{
+                    destination, run_counts[index], descriptors[index].space};
+                auto cursor = backend->runs(sources[index], 0u, descriptors[index].bp_length);
+                bioseq::postgres::support::invoke_pg_as_cpp(
+                    [&cursor, &writer, &collector, profile] {
+                        for (;;) {
+                            const auto next = cursor.next();
+                            if (!next) batch_sort_cigar_error(next.error());
+                            if (!*next) break;
+                            const auto written = writer.append(**next);
+                            if (!written) batch_sort_cigar_error(written.error());
+                            collector.observe(**next, profile);
+                        }
+                    });
+                const auto written = writer.finish();
+                if (!written) batch_sort_cigar_error(written.error());
+                if (*written != descriptors[index].bp_length)
+                    batch_sort_cigar_error({bioseq::cigar_error_code::input_length_mismatch});
+                keys[index].canonical = range_type{destination, *written, descriptors[index].space};
+            } else {
+                for (const auto run : keys[index].canonical.runs()) collector.observe(run, profile);
+            }
+            collector.flush(profile);
+            if (collector.summary.match_intervals != profile.size())
+                batch_sort_cigar_error({bioseq::cigar_error_code::invalid_encoding});
+            if (profile.size() > 1u)
+                bioseq::simd::sorting::sort_unsigned_64_descending(profile.data(), profile.size());
+            keys[index].descending_match_lengths = profile;
+        }
+        order = bioseq::storage::sort_batch_permutation(
+            std::span<const key_type>{keys.data(), keys.size()}, runtime.spec,
+            [](const key_type& left, const key_type& right) {
+                return bioseq::compare_cigar_order_keys(left, right);
+            }, /*worker_shareable=*/true, observer);
+        runtime.admitted_source_rows = bioseq::common::saturating_add(
+            runtime.admitted_source_rows, materialized_rows);
+        runtime.admitted_source_bytes = bioseq::common::saturating_add(
+            runtime.admitted_source_bytes, static_cast<std::uint64_t>(payload_bytes));
+        runtime.accelerator = "cigar prepared CPU";
+    } catch (const std::bad_alloc&) {
+        preparation_denied = true;
+    } catch (const std::length_error&) {
+        preparation_denied = true;
+    }
+    if (preparation_denied) {
+        ++runtime.admission_fallbacks;
+        batch_cigar_scratch_provider provider{scratch, memory_slot};
+        order = bioseq::storage::sort_batch_permutation(datums, runtime.spec,
+            [&provider](Datum left, Datum right) {
+                const auto comparison = bioseq::postgres::support::invoke_pg_as_cpp(
+                    [left, right, &provider] {
+                        return with_pg_cigar_sequences<std::expected<std::strong_ordering, bioseq::cigar_error>>(
+                            left, right, [&provider](auto& backend, auto left_view, auto right_view) {
+                                return bioseq::compare_cigar(backend, left_view, right_view, provider);
+                            });
+                    });
+                if (!comparison) batch_sort_cigar_error(comparison.error());
+                return *comparison;
+            }, /*worker_shareable=*/false, observer);
+        runtime.accelerator = "cigar semantic CPU admission fallback";
+    }
+    runtime.sort_runtime_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    return order;
+}
+
 /** Sort buffered sequence values and return their row indices in output order.
  *
  * Keep null rows aside and compare sequence views with a common alphabet.
@@ -270,6 +457,10 @@ struct batch_sort_datum {
                 batch_sort_raise_as_cpp(ERRCODE_DATATYPE_MISMATCH,
                                         "BioseqBatchSort requires a bound sequence alphabet");
             }
+            if (descriptor.alphabet_code != rt->expected_alphabet) {
+                batch_sort_raise_as_cpp(ERRCODE_DATATYPE_MISMATCH,
+                    "BioseqBatchSort input does not match its proven alphabet family");
+            }
             if (!descriptors.empty() &&
                 (descriptor.alphabet_code != descriptors.front().alphabet_code ||
                  descriptor.storage_unit_byte_width !=
@@ -303,7 +494,13 @@ struct batch_sort_datum {
                 [scratch] { return begin_pg_sequence_read_session(scratch); });
             const std::uint8_t alphabet = descriptors.front().alphabet_code;
             const std::uint8_t width = descriptors.front().storage_unit_byte_width;
-            bioseq::pg_types::seq::dispatch_instance(
+            if (pgseq_is_cigar_alphabet(alphabet)) {
+                // CIGAR semantics must branch before positional packing, source
+                // admission, and GPU runtime initialization.
+                value_order = sort_cigar_batch(*rt, *session, datums, descriptors,
+                    scratch, async_observer);
+            } else {
+            pgseq_dispatch_biological_instance(
                 alphabet,
                 width,
                 [rt,
@@ -400,6 +597,7 @@ struct batch_sort_datum {
                                       : admission_failed           ? "stdc_compare backend source"
                                                                    : "stdc_compare";
                 });
+            }
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [session] { finish_pg_sequence_read_session(session, true); });
             session = nullptr;
@@ -484,6 +682,14 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
         static_cast<Oid>(private_integer(batch_sort_private_field::source_relation_oid));
     rt->source_attno =
         static_cast<AttrNumber>(private_integer(batch_sort_private_field::source_attribute_number));
+    const int expected_alphabet = private_integer(batch_sort_private_field::alphabet_code);
+    if (expected_alphabet < 0 || expected_alphabet > (std::numeric_limits<std::uint8_t>::max)()
+        || !is_supported_alphabet_code(static_cast<std::uint8_t>(expected_alphabet))) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqBatchSort alphabet capability is invalid")));
+    }
+    rt->expected_alphabet = static_cast<std::uint8_t>(expected_alphabet);
     if (rt->seq_attno <= 0 || (OidIsValid(rt->source_relation_oid) != (rt->source_attno > 0))) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -897,6 +1103,7 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
         best_path->custom_private, private_field_index(batch_sort_private_field::sequence_key)));
     const int source_relation_oid = path_integer(batch_sort_private_field::source_relation_oid);
     const int source_attno = path_integer(batch_sort_private_field::source_attribute_number);
+    const int alphabet_code = path_integer(batch_sort_private_field::alphabet_code);
     auto* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
     AttrNumber sequence_resno = InvalidAttrNumber;
     for (TargetEntry* entry :
@@ -930,6 +1137,7 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
                                        makeInteger(sequence_resno),
                                        makeInteger(source_relation_oid),
                                        makeInteger(source_attno));
+    cscan->custom_private = lappend(cscan->custom_private, makeInteger(alphabet_code));
     cscan->custom_plans = custom_plans;
 
     /* Preserve the child's output columns. custom_scan_tlist describes that
@@ -1028,6 +1236,17 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
         return; /* No sequence sort key. */
     }
 
+    // A seq OID alone proves neither one alphabet family nor this ordering.
+    // Erased/mixed expressions and alternate ORDER BY USING families retain
+    // PostgreSQL's ordinary Sort and its semantic comparison function.
+    const int key_typmod = exprTypmod(sort_key.expression);
+    if (key_typmod < 0 || (key_typmod & 0xff) > 3) return;
+    const auto key_params = compact_sequence_stdc_type_params::decode(key_typmod);
+    if (!is_supported_alphabet_code(key_params.alphabet_code)) return;
+    const Oid sequence_family = get_opfamily_oid(BTREE_AM_OID,
+        list_make2(makeString(pstrdup("bioseq")), makeString(pstrdup("seq_ops"))), /*missing_ok=*/true);
+    if (!OidIsValid(sequence_family) || sort_key.pathkey->pk_opfamily != sequence_family) return;
+
     /* Save the requested direction and null order for execution. */
     const bool descending = pathkey_descending(sort_key.pathkey);
     const bool nulls_first = sort_key.pathkey->pk_nulls_first;
@@ -1087,6 +1306,8 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
                                        copyObject(sort_key.expression),
                                        makeInteger(static_cast<int>(source_relation_oid)),
                                        makeInteger(static_cast<int>(source_attno)));
+    cpath->custom_private = lappend(cpath->custom_private,
+        makeInteger(static_cast<int>(key_params.alphabet_code)));
     cpath->custom_restrictinfo = NIL;
     cpath->methods = &batch_sort_path_methods();
 

@@ -41,6 +41,9 @@ import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.scanner.source_test_contract;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.cigar_alphabet;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.postgres.table.alignment_execution;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.vectorization.execution;
@@ -226,11 +229,17 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
                              /*constisnull=*/true,
                              /*constbyval=*/true);
         };
-        /* TEXT: byref, len=-1 (varlena), default collation. */
-        const auto text_placeholder = []() {
-            return makeConst(TEXTOID,
-                             -1,
-                             DEFAULT_COLLATION_OID,
+        /* CIGAR seq: byref varlena with full/default CIGAR metadata. */
+        const auto cigar_placeholder = []() {
+            const compact_sequence_stdc_type_params params{
+                .alphabet_code = pgseq_cigar_alphabet_code,
+                .storage_unit_byte_width = sizeof(bioseq::cigar_run),
+                .encoding = bioseq::sequence_encoding::cigar_rle,
+                .space = bioseq::cigar_space::compatibility,
+            };
+            return makeConst(get_cached_stub_oids().bioseq_seq_type_oid,
+                             params.encode(),
+                             InvalidOid,
                              -1,
                              bioseq::postgres::support::pg_datum::from_pointer(nullptr).raw(),
                              /*constisnull=*/true,
@@ -257,7 +266,7 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
         runtime.placeholder_consts.is_primary_node = bool_placeholder();
         runtime.placeholder_consts.has_cigar_node = bool_placeholder();
         runtime.placeholder_consts.divergence_node = float_placeholder();
-        runtime.placeholder_consts.cigar_node = text_placeholder();
+        runtime.placeholder_consts.cigar_node = cigar_placeholder();
 
         /* Clear buffered rows while keeping the mmsearch configuration
          * prepared by BeginCustomScan. */
