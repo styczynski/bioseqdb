@@ -13,6 +13,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -120,7 +121,7 @@ requires supports_compact_sequence_bitcast_view<p_left_view>
 // call its SIMD helpers. active_target names the selected namespace.
 
 /**
- * @brief Encodes text and allocates a standard-layout sequence containing it.
+ * @brief Encodes positional text into a rank-packed standard-layout sequence.
  *
  * Uses a temporary packed vector, then copies its words after the new header.
  * The requested storage width must be enabled for the header type
@@ -140,6 +141,7 @@ requires (
     && alphabet_in_supported_set<
         typename p_sequence_header::supported_alphabets_type,
         p_alphabet>
+    && compact_sequence_range<p_alphabet>::traits::is_bit_packed
     && stdc_allocator<p_allocator, p_sequence_header>
 )
 [[nodiscard]]
@@ -202,6 +204,9 @@ inline p_sequence_header* stdc_convert_from_cstr(
             header->bp_size =
                 static_cast<typename p_sequence_header::bp_size_t>(
                     packed.bp_size());
+            header->encoding = bioseq::sequence_encoding::rank_packed;
+            header->space = bioseq::cigar_space::compatibility;
+            header->alignment_padding = {};
 
             if (unit_count > 0) {
                 std::memmove(
@@ -217,12 +222,13 @@ inline p_sequence_header* stdc_convert_from_cstr(
 /**
  * @brief Converts a standard-layout sequence to another supported alphabet.
  *
- * Decodes to text, then encodes that text with p_target_alphabet. Characters
- * unrecognized, by the target use its default rank.
+ * Rank-packed alphabets decode to text and re-encode with p_target_alphabet;
+ * unrecognized target characters use its default rank. Counted-run values
+ * support only a same-alphabet codec-preserving copy at their native width.
  * @param source Input sequence.
  * @param target_byte_width Destination wrd width in bytes.
  * @param allocator Allocates the resulting header and payload.
- * @return New sequence, or nullptr if the destination allocator returns null.
+ * @return New sequence, or nullptr for incompatible codecs or a null allocation.
  */
 template<
     class p_sequence_header,
@@ -242,27 +248,57 @@ inline p_sequence_header* stdc_recode_to(
     std::uint8_t target_byte_width,
     p_allocator&& allocator)
 {
-    std::string ascii;
-    // Decode source to ASCII, then re-encode under the target alphabet.
-    source.convert_to([&ascii]<class p_instance>(const compact_sequence_range<p_instance>& view) {
-        ascii = decode_sequence_simd<p_instance>(view);
-    });
-    return stdc_convert_from_cstr<p_sequence_header, p_target_alphabet>(
-        target_byte_width,
-        static_cast<typename p_sequence_header::bp_size_t>(ascii.size()),
-        ascii.data(),
-        std::forward<p_allocator>(allocator));
+    if (!p_sequence_header::supported_storage_unit_byte_widths_type::contains_runtime(
+            target_byte_width)) {
+        return nullptr;
+    }
+    using target_traits = typename compact_sequence_range<p_target_alphabet>::traits;
+    if constexpr (!target_traits::is_bit_packed) {
+        if (source.alphabet_code != p_sequence_header::supported_alphabets_type::template
+                index_of<p_target_alphabet>()
+            || source.encoding != bioseq::sequence_encoding::cigar_rle
+            || !bioseq::valid_cigar_space(source.space)
+            || source.storage_unit_byte_width != sizeof(typename target_traits::storage_unit)
+            || target_byte_width != source.storage_unit_byte_width) {
+            return nullptr;
+        }
+        return source.recast_storage_width(
+            target_byte_width, std::forward<p_allocator>(allocator));
+    } else {
+        if (source.encoding != bioseq::sequence_encoding::rank_packed
+            || source.space != bioseq::cigar_space::compatibility) {
+            return nullptr;
+        }
+        std::string ascii;
+        bool decoded = false;
+        p_sequence_header::dispatch_instance(
+            source.alphabet_code, source.storage_unit_byte_width,
+            [&source, &ascii, &decoded]<class p_instance>() {
+                if constexpr (p_instance::is_bit_packed) {
+                    const compact_sequence_range<p_instance> view{source};
+                    ascii = decode_sequence_simd<p_instance>(view);
+                    decoded = true;
+                }
+            });
+        if (!decoded) return nullptr;
+        return stdc_convert_from_cstr<p_sequence_header, p_target_alphabet>(
+            target_byte_width,
+            static_cast<typename p_sequence_header::bp_size_t>(ascii.size()),
+            ascii.data(),
+            std::forward<p_allocator>(allocator));
+    }
 }
 
 /**
- * @brief Changes packed word width while keeping the alphabet.
+ * @brief Changes packed word width while preserving alphabet and codec metadata.
  *
  * Copies bytes directly  when letters pack identically across widths. Other
- * alphabets are decoded and encoded again at the new width.
+ * alphabets are decoded and encoded again at the new width. Counted-run values
+ * retain their encoded payload and support only their native record width.
  * @param source Input sequence.
  * @param target Required alphabet code and new word width.
  * @param allocator Allocates the resulting header and payload.
- * @return New sequence, or nullptr for an alphabet mismatch or null allocation.
+ * @return New sequence, or nullptr for incompatible metadata or null allocation.
  */
 template<class p_sequence_header, class p_allocator>
 requires (
@@ -277,38 +313,38 @@ inline p_sequence_header* stdc_rewidth_to_type_params(
 {
     // Width conversion requires the source alphabet, including for callers
     // outside SQL that have not checked the requested type.
-    if (target.alphabet_code != source.alphabet_code) {
+    if (target.alphabet_code != source.alphabet_code
+        || target.encoding != source.encoding
+        || target.space != source.space
+        || !p_sequence_header::supported_storage_unit_byte_widths_type::contains_runtime(
+            target.storage_unit_byte_width)) {
         return nullptr;
-    }
-
-    // A byte copy preserves ranks when the letter width divides eight, as
-    // dna4 does. dna5 leaves different padding at different  word widths, so
-    // changing its width requires decoding and packing the letters again
-    bool byte_aligned = false;
-    p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
-        source.alphabet_code,
-        [&byte_aligned]<class p_alphabet>() {
-            constexpr std::size_t k_letter_bit_width =
-                seqan3::detail::ceil_log2(
-                    static_cast<std::size_t>(
-                        seqan3::alphabet_size<p_alphabet>));
-            byte_aligned = (k_letter_bit_width != 0u)
-                && (8u % k_letter_bit_width == 0u);
-        });
-    if (byte_aligned) {
-        return source.recast_storage_width(
-            target.storage_unit_byte_width,
-            std::forward<p_allocator>(allocator));
     }
     p_sequence_header* result = nullptr;
     p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
         source.alphabet_code,
         [&result, &source, target, &allocator]<class p_source_alphabet>() {
-            result = stdc_recode_to<
-                p_sequence_header, p_source_alphabet>(
-                source,
-                target.storage_unit_byte_width,
-                std::forward<p_allocator>(allocator));
+            using source_traits = typename compact_sequence_range<p_source_alphabet>::traits;
+            // A byte copy preserves ranks when the letter width divides a
+            // byte. Other packed alphabets must decode and pack again.
+            constexpr std::size_t letter_bit_width =
+                seqan3::detail::ceil_log2(seqan3::alphabet_size<p_source_alphabet>);
+            if constexpr (source_traits::is_bit_packed && letter_bit_width != 0u
+                && std::numeric_limits<std::uint8_t>::digits % letter_bit_width == 0u) {
+                if (source.encoding != bioseq::sequence_encoding::rank_packed
+                    || source.space != bioseq::cigar_space::compatibility) {
+                    return;
+                }
+                result = source.recast_storage_width(
+                    target.storage_unit_byte_width,
+                    std::forward<p_allocator>(allocator));
+            } else {
+                result = stdc_recode_to<
+                    p_sequence_header, p_source_alphabet>(
+                    source,
+                    target.storage_unit_byte_width,
+                    std::forward<p_allocator>(allocator));
+            }
         });
     return result;
 }
