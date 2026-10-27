@@ -132,4 +132,30 @@ inline constexpr bioseq::sql::opclass_tag seq_ops{};
 })]]
 inline constexpr bioseq::sql::opclass_tag seq_hash_ops{};
 
+/**
+ * @brief Register ordinary MIN for every sequence alphabet using its semantic order.
+ * No initial condition lets PostgreSQL initialize from the first non-NULL seq;
+ * empty and all-NULL groups return NULL. The same transition combines states.
+ */
+[[bioseq_sql::aggregate({
+    .transition = bioseq::pg_types::sql_routines::seq_smaller,
+    .combine = bioseq::pg_types::sql_routines::seq_smaller,
+    .sort_operator = bioseq::pg_types::sql_routines::seq_lt,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+inline constexpr bioseq::sql::aggregate_tag min{};
+
+/**
+ * @brief Register ordinary MAX without converting sequences to text.
+ * CIGAR selects the greatest value by reported matches, matching intervals and
+ * alphabet ranks; ordinary alphabets retain their existing sequence ordering.
+ */
+[[bioseq_sql::aggregate({
+    .transition = bioseq::pg_types::sql_routines::seq_larger,
+    .combine = bioseq::pg_types::sql_routines::seq_larger,
+    .sort_operator = bioseq::pg_types::sql_routines::seq_gt,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+inline constexpr bioseq::sql::aggregate_tag max{};
+
 }  // namespace bioseq::pg_types::sql_catalog

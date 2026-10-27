@@ -560,6 +560,64 @@ bool seq_gt(
     return seq_compare_internal<true>(left, right, std::addressof(call)) > 0;
 }
 
+/**
+ * @brief Keep the least sequence as the ordinary MIN aggregate state.
+ * PostgreSQL initializes this strict, same-type transition from its first
+ * non-NULL input and owns copying a newly selected pass-by-reference value.
+ * @param state Current non-NULL sequence state.
+ * @param input Next non-NULL input or partial aggregate state.
+ * @return The original state on equality, otherwise the lesser original Datum.
+ */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_smaller(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]] Datum state,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]] Datum input,
+    bioseq::postgres::support::function_call_context call)
+{
+    return seq_compare_internal<true>(state, input, std::addressof(call)) <= 0
+        ? state : input;
+}
+
+/**
+ * @brief Keep the greatest sequence as the ordinary MAX aggregate state.
+ * The shared comparator applies alphabet binding, alphabet identity and the
+ * alphabet's semantic order, including match-priority ordering for CIGAR.
+ * @param state Current non-NULL sequence state.
+ * @param input Next non-NULL input or partial aggregate state.
+ * @return The original state on equality, otherwise the greater original Datum.
+ */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_larger(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]] Datum state,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]] Datum input,
+    bioseq::postgres::support::function_call_context call)
+{
+    return seq_compare_internal<true>(state, input, std::addressof(call)) >= 0
+        ? state : input;
+}
+
 [[nodiscard]] inline std::uint64_t seq_hash_internal(
     Datum input,
     std::uint64_t seed)

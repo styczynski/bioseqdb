@@ -8,6 +8,7 @@ export module bioseq.sequences.cigar;
 import std;
 export import bioseq.sequences.cigar_alphabet;
 import bioseq.sequences;
+import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
@@ -1343,8 +1344,11 @@ template<sequence_alphabet Alphabet, class TextOwner>
         const auto count = static_cast<std::size_t>(std::min<storage::sequence_size_t>(length - consumed, chunk_capacity));
         sequence.template copy_ranks<false, false>(std::span<std::uint8_t>{ranks.data(), count},
             static_cast<std::size_t>(from + consumed), static_cast<std::size_t>(from + consumed + count));
-        for (std::size_t index = 0; index < count; ++index)
-            characters[index] = seqan3::to_char(Alphabet{}.assign_rank(ranks[index]));
+        // Lazy readers provide one rank per byte; reuse the shared generic codec
+        // without repacking or allocating a complete decoded sequence.
+        bioseq::simd::active_target::decode_words_to_ascii_scalar<
+            Alphabet, std::uint8_t, std::numeric_limits<std::uint8_t>::digits, 1u>(
+                ranks.data(), reinterpret_cast<std::uint8_t*>(characters.data()), count);
         auto appended = output.append(std::span<const char>{characters.data(), count});
         if (!appended) return appended;
         consumed += count;

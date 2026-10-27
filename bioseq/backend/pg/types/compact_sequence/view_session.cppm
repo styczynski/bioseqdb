@@ -1031,9 +1031,6 @@ facade_bp_size(void const *opaque) noexcept {
 /** Check whether this view's backing allows worker-thrad reads. */
 [[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
-  if (state.descriptor.encoding != bioseq::sequence_encoding::rank_packed) {
-    return std::nullopt;
-  }
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
@@ -1047,6 +1044,9 @@ template <class p_alphabet>
         p_alphabet>::resident_packed_result {
   using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
+  if (state.descriptor.encoding != bioseq::sequence_encoding::rank_packed) {
+    return std::nullopt;
+  }
   if (state.flat == nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
     note_pg_sequence_facade_source_resident_probe();

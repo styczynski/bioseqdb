@@ -979,7 +979,7 @@ char* seq_out(
             descriptor.bp_length, descriptor.bp_length,
             output.allocation_bytes, false,
             output.allocation_bytes, trace_started);
-        return static_cast<text*>(DatumGetPointer(output.value));
+        return reinterpret_cast<text*>(DatumGetPointer(output.value));
     }
     (void) classify_and_describe_sequence(dispatch);
     const Size total = checked_materialization_allocation_size(
@@ -1178,7 +1178,7 @@ text* seq_send(
             header_descriptor.bp_length, header_descriptor.bp_length,
             output.text_bytes, false,
             output.allocation_bytes, trace_started);
-        return static_cast<text*>(DatumGetPointer(output.value));
+        return reinterpret_cast<text*>(DatumGetPointer(output.value));
     }
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
         const auto descriptor = classify_and_describe_sequence(input);
