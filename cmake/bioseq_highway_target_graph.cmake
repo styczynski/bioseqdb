@@ -238,9 +238,9 @@ bioseq_add_highway_codegen(
     "ksw2|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,ksw2_primitives"
     "block_aligner_dp|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/block_aligner_dp.cppm|bioseq.highway.sources.block_aligner_dp|block_aligner_dp|alignment|alignment_utils,simd_utils"
     "block_aligner_traceback|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/block_aligner_traceback.cppm|bioseq.highway.sources.block_aligner_traceback|block_aligner_traceback|alignment|block_aligner_dp"
-    "block_aligner_certificates|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm|bioseq.highway.sources.block_aligner_certificates|block_aligner_certificates|alignment|alignment_utils,block_aligner_dp"
+    "block_aligner_certificates|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm|bioseq.highway.sources.block_aligner_certificates|block_aligner_certificates|alignment|alignment_utils,block_aligner_dp,simd_utils"
     "block_aligner|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|alignment_utils,block_aligner_certificates,block_aligner_dp,block_aligner_traceback"
-    "ksw2_batched|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils"
+    "ksw2_batched|${CMAKE_CURRENT_SOURCE_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils,simd_utils"
     "prefilter|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining_candidate_scoring|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/chaining/chaining_simd_candidate_scoring.cppm|bioseq.highway.sources.chaining_candidate_scoring|chaining_candidate_scoring|chaining|simd_utils"
     "chaining_forward|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/chaining/chaining_simd_forward.cppm|bioseq.highway.sources.chaining_forward|chaining_forward|chaining|chaining_candidate_scoring"
@@ -248,11 +248,13 @@ bioseq_add_highway_codegen(
     "chaining|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|chaining_candidate_scoring,chaining_forward,chaining_backtracking"
     "indexing|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
   SLOT_RECORDS
+    "simd_utils|common|count_equal_rank_chunk|&::bioseq::simd::{target_namespace}::count_equal_rank_chunk"
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
     "prefilter|common|sneaky_snake_simd_batch|&bioseq::prefilter::{target_namespace}::sneaky_snake_simd_batch"
     "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
   REQUIRED_SLOT_RECORDS
+    "common|count_equal_rank_chunk"
     ${BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
     "common|sneaky_snake_simd_batch"

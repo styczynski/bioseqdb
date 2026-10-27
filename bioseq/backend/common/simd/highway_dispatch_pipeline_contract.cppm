@@ -87,7 +87,7 @@ struct alignment_region {
     std::int32_t mapq = 0;
 
     /** Traceback operations for the aligned region. */
-    alignment_result_vector<cigar_operation> cigar;
+    alignment_result_vector<bioseq::cigar_run> cigar;
     /** Number of mismatches and gap bases in the chosen alignment. */
     sequence_size_t edit_distance = 0;
 };

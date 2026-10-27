@@ -383,6 +383,14 @@ inline void ksw_backtrack_cigar(
     const std::span<const int32_t> band_ends = matrix.band_ends();
     const int byte_columns_per_row = matrix.byte_columns_per_row();
 
+    // Keep native word limits and alphabet-to-native translation in one adapter.
+    const auto append_operation = [&output_cigar](bioseq::cigar_symbol operation,
+                                                 std::size_t length) {
+        if (!bioseq::push_native_cigar(output_cigar, operation, length)) {
+            throw std::length_error{"traceback CIGAR is not representable"};
+        }
+    };
+
     int row_position = starting_row, column_position = starting_column, traceback_state = 0;
     while (row_position >= 0 && column_position >= 0) {
         int forced_state = -1;
@@ -407,20 +415,22 @@ inline void ksw_backtrack_cigar(
         if (traceback_state == 0) traceback_state = static_cast<int>(traceback_value & 7U);
         if (forced_state >= 0) traceback_state = forced_state;
 
-        if (traceback_state == 0)      { push_packed_cigar(output_cigar, cigar_match_opcode, 1); --row_position; --column_position; }
+        if (traceback_state == 0)      { append_operation(bioseq::cigar_symbol{}.assign_char('M'), 1); --row_position; --column_position; }
         else if (traceback_state == 1 || (traceback_state == 3 && minimum_intron_length <= 0))
-                             { push_packed_cigar(output_cigar, cigar_deletion_opcode, 1); --row_position; }
+                             { append_operation(bioseq::cigar_symbol{}.assign_char('D'), 1); --row_position; }
         else if (traceback_state == 3 && minimum_intron_length > 0)
-                             { push_packed_cigar(output_cigar, cigar_reference_skip_opcode, 1); --row_position; }
-        else                 { push_packed_cigar(output_cigar, cigar_insertion_opcode, 1); --column_position; }
+                             { append_operation(bioseq::cigar_symbol{}.assign_char('N'), 1); --row_position; }
+        else                 { append_operation(bioseq::cigar_symbol{}.assign_char('I'), 1); --column_position; }
     }
 
     if (row_position >= 0) {
-        const uint32_t operation = (minimum_intron_length > 0 && row_position >= minimum_intron_length)
-            ? cigar_reference_skip_opcode : cigar_deletion_opcode;
-        push_packed_cigar(output_cigar, operation, static_cast<uint32_t>(row_position + 1));
+        const auto operation = bioseq::cigar_symbol{}.assign_char(
+            minimum_intron_length > 0 && row_position >= minimum_intron_length ? 'N' : 'D');
+        append_operation(operation, static_cast<std::size_t>(row_position) + 1u);
     }
-    if (column_position >= 0) push_packed_cigar(output_cigar, cigar_insertion_opcode, static_cast<uint32_t>(column_position + 1));
+    if (column_position >= 0)
+        append_operation(bioseq::cigar_symbol{}.assign_char('I'),
+                         static_cast<std::size_t>(column_position) + 1u);
     if (!output_reversed) std::reverse(output_cigar.begin(), output_cigar.end());
 }
 

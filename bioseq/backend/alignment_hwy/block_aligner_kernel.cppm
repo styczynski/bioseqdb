@@ -344,10 +344,11 @@ public:
                 result.max_q = static_cast<int32_t>(query_length) - 1;
                 result.max_t = static_cast<int32_t>(target_length) - 1;
                 if (parameters.is_trace_enabled && gap_len != 0) {
-                    const std::uint32_t opcode = query_length == 0
-                        ? cigar_deletion_opcode : cigar_insertion_opcode;
-                    result.cigar.push_back(
-                        (static_cast<std::uint32_t>(gap_len) << 4u) | opcode);
+                    const auto operation = bioseq::cigar_symbol{}.assign_char(
+                        query_length == 0 ? 'D' : 'I');
+                    if (!bioseq::push_native_cigar(result.cigar, operation, gap_len)) {
+                        abort_block_aligner_invariant("empty-axis CIGAR is not representable");
+                    }
                 }
                 result.has_reached_end = true;
                 result.mqe = result.score;
@@ -386,9 +387,10 @@ public:
                 result.mte_q = result.max_q;
                 result.has_reached_end = true;
                 if (parameters.is_trace_enabled) {
-                    result.cigar.push_back(
-                        (static_cast<std::uint32_t>(query_length) << 4u)
-                        | cigar_match_opcode);
+                    if (!bioseq::push_native_cigar(
+                            result.cigar, bioseq::cigar_symbol{}.assign_char('M'), query_length)) {
+                        abort_block_aligner_invariant("certified CIGAR is not representable");
+                    }
                 }
                 if (parameters.should_compute_edit_distance) {
                     result.edit_distance = certificate.edit_distance;

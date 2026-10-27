@@ -73,25 +73,11 @@ struct reference_run {
 
 /** Converts packed CIGAR words to text for test comparisons. */
 [[nodiscard]] std::string packed_cigar_string(std::span<const std::uint32_t> cigar) {
-    std::string result;
-    for (const std::uint32_t packed : cigar) {
-        result += std::to_string(packed >> 4u);
-        switch (packed & 0xfu) {
-        case cigar_match_opcode:
-            result += 'M';
-            break;
-        case cigar_insertion_opcode:
-            result += 'I';
-            break;
-        case cigar_deletion_opcode:
-            result += 'D';
-            break;
-        default:
-            result += '?';
-            break;
-        }
-    }
-    return result;
+    std::vector<bioseq::cigar_run> runs;
+    REQUIRE(bioseq::decode_native_cigar(cigar, runs));
+    const auto formatted = bioseq::format_cigar(runs);
+    REQUIRE(formatted);
+    return *formatted;
 }
 
 /** Builds global gap-fill settings with the requested block sizes and traceback option. */
@@ -331,7 +317,7 @@ void check_region_alignment_identical(const alignment_region& optimized,
     CHECK(optimized.dp_max_score == forced_dp.dp_max_score);
     CHECK(optimized.has_alignment == forced_dp.has_alignment);
     CHECK(optimized.cigar.size() == forced_dp.cigar.size());
-    CHECK(format_cigar(optimized.cigar) == format_cigar(forced_dp.cigar));
+    CHECK(bioseq::format_cigar(optimized.cigar) == bioseq::format_cigar(forced_dp.cigar));
 }
 
 /** Scores and a label used to generate a test scoring matrix. */

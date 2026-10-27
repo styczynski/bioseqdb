@@ -207,11 +207,19 @@ export {
             } else {
                 stats.cigar_operation_count += cigar_size;
             }
-            for (const cigar_operation& operation : result.cigar) {
+            for (const bioseq::cigar_run& operation : result.cigar) {
+                // Regression fingerprints retain their native-format identity;
+                // SeqAn ranks intentionally use a different operation order.
+                const auto native_opcode = bioseq::cigar_native_opcode(operation.operation);
+                if (!native_opcode) {
+                    stats.is_computed = false;
+                    stats.is_saturated = true;
+                    return stats;
+                }
                 match_digest.add_u32(operation.length);
-                match_digest.add_u32(operation.opcode);
+                match_digest.add_u32(*native_opcode);
                 cigar_digest.add_u32(operation.length);
-                cigar_digest.add_u32(operation.opcode);
+                cigar_digest.add_u32(*native_opcode);
             }
         }
         cigar_digest.add_u64(stats.cigar_result_count);

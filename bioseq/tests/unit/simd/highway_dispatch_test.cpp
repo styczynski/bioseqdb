@@ -21,7 +21,7 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
     using simd_dispatch::highway_kernel_mask;
 
     STATIC_REQUIRE(std::is_same_v<std::underlying_type_t<highway_kernel>, std::uint8_t>);
-    STATIC_REQUIRE(simd_dispatch::highway_kernel_count == 8u);
+    STATIC_REQUIRE(simd_dispatch::highway_kernel_count == 9u);
     STATIC_REQUIRE(std::is_standard_layout_v<simd_dispatch::highway_target_binding>);
     STATIC_REQUIRE(std::is_trivially_copyable_v<simd_dispatch::highway_target_binding>);
     STATIC_REQUIRE(std::is_standard_layout_v<simd_dispatch::highway_dispatch_plan>);
@@ -38,11 +38,13 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
         "alignment::ksw2",
         "alignment::ksw2_batched",
         "alignment::block_aligner",
+        "sequence::rank_equality",
     };
 
     REQUIRE_FALSE(table.available_kernels.any());
     REQUIRE(table.has_all_kernels(expected));
     REQUIRE(table.common.sneaky_snake_simd_batch == nullptr);
+    REQUIRE(table.common.count_equal_rank_chunk == nullptr);
     REQUIRE(table.chaining.chain_anchors_simd == nullptr);
 
     for (std::size_t index = 0; index < simd_dispatch::highway_kernel_count; ++index) {

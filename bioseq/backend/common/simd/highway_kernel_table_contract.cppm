@@ -19,6 +19,7 @@ export import bioseq.alignment.contracts;
 export import bioseq.sequences.kmers.highway_minimizer_contract;
 export import bioseq.prefilter.sneaky_snake;
 export import bioseq.chaining.simd;
+import bioseq.simd.utils;
 
 export namespace bioseq::simd {
 
@@ -49,6 +50,8 @@ using sneaky_snake_simd_batch_kernel =
 struct highway_common_kernels final {
     /** Fixed-target SneakySnake batch implementation. */
     sneaky_snake_simd_batch_kernel sneaky_snake_simd_batch = nullptr;
+    /** Target-owned bounded rank equality, exposed through scalar arguments only. */
+    ::bioseq::simd::sequence_rank_equality_kernel count_equal_rank_chunk = nullptr;
 };
 
 static_assert(std::is_standard_layout_v<highway_common_kernels>);
@@ -138,6 +141,8 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
             return "alignment::ksw2_batched";
         case highway_kernel::alignment_block_aligner:
             return "alignment::block_aligner";
+        case highway_kernel::sequence_rank_equality:
+            return "sequence::rank_equality";
         case highway_kernel::count:
             break;
     }
@@ -247,6 +252,7 @@ struct highway_kernel_table final {
             || minimizers.two_stack_nthash == nullptr
             || minimizers.bounded_nthash == nullptr
             || common.sneaky_snake_simd_batch == nullptr
+            || common.count_equal_rank_chunk == nullptr
             || chaining.chain_anchors_simd == nullptr
             || alphabet_identities.empty()
             || alphabet_identities.size() != alignment_by_alphabet.size()) {

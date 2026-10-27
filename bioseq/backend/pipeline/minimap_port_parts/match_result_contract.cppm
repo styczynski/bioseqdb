@@ -45,9 +45,9 @@ struct match_result {
     bool is_primary = true;                  ///< Whether this region is its own primary parent
     bool has_cigar = false;                  ///< Whether base alignment was performed.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    alignment_result_vector<cigar_operation> cigar;  ///< CIGAR operations with their benchmark memory reservation.
+    alignment_result_vector<bioseq::cigar_run> cigar;  ///< CIGAR operations with their benchmark memory reservation.
 #else
-    std::vector<cigar_operation> cigar;      ///< CIGAR operations owned by this result.
+    std::vector<bioseq::cigar_run> cigar;      ///< CIGAR operations owned by this result.
 #endif
     sequence_size_t edit_distance = 0;      ///< Unit-cost edits in this  alignment, whgn exact edit counting was requested.
 };

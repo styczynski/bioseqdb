@@ -2184,7 +2184,11 @@ struct match_result_collection {
 
             if (match.has_cigar && !match.cigar.empty()) {
                 line += "\tcg:Z:";
-                line += format_cigar(match.cigar);
+                const auto cigar_text = bioseq::format_cigar(match.cigar);
+                if (!cigar_text) {
+                    throw std::runtime_error{"alignment output contains an invalid CIGAR"};
+                }
+                line += *cigar_text;
             }
 
             bioseq_log<logging_level::debug>("{}", line);

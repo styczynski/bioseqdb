@@ -124,17 +124,18 @@ template <bool p_should_compute_edit_distance>
     const auto flush_pending_operation = [&cigar, &pending_operation, &pending_length]() {
         if (pending_length == 0) return;
 
-        uint32_t opcode = cigar_match_opcode;
+        auto operation = bioseq::cigar_symbol{}.assign_char('M');
         switch (pending_operation) {
             case block_cigar_operation::match:
             case block_cigar_operation::equal:
-            case block_cigar_operation::mismatch: opcode = cigar_match_opcode; break;
-            case block_cigar_operation::insertion: opcode = cigar_insertion_opcode; break;
-            case block_cigar_operation::deletion: opcode = cigar_deletion_opcode; break;
+            case block_cigar_operation::mismatch: break;
+            case block_cigar_operation::insertion: operation.assign_char('I'); break;
+            case block_cigar_operation::deletion: operation.assign_char('D'); break;
             case block_cigar_operation::sentinel: return;
         }
-        push_packed_cigar(
-            cigar, opcode, static_cast<uint32_t>(pending_length));
+        if (!bioseq::push_native_cigar(cigar, operation, pending_length)) {
+            abort_block_aligner_invariant("traceback produced an invalid CIGAR operation");
+        }
     };
     const auto append_operation = [&flush_pending_operation, &pending_operation, &pending_length](
             block_cigar_operation operation) {

@@ -29,6 +29,7 @@ import bioseq.alignment.contracts;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.sources.ksw2;
 import bioseq.highway.sources.alignment_utils;
+import bioseq.highway.sources.simd_utils;
 import bioseq.chaining.core;
 import bioseq.common.context;
 import bioseq.storage.scanner;
@@ -61,7 +62,7 @@ struct alignas(16) fill_descriptor {
 
     /// CIGAR operations owned by a slab in the chain  arena.
     /// Stitching appends them to the region in chain order.
-    ::bioseq::chaining::arena_slab<cigar_operation>* cigar_scratch;
+    ::bioseq::chaining::arena_slab<bioseq::cigar_run>* cigar_scratch;
 
     /// The fill score is added to region.dp_score during stitching.
     std::int32_t fill_score;               ///< Alignment score for this fill.
@@ -354,21 +355,27 @@ align_single_fill(fill_descriptor& fill,
             exact_query_end = query_end;
             exact_target_end = target_end;
         }
-        fill.fill_edit_distance =
+        const auto exact_edits =
             exact_edit_distance_from_packed_cigar<p_is_reversed>(
                 query_seq, target_seq,
                 exact_query_start, exact_query_end,
                 exact_target_start, exact_target_end,
-                std::span<const std::uint32_t>(result.cigar));
+                std::span<const std::uint32_t>(result.cigar), &count_equal_rank_chunk);
+        if (!exact_edits) {
+            const auto error = exact_edits.error();
+            throw std::runtime_error{std::format(
+                "batched exact edit-distance CIGAR failed (code={}, run={})",
+                std::to_underlying(error.code), error.input_offset)};
+        }
+        fill.fill_edit_distance = *exact_edits;
     }
 
     if (fill.cigar_scratch != nullptr && !result.cigar.empty()) {
-        // Unpack each KSW2 CIGAR entry into a length and opcode.
-        // Stitching will merge matching runs across fill boundaries.
-        for (std::uint32_t entry : result.cigar) {
-            const std::uint32_t opcode    = entry & 0xfU;
-            const std::uint32_t op_length = entry >> 4;
-            fill.cigar_scratch->push_back(cigar_operation{op_length, opcode});
+        // Decode and canonicalize through the common native-format boundary.
+        if (!bioseq::decode_native_cigar(
+                std::span<const std::uint32_t>{result.cigar.data(), result.cigar.size()},
+                *fill.cigar_scratch)) {
+            throw std::runtime_error{"batched alignment produced an invalid CIGAR"};
         }
     }
 }
@@ -521,10 +528,12 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                     static_cast<std::size_t>(anchor.query_position) + 1u;
                 const std::size_t target_end =
                     static_cast<std::size_t>(anchor.ref_position) + 1u;
-                append_implicit_seed_cigar(
+                if (!append_implicit_seed_cigar(
                     region.cigar,
                     std::min(query_end, span),
-                    std::min(target_end, span));
+                    std::min(target_end, span))) {
+                    throw std::length_error{"batched seed CIGAR run is not representable"};
+                }
                 implicit_seed_appended = true;
             }
 
@@ -538,12 +547,9 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
 
             if (fill.cigar_scratch != nullptr) {
                 const auto& scratch = *fill.cigar_scratch;
-                for (const cigar_operation op : scratch.as_const_span()) {
-                    if (!region.cigar.empty()
-                        && region.cigar.back().opcode == op.opcode) {
-                        region.cigar.back().length += op.length;
-                    } else {
-                        region.cigar.push_back(op);
+                for (const bioseq::cigar_run op : scratch.as_const_span()) {
+                    if (!bioseq::append_canonical_run(region.cigar, op)) {
+                        throw std::length_error{"stitched CIGAR run is not representable"};
                     }
                 }
             }
@@ -576,10 +582,12 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                 static_cast<std::size_t>(anchor.query_position) + 1u;
             const std::size_t target_end =
                 static_cast<std::size_t>(anchor.ref_position) + 1u;
-            append_implicit_seed_cigar(
+            if (!append_implicit_seed_cigar(
                 region.cigar,
                 std::min(query_end, span),
-                std::min(target_end, span));
+                std::min(target_end, span))) {
+                throw std::length_error{"batched seed CIGAR run is not representable"};
+            }
         }
 
         region.ref_start = final_ref_start;
@@ -686,7 +694,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
     // Keep the CIGAR slab objects in an owning vector because they need
     // destructors. Their payloads use the chain arena and remain available
     // until all fills have been stitched into the region results.
-    std::vector<::bioseq::chaining::arena_slab<cigar_operation>> cigar_scratch_pool;
+    std::vector<::bioseq::chaining::arena_slab<bioseq::cigar_run>> cigar_scratch_pool;
     cigar_scratch_pool.reserve(detail_ksw2_batched::estimated_fill_count(regions));
 
     for (std::size_t region_index = 0;
@@ -756,19 +764,26 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         region.edit_distance = 0;
 
         if (params.compute_edit_distance && region.seed_count == 1) {
-            region.edit_distance += region.is_reverse
+            const auto exact_edits = region.is_reverse
                 ? exact_edit_distance_for_implicit_seed<true>(
                     query_seq, target_seq,
                     static_cast<std::size_t>(seed_query_start),
                     static_cast<std::size_t>(seed_query_end),
                     static_cast<std::size_t>(seed_ref_start),
-                    static_cast<std::size_t>(seed_ref_end))
+                    static_cast<std::size_t>(seed_ref_end), &count_equal_rank_chunk)
                 : exact_edit_distance_for_implicit_seed<false>(
                     query_seq, target_seq,
                     static_cast<std::size_t>(seed_query_start),
                     static_cast<std::size_t>(seed_query_end),
                     static_cast<std::size_t>(seed_ref_start),
-                    static_cast<std::size_t>(seed_ref_end));
+                    static_cast<std::size_t>(seed_ref_end), &count_equal_rank_chunk);
+            if (!exact_edits) {
+                const auto error = exact_edits.error();
+                throw std::runtime_error{std::format(
+                    "batched implicit seed accounting failed (code={}, run={})",
+                    std::to_underlying(error.code), error.input_offset)};
+            }
+            region.edit_distance += *exact_edits;
         }
 
         std::int32_t fill_order = 0;
@@ -776,7 +791,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         // Collect the optional left-extension fill.
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
             cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<cigar_operation>());
+                ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
             auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
             fill_cigar_scratch->reserve(static_cast<std::size_t>(
                 std::max(seed_query_start - outer_query_start,
@@ -820,7 +835,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                     continue;
                 }
                 cigar_scratch_pool.push_back(
-                    ::bioseq::chaining::make_arena_slab<cigar_operation>());
+                    ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
                 auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
                 fill_cigar_scratch->reserve(
                     static_cast<std::size_t>(std::max(gap_query_length, gap_reference_length)) +
@@ -846,7 +861,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         // Collect the optional right-extension fill.
         if (seed_query_end < outer_query_end && seed_ref_end < outer_ref_end) {
             cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<cigar_operation>());
+                ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
             auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
             fill_cigar_scratch->reserve(static_cast<std::size_t>(
                 std::max(outer_query_end - seed_query_end,
@@ -885,24 +900,12 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         region.dp_max_score = region.dp_score;
         region.has_alignment = true;
 
-        std::int32_t cigar_match_count = 0;
-        std::int32_t cigar_block_count = 0;
-        for (const auto& cigar_op : region.cigar) {
-            const std::int32_t operation_length = static_cast<std::int32_t>(cigar_op.length);
-            if (cigar_op.opcode == cigar_match_opcode || cigar_op.opcode == cigar_equal_opcode) {
-                cigar_match_count += operation_length;
-                cigar_block_count += operation_length;
-            } else if (cigar_op.opcode == cigar_mismatch_opcode) {
-                cigar_block_count += operation_length;
-            } else if (cigar_op.opcode == cigar_insertion_opcode || cigar_op.opcode == cigar_deletion_opcode) {
-                cigar_block_count += operation_length;
+        const auto cigar_summary = bioseq::summarize_alignment_cigar(region.cigar);
+        if (cigar_summary.matches > 0u) {
+            region.match_length = cigar_summary.matches;
+            if (cigar_summary.block_length > 0u) {
+                region.block_length = cigar_summary.block_length;
             }
-        }
-        if (cigar_match_count > 0) {
-            region.match_length = cigar_match_count;
-            const std::int32_t effective_block_length =
-                (cigar_block_count > 0) ? cigar_block_count : region.block_length;
-            region.block_length = effective_block_length;
         }
     }
 }

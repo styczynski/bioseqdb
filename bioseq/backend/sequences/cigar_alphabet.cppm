@@ -38,7 +38,11 @@ struct cigar_extension_definition {
 inline constexpr std::array cigar_extensions{
     cigar_extension_definition{'B', cigar_role::opaque, std::uint8_t{9}}
 };
-using standard_cigar_operation = seqan3::cigar::operation;
+// Intentional pinned-dependency exception, isolated by the SeqAn adapter:
+// cigar::operation aliases this exact type in the vendored revision. Loading
+// its public alias fails Clang22/libc++26 module compilation through SeqAn's
+// unrelated tuple machinery; exposition_only has no claimed stability here.
+using standard_cigar_operation = seqan3::exposition_only::cigar_operation;
 inline constexpr std::size_t standard_cigar_size =
     seqan3::alphabet_size<standard_cigar_operation>;
 inline constexpr std::size_t cigar_symbol_count =

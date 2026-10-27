@@ -35,7 +35,14 @@ export {
 #include <seqan3/alphabet/adaptation/all.hpp>
 #include <seqan3/alphabet/alphabet_base.hpp>
 #include <seqan3/alphabet/aminoacid/all.hpp>
-#include <seqan3/alphabet/cigar/cigar.hpp>
+// Intentional pinned-dependency exception: SeqAn recommends cigar::operation,
+// which aliases exactly the operation type below in this vendored revision.
+// Importing that public alias requires the counted product: Clang 22/libc++26
+// rejects its broad pod_tuple std::tuple_size specialization on incomplete
+// std::tuple types and its exported internal-linkage tuple helper. Keep the
+// exception here; this is not an API-stability claim for exposition_only.
+// Bioseq owns counted RLE runs and needs only the dependency's operation layer.
+#include <seqan3/alphabet/cigar/exposition_only/cigar_operation.hpp>
 #include <seqan3/alphabet/nucleotide/all.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/math.hpp>

@@ -40,6 +40,8 @@ enum class highway_kernel : std::uint8_t {
     alignment_ksw2_batched,
     /** Adaptive block alignment. */
     alignment_block_aligner,
+    /** Bounded byte-rank equality shared by alignment and CIGAR accounting. */
+    sequence_rank_equality,
     /** Number of kernel families. */
     count,
 };

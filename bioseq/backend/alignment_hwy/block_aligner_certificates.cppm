@@ -30,8 +30,10 @@ import bioseq.sequences;
 import bioseq.alignment.contracts;
 import bioseq.highway.sources.alignment_utils;
 import bioseq.highway.sources.block_aligner_dp;
+import bioseq.highway.sources.simd_utils;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
+import bioseq.simd.utils;
 
 export namespace bioseq::simd {
 
@@ -215,62 +217,14 @@ try_global_diagonal_certificate(
         return result;
     }
 
-    // Read small chunks in DP order. A successful check avoids allocating
-    // padded sequences, DP scratch space and traceback storage.
-    constexpr size_t scan_chunk_symbols = 1024u;
-    // The encoder writes every active byte. Initialize only the unused
-    // tail that a masked load may still read
-    alignas(64) std::array<std::uint8_t, scan_chunk_symbols> query_chunk;
-    alignas(64) std::array<std::uint8_t, scan_chunk_symbols> target_chunk;
-    const hn::Rebind<uint8_t, block_aligner_simd_tag> byte_tag;
-    const size_t lane_count = hn::Lanes(byte_tag);
-    const auto rank_limit = hn::Set(
-        byte_tag, static_cast<uint8_t>(biological_ranks));
-    std::uint64_t equal_symbols = 0;
-    for (size_t chunk_offset = 0; chunk_offset < sequence_length;
-         chunk_offset += scan_chunk_symbols) {
-        const size_t chunk_size = std::min(
-            scan_chunk_symbols, sequence_length - chunk_offset);
-        query_seq.template copy_ranks<p_is_reversed, false>(
-            std::span<std::uint8_t>{query_chunk.data(), chunk_size},
-            query_start + chunk_offset,
-            query_start + chunk_offset + chunk_size);
-        target_seq.template copy_ranks<false, false>(
-            std::span<std::uint8_t>{target_chunk.data(), chunk_size},
-            target_start + chunk_offset,
-            target_start + chunk_offset + chunk_size);
-        // A Highway masked load may read the whole vector on NEON. Zero the
-        // unused tail so those reads stay within initialized storage.
-        // Full chunks contain a whole number of vectors.
-        const size_t tail_lanes = chunk_size % lane_count;
-        if (tail_lanes != 0) {
-            const size_t tail_padding = lane_count - tail_lanes;
-            std::memset(
-                query_chunk.data() + chunk_size, 0, tail_padding);
-            std::memset(
-                target_chunk.data() + chunk_size, 0, tail_padding);
-        }
-        for (size_t offset = 0; offset < chunk_size; offset += lane_count) {
-            const size_t active_lanes = std::min(
-                lane_count, chunk_size - offset);
-            const auto active = hn::FirstN(byte_tag, active_lanes);
-            const auto query_bytes = hn::MaskedLoad(
-                active, byte_tag, query_chunk.data() + offset);
-            const auto reference_bytes = hn::MaskedLoad(
-                active, byte_tag, target_chunk.data() + offset);
-            const auto valid_ranks = hn::And(
-                hn::Lt(query_bytes, rank_limit),
-                hn::Lt(reference_bytes, rank_limit));
-            if (hn::CountTrue(byte_tag, hn::And(active, valid_ranks))
-                != active_lanes) {
-                return block_diagonal_certificate{};
-            }
-            equal_symbols += hn::CountTrue(
-                byte_tag, hn::And(active, hn::Eq(
-                    query_bytes, reference_bytes)));
-            ++result.vector_batches;
-        }
-    }
+    // Scalar-only chunk dispatch keeps vector instructions inside this target.
+    const auto equality = bioseq::simd::count_equal_sequence_symbols<
+        p_is_reversed, bioseq::simd::sequence_rank_validation::upper_bound>(
+            query_seq, target_seq, query_start, target_start,
+            sequence_length, &count_equal_rank_chunk, biological_ranks);
+    if (!equality.valid_ranks) return block_diagonal_certificate{};
+    const std::uint64_t equal_symbols = equality.equal_symbols;
+    result.vector_batches = equality.vector_batches;
 
     const std::uint64_t unequal_symbols = static_cast<std::uint64_t>(sequence_length)
         - equal_symbols;

@@ -11,10 +11,72 @@ export module bioseq.highway.sources.simd_utils;
 
 import std;
 import bioseq.common.templating;
+import bioseq.simd.utils;
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/** Compare one bounded byte chunk entirely within its owning Highway target. */
+template<class D, sequence_rank_validation Validation>
+[[nodiscard]] HWY_INLINE sequence_symbol_equality count_equal_rank_chunk_for(
+    D descriptor,
+    const std::uint8_t* HWY_RESTRICT query,
+    const std::uint8_t* HWY_RESTRICT target,
+    std::size_t length,
+    std::size_t rank_limit) {
+    static_assert(std::same_as<hn::TFromD<D>, std::uint8_t>);
+    const std::size_t lane_count = hn::Lanes(descriptor);
+    HWY_ALIGN std::array<std::uint8_t, hn::MaxLanes(D{})> query_tail;
+    HWY_ALIGN std::array<std::uint8_t, hn::MaxLanes(D{})> target_tail;
+    sequence_symbol_equality result;
+    for (std::size_t offset = 0u; offset < length; offset += lane_count) {
+        const std::size_t active_lanes = std::min(lane_count, length - offset);
+        const auto* query_input = query + offset;
+        const auto* target_input = target + offset;
+        if (active_lanes != lane_count) {
+            std::fill_n(query_tail.data(), lane_count, std::uint8_t{});
+            std::fill_n(target_tail.data(), lane_count, std::uint8_t{});
+            std::copy_n(query_input, active_lanes, query_tail.data());
+            std::copy_n(target_input, active_lanes, target_tail.data());
+            query_input = query_tail.data();
+            target_input = target_tail.data();
+        }
+        const auto active = hn::FirstN(descriptor, active_lanes);
+        const auto query_ranks = hn::LoadU(descriptor, query_input);
+        const auto target_ranks = hn::LoadU(descriptor, target_input);
+        if constexpr (Validation == sequence_rank_validation::upper_bound) {
+            if (rank_limit <= (std::numeric_limits<std::uint8_t>::max)()) {
+                const auto limit = hn::Set(descriptor, static_cast<std::uint8_t>(rank_limit));
+                const auto valid = hn::And(hn::Lt(query_ranks, limit), hn::Lt(target_ranks, limit));
+                if (hn::CountTrue(descriptor, hn::And(active, valid)) != active_lanes) {
+                    result.valid_ranks = false;
+                    return result;
+                }
+            }
+        }
+        result.equal_symbols += hn::CountTrue(
+            descriptor, hn::And(active, hn::Eq(query_ranks, target_ranks)));
+        ++result.vector_batches;
+    }
+    return result;
+}
+
+/** Scalar ABI boundary: callers never instantiate a foreign target's vector code. */
+[[nodiscard, gnu::noinline]] sequence_symbol_equality count_equal_rank_chunk(
+    const std::uint8_t* query,
+    const std::uint8_t* target,
+    std::size_t length,
+    sequence_rank_validation validation,
+    std::size_t rank_limit) {
+    const hn::ScalableTag<std::uint8_t> descriptor;
+    if (validation == sequence_rank_validation::upper_bound) {
+        return count_equal_rank_chunk_for<hn::ScalableTag<std::uint8_t>,
+            sequence_rank_validation::upper_bound>(descriptor, query, target, length, rank_limit);
+    }
+    return count_equal_rank_chunk_for<hn::ScalableTag<std::uint8_t>, sequence_rank_validation::none>(
+        descriptor, query, target, length, rank_limit);
+}
 
 /// @brief Reuses the compile-time index loop in generated kernels.
 using ::bioseq::common::templating::for_each_index;

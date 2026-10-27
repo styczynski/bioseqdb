@@ -1145,6 +1145,7 @@ inline void render_minimizer_wrapper(
     if (owner == "ksw2") return "alignment_ksw2";
     if (owner == "ksw2_batched") return "alignment_ksw2_batched";
     if (owner == "block_aligner") return "alignment_block_aligner";
+    if (owner == "simd_utils") return "sequence_rank_equality";
     throw std::runtime_error(
         "Highway table slot owner '" + std::string{owner}
         + "' has no highway_kernel mapping");

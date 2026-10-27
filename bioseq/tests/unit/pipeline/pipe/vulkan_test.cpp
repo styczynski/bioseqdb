@@ -925,9 +925,9 @@ TEST_CASE("match_result biological fingerprints cover every result and CIGAR fie
         .has_cigar = true,
         .cigar =
             {
-                cigar_operation{.length = 10u, .opcode = cigar_match_opcode},
-                cigar_operation{.length = 2u, .opcode = cigar_insertion_opcode},
-                cigar_operation{.length = 82u, .opcode = cigar_match_opcode},
+                bioseq::cigar_run{.length = 10u, .operation = bioseq::cigar_symbol{}.assign_char('M')},
+                bioseq::cigar_run{.length = 2u, .operation = bioseq::cigar_symbol{}.assign_char('I')},
+                bioseq::cigar_run{.length = 82u, .operation = bioseq::cigar_symbol{}.assign_char('M')},
             },
         .edit_distance = 2u,
     };
@@ -1072,7 +1072,7 @@ TEST_CASE("match_result biological fingerprints cover every result and CIGAR fie
     };
     constexpr std::array<cigar_field_mutation, 3u> cigar_mutations{{
         {cigar_field::length, "cigar.length"},
-        {cigar_field::opcode, "cigar.opcode"},
+        {cigar_field::opcode, "cigar.operation"},
         {cigar_field::vector_shape, "cigar vector shape"},
     }};
     for (const auto& mutation : cigar_mutations) {
@@ -1082,10 +1082,10 @@ TEST_CASE("match_result biological fingerprints cover every result and CIGAR fie
             ++mutated.cigar[1].length;
             break;
         case cigar_field::opcode:
-            mutated.cigar[1].opcode = cigar_deletion_opcode;
+            mutated.cigar[1].operation = bioseq::cigar_symbol{}.assign_char('D');
             break;
         case cigar_field::vector_shape:
-            mutated.cigar.push_back(cigar_operation{.length = 1u, .opcode = cigar_deletion_opcode});
+            mutated.cigar.push_back(bioseq::cigar_run{.length = 1u, .operation = bioseq::cigar_symbol{}.assign_char('D')});
             break;
         }
         INFO("mutated CIGAR field: " << mutation.name);

@@ -238,13 +238,13 @@ TEST_CASE("admitted Vulkan chaining requires its hooked ordinary context",
     SECTION("the experimental coordinate tail is not an admitted campaign route") {
         bioseq::parallelism::memory_admission_controller admission;
         bioseq::simd::pipe::route_attempt_memory attempt{admission, {}, nullptr};
-        context::installed_context_scope installed{attempt.fresh_context};
+        context::installed_context_scope installed{attempt.workspace->memory};
         auto chains = ch::make_arena_slab<ch::chain>();
         auto reordered = ch::make_arena_slab<ch::anchor>();
         params.coordinate_only = true;
-        REQUIRE(attempt.fresh_context.has_backing_allocation_hook());
+        REQUIRE(attempt.workspace->memory.has_backing_allocation_hook());
         REQUIRE_THROWS_AS(
-            ch::chain_anchors_vulkan({}, params, chains, reordered, &attempt.retention),
+            ch::chain_anchors_vulkan({}, params, chains, reordered, &attempt.workspace->retention),
             gv::vulkan_runtime_error);
     }
 }
@@ -264,8 +264,8 @@ TEST_CASE("admitted Vulkan chaining keeps only context storage after device comp
     }
     {
         bioseq::simd::pipe::route_attempt_memory attempt{admission, {}, nullptr};
-        context::installed_context_scope installed{attempt.fresh_context};
-        const auto initial_retained = attempt.retention.retained_bytes();
+        context::installed_context_scope installed{attempt.workspace->memory};
+        const auto initial_retained = attempt.workspace->retention.retained_bytes();
         {
             auto chain_scope = context::current().push<context::arena::chain>();
             auto chains = ch::make_arena_slab<ch::chain>();
@@ -273,16 +273,16 @@ TEST_CASE("admitted Vulkan chaining keeps only context storage after device comp
             chains.reserve(anchors.size() + 1u);
             reordered.reserve(anchors.size());
             REQUIRE(ch::chain_anchors_vulkan(
-                anchors, params, chains, reordered, &attempt.retention));
+                anchors, params, chains, reordered, &attempt.workspace->retention));
             REQUIRE(chains.size() != 0u);
             REQUIRE(reordered.size() != 0u);
             REQUIRE(runtime.chaining_dispatch_count() > dispatches_before);
-            REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
+            REQUIRE(admission.reserved_bytes() == baseline + attempt.workspace->retention.retained_bytes() +
                 runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
         }
         // Arena rewind keeps the context block allocated, so its reservation must remain.
-        REQUIRE(attempt.retention.retained_bytes() >= initial_retained);
-        REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
+        REQUIRE(attempt.workspace->retention.retained_bytes() >= initial_retained);
+        REQUIRE(admission.reserved_bytes() == baseline + attempt.workspace->retention.retained_bytes() +
             runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
     }
     REQUIRE(admission.reserved_bytes() == baseline +

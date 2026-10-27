@@ -134,22 +134,22 @@ struct cigar_consumption {
 };
 
 /** Counts the query and target bases consumed by the CIGAR, failing on unsupported operations. */
-[[nodiscard]] auto measure_cigar_consumption(std::span<const cigar_operation> cigar)
+[[nodiscard]] auto measure_cigar_consumption(std::span<const bioseq::cigar_run> cigar)
     -> cigar_consumption {
     cigar_consumption consumption{};
-    for (const cigar_operation op : cigar) {
-        switch (op.opcode) {
-        case cigar_match_opcode:
-        case cigar_equal_opcode:
-        case cigar_mismatch_opcode:
+    for (const bioseq::cigar_run op : cigar) {
+        switch (seqan3::to_char(op.operation)) {
+        case 'M':
+        case '=':
+        case 'X':
             consumption.query += op.length;
             consumption.target += op.length;
             break;
-        case cigar_insertion_opcode:
+        case 'I':
             consumption.query += op.length;
             break;
-        case cigar_deletion_opcode:
-        case cigar_reference_skip_opcode:
+        case 'D':
+        case 'N':
             consumption.target += op.length;
             break;
         default:
@@ -278,7 +278,7 @@ auto check_exact_region(const alignment_region& region,
                         sequence_size_t expected_target_length) -> void {
     CHECK(region.edit_distance == expected_edit_distance);
     const cigar_consumption consumed = measure_cigar_consumption(
-        std::span<const cigar_operation>{region.cigar.data(), region.cigar.size()});
+        std::span<const bioseq::cigar_run>{region.cigar.data(), region.cigar.size()});
     CHECK(consumed.query == expected_query_length);
     CHECK(consumed.target == expected_target_length);
     CHECK(region.query_end - region.query_start == consumed.query);
@@ -291,9 +291,11 @@ TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     const auto assemble_cigar = [](std::size_t query_length,
                                    std::size_t target_length) -> std::string {
-        std::vector<cigar_operation> cigar;
-        append_implicit_seed_cigar(cigar, query_length, target_length);
-        return format_cigar(cigar);
+        std::vector<bioseq::cigar_run> cigar;
+        REQUIRE(append_implicit_seed_cigar(cigar, query_length, target_length));
+        const auto formatted = bioseq::format_cigar(cigar);
+        REQUIRE(formatted);
+        return *formatted;
     };
 
     CHECK(assemble_cigar(5u, 5u) == "5M");
@@ -303,10 +305,10 @@ TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
     CHECK(assemble_cigar(0u, 4u) == "4D");
     CHECK(assemble_cigar(0u, 0u).empty());
 
-    std::vector<cigar_operation> existing{
-        cigar_operation{.length = 3u, .opcode = cigar_match_opcode}};
-    append_implicit_seed_cigar(existing, 5u, 7u);
-    CHECK(format_cigar(existing) == "8M2D");
+    std::vector<bioseq::cigar_run> existing{
+        bioseq::cigar_run{.length = 3u, .operation = bioseq::cigar_symbol{}.assign_char('M')}};
+    REQUIRE(append_implicit_seed_cigar(existing, 5u, 7u));
+    CHECK(bioseq::format_cigar(existing) == "8M2D");
 }
 
 TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
@@ -320,9 +322,9 @@ TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
         check_exact_region(regions.ksw2, 2, 8, 8);
         check_exact_region(regions.block, 2, 8, 8);
         check_exact_region(regions.batched, 2, 8, 8);
-        CHECK(format_cigar(regions.ksw2.cigar) == "8M");
-        CHECK(format_cigar(regions.block.cigar) == "8M");
-        CHECK(format_cigar(regions.batched.cigar) == "8M");
+        CHECK(bioseq::format_cigar(regions.ksw2.cigar) == "8M");
+        CHECK(bioseq::format_cigar(regions.block.cigar) == "8M");
+        CHECK(bioseq::format_cigar(regions.batched.cigar) == "8M");
     }
 }
 
@@ -352,9 +354,9 @@ TEST_CASE("Exact edit accounting forces traceback when CIGAR was not requested",
         CHECK(regions.ksw2.edit_distance == 2);
         CHECK(regions.block.edit_distance == 2);
         CHECK(regions.batched.edit_distance == 2);
-        CHECK(format_cigar(regions.ksw2.cigar) == "40M");
-        CHECK(format_cigar(regions.block.cigar) == "40M");
-        CHECK(format_cigar(regions.batched.cigar) == "40M");
+        CHECK(bioseq::format_cigar(regions.ksw2.cigar) == "40M");
+        CHECK(bioseq::format_cigar(regions.block.cigar) == "40M");
+        CHECK(bioseq::format_cigar(regions.batched.cigar) == "40M");
     }
 }
 
@@ -373,7 +375,7 @@ TEST_CASE("Left-extension exact counting uses source-order CIGAR windows",
         CHECK(regions.batched.query_end == regions.ksw2.query_end);
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
-        CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
+        CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
         check_exact_region(regions.ksw2, 3, 16, 13);
         check_exact_region(regions.batched, 3, 16, 13);
     }
@@ -423,7 +425,7 @@ TEST_CASE("Exact mandatory gaps are unbanded before SneakySnake rejection",
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
         CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
-        CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
+        CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
         CHECK(prefilter.lower_bound == regions.ksw2.edit_distance);
     }
 }
@@ -447,10 +449,10 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
             CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
             CHECK(regions.batched.match_length == regions.ksw2.match_length);
             CHECK(regions.batched.block_length == regions.ksw2.block_length);
-            CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
+            CHECK(bioseq::format_cigar(regions.batched.cigar) == bioseq::format_cigar(regions.ksw2.cigar));
 
             const cigar_consumption consumed =
-                measure_cigar_consumption(std::span<const cigar_operation>{
+                measure_cigar_consumption(std::span<const bioseq::cigar_run>{
                     regions.batched.cigar.data(), regions.batched.cigar.size()});
             CHECK(consumed.query == regions.batched.query_end - regions.batched.query_start);
             CHECK(consumed.target == regions.batched.ref_end - regions.batched.ref_start);
@@ -488,7 +490,7 @@ TEST_CASE("alignment storage plan preserves extension geometry and separates CIG
     CHECK(plan.outer_query_extent == 200u);
     CHECK(plan.outer_reference_extent == 200u);
     CHECK(plan.final_cigar_step_bound == 400u);
-    CHECK(plan.final_cigar_capacity_bytes == 400u * sizeof(cigar_operation));
+    CHECK(plan.final_cigar_capacity_bytes == 400u * sizeof(bioseq::cigar_run));
     CHECK(plan.initial_cigar_reserve == 264u);
     CHECK(plan.initial_cigar_reserve < plan.final_cigar_step_bound);
 }
@@ -515,7 +517,7 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     // The initial allocation can hold extra CIGAR operations. Account for that
     // capacity even when the alignment can emit fewer steps.
     CHECK(plan.initial_cigar_reserve == 32u);
-    CHECK(plan.final_cigar_capacity_bytes == 32u * sizeof(cigar_operation));
+    CHECK(plan.final_cigar_capacity_bytes == 32u * sizeof(bioseq::cigar_run));
 
     region.anchor_start = -1;
     CHECK_THROWS_AS(derive_alignment_region_storage_plan(

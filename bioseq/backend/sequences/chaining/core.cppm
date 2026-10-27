@@ -332,6 +332,8 @@ template <class p_element>
 struct arena_slab {
     /** @brief Element type stored in arena-owned memory. */
     using element_type = p_element;
+    /** @brief Standard container element name for shared append algorithms. */
+    using value_type = element_type;
 
     element_type* data_ = nullptr;
     std::size_t size_ = 0;
@@ -543,6 +545,18 @@ struct arena_slab {
     [[nodiscard]] const element_type*    data() const noexcept { return data_; }
     /** @brief Returns the number of live elements. */
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    /** @brief Return whether the slab contains no live elements. */
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0u; }
+    /** @brief Return the last live element; the slab must be nonempty. */
+    [[nodiscard]] element_type& back() noexcept {
+        DEBUG_ASSERT(!empty(), "arena_slab::back requires a live element");
+        return data_[size_ - 1u];
+    }
+    /** @brief Return the last immutable live element; the slab must be nonempty. */
+    [[nodiscard]] const element_type& back() const noexcept {
+        DEBUG_ASSERT(!empty(), "arena_slab::back requires a live element");
+        return data_[size_ - 1u];
+    }
     /** @brief Returns the number of allocated element slots. */
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
     /** @brief Return a writable view of the live elements. */

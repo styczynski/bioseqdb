@@ -338,8 +338,8 @@ TEST_CASE("Block production stats reduction is deterministic in parallel",
               == parallel_regions[index].ref_end);
         CHECK(serial_regions[index].dp_score
               == parallel_regions[index].dp_score);
-        CHECK(format_cigar(serial_regions[index].cigar)
-              == format_cigar(parallel_regions[index].cigar));
+        CHECK(bioseq::format_cigar(serial_regions[index].cigar)
+              == bioseq::format_cigar(parallel_regions[index].cigar));
     }
 }
 

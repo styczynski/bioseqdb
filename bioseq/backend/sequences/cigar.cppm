@@ -1,7 +1,6 @@
 /** @file @brief Canonical CIGAR algorithms, expression contracts and native adapters. */
 module;
 
-#include <hwy/highway.h>
 #include <libassert/assert.hpp>
 
 export module bioseq.sequences.cigar;
@@ -26,6 +25,33 @@ struct cigar_parse_summary {
     storage::sequence_size_t logical_length{};
 };
 
+/** Bounded canonical-run destination borrowing exact caller-admitted storage. */
+template<cigar_operation_alphabet Alphabet = cigar_symbol>
+struct cigar_run_span_sink {
+    using value_type = cigar_run_value<Alphabet>;
+    std::span<value_type> storage;
+    std::size_t used{};
+
+    /** Return whether no positive run has yet been written. */
+    [[nodiscard]] bool empty() const noexcept { return used == 0u; }
+    /** Return the initialized run count, independently of capacity. */
+    [[nodiscard]] std::size_t size() const noexcept { return used; }
+    /** Borrow the first caller-owned run slot. */
+    [[nodiscard]] value_type* data() const noexcept { return storage.data(); }
+    /** Access the last initialized run for canonical coalescing. */
+    [[nodiscard]] value_type& back() const noexcept {
+        DEBUG_ASSERT(used != 0u, "CIGAR bounded run sink has a trailing run");
+        return storage[used - 1u];
+    }
+    /** Append one run only when its pre-admitted capacity remains available. */
+    [[nodiscard]] std::expected<void, cigar_error> try_push_back(value_type run) {
+        if (used >= storage.size())
+            return std::unexpected(cigar_error{cigar_error_code::output_too_large, used});
+        storage[used++] = run;
+        return {};
+    }
+};
+
 /** Append a positive run, coalescing its predecessor in caller-admitted storage. */
 template<class Vector>
 [[nodiscard]] std::expected<void, cigar_error> append_canonical_run(
@@ -42,7 +68,11 @@ template<class Vector>
             return std::unexpected(cigar_error{cigar_error_code::length_overflow});
         output.back().length = *combined;
     } else {
-        output.push_back(incoming);
+        if constexpr (requires { output.try_push_back(incoming); }) {
+            return output.try_push_back(incoming);
+        } else {
+            output.push_back(incoming);
+        }
     }
     return {};
 }
@@ -198,24 +228,6 @@ template<class Vector>
     return {};
 }
 
-/** Checked import of SeqAn's standard counted run; zero counts are rejected. */
-[[nodiscard]] inline std::expected<cigar_run, cigar_error> import_seqan_cigar(
-        const seqan3::cigar& input) {
-    using seqan3::get;
-    const auto length = get<0>(input);
-    if (length == 0u) return std::unexpected(cigar_error{cigar_error_code::zero_count});
-    return cigar_run{length, cigar_symbol{}.assign_char(seqan3::to_char(get<1>(input)))};
-}
-
-/** Export only true standard symbols; a semantic extension is never recoded as standard. */
-[[nodiscard]] inline std::expected<seqan3::cigar, cigar_error> export_seqan_cigar(cigar_run input) {
-    const auto character = seqan3::to_char(input.operation);
-    if (input.length == 0u) return std::unexpected(cigar_error{cigar_error_code::zero_count});
-    if (!seqan3::char_is_valid_for<standard_cigar_operation>(character))
-        return std::unexpected(cigar_error{cigar_error_code::invalid_operation});
-    return seqan3::cigar{input.length, standard_cigar_operation{}.assign_char(character)};
-}
-
 /** Cursor contracts distinguish clean end from recoverable read failure. */
 template<class Cursor>
 concept cigar_run_cursor = requires(Cursor& cursor) {
@@ -232,6 +244,7 @@ concept cigar_sequence_backend = requires(Backend& backend,
         std::span<const typename Backend::run_type> runs) {
     requires cigar_operation_alphabet<typename Backend::alphabet_type>;
     requires std::same_as<typename Backend::run_type, cigar_run_value<typename Backend::alphabet_type>>;
+    requires std::same_as<typename Backend::run_cursor_type::run_type, typename Backend::run_type>;
     requires cigar_run_cursor<typename Backend::run_cursor_type>;
     { backend.borrow(owned) } -> std::same_as<typename Backend::sequence_view_type>;
     { backend.release(owned) } noexcept -> std::same_as<void>;
@@ -550,6 +563,8 @@ template<cigar_operation_alphabet Alphabet>
         const cigar_order_key<Alphabet>& left, const cigar_order_key<Alphabet>& right) {
     if (left.summary.total_matches != right.summary.total_matches)
         return left.summary.total_matches <=> right.summary.total_matches;
+    if (left.summary.largest_match != right.summary.largest_match)
+        return left.summary.largest_match <=> right.summary.largest_match;
     const auto profile_order = std::lexicographical_compare_three_way(
         left.descending_match_lengths.begin(), left.descending_match_lengths.end(),
         right.descending_match_lengths.begin(), right.descending_match_lengths.end());
@@ -861,7 +876,7 @@ template<cigar_sequence_backend Backend, class TextOwner>
 }
 
 /** Render an already canonical admitted alignment run range using measured text storage. */
-template<std::ranges::input_range Range>
+template<std::ranges::forward_range Range>
 [[nodiscard]] std::expected<std::string, cigar_error> format_cigar(const Range& runs) {
     using run_type = std::ranges::range_value_t<Range>;
     std::size_t bytes{};
@@ -1289,17 +1304,24 @@ template<cigar_sequence_backend Backend, sequence_alphabet ReferenceAlphabet,
         Backend& backend, typename Backend::sequence_view_type cigar,
         storage::lazy_sequence_view<ReferenceAlphabet> reference,
         storage::lazy_sequence_view<QueryAlphabet> query, TextFactory& factory) {
-    auto reference_length = cigar_extent(backend, cigar, cigar_space::reference);
-    if (!reference_length) return std::unexpected(reference_length.error());
-    auto query_length = cigar_extent(backend, cigar, cigar_space::query);
-    if (!query_length) return std::unexpected(query_length.error());
-    if (*reference_length != reference.bp_size() || *query_length != query.bp_size())
+    storage::sequence_size_t reference_length{}, query_length{}, columns{};
+    auto measurement = backend.runs(cigar, 0u, backend.length(cigar));
+    for (;;) {
+        auto next = measurement.next();
+        if (!next) return std::unexpected(next.error());
+        if (!*next) break;
+        const auto run = **next;
+        if (!geometry_supported(run.operation))
+            return std::unexpected(cigar_error{cigar_error_code::unsupported_geometry});
+        if (visible_in_space(run.operation, cigar_space::reference)) reference_length += run.length;
+        if (visible_in_space(run.operation, cigar_space::query)) query_length += run.length;
+        if (visible_in_space(run.operation, cigar_space::pairwise)) columns += run.length;
+    }
+    if (reference_length != reference.bp_size() || query_length != query.bp_size())
         return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch});
-    auto columns = cigar_extent(backend, cigar, cigar_space::pairwise);
-    if (!columns) return std::unexpected(columns.error());
-    auto reference_text = factory.make_text(*columns);
+    auto reference_text = factory.make_text(columns);
     if (!reference_text) return std::unexpected(reference_text.error());
-    auto query_text = factory.make_text(*columns);
+    auto query_text = factory.make_text(columns);
     if (!query_text) return std::unexpected(query_text.error());
     storage::sequence_size_t reference_position{}, query_position{};
     auto cursor = backend.runs(cigar, 0u, backend.length(cigar));
@@ -1341,34 +1363,43 @@ enum class block_cigar_operation : std::uint8_t {
 
 /** Count exact edits using bounded existing SIMD readers for each ambiguous paired run. */
 template<bool QueryReversed, sequence_alphabet Alphabet>
-[[nodiscard]] storage::sequence_size_t exact_edit_distance_from_packed_cigar(
+[[nodiscard]] std::expected<storage::sequence_size_t, cigar_error> exact_edit_distance_from_packed_cigar(
         storage::lazy_sequence_view<Alphabet> query, storage::lazy_sequence_view<Alphabet> target,
         std::size_t query_start, std::size_t query_end,
         std::size_t target_start, std::size_t target_end,
-        std::span<const std::uint32_t> packed_cigar) {
+        std::span<const std::uint32_t> packed_cigar,
+        sequence_rank_equality_kernel counter) {
+    if (counter == nullptr)
+        return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
     if (query_end < query_start || target_end < target_start)
-        throw std::invalid_argument{"exact edit-distance window is inverted"};
+        return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch});
     if (query_end > query.bp_size() || target_end > target.bp_size())
-        throw std::out_of_range{"exact edit-distance window exceeds sequence"};
+        return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch});
     const auto query_length = query_end - query_start;
     const auto target_length = target_end - target_start;
     std::size_t query_position{}, target_position{};
     storage::sequence_size_t edits{};
-    const hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t> descriptor;
-    for (const auto word : packed_cigar) {
+    for (std::size_t run_index = 0u; run_index < packed_cigar.size(); ++run_index) {
+        const auto word = packed_cigar[run_index];
         const auto decoded = native_cigar_codec::decode(word);
-        if (!decoded) throw std::runtime_error{"invalid exact edit-distance native CIGAR"};
+        if (!decoded) {
+            auto error = decoded.error();
+            error.input_offset = run_index;
+            return std::unexpected(error);
+        }
         const auto run = *decoded;
         const auto role = operation_role(run.operation);
         const bool on_query = is_paired(role) || role == cigar_role::insertion;
         const bool on_target = is_paired(role) || role == cigar_role::deletion || role == cigar_role::reference_skip;
-        if ((!on_query && !on_target) ||
-            (on_query && run.length > query_length - query_position) ||
+        if (!on_query && !on_target)
+            return std::unexpected(cigar_error{cigar_error_code::unsupported_geometry, run_index});
+        if ((on_query && run.length > query_length - query_position) ||
             (on_target && run.length > target_length - target_position))
-            throw std::runtime_error{"exact edit-distance CIGAR consumes an invalid window"};
+            return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch, run_index});
         if (role == cigar_role::paired_unspecified) {
-            const auto compared = count_equal_sequence_symbols<QueryReversed>(descriptor,
-                query, target, query_start + query_position, target_start + target_position, run.length);
+            const auto compared = count_equal_sequence_symbols<QueryReversed>(
+                query, target, query_start + query_position, target_start + target_position,
+                run.length, counter);
             edits += run.length - compared.equal_symbols;
         } else if (role != cigar_role::paired_equal) {
             edits += run.length;
@@ -1377,26 +1408,28 @@ template<bool QueryReversed, sequence_alphabet Alphabet>
         if (on_target) target_position += run.length;
     }
     if (query_position != query_length || target_position != target_length)
-        throw std::runtime_error{"exact edit-distance CIGAR does not cover its windows"};
+        return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch, packed_cigar.size()});
     return edits;
 }
 
 /** Count seed substitutions with the shared bounded equality counter plus length difference. */
 template<bool QueryReversed, sequence_alphabet Alphabet>
-[[nodiscard]] storage::sequence_size_t exact_edit_distance_for_implicit_seed(
+[[nodiscard]] std::expected<storage::sequence_size_t, cigar_error> exact_edit_distance_for_implicit_seed(
         storage::lazy_sequence_view<Alphabet> query, storage::lazy_sequence_view<Alphabet> target,
         std::size_t query_start, std::size_t query_end,
-        std::size_t target_start, std::size_t target_end) {
+        std::size_t target_start, std::size_t target_end,
+        sequence_rank_equality_kernel counter) {
+    if (counter == nullptr)
+        return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
     if (query_end < query_start || target_end < target_start)
-        throw std::invalid_argument{"implicit seed window is inverted"};
+        return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch});
     if (query_end > query.bp_size() || target_end > target.bp_size())
-        throw std::out_of_range{"implicit seed window exceeds sequence"};
+        return std::unexpected(cigar_error{cigar_error_code::input_length_mismatch});
     const auto query_length = query_end - query_start;
     const auto target_length = target_end - target_start;
     const auto common_length = std::min(query_length, target_length);
-    const hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t> descriptor;
-    const auto compared = count_equal_sequence_symbols<QueryReversed>(descriptor,
-        query, target, query_start, target_start, common_length);
+    const auto compared = count_equal_sequence_symbols<QueryReversed>(
+        query, target, query_start, target_start, common_length, counter);
     return std::max(query_length, target_length) - compared.equal_symbols;
 }
 
