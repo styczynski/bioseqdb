@@ -72,7 +72,7 @@ using range_t = compact_sequence_range<dna4_u64>;
     for (const auto& match : collection.results) {
         std::string cg;
         for (const auto& op : match.cigar)
-            cg += fmt::format("{}:{},", op.length, static_cast<int>(op.opcode));
+            cg += fmt::format("{}:{},", op.length, seqan3::to_char(op.operation));
         out.push_back(fmt::format("qs={} qe={} rev={} ts={} te={} nm={} bl={} mapq={} cs={} cg={}",
                                   match.query_start,
                                   match.query_end,

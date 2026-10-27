@@ -469,8 +469,8 @@ using range_t  = compact_sequence_range<dna4_u64>;
              cigar_index < lhs.cigar.size(); ++cigar_index) {
             if (lhs.cigar[cigar_index].length
                     != rhs.cigar[cigar_index].length
-                || lhs.cigar[cigar_index].opcode
-                    != rhs.cigar[cigar_index].opcode) {
+                || lhs.cigar[cigar_index].operation
+                    != rhs.cigar[cigar_index].operation) {
                 return false;
             }
         }
