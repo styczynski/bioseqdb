@@ -204,7 +204,7 @@ TEST_CASE("canonical seed jobs include empty jobs and prohibit cross-job chains"
         const auto& job = seeds.jobs[job_index];
         CAPTURE(job_index, job.ordinal, job.offset, job.count);
         route_attempt_memory attempt{admission, {}, nullptr};
-        context::installed_context_scope attempt_install{attempt.fresh_context};
+        context::installed_context_scope attempt_install{attempt.workspace->memory};
         match_result_collection output{};
         auto query_minimizers = minimizer_batch_view<minimizer_type>::from_shared_host(
             minimizers_owner, 0u, 0u);
