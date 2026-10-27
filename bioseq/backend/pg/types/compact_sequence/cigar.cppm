@@ -85,7 +85,6 @@ struct [[bioseq_sql::type({.schema = bioseq::sql::fixed_schema<"bioseq">})]] cig
 namespace {
 
 using bioseq::postgres::support::invoke_pg_as_cpp;
-using bioseq::postgres::support::function_call_context;
 using cigar_mask = bioseq::cigar_operation_mask<bioseq::cigar_symbol>;
 
 /** Unwrap a completed noPG operation after its local resource scopes have unwound. */
@@ -457,7 +456,7 @@ export namespace bioseq::pg_types::sql_routines {
 [[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op">})]]
 Datum cigar_op(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.letter">})]] bioseq::pg_types::letter operation,
-    std::int64_t length, function_call_context call) {
+    std::int64_t length, bioseq::postgres::support::function_call_context call) {
     const auto symbol = checked_cigar_letter(operation);
     if (length <= 0 || static_cast<std::uint64_t>(length) > std::numeric_limits<bioseq::cigar_run::length_type>::max())
         cigar_argument_error("CIGAR operation length is outside the supported positive range");
@@ -515,7 +514,7 @@ std::int64_t cigar_mismatches(
 [[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op">})]]
 std::optional<Datum> cigar_op_at(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum sequence,
-    std::int64_t index, function_call_context call) {
+    std::int64_t index, bioseq::postgres::support::function_call_context call) {
     const Oid type = call.result_type_oid();
     return with_pg_cigar_sequence<std::optional<Datum>>(sequence, [index, type](auto& backend, auto view) {
         const auto operation = require_cigar_value(bioseq::cigar_op_at(backend, view, index));
@@ -606,7 +605,7 @@ std::optional<Datum> cigar_largest(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum sequence,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0"}})]] std::int64_t start_pos,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"9223372036854775807"}})]] std::int64_t end_pos,
-    function_call_context call) {
+    bioseq::postgres::support::function_call_context call) {
     const Oid type = call.result_type_oid();
     return with_pg_cigar_sequence<std::optional<Datum>>(sequence, [start_pos, end_pos, type](auto& backend, auto view) {
         auto match = require_cigar_value(bioseq::cigar_largest(backend, view, start_pos, end_pos));
@@ -661,7 +660,7 @@ Datum cigar_rstrip_reference([[bioseq_sql::param({.sql_type = bioseq::sql::custo
 Datum cigar_to_arrays(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum sequence,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0"}})]] std::int64_t initial_position,
-    function_call_context call) {
+    bioseq::postgres::support::function_call_context call) {
     const Oid result_type = call.result_type_oid();
     return with_pg_cigar_sequence<Datum>(sequence, [initial_position, result_type](auto& backend, auto view) {
         const auto op_count = require_cigar_value(bioseq::cigar_op_count(backend, view));
@@ -707,7 +706,7 @@ ArrayType* cigar_find(
     const std::string& operation,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0"}})]] std::int64_t start_pos,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"9223372036854775807"}})]] std::int64_t end_pos,
-    function_call_context call) {
+    bioseq::postgres::support::function_call_context call) {
     return cigar_find_array(sequence, checked_cigar_operation(operation), start_pos, end_pos,
         invoke_pg_as_cpp([type = call.result_type_oid()] { return get_element_type(type); }));
 }
@@ -718,7 +717,7 @@ ArrayType* cigar_find(
 [[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op[]">})]]
 ArrayType* cigar_ops_array(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum sequence,
-    function_call_context call) {
+    bioseq::postgres::support::function_call_context call) {
     const Oid element_type = invoke_pg_as_cpp([type = call.result_type_oid()] { return get_element_type(type); });
     const Datum result = with_pg_cigar_sequence<Datum>(sequence, [element_type](auto& backend, auto view) {
         const auto op_count = require_cigar_value(bioseq::cigar_op_count(backend, view));
@@ -785,7 +784,7 @@ Datum cigar_filter_letters(
 ArrayType* cigar_find_letter(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum sequence,
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.letter">})]] bioseq::pg_types::letter operation,
-    std::int64_t start_pos, std::int64_t end_pos, function_call_context call) {
+    std::int64_t start_pos, std::int64_t end_pos, bioseq::postgres::support::function_call_context call) {
     return cigar_find_array(sequence, checked_cigar_letter(operation), start_pos, end_pos,
         invoke_pg_as_cpp([type = call.result_type_oid()] { return get_element_type(type); }));
 }
@@ -898,7 +897,7 @@ Datum cigar_to_msa(
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum cigar,
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum reference_seq,
     [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] Datum query_seq,
-    function_call_context call) {
+    bioseq::postgres::support::function_call_context call) {
     const Oid result_type = call.result_type_oid();
     return with_pg_cigar_sequence<Datum>(cigar,
         [reference_seq, query_seq, result_type](auto& backend, auto cigar_view) -> Datum {
