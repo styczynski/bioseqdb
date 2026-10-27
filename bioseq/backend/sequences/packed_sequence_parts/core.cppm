@@ -38,6 +38,7 @@ export module bioseq.sequences:packed_sequence_core;
 
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
+export import bioseq.sequences.cigar_alphabet;
 import bioseq.common.templating;
 import bioseq.sequences.rank_pack_core;
 

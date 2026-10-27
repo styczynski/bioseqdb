@@ -356,10 +356,11 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # DOC0433 adds pure minimizer layout geometry and the shared native heap
 # allocation helper. The heap module belongs to the small runtime-core closure.
 # The generic bounded ntHash seed policy is one shared, target-neutral module.
+# The CIGAR alphabet and RLE range partition are target-neutral sequence owners.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 349)
+if(NOT _bioseq_nopg_module_count EQUAL 351)
   message(FATAL_ERROR
-        "Domain-neutral module inventory must contain exactly 349 authored units; "
+        "Domain-neutral module inventory must contain exactly 351 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)

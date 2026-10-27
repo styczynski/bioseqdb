@@ -65,6 +65,8 @@ struct compact_sequence_range_base {
     struct traits {
         using alphabet_type = p_alphabet;
         using storage_unit = p_packed_unit;
+        static constexpr bool is_bit_packed = true;
+        static constexpr bool is_run_encoded = false;
 
         static constexpr std::size_t bits_per_char =
             p_bits_per_character == 0

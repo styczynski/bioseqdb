@@ -51,6 +51,8 @@ export import :packed_sequence_core;
 export import :packed_sequence_packing;
 /** Packed and unpacked sequence range implementations. */
 export import :packed_sequence_range;
+/** Run-encoded ranges and the shared indexed byte codec. */
+export import :packed_sequence_cigar;
 /** Compact headers, inline payloads, and allocation helpers. */
 export import :packed_sequence_wire;
 
@@ -112,6 +114,7 @@ enum class sequence_strand_mode : std::uint8_t {
 template <typename p_range_configuration, typename p_new_storage_unit_type>
 concept is_sequence_bit_castable_to = (
     supports_compact_sequence_range<p_range_configuration>
+    && compact_sequence_range<p_range_configuration>::traits::is_bit_packed
     &&
     is_sequence_custom_alphabet_bit_castable_to<
         sequence_custom_alphabet<
@@ -141,7 +144,7 @@ static_assert(is_sequence_bit_castable_to<seq::dna4, uint8_t>);
  */
 template <typename p_view_type>
 concept supports_compact_sequence_bitcast_view =
-    requires (
+    p_view_type::traits::is_bit_packed && requires (
         p_view_type view,
         typename p_view_type::iterator& iterator,
         const typename p_view_type::iterator& const_iterator,
@@ -197,7 +200,11 @@ struct formatter<compact_sequence_range<p_configuration>>
     auto format(
         compact_sequence_range<p_configuration> sequence,
         p_format_context_type& context) const {
-        return formatter<std::string>::format(
+        if constexpr (!range_type::traits::is_bit_packed) {
+            return formatter<std::string>::format(
+                fmt::format("sequence<bps={}|runs={}|total={}B>[{}]",
+                    sequence.bp_size(), sequence.size(), sequence.byte_size(), sequence.to_string()), context);
+        } else return formatter<std::string>::format(
             fmt::format(
                 "sequence<bps={}|size={}|total={}B>({}->b{} +{})[{}]",
                 sequence.bp_size(),

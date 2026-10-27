@@ -35,6 +35,7 @@ export {
 #include <seqan3/alphabet/adaptation/all.hpp>
 #include <seqan3/alphabet/alphabet_base.hpp>
 #include <seqan3/alphabet/aminoacid/all.hpp>
+#include <seqan3/alphabet/cigar/cigar.hpp>
 #include <seqan3/alphabet/nucleotide/all.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/math.hpp>

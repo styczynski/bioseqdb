@@ -44,6 +44,7 @@ export import bioseq.sequences.compact_sequence_typmod;
 import :packed_sequence_core;
 import :packed_sequence_packing;
 import :packed_sequence_range;
+export import :packed_sequence_cigar;
 
 export {
 
@@ -79,7 +80,9 @@ consteval size_t reserved_deficit() {
         p_varlena_bytes + p_code_bytes
         + 1u /* storage_unit_byte_width */
         + 2u /* padding_letters */
-        + p_bp_size_bytes;
+        + p_bp_size_bytes
+        + 1u /* encoding */
+        + 1u /* space */;
     constexpr size_t target = 8u;
     return (target - (fixed_bytes % target)) % target;
 }
@@ -200,6 +203,10 @@ public:
     std::uint16_t         padding_letters;
     /** @brief Number of logical alphabet symbols. */
     bp_size_t             bp_size;
+    /** Physical payload codec; does not introduce another alphabet dispatch axis. */
+    bioseq::sequence_encoding encoding{bioseq::sequence_encoding::rank_packed};
+    /** Declared CIGAR operation subset; ordinary alphabets use compatibility. */
+    bioseq::cigar_space space{bioseq::cigar_space::compatibility};
     [[no_unique_address]]
     compact_sequence_stdc_detail::alignment_reserved_holder<alignment_deficit>
         alignment_padding;
@@ -239,6 +246,14 @@ public:
     {
         p_alphabet_set_type::dispatch_alphabet_by_code(
             alpha_code, [&byte_width, &handler]<class p_dispatched_alphabet>() {
+                if constexpr (bioseq::cigar_operation_alphabet<p_dispatched_alphabet>) {
+                    constexpr auto run_width = sizeof(bioseq::cigar_run_value<p_dispatched_alphabet>);
+                    static_assert(p_storage_width_set_type::template contains<run_width>,
+                                  "CIGAR registration requires its native run record width");
+                    DEBUG_ASSERT(byte_width == run_width, "CIGAR storage width must equal its run codec width");
+                    handler.template operator()<compact_sequence_stdc_instance<
+                        compact_sequence_stdc, p_dispatched_alphabet, run_width>>();
+                } else {
                 p_storage_width_set_type::dispatch(
                     byte_width, [&handler]<size_t p_dispatched_byte_width>() {
                         handler.template operator()<
@@ -248,6 +263,7 @@ public:
                                 p_dispatched_byte_width>
                         >();
                     });
+                }
             });
     }
 
@@ -284,6 +300,7 @@ public:
     >
     requires (
         alphabet_in_supported_set<p_alphabet_set_type, p_alphabet_type>
+        && (!bioseq::cigar_operation_alphabet<p_alphabet_type>)
         && stdc_allocator<p_allocator_type, compact_sequence_stdc>
     )
     [[nodiscard]]
@@ -312,6 +329,7 @@ public:
     >
     requires (
         alphabet_in_supported_set<p_alphabet_set_type, p_alphabet_type>
+        && (!bioseq::cigar_operation_alphabet<p_alphabet_type>)
         && stdc_allocator<p_allocator_type, compact_sequence_stdc>
     )
     [[nodiscard]]
@@ -362,6 +380,12 @@ public:
 
     /** @brief Returns payload bytes excluding trailing allocation alignment. */
     [[nodiscard]] size_t payload_bytes() const noexcept {
+        if (encoding == bioseq::sequence_encoding::cigar_rle_fragment)
+            return static_cast<std::size_t>(bp_size);
+        if (encoding == bioseq::sequence_encoding::cigar_rle) {
+            const auto total = static_cast<std::uint32_t>(vl_len_) >> 2u;
+            return total >= header_bytes() ? total - header_bytes() : 0u;
+        }
         return unit_count() * storage_unit_byte_width;
     }
 
@@ -371,6 +395,8 @@ public:
         return {
             .alphabet_code           = static_cast<std::uint8_t>(alphabet_code),
             .storage_unit_byte_width = storage_unit_byte_width,
+            .encoding = encoding,
+            .space = space,
         };
     }
 };
@@ -424,11 +450,18 @@ struct compact_sequence_stdc_instance {
     // Use standard fixed-width integer types so Highway selects the same lane
     // types across LP64 platforms. Boost  can choose a different C++ type with
     // the same width.
-    using storage_unit =
-        std::conditional_t<p_storage_unit_byte_width == 8, std::uint64_t,
-        std::conditional_t<p_storage_unit_byte_width == 4, std::uint32_t,
-        std::conditional_t<p_storage_unit_byte_width == 2, std::uint16_t,
-                                                          std::uint8_t>>>;
+    /** Select a codec word without instantiating the other family's constrained type. */
+    [[nodiscard]] static consteval auto storage_type_identity() {
+        if constexpr (bioseq::cigar_operation_alphabet<p_alphabet>)
+            return std::type_identity<bioseq::cigar_run_value<p_alphabet>>{};
+        else if constexpr (p_storage_unit_byte_width == 8) return std::type_identity<std::uint64_t>{};
+        else if constexpr (p_storage_unit_byte_width == 4) return std::type_identity<std::uint32_t>{};
+        else if constexpr (p_storage_unit_byte_width == 2) return std::type_identity<std::uint16_t>{};
+        else return std::type_identity<std::uint8_t>{};
+    }
+    using storage_unit = typename decltype(storage_type_identity())::type;
+    static constexpr bool is_bit_packed = !bioseq::cigar_operation_alphabet<p_alphabet>;
+    static constexpr bool is_run_encoded = !is_bit_packed;
 
     static constexpr size_t byte_width        = p_storage_unit_byte_width;
     static constexpr size_t letter_bit_width  =
@@ -447,7 +480,8 @@ struct compact_sequence_stdc_instance {
  * @tparam p_instance_type Header type with a fixed alphabet and word size.
  */
 template<typename p_instance_type>
-requires (is_compact_sequence_stdc_instance<p_instance_type>)
+requires (is_compact_sequence_stdc_instance<p_instance_type>
+          && !bioseq::cigar_operation_alphabet<typename p_instance_type::alphabet_type>)
 struct compact_sequence_range<p_instance_type>
     : public compact_sequence_range_base<
         compact_sequence_range<p_instance_type>,
@@ -558,6 +592,28 @@ public:
     }
 };
 
+/** Borrow the canonical RLE payload of the same shared compact header. */
+template<typename Instance>
+    requires (is_compact_sequence_stdc_instance<Instance>
+              && bioseq::cigar_operation_alphabet<typename Instance::alphabet_type>)
+struct compact_sequence_range<Instance>
+    : compact_sequence_range<typename Instance::alphabet_type> {
+    using parent = compact_sequence_range<typename Instance::alphabet_type>;
+    using traits = typename parent::traits;
+    using iterator = typename parent::iterator;
+    using base_container = const typename Instance::compact_sequence_stdc_type*;
+    /** Borrow a validated complete value; internal fragment envelopes are never sequence views. */
+    explicit compact_sequence_range(const typename Instance::compact_sequence_stdc_type& storage)
+        : parent(std::span<const std::byte>{reinterpret_cast<const std::byte*>(storage.data), storage.payload_bytes()},
+                 static_cast<std::uint32_t>(storage.bp_size), storage.space) {
+        DEBUG_ASSERT(storage.encoding == bioseq::sequence_encoding::cigar_rle,
+                     "only complete RLE values can become CIGAR sequence ranges");
+        DEBUG_ASSERT(storage.storage_unit_byte_width == sizeof(typename traits::storage_unit)
+                     && storage.padding_letters == 0u,
+                     "CIGAR header does not match the canonical run codec");
+    }
+};
+
 // Keep instance types separate  from custom alphabet configurations and
 // alphabet containers so exactly one compact_sequence_range specialization
 // matches. These assertions catch an overlap at its definition.
@@ -627,6 +683,9 @@ inline void compact_sequence_stdc<
         alphabet_code,
         storage_unit_byte_width,
         [this, &send_context, &sender]<class p_instance_type>() {
+            if constexpr (p_instance_type::is_run_encoded) {
+                DEBUG_ASSERT(false, "CIGAR uses its family-specific canonical run wire frame");
+            } else {
             using storage_unit_type = typename p_instance_type::storage_unit;
             constexpr std::size_t letters_per_unit =
                 compact_sequence_range<p_instance_type>::traits::letters_per_unit;
@@ -642,6 +701,7 @@ inline void compact_sequence_stdc<
                     send_context,
                     static_cast<std::uint64_t>(reader[unit_index]),
                     static_cast<std::uint8_t>(p_instance_type::byte_width));
+            }
             }
         });
 }
@@ -665,10 +725,21 @@ inline std::size_t compact_sequence_stdc<
     std::size_t result = 0;
     dispatch_instance(
         alphabet_code, storage_unit_byte_width, [this, &result]<class p_instance_type>() {
+            if constexpr (p_instance_type::is_run_encoded) {
+                if (encoding == bioseq::sequence_encoding::cigar_rle) {
+                    const auto header = bioseq::read_cigar_payload_header(
+                        std::span<const std::byte>{reinterpret_cast<const std::byte*>(data), payload_bytes()});
+                    DEBUG_ASSERT(header.has_value(), "CIGAR payload prefix is truncated or invalid");
+                    result = header ? header->run_count : 0u;
+                } else {
+                    DEBUG_ASSERT(false, "internal fragment envelopes have no logical run count");
+                }
+            } else {
             constexpr std::size_t letters_per_unit =
                 compact_sequence_range<p_instance_type>::traits::letters_per_unit;
             result = (bp_size == 0) ? std::size_t{0}
                 : (bp_size + letters_per_unit - 1) / letters_per_unit;
+            }
         });
     return result;
 }
@@ -686,6 +757,7 @@ requires (
 template<sequence_alphabet p_alphabet, class p_allocator_type>
 requires (
     alphabet_in_supported_set<p_alphabet_set_type, p_alphabet>
+    && (!bioseq::cigar_operation_alphabet<p_alphabet>)
     && stdc_allocator<p_allocator_type, compact_sequence_stdc<
         p_alphabet_set_type,
         p_base_pair_size_type,
@@ -725,6 +797,8 @@ compact_sequence_stdc<
     header->storage_unit_byte_width = target_storage_byte_width;
     header->padding_letters         = 0;
     header->bp_size                 = 0;
+    header->encoding = bioseq::sequence_encoding::rank_packed;
+    header->space = bioseq::cigar_space::compatibility;
     return header;
 }
 
@@ -746,6 +820,7 @@ template<
 >
 requires (
     alphabet_in_supported_set<p_alphabet_set_type, p_alphabet>
+    && (!bioseq::cigar_operation_alphabet<p_alphabet>)
     && stdc_allocator<p_allocator_type, compact_sequence_stdc<
         p_alphabet_set_type,
         p_base_pair_size_type,
@@ -845,6 +920,8 @@ compact_sequence_stdc<
                 static_cast<std::uint8_t>(p_storage_byte_width);
             header->padding_letters = in_padding_letters;
             header->bp_size = in_bp_size;
+            header->encoding = bioseq::sequence_encoding::rank_packed;
+            header->space = bioseq::cigar_space::compatibility;
 
             auto* writer =
                 reinterpret_cast<storage_unit_type*>(header->data);
@@ -897,6 +974,15 @@ compact_sequence_stdc<
             "recast_storage_width: target_byte_width {} is not enabled",
                     static_cast<unsigned>(target_byte_width)));
 
+    if (encoding == bioseq::sequence_encoding::cigar_rle) {
+        if (target_byte_width != storage_unit_byte_width) return nullptr;
+        const auto total_bytes = header_bytes() + payload_bytes();
+        auto* copy = std::forward<p_allocator_type>(allocator)(total_bytes);
+        if (copy != nullptr) std::memcpy(copy, this, total_bytes);
+        return copy;
+    }
+    if (encoding != bioseq::sequence_encoding::rank_packed) return nullptr;
+
     std::uint16_t new_padding = 0;
     std::size_t   payload_bytes_value = 0;
     convert_to([this,
@@ -904,24 +990,20 @@ compact_sequence_stdc<
                 &new_padding,
                 &payload_bytes_value]<class p_instance_type>(
                    const compact_sequence_range<p_instance_type>&) {
-        p_storage_width_set_type::dispatch(
-            target_byte_width,
-            [this, &new_padding, &payload_bytes_value]<std::size_t p_target_storage_byte_width>() {
-                constexpr std::size_t target_letters_per_unit =
-                    (p_target_storage_byte_width * 8)
-                    / p_instance_type::letter_bit_width;
-                const std::uint64_t derived_units = (bp_size == 0) ? std::uint64_t{0}
-                    : (static_cast<std::uint64_t>(bp_size)
-                        + target_letters_per_unit - 1)
-                        / target_letters_per_unit;
-                new_padding   = static_cast<std::uint16_t>(
-                    (bp_size == 0) ? 0u
-                    : (derived_units * target_letters_per_unit
-                        - static_cast<std::uint64_t>(bp_size)));
-                payload_bytes_value =
-                    static_cast<std::size_t>(derived_units)
-                    * p_target_storage_byte_width;
-            });
+        if constexpr (p_instance_type::is_bit_packed) {
+            p_storage_width_set_type::dispatch(
+                target_byte_width,
+                [this, &new_padding, &payload_bytes_value]<std::size_t p_target_storage_byte_width>() {
+                    constexpr std::size_t target_letters_per_unit =
+                        (p_target_storage_byte_width * 8) / p_instance_type::letter_bit_width;
+                    const std::uint64_t derived_units = bp_size == 0 ? std::uint64_t{0}
+                        : (static_cast<std::uint64_t>(bp_size) + target_letters_per_unit - 1u)
+                            / target_letters_per_unit;
+                    new_padding = static_cast<std::uint16_t>(derived_units * target_letters_per_unit
+                        - static_cast<std::uint64_t>(bp_size));
+                    payload_bytes_value = static_cast<std::size_t>(derived_units) * p_target_storage_byte_width;
+                });
+        }
     });
 
     const std::size_t total_bytes =
@@ -934,6 +1016,8 @@ compact_sequence_stdc<
     destination->storage_unit_byte_width = target_byte_width;
     destination->bp_size = bp_size;
     destination->padding_letters = new_padding;
+    destination->encoding = encoding;
+    destination->space = space;
 
     if (payload_bytes_value > 0) {
         std::memcpy(destination->data, this->data, payload_bytes_value);

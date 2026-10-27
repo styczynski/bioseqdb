@@ -10,12 +10,14 @@ export module bioseq.sequences.compact_sequence_typmod;
 
 import std;
 import bioseq.common.logging;
+export import bioseq.sequences.cigar_alphabet;
 
 /**
  * @brief Alphabet and storage width for a compact sequence.
  *
  * The type modifier keeps the  alphabet code in bits 8-15. The low byte holds
- * 0, 1, 2, or 3 for storage units of 1, 2, 4, or 8 bytes.
+ * 0, 1, 2, or 3 for storage units of 1, 2, 4, or 8 bytes. Bits 16-23
+ * carry the declared CIGAR space; physical encoding is derived by the host.
  */
 export struct compact_sequence_stdc_type_params {
     /** @brief Alphabet number in the caller's supported-alphabet list. */
@@ -23,6 +25,11 @@ export struct compact_sequence_stdc_type_params {
 
     /** @brief Width of one packed storage unit in bytes. */
     std::uint8_t storage_unit_byte_width;
+
+    /** Physical codec, independent of the alphabet dispatch code. */
+    bioseq::sequence_encoding encoding{bioseq::sequence_encoding::rank_packed};
+    /** Declared CIGAR subset; ordinary alphabets use compatibility. */
+    bioseq::cigar_space space{bioseq::cigar_space::compatibility};
 
     /**
      * @brief Pack the alphabet and width into a PostgreSQL type modifier.
@@ -39,7 +46,8 @@ export struct compact_sequence_stdc_type_params {
         DEBUG_ASSERT(width_code != 0xFFu,
                      fmt::format("encode: storage_unit_byte_width {} invalid",
                                  static_cast<unsigned>(storage_unit_byte_width)));
-        return (static_cast<std::int32_t>(alphabet_code) << 8) | width_code;
+        return (static_cast<std::int32_t>(alphabet_code) << 8) | width_code
+            | (static_cast<std::int32_t>(std::to_underlying(space)) << 16);
     }
 
     /**
@@ -57,6 +65,8 @@ export struct compact_sequence_stdc_type_params {
         return {
             .alphabet_code           = static_cast<std::uint8_t>((typmod >> 8) & 0xFF),
             .storage_unit_byte_width = static_cast<std::uint8_t>(1u << width_code),
+            .encoding = bioseq::sequence_encoding::rank_packed,
+            .space = static_cast<bioseq::cigar_space>((typmod >> 16) & 0xff),
         };
     }
 
