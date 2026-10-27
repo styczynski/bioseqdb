@@ -217,167 +217,56 @@ export {
      * each attempt owns its temporary memory.
      */
     struct route_attempt_memory final {
-        bioseq::parallelism::operation_memory_retention retention{};
-
     private:
-        friend class route_worker_context_factory;
-        bioseq::parallelism::memory_admission_controller* admission_ = nullptr;
-        bioseq::parallelism::memory_footprint_probe footprint_probe_ = nullptr;
+        std::optional<bioseq::parallelism::memory_admission_failure> last_refusal_;
 
-    public:
-        ::context::context fresh_context;
-
-    private:
-        /** Adjust a pending reservation to the allocator's actual byte count. */
-        [[nodiscard]] static bool reconcile_permit(
-            void* opaque_permit,
-            std::uint64_t actual_bytes) noexcept {
-            auto& permit = *static_cast<bioseq::parallelism::memory_permit*>(
-                opaque_permit);
-            if (!permit.grow_to(actual_bytes)) {
-                return false;
-            }
-            permit.shrink_to(actual_bytes);
-            return permit.bytes() == actual_bytes;
+        /** Keep the original refusal alive while a context constructor unwinds. */
+        static void record_refusal(
+            void* state,
+            const bioseq::parallelism::memory_admission_failure& failure) noexcept {
+            *static_cast<std::optional<bioseq::parallelism::memory_admission_failure>*>(state)
+                = failure;
         }
 
-        /** Reserve and allocate context backing, then  keep or transfer its reservation. */
-        [[nodiscard]] static ::context::backing_allocation_authority
-        materialize_context_allocation(
-            void* opaque_attempt,
-            std::uint64_t requested_bytes,
-            ::context::backing_allocation_lifetime lifetime,
-            void* operation_state,
-            ::context::backing_allocation_materializer materializer,
-            ::context::backing_allocation_cleanup cleanup) {
-            auto& attempt = *static_cast<route_attempt_memory*>(opaque_attempt);
-            if (requested_bytes == 0u || materializer == nullptr || cleanup == nullptr
-                || attempt.admission_ == nullptr) {
-                throw std::invalid_argument{
-                    "context allocation hook received an invalid transaction"};
-            }
-
+        /** Preserve the existing pipeline-only refusal formatting on every growth. */
+        [[noreturn]] static void reject_context_allocation(
+            const bioseq::parallelism::memory_admission_failure& failure) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-            bioseq::parallelism::memory_admission_failure admission_failure{};
-            auto permit = attempt.admission_->try_reserve(
-                requested_bytes, std::addressof(admission_failure));
+            throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
+                "context_backing", failure)};
 #else
-            auto permit = attempt.admission_->try_reserve(requested_bytes);
+            static_cast<void>(failure);
+            throw std::bad_alloc{};
 #endif
-            if (!permit.has_value()) {
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-                throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
-                    "context_backing", admission_failure)};
-#else
-                throw std::bad_alloc{};
-#endif
-            }
-
-            try {
-                ::context::backing_allocation_materialization allocation{};
-                ::context::backing_allocation_authority authority{};
-                (void)attempt.admission_->materialize(
-                    *permit,
-                    [&allocation,
-                     &permit,
-                     operation_state,
-                     materializer]()
-                        -> bioseq::parallelism::memory_materialization_snapshot {
-                        const ::context::backing_allocation_reconciliation reconciliation{
-                            .state = std::addressof(*permit),
-                            .reconcile = &route_attempt_memory::reconcile_permit,
-                        };
-                        allocation = materializer(operation_state, reconciliation);
-                        if (allocation.actual_allocation_bytes != permit->bytes()) {
-                            bioseq_log<logging_level::debug>(
-                                "context allocation failed exact permit reconciliation");
-                            std::abort();
-                        }
-                        return {
-                            .actual_allocation_bytes = allocation.actual_allocation_bytes,
-                            .fully_touched_bytes = allocation.fully_touched_bytes,
-                            .is_host_visible = allocation.is_host_visible,
-                            .is_host_coherent = allocation.is_host_coherent,
-                            .is_process_footprint_reflected =
-                                allocation.is_process_footprint_reflected,
-                        };
-                    },
-                    attempt.footprint_probe_);
-
-                if (lifetime == ::context::backing_allocation_lifetime::context) {
-                    if (allocation.primary_owner_bytes != 0u
-                        || allocation.replacement_owner_bytes != 0u) {
-                        bioseq_log<logging_level::debug>(
-                            "context-lifetime allocation exposed adjacent ownership");
-                        std::abort();
-                    }
-                    if (*permit
-                        && !attempt.retention.retain_context_block(std::move(*permit))) {
-                        throw std::logic_error{
-                            "context backing permit could not enter attempt retention"};
-                    }
-                    return authority;
-                }
-
-                if (allocation.primary_owner_bytes == 0u
-                    || allocation.replacement_owner_bytes
-                        > (std::numeric_limits<std::uint64_t>::max)()
-                            - allocation.primary_owner_bytes
-                    || allocation.primary_owner_bytes
-                            + allocation.replacement_owner_bytes
-                        != allocation.actual_allocation_bytes) {
-                    bioseq_log<logging_level::debug>(
-                        "adjacent context allocation exposed invalid ownership geometry");
-                    std::abort();
-                }
-                if (!*permit) {
-                    return authority;
-                }
-
-                if (allocation.replacement_owner_bytes == 0u) {
-                    authority.primary.emplace(std::move(*permit));
-                    return authority;
-                }
-                auto primary_permit = permit->split_off(
-                    allocation.primary_owner_bytes);
-                if (!primary_permit) {
-                    bioseq_log<logging_level::debug>(
-                        "adjacent context allocation permit split failed");
-                    std::abort();
-                }
-                authority.primary.emplace(std::move(primary_permit));
-                authority.replacement.emplace(std::move(*permit));
-                return authority;
-            } catch (...) {
-                cleanup(operation_state);
-                throw;
-            }
         }
 
     public:
+        std::optional<bioseq::parallelism::admitted_context> workspace;
 
-        /**
-         * @brief Attach memory accounting before the context allocates its initial blocks.
-         * @param admission Controller used for reservations and allocation accounting.
-         * @param configuration Initial arena sizes.
-         * @param footprint_probe Function that measures process memory.
-         */
+        /** Construct the common admitted owner while pipeline diagnostics remain live. */
         explicit route_attempt_memory(
             bioseq::parallelism::memory_admission_controller& admission =
                 bioseq::parallelism::memory_admission_controller::instance(),
             const ::context::context::arena_configuration& configuration = {},
             bioseq::parallelism::memory_footprint_probe footprint_probe =
                 bioseq::parallelism::live_process_footprint_probe)
-            : admission_(std::addressof(admission))
-            , footprint_probe_(footprint_probe)
-            , fresh_context(
-                  configuration,
-                  ::context::backing_allocation_hook{
-                      .state = this,
-                      .transaction =
-                          &route_attempt_memory::materialize_context_allocation,
-                  })
-        {}
+        {
+            try {
+                workspace.emplace(admission, configuration, footprint_probe,
+                    bioseq::parallelism::memory_admission_failure_observer{
+                        .state = std::addressof(last_refusal_),
+                        .record = &route_attempt_memory::record_refusal,
+                    }, &route_attempt_memory::reject_context_allocation);
+            } catch (const std::bad_alloc&) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                if (last_refusal_) {
+                    throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
+                        "context_backing", *last_refusal_)};
+                }
+#endif
+                throw;
+            }
+        }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         /**
@@ -386,7 +275,7 @@ export {
          */
         [[nodiscard]] bioseq::parallelism::memory_admission_snapshot
         alignment_workspace_diagnostic_snapshot() const noexcept {
-            return admission_->diagnostic_snapshot();
+            return workspace->controller().diagnostic_snapshot();
         }
 #endif
 
@@ -415,10 +304,10 @@ export {
             }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             bioseq::parallelism::memory_admission_failure admission_failure{};
-            auto pending_permit = admission_->try_reserve(
+            auto pending_permit = workspace->controller().try_reserve(
                 *preallocation_bound, std::addressof(admission_failure));
 #else
-            auto pending_permit = admission_->try_reserve(*preallocation_bound);
+            auto pending_permit = workspace->controller().try_reserve(*preallocation_bound);
 #endif
             if (!pending_permit) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -430,7 +319,7 @@ export {
             }
             // Free pending storage before its reservation on any exception.
             std::vector<canonical_seed_job_span> pending_storage;
-            const auto materialization = admission_->materialize(
+            const auto materialization = workspace->controller().materialize(
                 *pending_permit,
                 [&pending_permit, &pending_storage, count]()
                     -> bioseq::parallelism::memory_materialization_snapshot {
@@ -462,7 +351,7 @@ export {
                         .is_process_footprint_reflected = true,
                     };
                 },
-                footprint_probe_);
+                workspace->footprint_probe());
             const auto exact_bytes = static_cast<std::uint64_t>(pending_storage.capacity()) *
                                      sizeof(canonical_seed_job_span);
             if (materialization.allocation_snapshot.actual_allocation_bytes != exact_bytes ||
@@ -519,7 +408,7 @@ export {
                 reinterpret_cast<route_attempt_memory*>(slot.bytes.data()),
                 *factory.admission_, factory.configuration_, factory.footprint_probe_);
             slot.constructed = true;
-            return owner->fresh_context;
+            return owner->workspace->memory;
         }
 
     public:
@@ -596,8 +485,8 @@ export {
             std::size_t maximum_concurrency,
             route_attempt_memory& parent,
             const ::context::context::arena_configuration& configuration = {})
-            : route_worker_context_factory(maximum_concurrency, *parent.admission_,
-                                           configuration, parent.footprint_probe_) {}
+            : route_worker_context_factory(maximum_concurrency, parent.workspace->controller(),
+                                           configuration, parent.workspace->footprint_probe()) {}
 
         ~route_worker_context_factory() {
             for (auto& slot : slots_) {

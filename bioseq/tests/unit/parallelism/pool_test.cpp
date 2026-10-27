@@ -687,7 +687,7 @@ TEST_CASE("route attempt installs backing admission before all initial context b
     {
         route_attempt_memory attempt{
             admission, configuration, zero_context_footprint_observation};
-        REQUIRE(attempt.retention.retained_bytes() == initial_context_bytes);
+        REQUIRE(attempt.workspace->retention.retained_bytes() == initial_context_bytes);
         REQUIRE(admission.reserved_bytes() == initial_context_bytes);
     }
     REQUIRE(admission.reserved_bytes() == 0u);
@@ -706,7 +706,7 @@ TEST_CASE("route worker factory joins before independent context permits unwind"
     admission.set_index_memory_cap_bytes(1u << 20u);
     bioseq::simd::pipe::route_attempt_memory parent_attempt{
         admission, context_test_configuration(), zero_context_footprint_observation};
-    auto& parent = parent_attempt.fresh_context;
+    auto& parent = parent_attempt.workspace->memory;
     const auto parent_reserved_bytes = admission.reserved_bytes();
     context::installed_context_scope parent_scope{parent};
     std::array<std::atomic<unsigned>, 32> seen{};
@@ -789,7 +789,7 @@ TEST_CASE("route worker factory preserves coarse parallel and nested context own
     {
         route_attempt_memory parent{admission, context_test_configuration(),
                                     zero_context_footprint_observation};
-        context::installed_context_scope installed{parent.fresh_context};
+        context::installed_context_scope installed{parent.workspace->memory};
         for (const bool nested : {false, true}) {
             std::array<std::atomic<unsigned>, 32> seen{};
             std::atomic<bool> wrong_context{false};
@@ -806,7 +806,7 @@ TEST_CASE("route worker factory preserves coarse parallel and nested context own
                     [&parent, &seen, &wrong_context, nested](std::size_t lo, std::size_t hi) {
                         auto* current = context::current_or_null();
                         if (current == nullptr || !current->has_backing_allocation_hook() ||
-                            (current == &parent.fresh_context) != nested) {
+                            (current == &parent.workspace->memory) != nested) {
                             wrong_context.store(true, std::memory_order_relaxed);
                             return;
                         }
@@ -821,9 +821,9 @@ TEST_CASE("route worker factory preserves coarse parallel and nested context own
                 for (const auto& count : seen) {
                     REQUIRE(count.load(std::memory_order_relaxed) == 1u);
                 }
-                REQUIRE(context::current_or_null() == &parent.fresh_context);
+                REQUIRE(context::current_or_null() == &parent.workspace->memory);
             }
-            REQUIRE(admission.reserved_bytes() == parent.retention.retained_bytes());
+            REQUIRE(admission.reserved_bytes() == parent.workspace->retention.retained_bytes());
         }
     }
     REQUIRE(admission.reserved_bytes() == 0u);
@@ -935,24 +935,24 @@ TEST_CASE("context hook admits later backing blocks but not covered suballocatio
             admission,
             context_test_configuration(),
             zero_context_footprint_observation};
-        REQUIRE(attempt.retention.retained_bytes() == initial_context_bytes);
+        REQUIRE(attempt.workspace->retention.retained_bytes() == initial_context_bytes);
 
         {
-            auto scratch_scope = attempt.fresh_context.push<context::arena::scratch>();
-            auto covered = attempt.fresh_context.make_scratch_vector<std::uint64_t>(8u);
+            auto scratch_scope = attempt.workspace->memory.push<context::arena::scratch>();
+            auto covered = attempt.workspace->memory.make_scratch_vector<std::uint64_t>(8u);
             REQUIRE(covered.capacity() >= 8u);
-            REQUIRE(attempt.retention.retained_bytes() == initial_context_bytes);
+            REQUIRE(attempt.workspace->retention.retained_bytes() == initial_context_bytes);
 
-            auto extended = attempt.fresh_context.alloc_scratch_array<std::byte>(
+            auto extended = attempt.workspace->memory.alloc_scratch_array<std::byte>(
                 extended_scratch_request);
             REQUIRE(extended.size() == extended_scratch_request);
-            REQUIRE(attempt.retention.retained_bytes()
+            REQUIRE(attempt.workspace->retention.retained_bytes()
                     == initial_context_bytes + next_scratch_block_bytes);
         }
 
         // Rewinding the scope keeps its arena blocks for reuse, so their memory
         // reservations must stay live.
-        REQUIRE(attempt.retention.retained_bytes()
+        REQUIRE(attempt.workspace->retention.retained_bytes()
                 == initial_context_bytes + next_scratch_block_bytes);
         REQUIRE(admission.reserved_bytes()
                 == initial_context_bytes + next_scratch_block_bytes);
@@ -975,7 +975,7 @@ TEST_CASE("context hook reconciles reflected initial backing allocations",
             admission,
             context_test_configuration(),
             reflecting_context_footprint_observation};
-        REQUIRE(attempt.retention.retained_bytes() == 0u);
+        REQUIRE(attempt.workspace->retention.retained_bytes() == 0u);
         REQUIRE(admission.reserved_bytes() == 0u);
         REQUIRE(context_reflection_probe_calls.load(std::memory_order_relaxed) == 10u);
     }
@@ -1115,7 +1115,7 @@ TEST_CASE("admitted alignment vector replaces capacity at the exact adjacent pea
             admission,
             context_test_configuration(),
             recording_zero_footprint_observation};
-        context::installed_context_scope installed{attempt.fresh_context};
+        context::installed_context_scope installed{attempt.workspace->memory};
         const std::uint64_t context_baseline = admission.reserved_bytes();
 
         storage_type values;
@@ -1179,7 +1179,7 @@ TEST_CASE("admitted alignment vector preserves old ownership on one-short denial
             admission,
             context_test_configuration(),
             zero_context_footprint_observation};
-        context::installed_context_scope installed{attempt.fresh_context};
+        context::installed_context_scope installed{attempt.workspace->memory};
         const std::uint64_t context_baseline = admission.reserved_bytes();
 
         storage_type values;
@@ -1222,7 +1222,7 @@ TEST_CASE("fully touched trivial alignment capacity releases a reflected permit"
             admission,
             context_test_configuration(),
             deterministic_footprint_observation};
-        context::installed_context_scope installed{attempt.fresh_context};
+        context::installed_context_scope installed{attempt.workspace->memory};
         const std::uint64_t context_baseline = admission.reserved_bytes();
         set_materialization_observations(50'000u, 50'000u + sizeof(std::uint64_t));
 
@@ -1263,7 +1263,7 @@ TEST_CASE("outer match results retain exact replacement ownership across map tra
         results.reserve(1u);
         match_result first{};
         first.dp_score = 71;
-        first.cigar.push_back({9u, bioseq::simd::cigar_match_opcode});
+        first.cigar.push_back({9u, bioseq::cigar_symbol{}.assign_char('M')});
         results.push_back(std::move(first));
 
         const std::uint64_t before_replacement = admission.reserved_bytes();
@@ -1317,7 +1317,7 @@ TEST_CASE("outer match result denial preserves source and reflected probes keep 
         match_result retained{};
         retained.dp_score = 83;
         retained.query_start = 11u;
-        retained.cigar.push_back({5u, bioseq::simd::cigar_equal_opcode});
+        retained.cigar.push_back({5u, bioseq::cigar_symbol{}.assign_char('=')});
         results.push_back(std::move(retained));
 
         const std::uint64_t stable_reserved = denial_admission.reserved_bytes();
@@ -1522,14 +1522,14 @@ TEST_CASE("oversize context storage and tracker replacement keep adjacent permit
             admission,
             context_test_configuration(),
             zero_context_footprint_observation};
-        REQUIRE(attempt.retention.retained_bytes() == initial_context_bytes);
+        REQUIRE(attempt.workspace->retention.retained_bytes() == initial_context_bytes);
 
         std::uint64_t reserved_with_blocks = 0u;
         {
-            auto scratch_scope = attempt.fresh_context.push<context::arena::scratch>();
-            auto first = attempt.fresh_context.alloc_scratch_array<std::byte>(oversize_bytes);
+            auto scratch_scope = attempt.workspace->memory.push<context::arena::scratch>();
+            auto first = attempt.workspace->memory.alloc_scratch_array<std::byte>(oversize_bytes);
             REQUIRE(first.size() == oversize_bytes);
-            REQUIRE(attempt.fresh_context.scratch_heap_fallback_bytes()
+            REQUIRE(attempt.workspace->memory.scratch_heap_fallback_bytes()
                     == oversize_geometry.retained_bytes);
             const std::uint64_t reserved_with_first_block = admission.reserved_bytes();
             REQUIRE(reserved_with_first_block > initial_context_bytes + oversize_bytes);
@@ -1541,24 +1541,24 @@ TEST_CASE("oversize context storage and tracker replacement keep adjacent permit
                 reserved_with_first_block + oversize_geometry.admitted_bytes
                     + 2u * first_tracker_bytes - 1u);
             REQUIRE_THROWS_AS(
-                attempt.fresh_context.alloc_scratch_array<std::byte>(oversize_bytes),
+                attempt.workspace->memory.alloc_scratch_array<std::byte>(oversize_bytes),
                 std::bad_alloc);
             REQUIRE(admission.reserved_bytes() == reserved_with_first_block);
-            REQUIRE(attempt.fresh_context.scratch_heap_fallback_bytes()
+            REQUIRE(attempt.workspace->memory.scratch_heap_fallback_bytes()
                     == oversize_geometry.retained_bytes);
 
             admission.set_index_memory_cap_bytes(16u << 20u);
             auto second =
-                attempt.fresh_context.alloc_scratch_array<std::byte>(oversize_bytes);
+                attempt.workspace->memory.alloc_scratch_array<std::byte>(oversize_bytes);
             REQUIRE(second.size() == oversize_bytes);
-            REQUIRE(attempt.fresh_context.scratch_heap_fallback_bytes()
+            REQUIRE(attempt.workspace->memory.scratch_heap_fallback_bytes()
                     == 2u * oversize_geometry.retained_bytes);
             reserved_with_blocks = admission.reserved_bytes();
             REQUIRE(reserved_with_blocks
                     > reserved_with_first_block + oversize_bytes);
         }
 
-        REQUIRE(attempt.fresh_context.scratch_heap_fallback_bytes() == 0u);
+        REQUIRE(attempt.workspace->memory.scratch_heap_fallback_bytes() == 0u);
         REQUIRE(admission.reserved_bytes()
                 == reserved_with_blocks - 2u * oversize_geometry.retained_bytes);
         REQUIRE(admission.reserved_bytes() > initial_context_bytes);

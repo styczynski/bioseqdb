@@ -341,7 +341,7 @@ export {
                                     "seed permit byte authority is invalid"};
                             }
                             if (attempt_memory != nullptr) {
-                                if (!attempt_memory->retention.retain_context_block(
+                                if (!attempt_memory->workspace->retention.retain_context_block(
                                         std::move(seed_completion.retained_anchor_permit))) {
                                     throw std::logic_error{"seed block permit lost its attempt owner"};
                                 }

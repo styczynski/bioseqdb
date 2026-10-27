@@ -229,7 +229,7 @@ export {
 #endif
         if (!execution_plan || !query_minimizers.has_host_owner() ||
             job_index >= seeds.jobs.size() || !output.results.empty() ||
-            context::current_or_null() != std::addressof(attempt.fresh_context)) {
+            context::current_or_null() != std::addressof(attempt.workspace->memory)) {
             throw std::invalid_argument{"post-seed job has no fresh owned execution scope"};
         }
         const auto& params = execution_plan->frozen_parameters;
@@ -739,7 +739,7 @@ export {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         campaign_attempt.emplace();
         attempt_memory = std::addressof(*campaign_attempt);
-        install.emplace(campaign_attempt->fresh_context);
+        install.emplace(campaign_attempt->workspace->memory);
 #else
         if (context::current_or_null() == nullptr) {
             owned_context.emplace();

@@ -1725,7 +1725,7 @@ void process_vulkan_mpf_seed_route(
                 "MPF Vulkan seed route changed its prepared target row");
         }
         pipe::route_attempt_memory attempt;
-        context::installed_context_scope install{attempt.fresh_context};
+        context::installed_context_scope install{attempt.workspace->memory};
         bioseq::parallelism::memory_permit job_permit;
         canonical_seed_batch seeds;
         attempt.prepare_seed_job_storage(seeds.jobs, job_permit, 1u);
@@ -1770,7 +1770,7 @@ void process_vulkan_mpf_seed_route(
             }
             if (completion.retained_anchor_permit) {
                 if (completion.retained_anchor_bytes != completion.retained_anchor_permit.bytes() ||
-                    !attempt.retention.retain_context_block(
+                    !attempt.workspace->retention.retain_context_block(
                         std::move(completion.retained_anchor_permit))) {
                     throw std::logic_error{"MPF canonical anchor permit lost its attempt owner"};
                 }
@@ -2016,7 +2016,7 @@ void process_vulkan_mps_seed_route(
     }
 
     pipe::route_attempt_memory attempt;
-    context::installed_context_scope install{attempt.fresh_context};
+    context::installed_context_scope install{attempt.workspace->memory};
     bioseq::parallelism::memory_permit job_permit;
     canonical_seed_batch seeds;
     attempt.prepare_seed_job_storage(seeds.jobs, job_permit, batch_size);

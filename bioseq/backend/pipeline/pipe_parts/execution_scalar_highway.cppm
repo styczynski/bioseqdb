@@ -365,7 +365,7 @@ export {
                 host_timing_dst == nullptr ? 0u : host_stage_now_ns();
             chaining_parameters active_cp = cp;
             if (attempt_memory != nullptr &&
-                &context::current() != &attempt_memory->fresh_context) {
+                &context::current() != &attempt_memory->workspace->memory) {
                 throw std::logic_error{"chaining stage is not installed in its admitted attempt"};
             }
             active_cp.query_len = query_len;
@@ -446,7 +446,7 @@ export {
                     ? &local_chaining : completed_chaining;
 #endif
                 if (p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab,
-                                   attempt_memory == nullptr ? nullptr : &attempt_memory->retention
+                                   attempt_memory == nullptr ? nullptr : &attempt_memory->workspace->retention
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                    , completion
 #endif
@@ -846,7 +846,7 @@ export {
                 std::optional<route_worker_context_factory> admitted_workers;
                 bioseq::parallelism::worker_context_factory worker_factory{};
                 if (attempt_memory != nullptr) {
-                    if (&context::current() != &attempt_memory->fresh_context) {
+                    if (&context::current() != &attempt_memory->workspace->memory) {
                         throw std::logic_error{
                             "alignment stage is not installed in its admitted attempt"};
                     }

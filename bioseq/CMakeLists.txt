@@ -1220,6 +1220,9 @@ target_sources(bioseq_runtime_core
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_RUNTIME_CORE_MODULES})
+# The reusable admitted context keeps the existing runtime arena owner rather
+# than introducing another allocator in the memory-admission module.
+target_link_libraries(bioseq_memory_admission_core PUBLIC bioseq_runtime_core)
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
