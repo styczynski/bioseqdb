@@ -373,7 +373,7 @@ TEMPLATE_TEST_CASE_SIG(
         "SELECT 'ACGT'::bioseq.seq('dna4', 0);",
         "SELECT 'ACGT'::bioseq.seq('dna4', -8);",
         "SELECT 'ACGT'::bioseq.seq('', 32);",
-        "SELECT 'ACGT'::bioseq.seq('dna4');",
+        "SELECT '1M'::bioseq.seq('cigar', 32);",
         "SELECT 'ACGT'::bioseq.seq('dna4', 64, 10);",
     };
     auto ctx = fresh_context();

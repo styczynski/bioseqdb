@@ -347,7 +347,7 @@ TEST_CASE("fresh install catalogs expose exact public objects",
             "       to_regoperator("
             "         'bioseq.=(bioseq.letter,bioseq.letter)') "
             "         IS NOT NULL, "
-            "       (SELECT count(*)=9 FROM pg_catalog.pg_operator o "
+            "       (SELECT count(*)=11 FROM pg_catalog.pg_operator o "
             "        JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace "
             "        WHERE n.nspname='bioseq' AND o.oprname='||'), "
             "       (SELECT count(*)=2 FROM pg_catalog.pg_cast c "

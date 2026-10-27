@@ -750,10 +750,10 @@ TEST_CASE("generated SQL preserves the extension catalog surface",
                 catalog, alias, predicate));
       };
 
-  REQUIRE(extension_member_count("pg_operator", "obj", "true") == "21");
+  REQUIRE(extension_member_count("pg_operator", "obj", "true") == "23");
   REQUIRE(extension_member_count("pg_opclass", "obj", "true") == "4");
   REQUIRE(extension_member_count("pg_proc", "obj", "obj.prokind = 'a'") ==
-          "16");
+          "18");
 
   REQUIRE(extension_member_count(
               "pg_proc", "obj",
