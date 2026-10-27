@@ -215,13 +215,13 @@ namespace {
     return result;
 }
 
-/** Infer only complete nonempty CIGAR grammar, otherwise keep ordinary late binding. */
+/** Probe numeric prefixes for complete CIGAR grammar; preserve ordinary alphabet diagnostics. */
 [[nodiscard]] inline bioseq::pg_types::seq* allocate_sequence_text(
     char const* input,
     std::size_t length,
     bool require_already_canonical)
 {
-    if (length != 0u) {
+    if (length != 0u && input[0] >= '0' && input[0] <= '9') {
         const std::string_view text{input, length};
         const auto measured = bioseq::measure_cigar_text(text);
         if (measured) {

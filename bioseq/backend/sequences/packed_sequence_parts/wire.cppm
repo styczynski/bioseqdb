@@ -780,6 +780,7 @@ compact_sequence_stdc<
     header->bp_size                 = 0;
     header->encoding = bioseq::sequence_encoding::rank_packed;
     header->space = bioseq::cigar_space::compatibility;
+    header->alignment_padding = {};
     return header;
 }
 
@@ -903,6 +904,7 @@ compact_sequence_stdc<
             header->bp_size = in_bp_size;
             header->encoding = bioseq::sequence_encoding::rank_packed;
             header->space = bioseq::cigar_space::compatibility;
+            header->alignment_padding = {};
 
             auto* writer =
                 reinterpret_cast<storage_unit_type*>(header->data);
@@ -999,6 +1001,7 @@ compact_sequence_stdc<
     destination->padding_letters = new_padding;
     destination->encoding = encoding;
     destination->space = space;
+    destination->alignment_padding = {};
 
     if (payload_bytes_value > 0) {
         std::memcpy(destination->data, this->data, payload_bytes_value);
