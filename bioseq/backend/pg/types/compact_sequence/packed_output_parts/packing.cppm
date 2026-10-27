@@ -8,13 +8,16 @@ module;
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <expected>
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -201,7 +204,11 @@ template<class Result, class Function>
         return total;
     }
     if (pgseq_is_cigar_alphabet(value.type_params.alphabet_code)) {
-        const auto bytes = bioseq::measure_cigar_payload(cigar_tree_run_count(value));
+        if (!value.canonical_run_count_valid) {
+            value.canonical_run_count = cigar_tree_run_count(value);
+            value.canonical_run_count_valid = true;
+        }
+        const auto bytes = bioseq::measure_cigar_payload(value.canonical_run_count);
         if (!bytes) pg_raise_cigar_error(bytes.error());
         return checked_materialization_allocation_size(*bytes,
             bioseq::pg_types::seq::header_bytes(), "flat CIGAR");
@@ -432,7 +439,7 @@ export inline void pg_sequence_flatten_into(
     }
 
     if (pgseq_is_cigar_alphabet(value.type_params.alphabet_code)) {
-        const auto run_count = cigar_tree_run_count(value);
+        const auto run_count = value.canonical_run_count;
         const auto payload_size = allocated_size - bioseq::pg_types::seq::header_bytes();
         bioseq::cigar_payload_writer<bioseq::cigar_symbol> writer{
             std::span<std::byte>{reinterpret_cast<std::byte*>(destination.data), payload_size},
@@ -1184,7 +1191,7 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
 {
     if (pgseq_is_cigar_alphabet(alphabet_code)) return false;
     bool complete = true;
-    pgseq_supported_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
         [alphabet_code, &complete]<class p_alphabet>() {
             for (std::uint16_t rank = 0u;
@@ -1307,10 +1314,16 @@ public:
     [[nodiscard]] sequence_view_type borrow_input(Datum input)
     {
         return bioseq::postgres::support::invoke_pg_as_cpp([this, input]() mutable {
+            // Temporary flat-input wrappers belong to the call session. A
+            // published result independently retains their immutable arenas.
+            // In particular, repeated B-tree comparator calls must not leave
+            // one expanded-object context behind for every comparison.
+            const MemoryContext previous = MemoryContextSwitchTo(session_.payload_context);
             if constexpr (bioseq::cigar_operation_alphabet<Alphabet>) {
                 input = bind_pg_cigar_sequence(input);
             }
             auto view = acquire_sequence_for_read(input);
+            MemoryContextSwitchTo(previous);
             if (!view.alphabet_bound || view.type_params.alphabet_code != type_.alphabet_code) {
                 pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
             }
@@ -1511,6 +1524,11 @@ export [[nodiscard]] inline Datum pg_cigar_from_runs(
 export template<class Result, class Function>
 Result with_pg_cigar_sequence(Datum input, Function&& callback)
 {
+    static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
+    static_assert(!is_borrowed_view_result_v<Result>);
+    static_assert(!std::same_as<std::remove_cvref_t<Result>, pg_cigar_expression>);
+    static_assert(!std::same_as<std::remove_cvref_t<Result>, pg_sequence_read_handle>);
+    static_assert(std::is_trivially_destructible_v<Result>);
     std::optional<Result> result;
     std::exception_ptr failure;
     pg_sequence_read_session* volatile session = nullptr;

@@ -269,6 +269,16 @@ inline void validate_retired_join_root_storage(
                      errmsg("bioseq literal leaf metadata is corrupt")));
         }
         if (alphabet_bound
+            && (literal.encoding == literal_encoding::unbound_ascii
+                || (pgseq_is_cigar_alphabet(result_type.alphabet_code)
+                    && (literal.encoding != literal_encoding::cigar_rle
+                        || literal.encoded_byte_count < sizeof(std::uint64_t)
+                        || literal.symbol_to > literal.encoded_logical_length)))) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq literal codec does not match its sequence alphabet")));
+        }
+        if (alphabet_bound
             && (literal.encoding == literal_encoding::packed
                 || literal.encoding == literal_encoding::cigar_rle)
             && literal.stored_type_params.alphabet_code
@@ -299,6 +309,11 @@ export inline void validate_tree_and_limits(
       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
     ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                     errmsg("bioseq logical length exceeds bigint")));
+  }
+  if (alphabet_bound && pgseq_is_cigar_alphabet(result_type.alphabet_code)
+      && expected_length > (std::numeric_limits<std::uint32_t>::max)()) {
+    ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    errmsg("CIGAR logical length exceeds the supported sequence limit")));
   }
   const auto fields = validate_tree_node(edge, result_type, alphabet_bound);
   if (edge) {
@@ -991,4 +1006,5 @@ export inline void publish_root_noexcept(pg_sequence_expanded &value,
   value.type_params = type;
   value.bp_length = length;
   value.alphabet_bound = alphabet_bound;
+  value.canonical_run_count_valid = false;
 }

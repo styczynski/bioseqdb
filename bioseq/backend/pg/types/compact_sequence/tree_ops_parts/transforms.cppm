@@ -818,7 +818,8 @@ namespace {
         return joined;
     }
     const literal_piece& literal = edge.node->payload.literal;
-    if (literal.encoding == literal_encoding::packed) {
+    if (literal.encoding == literal_encoding::packed
+        || literal.encoding == literal_encoding::cigar_rle) {
         if (literal.stored_type_params.alphabet_code
             != result_type.alphabet_code) {
             ereport(ERROR,

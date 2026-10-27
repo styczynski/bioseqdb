@@ -18,6 +18,7 @@ export module bioseq.sequences.rank_pack;
 
 import bioseq.sequences;
 import bioseq.sequences.rank_pack_core;
+import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::sequences {
 
@@ -160,6 +161,8 @@ template <class p_output_instance,
           invalid_rank_policy p_invalid_policy,
           pack_capacity_policy p_capacity_policy,
           class p_unit_sink_type>
+    requires (supports_compact_sequence_range<p_output_instance>
+              && compact_sequence_range<p_output_instance>::traits::is_bit_packed)
 class checked_rank_pack_sink {
 public:
     /** @brief Output compact-sequence range type derived from the instance. */
@@ -244,7 +247,8 @@ public:
      * rather than invoking append_rank for every generated symbol.
      * @param rank Alphabet rank repeated in the output.
      * @param count Number of logical symbols to append.
-     * @return Current status; overflow is rejected before changing the state.
+     * @return Current status. A symbol-count overflow is rejected before writing;
+     * sink overflow retains earlier writes and the failed word, like append_rank.
      */
     [[nodiscard]] rank_pack_status append_repeated_rank(
             std::uint8_t rank, std::uint64_t count) {
@@ -258,8 +262,7 @@ public:
             status_ = rank_pack_status::invalid_rank;
             return status_;
         }
-        if (count > (std::numeric_limits<std::uint64_t>::max)()
-                        - emitted_symbols_) {
+        if (!bioseq::common::checked_add(emitted_symbols_, count)) {
             status_ = rank_pack_status::length_mismatch;
             return status_;
         }

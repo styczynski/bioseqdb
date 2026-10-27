@@ -163,7 +163,9 @@ export struct pg_sequence_source_backend_ops {
         std::span<std::uint8_t>);
     /** Read a bounded encoded-byte interval, reusing the source read session.
      * RLE consumers use this optional callback for checkpoint and run access;
-     * the offset is in the canonical payload, not logical positions. */
+     * the offset is in the canonical payload, not logical positions. As for
+     * read_ranks, implementations convert PostgreSQL ERROR to C++ before
+     * returning, so a caller's admitted scratch owners unwind normally. */
     pg_sequence_source_read_status (*read_encoded_bytes)(
         void const*,
         pg_sequence_read_session&,

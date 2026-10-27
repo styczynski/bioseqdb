@@ -39,6 +39,7 @@ export module bioseq.sequences:packed_sequence_wire;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.common.templating;
+import bioseq.common.checked_arithmetic;
 import bioseq.sequences.rank_pack_core;
 export import bioseq.sequences.compact_sequence_typmod;
 import :packed_sequence_core;
@@ -53,49 +54,23 @@ export {
 
 namespace compact_sequence_stdc_detail {
 
-/**
- * @brief Chooses a field type for the required header padding.
- * @tparam p_deficit Number of padding bytes.
- * @return Type identity for that width, or void when no padding is needed.
- */
-template<std::size_t p_deficit>
-consteval auto pick_alignment_reserved_type() {
-    if constexpr (p_deficit == 0) return std::type_identity<void>{};
-    else if constexpr (p_deficit == 1) return std::type_identity<std::uint8_t>{};
-    else if constexpr (p_deficit == 2) return std::type_identity<std::uint16_t>{};
-    else if constexpr (p_deficit == 4) return std::type_identity<std::uint32_t>{};
-    else return std::type_identity<std::array<std::uint8_t, p_deficit>>{};
+/** Compute actual member padding before rounding the payload boundary to eight bytes. */
+template<class VarlenaHeader, class AlphabetCode, class LogicalSize>
+[[nodiscard]] consteval std::size_t reserved_deficit() {
+    std::uint64_t offset = sizeof(VarlenaHeader);
+    offset = *bioseq::common::checked_align_up(offset, alignof(AlphabetCode));
+    offset += sizeof(AlphabetCode) + sizeof(std::uint8_t);
+    offset = *bioseq::common::checked_align_up(offset, alignof(std::uint16_t));
+    offset += sizeof(std::uint16_t);
+    offset = *bioseq::common::checked_align_up(offset, alignof(LogicalSize));
+    offset += sizeof(LogicalSize) + sizeof(bioseq::sequence_encoding) + sizeof(bioseq::cigar_space);
+    return static_cast<std::size_t>(*bioseq::common::checked_align_up(offset, sizeof(std::uint64_t)) - offset);
 }
 
-/**
- * @brief Calculates header padding for an  eight-byte payload boundary.
- * @tparam p_varlena_bytes Length-header bytes.
- * @tparam p_code_bytes Alphabet-code bytes.
- * @tparam p_bp_size_bytes Sequence-length bytes.
- * @return Padding bytes to add to the fixed fields.
- */
-template<size_t p_varlena_bytes, size_t p_code_bytes, size_t p_bp_size_bytes>
-consteval size_t reserved_deficit() {
-    constexpr size_t fixed_bytes =
-        p_varlena_bytes + p_code_bytes
-        + 1u /* storage_unit_byte_width */
-        + 2u /* padding_letters */
-        + p_bp_size_bytes
-        + 1u /* encoding */
-        + 1u /* space */;
-    constexpr size_t target = 8u;
-    return (target - (fixed_bytes % target)) % target;
-}
-
-/** Type used for a header padding field of the requested size. */
-template <std::size_t p_deficit>
-using alignment_reserved_for_type =
-    typename decltype(pick_alignment_reserved_type<p_deficit>())::type;
-
-/** Stores padding bytes before the packed payload. */
-template<std::size_t p_deficit>
+/** Byte-aligned reserved storage cannot introduce additional implicit member padding. */
+template<std::size_t Deficit>
 struct alignment_reserved_holder {
-    alignment_reserved_for_type<p_deficit> reserved;
+    std::array<std::uint8_t, Deficit> reserved;
 };
 /** @brief Omits alignment storage when the fixed header is already aligned. */
 template<>
@@ -188,9 +163,9 @@ public:
 
     static constexpr size_t alignment_deficit =
         compact_sequence_stdc_detail::reserved_deficit<
-            sizeof(varlena_header_t),
-            sizeof(alphabet_code_t),
-            sizeof(bp_size_t)
+            varlena_header_t,
+            alphabet_code_t,
+            bp_size_t
         >();
 
     /** Allocation length encoded with PostgreSQL varlena format bits. */
@@ -424,6 +399,10 @@ static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "d
                                 std::uint8_t,  std::int32_t>::aligned);
 static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint32_t, std::int64_t>::aligned);
+using cigar_header_check = compact_sequence_stdc<supported_alphabets<
+    alphabet_entry<seq::dna4, "dna4">, alphabet_entry<bioseq::cigar_symbol, "cigar">>>;
+static_assert(offsetof(cigar_header_check, data) == 16u,
+              "CIGAR codec metadata must preserve the shared PostgreSQL payload offset");
 }  // namespace compact_sequence_stdc_detail
 
 /**
@@ -462,6 +441,8 @@ struct compact_sequence_stdc_instance {
     using storage_unit = typename decltype(storage_type_identity())::type;
     static constexpr bool is_bit_packed = !bioseq::cigar_operation_alphabet<p_alphabet>;
     static constexpr bool is_run_encoded = !is_bit_packed;
+    static_assert(is_bit_packed || p_storage_unit_byte_width == sizeof(storage_unit),
+                  "run-encoded instances have exactly one physical record width");
 
     static constexpr size_t byte_width        = p_storage_unit_byte_width;
     static constexpr size_t letter_bit_width  =

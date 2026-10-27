@@ -28,6 +28,7 @@ module;
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -38,6 +39,7 @@ export module bioseq.common.context;
 
 import bioseq.common.logging;
 import bioseq.common.heap_allocation;
+import bioseq.parallelism.memory_admission;
 
 using namespace memory::literals;
 
@@ -1238,3 +1240,204 @@ private:
 };
 
 } // namespace context
+
+// Allocator/admission integration belongs here so permit-only clients stay light.
+export namespace bioseq::parallelism {
+
+/** Transport the original reservation refusal without resampling memory. */
+struct memory_admission_failure_observer {
+    void* state{};
+    void (*record)(void*, const memory_admission_failure&) noexcept{};
+
+    /** Publish diagnostics before allocation unwinds; callbacks never throw. */
+    void operator()(const memory_admission_failure& failure) const noexcept {
+        if (record != nullptr) record(state, failure);
+    }
+};
+
+/** Own context backing and its exact existing memory reservations. */
+class admitted_context final {
+public:
+    operation_memory_retention retention{};
+
+private:
+    memory_admission_controller* admission_;
+    memory_footprint_probe footprint_probe_;
+    memory_admission_failure_observer refusal_observer_;
+    void (*reject_)(const memory_admission_failure&) = nullptr;
+
+public:
+    ::context::context memory;
+
+private:
+    /** Original refusal state survives a failed physical-size reconciliation. */
+    struct permit_reconciliation_state {
+        admitted_context& owner;
+        memory_permit& permit;
+        std::optional<memory_admission_failure> failure;
+    };
+
+    /** Adjust a pending reservation to the allocator's actual byte count. */
+    [[nodiscard]] static bool reconcile_permit(
+        void* opaque_state,
+        std::uint64_t actual_bytes) noexcept {
+        auto& state = *static_cast<permit_reconciliation_state*>(opaque_state);
+        memory_admission_failure failure{};
+        if (!state.permit.grow_to(actual_bytes, std::addressof(failure))) {
+            state.failure = failure;
+            state.owner.refusal_observer_(failure);
+            return false;
+        }
+        state.permit.shrink_to(actual_bytes);
+        return state.permit.bytes() == actual_bytes;
+    }
+
+    /** Reserve and allocate context backing, then  keep or transfer its reservation. */
+    [[nodiscard]] static ::context::backing_allocation_authority
+    materialize_context_allocation(
+        void* opaque_owner,
+        std::uint64_t requested_bytes,
+        ::context::backing_allocation_lifetime lifetime,
+        void* operation_state,
+        ::context::backing_allocation_materializer materializer,
+        ::context::backing_allocation_cleanup cleanup) {
+        auto& owner = *static_cast<admitted_context*>(opaque_owner);
+        if (requested_bytes == 0u || materializer == nullptr || cleanup == nullptr
+            || owner.admission_ == nullptr) {
+            throw std::invalid_argument{
+                "context allocation hook received an invalid transaction"};
+        }
+
+        memory_admission_failure admission_failure{};
+        auto permit = owner.admission_->try_reserve(
+            requested_bytes, std::addressof(admission_failure));
+        if (!permit.has_value()) {
+            owner.refusal_observer_(admission_failure);
+            if (owner.reject_ != nullptr) owner.reject_(admission_failure);
+            throw std::bad_alloc{};
+        }
+
+        permit_reconciliation_state reconciliation_state{owner, *permit, {}};
+        try {
+            ::context::backing_allocation_materialization allocation{};
+            ::context::backing_allocation_authority authority{};
+            (void)owner.admission_->materialize(
+                *permit,
+                [&allocation,
+                 &permit,
+                 &reconciliation_state,
+                 operation_state,
+                 materializer]()
+                    -> bioseq::parallelism::memory_materialization_snapshot {
+                    const ::context::backing_allocation_reconciliation reconciliation{
+                        .state = std::addressof(reconciliation_state),
+                        .reconcile = &admitted_context::reconcile_permit,
+                    };
+                    allocation = materializer(operation_state, reconciliation);
+                    if (allocation.actual_allocation_bytes != permit->bytes()) {
+                        bioseq_log<logging_level::debug>(
+                            "context allocation failed exact permit reconciliation");
+                        std::abort();
+                    }
+                    return {
+                        .actual_allocation_bytes = allocation.actual_allocation_bytes,
+                        .fully_touched_bytes = allocation.fully_touched_bytes,
+                        .is_host_visible = allocation.is_host_visible,
+                        .is_host_coherent = allocation.is_host_coherent,
+                        .is_process_footprint_reflected =
+                            allocation.is_process_footprint_reflected,
+                    };
+                },
+                owner.footprint_probe_);
+
+            if (lifetime == ::context::backing_allocation_lifetime::context) {
+                if (allocation.primary_owner_bytes != 0u
+                    || allocation.replacement_owner_bytes != 0u) {
+                    bioseq_log<logging_level::debug>(
+                        "context-lifetime allocation exposed adjacent ownership");
+                    std::abort();
+                }
+                if (*permit
+                    && !owner.retention.retain_context_block(std::move(*permit))) {
+                    throw std::logic_error{
+                        "context backing permit could not enter owner retention"};
+                }
+                return authority;
+            }
+
+            if (allocation.primary_owner_bytes == 0u
+                || allocation.replacement_owner_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - allocation.primary_owner_bytes
+                || allocation.primary_owner_bytes
+                        + allocation.replacement_owner_bytes
+                    != allocation.actual_allocation_bytes) {
+                bioseq_log<logging_level::debug>(
+                    "adjacent context allocation exposed invalid ownership geometry");
+                std::abort();
+            }
+            if (!*permit) {
+                return authority;
+            }
+
+            if (allocation.replacement_owner_bytes == 0u) {
+                authority.primary.emplace(std::move(*permit));
+                return authority;
+            }
+            auto primary_permit = permit->split_off(
+                allocation.primary_owner_bytes);
+            if (!primary_permit) {
+                bioseq_log<logging_level::debug>(
+                    "adjacent context allocation permit split failed");
+                std::abort();
+            }
+            authority.primary.emplace(std::move(primary_permit));
+            authority.replacement.emplace(std::move(*permit));
+            return authority;
+        } catch (...) {
+            cleanup(operation_state);
+            if (reconciliation_state.failure && owner.reject_ != nullptr) {
+                owner.reject_(*reconciliation_state.failure);
+            }
+            throw;
+        }
+    }
+public:
+    /**
+     * Install admission before initial arena allocations. The optional rejection
+     * callback preserves caller-specific error reporting after diagnostics have
+     * been recorded; it may throw only at this existing allocator boundary.
+     */
+    explicit admitted_context(
+        memory_admission_controller& admission = memory_admission_controller::instance(),
+        const ::context::context::arena_configuration& configuration = {},
+        memory_footprint_probe footprint_probe = live_process_footprint_probe,
+        memory_admission_failure_observer refusal_observer = {},
+        void (*reject)(const memory_admission_failure&) = nullptr)
+        : admission_(std::addressof(admission))
+        , footprint_probe_(footprint_probe)
+        , refusal_observer_(refusal_observer)
+        , reject_(reject)
+        , memory(configuration, ::context::backing_allocation_hook{
+              .state = this,
+              .transaction = &admitted_context::materialize_context_allocation,
+          })
+    {}
+
+    admitted_context(const admitted_context&) = delete;
+    admitted_context& operator=(const admitted_context&) = delete;
+    admitted_context(admitted_context&&) = delete;
+    admitted_context& operator=(admitted_context&&) = delete;
+
+    /** Return the controller used by all allocations owned by this context. */
+    [[nodiscard]] memory_admission_controller& controller() const noexcept {
+        return *admission_;
+    }
+
+    /** Return the exact footprint probe shared with callers and worker contexts. */
+    [[nodiscard]] memory_footprint_probe footprint_probe() const noexcept {
+        return footprint_probe_;
+    }
+};
+
+} // namespace bioseq::parallelism

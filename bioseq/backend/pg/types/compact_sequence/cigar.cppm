@@ -323,39 +323,41 @@ template<class Backend>
 struct cigar_match_array_sink {
     Backend& backend;
     Oid element_type;
-    std::span<Datum> values;
-    std::size_t used{};
+    MemoryContext result_context;
+    ArrayBuildState* state{};
     std::uint64_t serialized_bytes{};
 
     /** Append one already-sorted result and check the final array's cumulative size. */
     [[nodiscard]] auto operator()(bioseq::cigar_match<typename Backend::sequence_type>&& match)
             -> std::expected<void, bioseq::cigar_error> {
-        if (used == values.size()) {
-            backend.release(match.prefix);
-            backend.release(match.postfix);
-            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::output_too_large});
-        }
         const Datum value = form_cigar_match(backend, element_type, std::move(match));
         account_cigar_array_value(serialized_bytes, value);
-        values[used++] = value;
+        state = invoke_pg_as_cpp([current = state, value, type = element_type, parent = result_context] {
+            auto* array = current != nullptr ? current : initArrayResult(type, parent, false);
+            return accumArrayResult(array, value, false, type, parent);
+        });
         return {};
+    }
+
+    /** Finish the native PG array builder; absent matches use a real empty typed array. */
+    [[nodiscard]] Datum finish() const {
+        return invoke_pg_as_cpp([current = state, type = element_type, parent = result_context] {
+            return current == nullptr ? PointerGetDatum(construct_empty_array(type))
+                                      : makeArrayResult(current, parent);
+        });
     }
 };
 
 /** Execute the shared noPG operation search and materialize its sorted SQL records. */
 [[nodiscard]] inline ArrayType* cigar_find_array(Datum sequence, bioseq::cigar_symbol operation,
         std::int64_t from, std::int64_t to, Oid element_type) {
+    const MemoryContext result_context = CurrentMemoryContext;
     const Datum result = with_pg_cigar_sequence<Datum>(sequence,
-        [operation, from, to, element_type](auto& backend, auto view) {
-            const auto capacity = require_cigar_value(bioseq::cigar_op_count(backend, view));
-            const int count = checked_cigar_array_count(capacity, sizeof(Datum) + sizeof(HeapTupleHeaderData));
-            auto& memory = backend.memory();
-            auto scope = memory.template push<context::arena::scratch>();
-            auto values = memory.template alloc_scratch_array<Datum>(static_cast<std::size_t>(count));
-            cigar_match_array_sink sink{backend, element_type, values};
+        [operation, from, to, element_type, result_context](auto& backend, auto view) {
+            cigar_match_array_sink sink{backend, element_type, result_context};
             cigar_backend_scratch provider{backend};
             require_cigar_success(bioseq::cigar_find(backend, view, operation, from, to, provider, sink));
-            return PointerGetDatum(form_cigar_array(values.first(sink.used), element_type));
+            return sink.finish();
         });
     return reinterpret_cast<ArrayType*>(DatumGetPointer(result));
 }

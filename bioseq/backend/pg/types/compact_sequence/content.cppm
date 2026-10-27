@@ -3,8 +3,10 @@
  * Compare and hash sequence contents for SQL operators and indexes.
  *
  * Alphabet binding and alphabet code come before  the letters in the ordering.
- * Values with the same alphabet compare by letter rank, regardless of storage
- * width or piece-tree shape. Unbound values compare their text bytes.
+ * Ordinary values with the same alphabet compare by letter rank; CIGAR values
+ * use reported matches and descending match intervals before letter rank.
+ * Equality ignores storage width and piece-tree shape. Unbound values compare
+ * their text bytes.
  */
 module;
 

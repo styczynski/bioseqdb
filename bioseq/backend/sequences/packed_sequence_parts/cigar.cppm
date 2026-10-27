@@ -277,7 +277,6 @@ public:
             error_ = cigar_error{cigar_error_code::invalid_encoding};
             return;
         }
-        std::fill(destination_.begin(), destination_.end(), std::byte{});
         const cigar_payload_header header{run_count, cigar_checkpoint_count(run_count)};
         std::memcpy(destination_.data(), std::addressof(header), sizeof(header));
     }
@@ -298,10 +297,12 @@ public:
             std::memcpy(destination_.data() + cigar_checkpoint_offset(written_runs_ / cigar_checkpoint_stride),
                         std::addressof(checkpoint), sizeof(checkpoint));
         }
-        auto* record = destination_.data() + cigar_run_offset<Alphabet>(expected_runs_, written_runs_);
+        std::array<std::byte, sizeof(run_type)> record{};
         const auto rank = seqan3::to_rank(run.operation);
-        std::memcpy(record, std::addressof(run.length), sizeof(run.length));
-        std::memcpy(record + sizeof(run.length), std::addressof(rank), sizeof(rank));
+        std::memcpy(record.data(), std::addressof(run.length), sizeof(run.length));
+        std::memcpy(record.data() + sizeof(run.length), std::addressof(rank), sizeof(rank));
+        std::memcpy(destination_.data() + cigar_run_offset<Alphabet>(expected_runs_, written_runs_),
+                    record.data(), record.size());
         logical_length_ = *sum;
         previous_ = run.operation;
         ++written_runs_;

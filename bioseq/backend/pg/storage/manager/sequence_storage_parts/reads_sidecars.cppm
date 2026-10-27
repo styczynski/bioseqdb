@@ -174,16 +174,18 @@ sequence_storage_manager<
     const bool retain_read_state =
         registered_mvcc_snapshot || snapshot == SnapshotAny;
 
-    // Empty sources retain their alphabet/codec metadata in the source catalog.
-    if (loc.fragment_count == 0u) {
-        const auto source = sequence_source_version_manager::lookup(
-            loc.source_epoch, snapshot, false);
+    // RLE and empty sources retain their exact codec metadata in the source catalog.
+    std::optional<sequence_source_version_row> source;
+    if (loc.fragment_count == 0u || loc.encoded_payload_bytes != 0u) {
+        source = sequence_source_version_manager::lookup(loc.source_epoch, snapshot, false);
         if (!source || source->database_oid != db_oid || source->tablespace_oid != spc_oid ||
             source->main_relfilenode != main_relfilenode || source->column_attno != column_attno ||
             std::memcmp(&source->locator, &loc, sizeof(loc)) != 0) {
             ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
-                errmsg("bioseq empty source metadata does not match its locator")));
+                errmsg("bioseq source metadata does not match its locator")));
         }
+    }
+    if (loc.fragment_count == 0u) {
         const Size payload_bytes = source->encoding == bioseq::sequence_encoding::cigar_rle
             ? sizeof(bioseq::cigar_payload_header) : 0u;
         const Size bytes = bioseq::pg_types::seq::header_bytes() + payload_bytes;
@@ -288,12 +290,19 @@ sequence_storage_manager<
     const bool is_rle = first_raw->encoding == bioseq::sequence_encoding::cigar_rle_fragment;
     if ((!is_rle && first_raw->encoding != bioseq::sequence_encoding::rank_packed) ||
         !bioseq::valid_cigar_space(first_raw->space) ||
+        (pgseq_is_cigar_alphabet(logical_alphabet_code) != is_rle) ||
         (!is_rle && (first_raw->space != bioseq::cigar_space::compatibility || loc.encoded_payload_bytes != 0u)) ||
         (is_rle && (loc.encoded_payload_bytes == 0u ||
             logical_byte_width != sizeof(bioseq::cigar_run) ||
             !pgseq_is_cigar_alphabet(logical_alphabet_code)))) {
         ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
             errmsg("bioseq fragment codec disagrees with its locator")));
+    }
+    if (is_rle && (!source || source->encoding != bioseq::sequence_encoding::cigar_rle ||
+        source->space != first_raw->space || source->alphabet_code != logical_alphabet_code ||
+        source->storage_unit_byte_width != logical_byte_width || source->padding_letters != 0u)) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+            errmsg("bioseq encoded fragment metadata differs from its source epoch")));
     }
     const auto encoding = first_raw->encoding;
     const auto space = first_raw->space;

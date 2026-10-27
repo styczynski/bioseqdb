@@ -260,6 +260,9 @@ export struct pg_sequence_expanded {
     piece_edge root;
     slice_trace_attachment* trace;
     std::uint32_t producer_value_id;
+    /** Whole-root canonical measure reused between EOH sizing and flattening. */
+    mutable std::uint32_t canonical_run_count{};
+    mutable bool canonical_run_count_valid{};
 };
 
 /* :packed_output defines the sizing and flattening callbacks. Datum

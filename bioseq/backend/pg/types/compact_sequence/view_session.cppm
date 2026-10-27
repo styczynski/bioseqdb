@@ -10,6 +10,7 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <expected>
 #include <limits>
 #include <memory>
 #include <new>
@@ -212,6 +213,20 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
     }
 }
 
+/** Validate codec metadata before a source locator can acquire an owner. */
+[[nodiscard]] inline bool valid_locator_codec_metadata(
+    bioseq::pg_types::seq const& header, std::uint8_t physical_width) noexcept
+{
+    if (pgseq_is_cigar_alphabet(header.alphabet_code)) {
+        return header.encoding == bioseq::sequence_encoding::cigar_rle
+            && physical_width == sizeof(bioseq::cigar_run)
+            && header.padding_letters == 0u
+            && bioseq::valid_cigar_space(header.space);
+    }
+    return header.encoding == bioseq::sequence_encoding::rank_packed
+        && header.space == bioseq::cigar_space::compatibility;
+}
+
 } // namespace
 
 /** Borrow an expanded sequence for reading, or return nullptr for a flat Datum.
@@ -257,7 +272,13 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                 static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
             || (expanded->alphabet_bound
                 && !is_supported_alphabet_code(
-                    expanded->type_params.alphabet_code))) {
+                    expanded->type_params.alphabet_code))
+            || (expanded->alphabet_bound
+                && pgseq_is_cigar_alphabet(expanded->type_params.alphabet_code)
+                && (expanded->type_params.encoding != bioseq::sequence_encoding::cigar_rle
+                    || expanded->type_params.storage_unit_byte_width != sizeof(bioseq::cigar_run)
+                    || !bioseq::valid_cigar_space(expanded->type_params.space)
+                    || expanded->bp_length > (std::numeric_limits<std::uint32_t>::max)()))) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("invalid expanded bioseq.seq metadata")));
@@ -337,8 +358,16 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(flat->alphabet_code))
                 || !pgseq_supported_storage_unit_byte_widths::
-                    contains_runtime(width)) {
-                invalid_flat_sequence("locator payload/header is outside the live v3 domain");
+                    contains_runtime(width)
+                || !valid_locator_codec_metadata(*flat, width)
+                || flat->bp_size != locator->logical_length
+                || (pgseq_is_cigar_alphabet(flat->alphabet_code)
+                    ? (locator->logical_length > (std::numeric_limits<std::uint32_t>::max)()
+                        || (locator->logical_length == 0u
+                            ? locator->encoded_payload_bytes != 0u
+                            : locator->encoded_payload_bytes < sizeof(bioseq::cigar_payload_header)))
+                    : locator->encoded_payload_bytes != 0u)) {
+                invalid_flat_sequence("locator payload/header is outside the live codec domain");
             }
             return {
                 .kind = pg_sequence_datum_kind::locator,
@@ -462,7 +491,8 @@ classify_and_describe_sequence_header(Datum input)
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(header->alphabet_code))
                 || !pgseq_supported_storage_unit_byte_widths::
-                    contains_runtime(physical_width)) {
+                    contains_runtime(physical_width)
+                || !valid_locator_codec_metadata(*header, physical_width)) {
                 if (free_header) {
                     pfree(header);
                 }
@@ -517,14 +547,13 @@ export struct pg_cigar_payload_reader {
             return std::unexpected(bioseq::cigar_error{
                 bioseq::cigar_error_code::invalid_encoding, offset});
         }
-        const auto status = bioseq::postgres::support::invoke_pg_as_cpp(
-            [this, offset, output] {
-                return source->source.ops->read_encoded_bytes(
-                    source->source.state, *session, source->locator,
-                    source->stored_type_params, offset,
-                    std::span<std::uint8_t>{
-                        reinterpret_cast<std::uint8_t*>(output.data()), output.size()});
-            });
+        // Source callbacks already convert PostgreSQL ERROR before returning
+        // through the ABI. Avoid a second heap-owning error bridge per record.
+        const auto status = source->source.ops->read_encoded_bytes(
+            source->source.state, *session, source->locator,
+            source->stored_type_params, offset,
+            std::span<std::uint8_t>{
+                reinterpret_cast<std::uint8_t*>(output.data()), output.size()});
         if (status != pg_sequence_source_read_status::ok) {
             return std::unexpected(bioseq::cigar_error{
                 bioseq::cigar_error_code::invalid_encoding, offset});
@@ -581,8 +610,9 @@ private:
             const frame selected = stack_[--stack_size_];
             if (!selected.edge || selected.from == selected.to) continue;
             if (selected.edge.node->node_kind == piece_node::kind::branch) {
-                const auto children = bioseq::postgres::support::invoke_pg_as_cpp(
-                    [selected] { return logical_children(selected.edge); });
+                // Both preconditions of this allocation-free helper were
+                // established above, so its PostgreSQL error arm is unreachable.
+                const auto children = logical_children(selected.edge);
                 const auto split = children.first.node->bp_length;
                 if (stack_size_ + 2u > stack_.size()) {
                     return std::unexpected(bioseq::cigar_error{
@@ -723,9 +753,15 @@ template<class p_alphabet>
 /** Returns the complement rank for @p rank in alphabet @p p_alphabet. */
 [[nodiscard]] inline std::uint8_t complement_rank(std::uint8_t rank)
 {
-    return static_cast<std::uint8_t>(
-        bioseq::storage::lazy_sequence_traits<p_alphabet>::
-            letter_complement(rank));
+    if constexpr (requires(p_alphabet symbol) { seqan3::complement(symbol); }) {
+        return static_cast<std::uint8_t>(
+            bioseq::storage::lazy_sequence_traits<p_alphabet>::letter_complement(rank));
+    } else {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("sequence alphabet does not support complementation")));
+        pg_unreachable();
+    }
 }
 
 template<class p_alphabet>

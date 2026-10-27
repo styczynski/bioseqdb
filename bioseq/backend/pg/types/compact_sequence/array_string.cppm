@@ -371,6 +371,13 @@ inline void validate_bridge_array_shape(
                         width_bits),
                  errhint("Supported widths: 8, 16, 32, 64")));
     }
+    if (pgseq_is_cigar_alphabet(alphabet)
+        && width_bits != sizeof(bioseq::cigar_run) * 8u) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("bioseq CIGAR storage width must be %zu bits",
+                        sizeof(bioseq::cigar_run) * 8u)));
+    }
     return {
         .alphabet_code = alphabet,
         .storage_unit_byte_width = pgseq_normalize_storage_unit_byte_width(
@@ -827,7 +834,12 @@ ArrayType* to_array(
         ? 0u : expanded->producer_value_id;
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(trace);
-    const auto descriptor = inspect_sequence(input);
+    const auto descriptor = classify_and_describe_sequence_header(input);
+    if (descriptor.kind == pg_sequence_datum_kind::locator) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cannot resolve a bioseq locator outside its owning table scan")));
+    }
     if (!descriptor.alphabet_bound) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -836,6 +848,7 @@ ArrayType* to_array(
     }
     const Oid letter_oid = bioseq_letter_oid();
     if (descriptor.bp_length == 0u) {
+        (void)inspect_sequence(input);
         ArrayType* result = construct_empty_array(letter_oid);
         record_slice_materialization_success(
             trace, producer_value_id,

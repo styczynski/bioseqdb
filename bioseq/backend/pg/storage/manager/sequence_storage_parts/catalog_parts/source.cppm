@@ -547,7 +547,9 @@ inline void validate_bound_read_catalog_contract(
     row.encoding = static_cast<bioseq::sequence_encoding>(catalog.encoding);
     row.space = static_cast<bioseq::cigar_space>(catalog.cigar_space);
     row.locator.encoded_payload_bytes = static_cast<std::uint32_t>(catalog.encoded_payload_bytes);
-    if ((row.encoding == bioseq::sequence_encoding::rank_packed
+    if ((pgseq_is_cigar_alphabet(row.alphabet_code) !=
+            (row.encoding == bioseq::sequence_encoding::cigar_rle)) ||
+        (row.encoding == bioseq::sequence_encoding::rank_packed
             && (row.space != bioseq::cigar_space::compatibility
                 || row.locator.encoded_payload_bytes != 0u))
         || (row.encoding == bioseq::sequence_encoding::cigar_rle

@@ -604,40 +604,74 @@ template<class Backend>
     return {};
 }
 
-/** Select maximal retained intervals and compose existing balanced expression joins. */
-template<cigar_sequence_backend Backend, class Predicate>
-[[nodiscard]] std::expected<typename Backend::sequence_type, cigar_error> select_cigar_intervals(
-        Backend& backend, typename Backend::sequence_view_type view, Predicate&& keep) {
-    std::optional<typename Backend::sequence_type> aggregate;
-    std::optional<storage::sequence_size_t> interval_start;
+/** Visit selected canonical runs once, preserving their original absolute coordinates. */
+template<cigar_sequence_backend Backend, class Predicate, class Emit>
+[[nodiscard]] std::expected<void, cigar_error> visit_selected_cigar_runs(
+        Backend& backend, typename Backend::sequence_view_type view,
+        Predicate&& keep, Emit&& emit) {
     storage::sequence_size_t position{};
     auto cursor = backend.runs(view, 0u, backend.length(view));
     for (;;) {
         auto next = cursor.next();
-        if (!next) {
-            if (aggregate) backend.release(*aggregate);
-            return std::unexpected(next.error());
+        if (!next) return std::unexpected(next.error());
+        if (!*next) return {};
+        const auto run = **next;
+        if (std::invoke(keep, run, position)) {
+            auto emitted = std::invoke(emit, run, position);
+            if (!emitted) return emitted;
         }
-        const bool retained = *next && std::invoke(keep, **next, position);
-        if (retained && !interval_start) interval_start = position;
-        if (!retained && interval_start) {
-            auto piece = backend.slice(view, *interval_start, position);
-            if (!piece) {
-                if (aggregate) backend.release(*aggregate);
-                return std::unexpected(piece.error());
-            }
-            auto appended = append_cigar_owned_piece(backend, aggregate, std::move(*piece));
-            if (!appended) {
-                if (aggregate) backend.release(*aggregate);
-                return std::unexpected(appended.error());
-            }
-            interval_start.reset();
-        }
-        if (!*next) break;
-        position += (**next).length;
+        position += run.length;
     }
-    if (aggregate) return std::move(*aggregate);
-    return backend.from_runs({}, backend.space(view));
+}
+
+/** Select runs through a representation accumulator, sharing source intervals for lazy backends. */
+template<cigar_sequence_backend Backend, class Predicate>
+[[nodiscard]] std::expected<typename Backend::sequence_type, cigar_error> select_cigar_intervals(
+        Backend& backend, typename Backend::sequence_view_type view, Predicate&& keep) {
+    if constexpr (requires {
+        { backend.select_runs(view, std::forward<Predicate>(keep)) }
+            -> std::same_as<std::expected<typename Backend::sequence_type, cigar_error>>;
+    }) {
+        return backend.select_runs(view, std::forward<Predicate>(keep));
+    } else {
+        std::optional<typename Backend::sequence_type> aggregate;
+        std::optional<storage::sequence_size_t> interval_start;
+        storage::sequence_size_t interval_end{};
+        auto flush_interval = [&backend, view, &aggregate, &interval_start, &interval_end]()
+                -> std::expected<void, cigar_error> {
+            if (!interval_start) return {};
+            auto piece = backend.slice(view, *interval_start, interval_end);
+            if (!piece) return std::unexpected(piece.error());
+            auto appended = append_cigar_owned_piece(backend, aggregate, std::move(*piece));
+            if (!appended) return appended;
+            interval_start.reset();
+            return {};
+        };
+        auto emit = [&interval_start, &interval_end, &flush_interval](
+                typename Backend::run_type run, storage::sequence_size_t position)
+                -> std::expected<void, cigar_error> {
+            if (interval_start && position != interval_end) {
+                auto flushed = flush_interval();
+                if (!flushed) return flushed;
+            }
+            if (!interval_start) interval_start = position;
+            interval_end = position + run.length;
+            return {};
+        };
+        const auto selected = visit_selected_cigar_runs(
+            backend, view, std::forward<Predicate>(keep), emit);
+        if (!selected) {
+            if (aggregate) backend.release(*aggregate);
+            return std::unexpected(selected.error());
+        }
+        const auto flushed = flush_interval();
+        if (!flushed) {
+            if (aggregate) backend.release(*aggregate);
+            return std::unexpected(flushed.error());
+        }
+        if (aggregate) return std::move(*aggregate);
+        return backend.from_runs({}, backend.space(view));
+    }
 }
 
 /** Keep an identity whitelist without expanding any retained operation run. */
@@ -1087,6 +1121,28 @@ public:
                 std::span<const run_type>{canonical.data(), canonical.size()}, declared_space);
             if (!encoded) return std::unexpected(encoded.error());
             return sequence_type{std::move(payload), *encoded, declared_space};
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
+        } catch (const std::length_error&) {
+            return std::unexpected(cigar_error{cigar_error_code::output_too_large});
+        }
+    }
+    /** Accumulate retained runs once; eager standalone output is encoded only after selection. */
+    template<class Predicate>
+    [[nodiscard]] std::expected<sequence_type, cigar_error> select_runs(
+            sequence_view_type view, Predicate&& keep) {
+        try {
+            const auto scope = memory_.template push<context::arena::scratch>();
+            // Grow only for retained runs through the existing admitted vector policy.
+            auto selected = memory_.template make_scratch_vector<run_type>();
+            auto emit = [&selected](run_type run, storage::sequence_size_t)
+                    -> std::expected<void, cigar_error> {
+                return append_canonical_run(selected, run);
+            };
+            const auto visited = visit_selected_cigar_runs(
+                *this, view, std::forward<Predicate>(keep), emit);
+            if (!visited) return std::unexpected(visited.error());
+            return from_runs({selected.data(), selected.size()}, space(view));
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
         } catch (const std::length_error&) {

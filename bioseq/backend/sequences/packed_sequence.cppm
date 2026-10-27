@@ -71,7 +71,9 @@ template<
         !std::is_same_v<p_left_configuration, p_right_configuration>, bool>
         p_configurations_are_distinct = true>
 requires (
-    requires (
+    compact_sequence_range<p_left_configuration>::traits::is_bit_packed
+    && compact_sequence_range<p_right_configuration>::traits::is_bit_packed
+    && requires (
         compact_sequence_range<p_left_configuration>& lhs,
         compact_sequence_range<p_right_configuration>& rhs) {
         {
@@ -90,6 +92,49 @@ inline constexpr bool operator==(
         rhs.template iter<alphabet_symbol>(rhs.begin()),
         rhs.template iter<alphabet_symbol>(rhs.end())
     );
+}
+
+/**
+ * @brief Compares CIGAR configurations without expanding a run-encoded operand.
+ *
+ * Canonical RLE streams compare by run records. An explicitly materialized
+ * positional operand is read in place while its counterpart stays run encoded.
+ * @param lhs First logical operation stream.
+ * @param rhs Second logical operation stream in the same alphabet.
+ * @return Whether canonical contents agree, independently of physical storage.
+ */
+template<supports_compact_sequence_range Left, supports_compact_sequence_range Right>
+    requires (!std::same_as<Left, Right>
+        && std::same_as<typename compact_sequence_range<Left>::traits::alphabet_type,
+                        typename compact_sequence_range<Right>::traits::alphabet_type>
+        && bioseq::cigar_operation_alphabet<
+            typename compact_sequence_range<Left>::traits::alphabet_type>
+        && (compact_sequence_range<Left>::traits::is_run_encoded
+            || compact_sequence_range<Right>::traits::is_run_encoded))
+[[nodiscard]] inline bool operator==(
+        const compact_sequence_range<Left>& lhs,
+        const compact_sequence_range<Right>& rhs) {
+    if (lhs.bp_size() != rhs.bp_size()) return false;
+    if constexpr (compact_sequence_range<Left>::traits::is_run_encoded
+                  && compact_sequence_range<Right>::traits::is_run_encoded) {
+        return std::ranges::equal(lhs.runs(), rhs.runs());
+    } else {
+        const auto compare_run_positions = [](const auto& run_view, const auto& positional_view) {
+            const auto symbols = positional_view.template iterable<alphabet_symbol>();
+            auto position = symbols.begin();
+            for (const auto run : run_view.runs()) {
+                for (std::size_t remaining = run.length; remaining != 0u; --remaining) {
+                    if (position == symbols.end() || *position != run.operation) return false;
+                    ++position;
+                }
+            }
+            return position == symbols.end();
+        };
+        if constexpr (compact_sequence_range<Left>::traits::is_run_encoded)
+            return compare_run_positions(lhs, rhs);
+        else
+            return compare_run_positions(rhs, lhs);
+    }
 }
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
