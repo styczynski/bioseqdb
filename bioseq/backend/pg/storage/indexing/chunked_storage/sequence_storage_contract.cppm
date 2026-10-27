@@ -80,7 +80,7 @@ import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.postgres.storage.scanner.lazy_binding; // Read sequence fragments through a PostgreSQL snapshot.
+import bioseq.postgres.storage.scanner; // Packed bindings and codec-aware source promotion.
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
@@ -804,48 +804,83 @@ inline void table_index_storage::for_each_sequence(p_callback&& loader) {
     std::vector<char> nullbuf(td->natts);
     bool* nulls = reinterpret_cast<bool*>(nullbuf.data());
     std::uint64_t rowno = 0;
-    while (read_next_column_row(rs, valp, nulls, &rowno)) {
-        if (nulls[column_attno_ - 1])
-            continue;
-        MemoryContextReset(inner);
-        MemoryContext previous_context = MemoryContextSwitchTo(inner);
-        auto hdr_detoasted = bioseq::postgres::support::detoast_as<bioseq::pg_types::seq>(
-            bioseq::postgres::support::pg_datum::from_raw(valp[column_attno_ - 1]));
-        bioseq::pg_types::seq* hdr = hdr_detoasted.ptr;
-        MemoryContextSwitchTo(previous_context);
-        const std::uint8_t alpha = hdr->alphabet_code;
-        const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
-        if (!is_locator_stub(hdr)) {
-            bioseq::pg_types::seq::dispatch_instance(
-                alpha, bw, [hdr, &loader, rowno, total]<class p_sequence_type>() {
-                    compact_sequence_range<p_sequence_type> rng{*hdr};
-                    const auto view = bioseq::storage::make_lazy_sequence_view(rng);
-                    loader(view, static_cast<std::size_t>(rowno), total);
-                });
-        } else {
-            const sequence_locator loc = decode_locator_from_stub(hdr);
-            bioseq::pg_types::seq::dispatch_instance(
-                alpha, bw, [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
-                    // Read locator fragments with this traversal's snapshot and row memory context.
-                    using source_binding =
-                        bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
-                    const source_binding bound_source{
-                        db_oid_,
-                        tablespace_oid_,
-                        main_relfilenode_,
-                        column_attno_,
-                        loc,
-                        source_binding::expected_last_fragment_padding(loc),
-                        rs->snapshot,
-                        read_caches_,
-                        inner};
-                    bioseq::storage::with_postgres_lazy_sequence<p_sequence_type>(
-                        bound_source, [&loader, rowno, total](auto view) {
-                            loader(view, static_cast<std::size_t>(rowno), total);
-                        });
-                });
-        }
-        hdr_detoasted.free_if_copy();
+    bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
+    try {
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [this, rs, valp, nulls, &rowno, inner, &loader, total, main, &source_provider] {
+                while (read_next_column_row(rs, valp, nulls, &rowno)) {
+                    if (nulls[column_attno_ - 1])
+                        continue;
+                    MemoryContextReset(inner);
+                    MemoryContext previous_context = MemoryContextSwitchTo(inner);
+                    auto hdr_detoasted = bioseq::postgres::support::detoast_as<bioseq::pg_types::seq>(
+                        bioseq::postgres::support::pg_datum::from_raw(valp[column_attno_ - 1]));
+                    bioseq::pg_types::seq* hdr = hdr_detoasted.ptr;
+                    MemoryContextSwitchTo(previous_context);
+                    const std::uint8_t alpha = hdr->alphabet_code;
+                    const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
+                    if (!is_locator_stub(hdr)) {
+                        bioseq::pg_types::seq::dispatch_instance(
+                            alpha, bw, [hdr, &loader, rowno, total]<class p_sequence_type>() {
+                                compact_sequence_range<p_sequence_type> rng{*hdr};
+                                const auto view = bioseq::storage::make_lazy_sequence_view(rng);
+                                loader(view, static_cast<std::size_t>(rowno), total);
+                            });
+                    } else if (pgseq_is_cigar_alphabet(alpha)) {
+                        // Reuse one provider for this traversal and its registered snapshot.
+                        // RLE retains encoded-byte geometry behind the existing lazy view.
+                        if (source_provider == nullptr) {
+                            source_provider = bioseq::storage::create_standalone_pg_sequence_source_provider(
+                                main, rs->snapshot);
+                        }
+                        const Datum promoted = bioseq::storage::promote_pg_sequence_locator(
+                            source_provider, column_attno_, PointerGetDatum(hdr), inner);
+                        static_cast<void>(with_pg_sequence_view<bool>(promoted,
+                            [&loader, rowno, total](auto view) {
+                                loader(view, static_cast<std::size_t>(rowno), total);
+                                return true;
+                            }));
+                    } else {
+                        const sequence_locator loc = decode_locator_from_stub(hdr);
+                        pgseq_dispatch_biological_instance(
+                            alpha, bw, [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
+                                // Read locator fragments with this traversal's snapshot and row memory context.
+                                using source_binding =
+                                    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
+                                const source_binding bound_source{
+                                    db_oid_,
+                                    tablespace_oid_,
+                                    main_relfilenode_,
+                                    column_attno_,
+                                    loc,
+                                    source_binding::expected_last_fragment_padding(loc),
+                                    rs->snapshot,
+                                    read_caches_,
+                                    inner};
+                                bioseq::storage::with_postgres_lazy_sequence<p_sequence_type>(
+                                    bound_source, [&loader, rowno, total](auto view) {
+                                        loader(view, static_cast<std::size_t>(rowno), total);
+                                    });
+                            });
+                    }
+                    hdr_detoasted.free_if_copy();
+                }
+            });
+        // Retire the final row's expanded source lease before closing its provider.
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [inner] { MemoryContextReset(inner); });
+        bioseq::postgres::support::invoke_pg_as_cpp([source_provider] {
+            bioseq::storage::close_pg_sequence_source_provider(source_provider, /*is_commit=*/true);
+        });
+        source_provider = nullptr;
+    } catch (...) {
+        // Preserve the traversal failure while releasing any promoted source lease.
+        try {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [inner] { MemoryContextReset(inner); });
+        } catch (...) {}
+        bioseq::storage::close_pg_sequence_source_provider(source_provider, /*is_commit=*/false);
+        throw;
     }
     // Cached fragment readers borrow rs->snapshot. Close them before
     // end_column_read unregisters any snapshot it refreshed during the scan.

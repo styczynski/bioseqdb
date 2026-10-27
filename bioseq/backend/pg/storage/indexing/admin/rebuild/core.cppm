@@ -605,8 +605,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         pg_unreachable();
     }
 
-    // Reject declared CIGAR columns before kernel binding or GPU initialization.
-    if (name != bioseq::indexing::k_symbol_counts_index_name) {
+    // Generic table callbacks remain alphabet-independent. Reject unsupported
+    // per-sequence CIGAR indexes before kernel binding or GPU initialization.
+    if (name != bioseq::indexing::k_symbol_counts_index_name &&
+        layout != sequence_index_layout::table_chunks) {
         for (std::size_t index = 0; index < state.row_count; ++index) {
             const auto typmod = state.typmods[index];
             if (typmod >= 0 && pgseq_is_cigar_alphabet(
