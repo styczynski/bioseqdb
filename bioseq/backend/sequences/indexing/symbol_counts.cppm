@@ -10,6 +10,9 @@ module;
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <limits>
+#include <span>
 #include <libassert/assert.hpp>
 #include <optional>
 #include <string_view>
@@ -20,6 +23,8 @@ import bioseq.indexing.traits;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.common.checked_arithmetic;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -29,6 +34,7 @@ export namespace bioseq::indexing {
  * @return Array indexed by the alphabet's numeric symbol ranks.
  */
 template <sequence_alphabet p_alphabet>
+    requires (!bioseq::cigar_operation_alphabet<p_alphabet>)
 auto tally_symbol_counts(
         bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
     using traits = typename bioseq::storage::lazy_sequence_view<
@@ -44,6 +50,49 @@ auto tally_symbol_counts(
     return counts;
 }
 
+/** Counts selected by a canonical cursor use the existing lazy-rank slot dimensions. */
+template<bioseq::cigar_run_cursor Cursor>
+[[nodiscard]] auto tally_symbol_counts(Cursor& cursor) {
+    using alphabet = typename Cursor::run_type::alphabet_type;
+    using traits = typename bioseq::storage::lazy_sequence_view<alphabet>::traits;
+    constexpr std::size_t rank_count = std::size_t{1} << traits::k_logical_bits_per_symbol;
+    using counts_type = std::array<std::int64_t, rank_count>;
+    counts_type counts{};
+    for (;;) {
+        auto next = cursor.next();
+        if (!next) return std::expected<counts_type, bioseq::cigar_error>{std::unexpected(next.error())};
+        if (!*next) return std::expected<counts_type, bioseq::cigar_error>{counts};
+        const auto run = **next;
+        const auto rank = static_cast<std::size_t>(seqan3::to_rank(run.operation));
+        if (run.length == 0u || rank >= seqan3::alphabet_size<alphabet>)
+            return std::expected<counts_type, bioseq::cigar_error>{std::unexpected(
+                bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding})};
+        const auto combined = bioseq::common::checked_add(
+            static_cast<bioseq::storage::sequence_size_t>(counts[rank]),
+            static_cast<bioseq::storage::sequence_size_t>(run.length));
+        if (!combined || *combined > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+            return std::expected<counts_type, bioseq::cigar_error>{std::unexpected(
+                bioseq::cigar_error{bioseq::cigar_error_code::length_overflow})};
+        counts[rank] = static_cast<std::int64_t>(*combined);
+    }
+}
+
+/** Borrow a validated resident CIGAR range as a weighted cursor, with no new owning buffer. */
+template<bioseq::cigar_operation_alphabet Alphabet>
+[[nodiscard]] auto tally_symbol_counts(const compact_sequence_range<Alphabet>& sequence) {
+    struct range_cursor {
+        using run_type = bioseq::cigar_run_value<Alphabet>;
+        typename compact_sequence_range<Alphabet>::run_iterator current;
+        typename compact_sequence_range<Alphabet>::run_iterator end;
+        /** Return one canonical run and preserve clean exhaustion. */
+        [[nodiscard]] std::expected<std::optional<run_type>, bioseq::cigar_error> next() {
+            if (current == end) return std::optional<run_type>{};
+            return std::optional<run_type>{*current++};
+        }
+    } cursor{sequence.begin(), sequence.end()};
+    return tally_symbol_counts(cursor);
+}
+
 /** @brief Stores each sequence's symbol counts in one inline index row. */
 template <class p_storage>
 struct symbol_counts_index {
@@ -56,12 +105,9 @@ struct symbol_counts_index {
     /// @brief Concrete storage type accepted by this index.
     using storage_type = p_storage;
 
-    /** @brief Counts the sequence symbols and writes the resulting array to inline storage. */
-    template <sequence_alphabet p_alphabet>
-    static void build(
-            p_storage& storage,
-            bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
-        const auto counts = tally_symbol_counts(seq);
+    /** Write the shared histogram format regardless of the logical source codec. */
+    template<std::size_t SlotCount>
+    static void write_counts(p_storage& storage, const std::array<std::int64_t, SlotCount>& counts) {
         storage.resize(counts.size() * sizeof(std::int64_t));
         storage.template write_to_each<std::int64_t>(
             [&counts](std::size_t chunk_no, std::int64_t* output, std::size_t capacity) {
@@ -71,13 +117,60 @@ struct symbol_counts_index {
                 return chunk_no;
             });
     }
-    /** @brief Clears the stored symbol counts and builds them  again from the sequence. */
-    template <sequence_alphabet p_alphabet>
-    static void rebuild(
-            p_storage& storage,
-            bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
+
+    /** Count ordinary positional sequences and write the existing inline histogram. */
+    template<sequence_alphabet Alphabet>
+        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+    static void build(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
+        write_counts(storage, tally_symbol_counts(sequence));
+    }
+
+    /** Build the same index from canonical weighted operations, propagating source failures. */
+    template<bioseq::cigar_run_cursor Cursor>
+    [[nodiscard]] static std::expected<void, bioseq::cigar_error> build(p_storage& storage, Cursor& cursor) {
+        auto counts = tally_symbol_counts(cursor);
+        if (!counts) return std::unexpected(counts.error());
+        write_counts(storage, *counts);
+        return {};
+    }
+
+    /** Build directly from a resident run range without a positional compatibility facade. */
+    template<bioseq::cigar_operation_alphabet Alphabet>
+    [[nodiscard]] static std::expected<void, bioseq::cigar_error> build(
+            p_storage& storage, const compact_sequence_range<Alphabet>& sequence) {
+        auto counts = tally_symbol_counts(sequence);
+        if (!counts) return std::unexpected(counts.error());
+        write_counts(storage, *counts);
+        return {};
+    }
+
+    /** Rebuild ordinary sequences through their existing rank reader. */
+    template<sequence_alphabet Alphabet>
+        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+    static void rebuild(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
         storage.clear_entity();
-        build(storage, seq);
+        build(storage, sequence);
+    }
+
+    /** Rebuild a weighted stream using the identical serialized histogram. */
+    template<bioseq::cigar_run_cursor Cursor>
+    [[nodiscard]] static std::expected<void, bioseq::cigar_error> rebuild(p_storage& storage, Cursor& cursor) {
+        auto counts = tally_symbol_counts(cursor);
+        if (!counts) return std::unexpected(counts.error());
+        storage.clear_entity();
+        write_counts(storage, *counts);
+        return {};
+    }
+
+    /** Rebuild a resident RLE value without constructing expanded ranks. */
+    template<bioseq::cigar_operation_alphabet Alphabet>
+    [[nodiscard]] static std::expected<void, bioseq::cigar_error> rebuild(
+            p_storage& storage, const compact_sequence_range<Alphabet>& sequence) {
+        auto counts = tally_symbol_counts(sequence);
+        if (!counts) return std::unexpected(counts.error());
+        storage.clear_entity();
+        write_counts(storage, *counts);
+        return {};
     }
 
     /**

@@ -23,6 +23,7 @@ extern "C" {
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <exception>
 #include <fmt/format.h>
 #include <limits>
@@ -48,6 +49,8 @@ import bioseq.postgres.storage.scanner;        // PostgreSQL sequence read sessi
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.indexing.type;
+import bioseq.indexing.symbol_counts;
+import bioseq.sequences.cigar;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.postgres.storage.indexing.chunked_storage;
@@ -446,10 +449,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         });
         pg_unreachable();
     }
-    const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
-        is_minimizer_index
-            ? bind_selected_minimizer_kernels_for_operation(backend, "bioseq.update_index")
-            : nullptr;
+    const bioseq::minimizers::minimizer_kernels* minimizer_kernels = nullptr;
+    bool minimizer_runtime_ready = false;
     const int configured_kmer_size = bioseq::aligner::settings::minimizer::kmer_size;
     const int configured_window_size = bioseq::aligner::settings::minimizer::window_size;
     const bool runtime_profile_fields_encodable =
@@ -515,7 +516,6 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         });
         pg_unreachable();
     }
-    ensure_vulkan_index_build_runtime_ready(backend);
     bioseq_log<logging_level::debug>(
         "[bioseq] index: update_index name={} backend={} vulkan_enabled={} "
         "vulkan_gpu_index_build={} minimizer_algorithm={} grouped-SoA={}",
@@ -529,7 +529,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     // Include every sequence column because mmsearch can target any of them.
     std::vector<std::int16_t> seq_attnos;
     const std::string seq_attno_sql =
-        fmt::format("SELECT a.attnum FROM pg_attribute a JOIN pg_type t "
+        fmt::format("SELECT a.attnum, a.atttypmod FROM pg_attribute a JOIN pg_type t "
                     "ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
                     "WHERE a.attrelid={}::oid AND t.typname='seq' "
                     "AND n.nspname IN ('bioseq','bioseq_internal') "
@@ -544,6 +544,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         bool table_present = false;
         bool overflow = false;
         std::array<std::int16_t, MaxTupleAttributeNumber> values{};
+        std::array<std::int32_t, MaxTupleAttributeNumber> typmods{};
     } state{};
     const char* seq_attno_sql_data = seq_attno_sql.c_str();
     bioseq::postgres::support::invoke_pg_as_cpp([&state, seq_attno_sql_data] noexcept {
@@ -564,6 +565,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     break;
                 }
                 state.values[static_cast<std::size_t>(row)] = DatumGetInt16(value);
+                const Datum typmod = SPI_getbinval(
+                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 2, &is_null);
+                if (is_null) { state.null_row = row; break; }
+                state.typmods[static_cast<std::size_t>(row)] = DatumGetInt32(typmod);
             }
         }
         state.finish_status = SPI_finish();
@@ -600,6 +605,22 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         pg_unreachable();
     }
 
+    // Reject declared CIGAR columns before kernel binding or GPU initialization.
+    if (name != bioseq::indexing::k_symbol_counts_index_name) {
+        for (std::size_t index = 0; index < state.row_count; ++index) {
+            const auto typmod = state.typmods[index];
+            if (typmod >= 0 && pgseq_is_cigar_alphabet(
+                    compact_sequence_stdc_type_params::decode(typmod).alphabet_code)) {
+                bioseq::postgres::support::invoke_pg_as_cpp([name] {
+                    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("index %.*s is incompatible with CIGAR sequences",
+                            static_cast<int>(name.size()), name.data()),
+                        errhint("CIGAR sequences support the symbol_counts index.")));
+                });
+                pg_unreachable();
+            }
+        }
+    }
     const MemoryContext parent_context = CurrentMemoryContext;
     MemoryContext work = bioseq::postgres::support::invoke_pg_as_cpp([parent_context] {
         return AllocSetContextCreate(parent_context, "bioseq_update_index", ALLOCSET_DEFAULT_SIZES);
@@ -775,6 +796,48 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     });
                 const std::uint8_t alpha = hdr->alphabet_code;
                 const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
+                if (pgseq_is_cigar_alphabet(alpha)) {
+                    if (name != bioseq::indexing::k_symbol_counts_index_name) {
+                        bioseq::postgres::support::invoke_pg_as_cpp([name] {
+                            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                errmsg("index %.*s is incompatible with CIGAR sequences",
+                                    static_cast<int>(name.size()), name.data())));
+                        });
+                        pg_unreachable();
+                    }
+                    sequence_locator cigar_locator{};
+                    Datum cigar_datum = PointerGetDatum(hdr);
+                    if (is_locator_stub(hdr)) {
+                        cigar_locator = decode_locator_from_stub(hdr);
+                        cigar_datum = bioseq::storage::promote_pg_sequence_locator(
+                            source_provider, seq_attno, cigar_datum, inner);
+                    } else {
+                        cigar_locator.logical_length = hdr->bp_size;
+                        cigar_locator.bucket_index = static_cast<std::uint8_t>(
+                            bioseq::storage::sequence_bucket_index<bioseq::storage::sequence_size_t, 8, 42>(
+                                cigar_locator.logical_length));
+                    }
+                    auto store = open_sequence_storage_handle(rel_oid, rid.db_oid,
+                        rid.tablespace_oid, rid.relfilenode, seq_attno, name,
+                        cigar_locator, rowno, caches, work);
+                    run_pg_index_build_with_cleanup(store, [&store, cigar_datum] {
+                        const auto rebuilt = with_pg_cigar_sequence<std::expected<void, bioseq::cigar_error>>(
+                            cigar_datum, [&store](auto& cigar_backend, auto cigar_view) {
+                                auto cursor = cigar_backend.runs(cigar_view, 0u, cigar_backend.length(cigar_view));
+                                return bioseq::indexing::symbol_counts_index<sequence_index_storage>::rebuild(store, cursor);
+                            });
+                        if (!rebuilt) bioseq::postgres::support::invoke_pg_as_cpp(
+                            [error = rebuilt.error()] { pg_raise_cigar_error(error); });
+                    });
+                    any_col = true;
+                    continue;
+                }
+                if (is_minimizer_index && !minimizer_runtime_ready) {
+                    minimizer_kernels = bind_selected_minimizer_kernels_for_operation(
+                        backend, "bioseq.update_index");
+                    ensure_vulkan_index_build_runtime_ready(backend);
+                    minimizer_runtime_ready = true;
+                }
                 if (is_minimizer_index && !use_grouped_soa_generation &&
                     backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
                     reject_bounded_nthash_for_scheme_untagged_fragment_storage(
@@ -854,7 +917,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 .algorithm_identity = *algorithm_identity,
                                 .kernels = generation_kernels});
                     } else {
-                        bioseq::pg_types::seq::dispatch_instance(
+                        pgseq_dispatch_biological_instance(
                             alpha,
                             bw,
                             [rid,
@@ -985,7 +1048,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     if (use_grouped_soa_generation) {
                         reject_grouped_soa_nonlocator_source_as_cpp(name);
                     }
-                    bioseq::pg_types::seq::dispatch_instance(
+                    pgseq_dispatch_biological_instance(
                         alpha,
                         hdr->storage_unit_byte_width,
                         [hdr,

@@ -19,6 +19,7 @@ extern "C" {
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <new>
 #include <optional>
@@ -28,6 +29,8 @@ extern "C" {
 module bioseq.postgres.storage.indexing.admin.policy_catalog;
 
 import bioseq.indexing.type;
+import bioseq.indexing.symbol_counts;
+import bioseq.sequences.cigar;
 import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
@@ -76,6 +79,33 @@ void index_build_on_insert(Oid user_relid,
     pg_supported_indexes idx;
     idx.apply_table_defaults();
     idx.merge_overrides(policy_rows);
+    if (pgseq_is_cigar_alphabet(hdr->alphabet_code)) {
+        constexpr auto index_types = pg_supported_indexes::list_types();
+        for (std::size_t index = 0; index < index_types.size(); ++index) {
+            if (index_types[index].first != bioseq::indexing::k_symbol_counts_index_name ||
+                !idx.enabled[index] || idx.policy[index] != bioseq::indexing::index_update_policy::update_on_insert)
+                continue;
+            const auto name = index_types[index].first;
+            acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
+            auto storage = open_sequence_storage_handle(user_relid, rid.db_oid,
+                rid.tablespace_oid, rid.relfilenode, attno, name, loc, rowno, nullptr, mctx);
+            try {
+                const auto built = with_pg_cigar_sequence<std::expected<void, bioseq::cigar_error>>(
+                    PointerGetDatum(hdr), [&storage](auto& backend, auto view) {
+                        auto cursor = backend.runs(view, 0u, backend.length(view));
+                        return bioseq::indexing::symbol_counts_index<sequence_index_storage>::build(storage, cursor);
+                    });
+                if (!built) bioseq::postgres::support::invoke_pg_as_cpp(
+                    [error = built.error()] { pg_raise_cigar_error(error); });
+                storage.close_checked();
+            } catch (...) {
+                storage.abandon_after_pg_error_noexcept();
+                throw;
+            }
+            note_successful_write(user_relid, rid.relfilenode, attno, name);
+        }
+        return;
+    }
     reset_last_minimizer_sequence_build_stats();
     if (bioseq::aligner::settings::grouped_soa_generation::enabled) {
         constexpr auto k_index_types = pg_supported_indexes::list_types();
@@ -148,7 +178,7 @@ void index_build_on_insert(Oid user_relid,
         }
     }
     ensure_vulkan_index_build_runtime_ready(backend);
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         hdr->alphabet_code,
         hdr->storage_unit_byte_width,
         [hdr, rid, attno, user_relid, loc, rowno, mctx, &idx, backend, minimizer_kernels]<

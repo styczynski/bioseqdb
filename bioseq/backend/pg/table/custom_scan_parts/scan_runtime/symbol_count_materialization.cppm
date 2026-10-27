@@ -27,6 +27,7 @@ export import :custom_scan_scan_runtime_symbol_count_materialization_contracts;
 
 import std;
 import bioseq.indexing.symbol_counts;
+import bioseq.sequences.cigar;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.manager;
@@ -53,6 +54,8 @@ export {
         MemoryContext scratch = nullptr;
         bioseq::storage::seq_caches* caches = nullptr;
         column_read_state* row_read_state = nullptr;
+        bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
+        MemoryContext source_values = nullptr;
     };
 
     /** @brief Closes symbol-count readers before deleting their scratch memory context. */
@@ -64,6 +67,16 @@ export {
             CurrentMemoryContext != resources->caller_context) {
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [resources] { MemoryContextSwitchTo(resources->caller_context); });
+        }
+        if (resources->source_values != nullptr) {
+            MemoryContext finished = std::exchange(resources->source_values, nullptr);
+            bioseq::postgres::support::invoke_pg_as_cpp([finished] { MemoryContextDelete(finished); });
+        }
+        if (resources->source_provider != nullptr) {
+            auto* finished = std::exchange(resources->source_provider, nullptr);
+            bioseq::postgres::support::invoke_pg_as_cpp([finished] {
+                bioseq::storage::close_pg_sequence_source_provider(finished, true);
+            });
         }
         if (resources->row_read_state != nullptr) {
             column_read_state* finished = resources->row_read_state;
@@ -92,6 +105,11 @@ export {
         if (resources == nullptr) {
             return;
         }
+        if (resources->source_provider != nullptr) {
+            auto* abandoned = std::exchange(resources->source_provider, nullptr);
+            bioseq::storage::close_pg_sequence_source_provider(abandoned, false);
+        }
+        resources->source_values = nullptr;
         // Leave readers, relations and PostgreSQL memory to transaction cleanup.
         // Only release C++ containers here, so cleanup cannot replace the original error.
         resources->row_read_state = nullptr;
@@ -288,7 +306,37 @@ export {
 
                 /* Recompute when no stored count is available, even with index reads disabled. */
                 std::int64_t cnt = 0;
-                bioseq::pg_types::seq::dispatch_instance(
+                if (pgseq_is_cigar_alphabet(alpha)) {
+                    if (static_cast<std::size_t>(site.rank) >= seqan3::alphabet_size<bioseq::cigar_symbol>)
+                        symbol_count_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
+                            "bioseq symbol-count CIGAR rank is outside the alphabet");
+                    Datum cigar_datum = PointerGetDatum(hdr);
+                    if (stub) {
+                        if (resources->source_provider == nullptr) {
+                            resources->source_provider = bioseq::storage::create_standalone_pg_sequence_source_provider(
+                                main, resources->row_read_state->snapshot);
+                            resources->source_values = bioseq::postgres::support::invoke_pg_as_cpp([resources] {
+                                return AllocSetContextCreate(resources->scratch,
+                                    "bioseq_symcount_cigar", ALLOCSET_SMALL_SIZES);
+                            });
+                        }
+                        cigar_datum = bioseq::storage::promote_pg_sequence_locator(
+                            resources->source_provider, site.column_attno, cigar_datum, resources->source_values);
+                    }
+                    bioseq::cigar_operation_mask<bioseq::cigar_symbol> selected;
+                    selected.set(static_cast<std::size_t>(site.rank));
+                    auto counted = with_pg_cigar_sequence<
+                        std::expected<bioseq::storage::sequence_size_t, bioseq::cigar_error>>(
+                        cigar_datum, [&selected](auto& backend, auto view) {
+                            return bioseq::cigar_count(backend, view, selected);
+                        });
+                    if (!counted) bioseq::postgres::support::invoke_pg_as_cpp(
+                        [error = counted.error()] { pg_raise_cigar_error(error); });
+                    cnt = static_cast<std::int64_t>(*counted);
+                    if (stub) bioseq::postgres::support::invoke_pg_as_cpp([resources] {
+                        MemoryContextReset(resources->source_values);
+                    });
+                } else pgseq_dispatch_biological_instance(
                     alpha,
                     bw,
                     [stub,

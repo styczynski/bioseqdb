@@ -33,6 +33,7 @@ extern "C" {
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -58,6 +59,7 @@ import bioseq.sequences;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.indexing.symbol_counts;
+import bioseq.sequences.cigar;
 import bioseq.postgres.storage.indexing.admin.policy_catalog;
 import bioseq.postgres.scheduler.supervisor;
 
@@ -276,13 +278,15 @@ float divergence(
 
 /**
  * @brief CIGAR operations supplied by the owning mmsearch scan.
- * A direct call returns !UNEXPECTED! to expose a missing planner rewrite.
+ * A direct call reports the missing planner owner through the SQL boundary.
  * @ingroup bioseq_sql_public_api
  */
-std::string cigar(
+Datum cigar(
         Datum el) {
     static_cast<void>(el);
-    return unowned_projection_result("cigar", std::string{"!UNEXPECTED!"});
+    bioseq::postgres::support::raise_sql_error(
+        ERRCODE_FEATURE_NOT_SUPPORTED,
+        {.message = "CIGAR requires an owning mmsearch custom scan"});
 }
 
 std::string gpu_warmup_shader_cache() {
@@ -319,6 +323,26 @@ vulkan_runtime_status() {
 std::int64_t symbol_count(
         Datum el,
         std::string sym) {
+    const auto descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
+        [el] { return classify_and_describe_sequence_header(el); });
+    if (descriptor.alphabet_bound && pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+        if (sym.size() != 1u || !seqan3::char_is_valid_for<bioseq::cigar_symbol>(sym.front())) {
+            bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+                {.message = "bioseq.symbol_count: symbol must be one CIGAR operation"});
+        }
+        bioseq::cigar_operation_mask<bioseq::cigar_symbol> selected;
+        selected.set(seqan3::to_rank(bioseq::cigar_symbol{}.assign_char(sym.front())));
+        const auto counted = with_pg_cigar_sequence<
+            std::expected<bioseq::storage::sequence_size_t, bioseq::cigar_error>>(
+            el, [&selected](auto& backend, auto view) {
+                return bioseq::cigar_count(backend, view, selected);
+            });
+        if (!counted) {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [error = counted.error()] { pg_raise_cigar_error(error); });
+        }
+        return static_cast<std::int64_t>(*counted);
+    }
     auto* const sequence_header = bioseq::postgres::support::invoke_pg_as_cpp(
         [el] { return reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(el)); });
     if (sym.size() != 1) {
@@ -367,7 +391,7 @@ std::int64_t symbol_count(
 	}
 
 	std::int64_t symbol_count_result = 0;
-	bioseq::pg_types::seq::dispatch_instance(
+	pgseq_dispatch_biological_instance(
 		sequence_header->alphabet_code,
 		sequence_header->storage_unit_byte_width,
 		[sequence_header, symbol_rank, &symbol_count_result]
