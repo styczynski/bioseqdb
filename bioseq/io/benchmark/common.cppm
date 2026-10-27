@@ -132,7 +132,8 @@ struct lazy_expression_input {
     std::uint64_t expected_hash = 0;
 };
 
-/// Bytes allocated and reserved from the memory budget while copying results.
+/// Distinguish logical payload, exact owned physical bytes, requested bounds, and reservations.
+/// Reservation maxima cover sampled owner boundaries, not transient allocator peaks.
 struct lazy_expression_allocation_statistics {
     std::uint64_t payload_materializations = 0;
     std::uint64_t intermediate_payload_materializations = 0;
@@ -140,9 +141,15 @@ struct lazy_expression_allocation_statistics {
     std::uint64_t payload_bytes_materialized = 0;
     std::uint64_t live_payload_bytes = 0;
     std::uint64_t peak_live_payload_bytes = 0;
-    std::uint64_t admitted_bytes_total = 0;
-    std::uint64_t live_admitted_bytes = 0;
-    std::uint64_t peak_live_admitted_bytes = 0;
+    std::uint64_t physical_allocation_bytes_total = 0;
+    std::uint64_t live_physical_allocation_bytes = 0;
+    std::uint64_t live_owned_physical_max_bytes = 0;
+    std::uint64_t requested_admission_bytes_total = 0;
+    std::uint64_t live_owner_admission_bound_bytes = 0;
+    std::uint64_t live_owner_admission_bound_max_bytes = 0;
+    std::uint64_t retained_reservation_bytes_total = 0;
+    std::uint64_t live_retained_reservation_bytes = 0;
+    std::uint64_t retained_reservation_boundary_max_bytes = 0;
 };
 
 /// Output length, content hash, and allocation counts from one expression run.

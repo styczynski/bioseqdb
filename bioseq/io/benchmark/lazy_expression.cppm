@@ -40,17 +40,20 @@ import bioseq.parallelism.memory_admission;
 
 namespace bioseq::io::benchmark::detail {
 
-/// Own a packed result and track its allocated bytes and memory reservation.
+/// Own one packed result and separately track requested bounds, physical bytes, and reservations.
 class lazy_expression_materialization {
   public:
-    /// Take ownership of a packed result and add its sizes to the run statistics.
+    /// Adopt the result after its physical allocation and surviving permit have been checked.
     lazy_expression_materialization(lazy_expression_packed&& packed,
                                     lazy_expression_allocation_statistics& stats,
                                     bool final_boundary,
                                     std::uint64_t payload_bytes,
-                                    std::uint64_t observed_admitted_bytes) noexcept
+                                    std::uint64_t physical_bytes,
+                                    std::uint64_t requested_admission_bytes,
+                                    std::uint64_t retained_reservation_bytes) noexcept
         : packed_(std::move(packed)), stats_(std::addressof(stats)), payload_bytes_(payload_bytes),
-          admitted_bytes_(observed_admitted_bytes) {
+          physical_bytes_(physical_bytes), requested_admission_bytes_(requested_admission_bytes),
+          retained_reservation_bytes_(retained_reservation_bytes) {
         ++stats.payload_materializations;
         if (final_boundary) {
             ++stats.boundary_materializations;
@@ -59,57 +62,78 @@ class lazy_expression_materialization {
         }
         stats.payload_bytes_materialized += payload_bytes_;
         stats.live_payload_bytes += payload_bytes_;
-        stats.peak_live_payload_bytes =
-            std::max(stats.peak_live_payload_bytes, stats.live_payload_bytes);
-        stats.admitted_bytes_total += admitted_bytes_;
-        stats.live_admitted_bytes += admitted_bytes_;
-        stats.peak_live_admitted_bytes =
-            std::max(stats.peak_live_admitted_bytes, stats.live_admitted_bytes);
+        stats.peak_live_payload_bytes = std::max(stats.peak_live_payload_bytes, stats.live_payload_bytes);
+        stats.physical_allocation_bytes_total += physical_bytes_;
+        stats.live_physical_allocation_bytes += physical_bytes_;
+        stats.live_owned_physical_max_bytes =
+            std::max(stats.live_owned_physical_max_bytes, stats.live_physical_allocation_bytes);
+        stats.requested_admission_bytes_total += requested_admission_bytes_;
+        stats.live_owner_admission_bound_bytes += requested_admission_bytes_;
+        stats.live_owner_admission_bound_max_bytes =
+            std::max(stats.live_owner_admission_bound_max_bytes, stats.live_owner_admission_bound_bytes);
+        stats.retained_reservation_bytes_total += retained_reservation_bytes_;
+        stats.live_retained_reservation_bytes += retained_reservation_bytes_;
+        stats.retained_reservation_boundary_max_bytes =
+            std::max(stats.retained_reservation_boundary_max_bytes, stats.live_retained_reservation_bytes);
     }
 
-    /// Move the result and transfer responsibility for updating the statistics
+    /// Move the result and transfer its accounting responsibility exactly once.
     lazy_expression_materialization(lazy_expression_materialization&& other) noexcept
         : packed_(std::move(other.packed_)), stats_(std::exchange(other.stats_, nullptr)),
-          payload_bytes_(other.payload_bytes_), admitted_bytes_(other.admitted_bytes_) {}
+          payload_bytes_(other.payload_bytes_), physical_bytes_(other.physical_bytes_),
+          requested_admission_bytes_(other.requested_admission_bytes_),
+          retained_reservation_bytes_(other.retained_reservation_bytes_) {}
 
-    /// Copying would count the same owned result  twice.
+    /// Copying would count the same owned result twice.
     lazy_expression_materialization(lazy_expression_materialization const&) = delete;
-
-    /// Copy assignment would duplicate ownership of a result.
     lazy_expression_materialization& operator=(lazy_expression_materialization const&) = delete;
-
-    /// Move assignment is disabled to keep each result's accounting unchanged.
     lazy_expression_materialization& operator=(lazy_expression_materialization&&) = delete;
 
-    /// Remove the result from the live counts before releasing its storage.
-    ~lazy_expression_materialization() {
-        release_tracking();
-    }
+    /// Retire tracked ownership immediately before releasing the packed owner.
+    ~lazy_expression_materialization() { release_tracking(); }
 
-    /// Return a sequence view that borrows this result's storage.
-    [[nodiscard]] lazy_expression_facade view() const noexcept {
-        return packed_.view();
-    }
+    /// Borrow this result's storage for a child expression or final hash.
+    [[nodiscard]] lazy_expression_facade view() const noexcept { return packed_.view(); }
 
   private:
-    /// Subtract this result from the live byte counts once.
+    /// Subtract this result's distinct byte categories once.
     void release_tracking() noexcept {
-        if (stats_ == nullptr) {
-            return;
-        }
+        if (stats_ == nullptr) return;
         DEBUG_ASSERT(stats_->live_payload_bytes >= payload_bytes_,
                      "lazy-expression live payload accounting underflow");
-        DEBUG_ASSERT(stats_->live_admitted_bytes >= admitted_bytes_,
-                     "lazy-expression live admission accounting underflow");
+        DEBUG_ASSERT(stats_->live_physical_allocation_bytes >= physical_bytes_,
+                     "lazy-expression live physical allocation accounting underflow");
+        DEBUG_ASSERT(stats_->live_owner_admission_bound_bytes >= requested_admission_bytes_,
+                     "lazy-expression live owner admission bound accounting underflow");
+        DEBUG_ASSERT(stats_->live_retained_reservation_bytes >= retained_reservation_bytes_,
+                     "lazy-expression live reservation accounting underflow");
         stats_->live_payload_bytes -= payload_bytes_;
-        stats_->live_admitted_bytes -= admitted_bytes_;
+        stats_->live_physical_allocation_bytes -= physical_bytes_;
+        stats_->live_owner_admission_bound_bytes -= requested_admission_bytes_;
+        stats_->live_retained_reservation_bytes -= retained_reservation_bytes_;
         stats_ = nullptr;
     }
 
     lazy_expression_packed packed_;
     lazy_expression_allocation_statistics* stats_ = nullptr;
     std::uint64_t payload_bytes_ = 0;
-    std::uint64_t admitted_bytes_ = 0;
+    std::uint64_t physical_bytes_ = 0;
+    std::uint64_t requested_admission_bytes_ = 0;
+    std::uint64_t retained_reservation_bytes_ = 0;
+};
+
+/// One materializer call must publish exactly one production physical-allocation event.
+struct lazy_expression_allocation_observation {
+    bioseq::storage::sequence_payload_allocation_event event{};
+    std::size_t count{};
+
+    /// Capture the materializer's exact owned bytes without duplicating allocator calculations.
+    static void publish(void* opaque, const bioseq::storage::sequence_payload_allocation_event& event,
+                        std::uint64_t, std::uint64_t) noexcept {
+        auto& observation = *static_cast<lazy_expression_allocation_observation*>(opaque);
+        observation.event = event;
+        ++observation.count;
+    }
 };
 
 /// Operations supported by, the benchmark's expression nodes.
@@ -173,7 +197,7 @@ struct lazy_expression_node {
 }
 
 /// Report no stored packed result so reads must evaluate the expression.
-[[nodiscard]] lazy_expression_facade::resident_probe_result lazy_expression_node_resident_probe(
+[[nodiscard]] lazy_expression_facade::resident_packed_result lazy_expression_node_resident_probe(
     void const*, lazy_expression_size, lazy_expression_size, std::uint8_t) noexcept {
     return std::nullopt;
 }
@@ -222,7 +246,7 @@ void lazy_expression_copy_forward(lazy_expression_node const& node,
 /// Copy a node range into scratch memory in  the requested orientation.
 /// Reverse reads also complement the DNA ranks.
 template <bool p_is_reversed, bool p_write_reversed>
-[[nodiscard]] const std::uint8_t* lazy_expression_node_ptr_at(void const* opaque,
+[[nodiscard]] const std::uint8_t* lazy_expression_node_read_at(void const* opaque,
                                                               lazy_expression_size from,
                                                               std::size_t required_length,
                                                               std::span<std::uint8_t> scratch) {
@@ -251,15 +275,16 @@ template <bool p_is_reversed, bool p_write_reversed>
 
 const lazy_expression_facade::backend_ops lazy_expression_node_operations{
     .bp_size = &lazy_expression_node_bp_size,
-    .ptr_at =
+    .read_at =
         {
-            &lazy_expression_node_ptr_at<false, false>,
-            &lazy_expression_node_ptr_at<false, true>,
-            &lazy_expression_node_ptr_at<true, false>,
-            &lazy_expression_node_ptr_at<true, true>,
+            &lazy_expression_node_read_at<false, false>,
+            &lazy_expression_node_read_at<false, true>,
+            &lazy_expression_node_read_at<true, false>,
+            &lazy_expression_node_read_at<true, true>,
         },
     .try_resident_packed = &lazy_expression_node_resident_probe,
-    .copy_full_packed = nullptr,
+    .copy_packed_sequence = nullptr,
+    .copy_packed_window = nullptr,
     .worker_shareable = &lazy_expression_node_worker_shareable,
 };
 
@@ -270,36 +295,57 @@ lazy_expression_view(lazy_expression_node const& node) noexcept {
                                   std::addressof(lazy_expression_node_operations)};
 }
 
-/// Reserve memory and copy a view into packed storage Track the allocation
-/// and check that the memory controller records the expected reservation.
+/// Reserve the production physical bound, then observe exact owned bytes and surviving reservation.
+/// This benchmark's bench_lock excludes concurrent framework batches during boundary sampling.
 [[nodiscard]] lazy_expression_materialization
 materialize_lazy_expression_view(lazy_expression_facade view,
                                  bool final_boundary,
                                  lazy_expression_allocation_statistics& stats) {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
-    const std::uint64_t admitted_bytes = bioseq::storage::packed_region_admission_bytes<seq::dna4>(
-        view.bp_size(), lazy_expression_storage_width);
+    const std::uint64_t requested_admission_bytes =
+        bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(
+            view.bp_size(), lazy_expression_storage_width);
     const std::uint64_t reserved_before = admission.reserved_bytes();
-    auto permit = admission.try_reserve(admitted_bytes);
+    auto permit = admission.try_reserve(requested_admission_bytes);
     if (!permit.has_value()) {
         throw std::runtime_error("memory admission rejected lazy-expression materialization");
     }
+    const auto reserved_after_admission = admission.reserved_bytes();
+    if (reserved_after_admission < reserved_before ||
+        reserved_after_admission - reserved_before != requested_admission_bytes)
+        throw std::runtime_error("lazy-expression admission request delta mismatch");
+
+    lazy_expression_allocation_observation observation;
+    const bioseq::storage::sequence_payload_allocation_observer observer{
+        .context = std::addressof(observation),
+        .publish = &lazy_expression_allocation_observation::publish,
+    };
     lazy_expression_packed packed = bioseq::storage::materialize_packed_sequence(
-        view, 0, view.bp_size(), lazy_expression_storage_width, std::move(*permit));
+        view.with_payload_allocation_observer(std::addressof(observer)),
+        0u, view.bp_size(), lazy_expression_storage_width, std::move(*permit));
     const std::uint64_t reserved_after = admission.reserved_bytes();
-    if (reserved_after < reserved_before || reserved_after - reserved_before != admitted_bytes) {
-        throw std::runtime_error("lazy-expression observed admission delta mismatch");
-    }
-    const std::uint64_t observed_admitted_bytes = reserved_after - reserved_before;
     const auto& descriptor = packed.descriptor();
     if (descriptor.unit_count >
-        (std::numeric_limits<std::uint64_t>::max)() / lazy_expression_storage_width) {
+        (std::numeric_limits<std::uint64_t>::max)() / lazy_expression_storage_width)
         throw std::overflow_error("lazy-expression payload byte overflow");
-    }
     const std::uint64_t payload_bytes =
         static_cast<std::uint64_t>(descriptor.unit_count) * lazy_expression_storage_width;
-    return lazy_expression_materialization{
-        std::move(packed), stats, final_boundary, payload_bytes, observed_admitted_bytes};
+    const auto& event = observation.event;
+    if (observation.count != 1u || event.allocation_id == 0u ||
+        event.kind != bioseq::storage::sequence_payload_allocation_kind::admitted_packed_sequence ||
+        event.input_symbols != view.bp_size() || event.output_symbols != view.bp_size() ||
+        descriptor.logical_length != view.bp_size() || event.payload_bytes != payload_bytes ||
+        event.retained_bytes <= payload_bytes || event.retained_bytes > requested_admission_bytes)
+        throw std::runtime_error("lazy-expression physical allocation proof mismatch");
+    if (reserved_after < reserved_before)
+        throw std::runtime_error("lazy-expression reservation boundary decreased below baseline");
+    const auto retained_reservation_bytes = reserved_after - reserved_before;
+    // The allocator shrinks to exact physical ownership, then either retains
+    // that permit or releases it completely after process-footprint credit.
+    if (retained_reservation_bytes != 0u && retained_reservation_bytes != event.retained_bytes)
+        throw std::runtime_error("lazy-expression retained reservation proof mismatch");
+    return lazy_expression_materialization{std::move(packed), stats, final_boundary,
+        payload_bytes, event.retained_bytes, requested_admission_bytes, retained_reservation_bytes};
 }
 
 /// Compute the logical output length and deterministic content hash.
@@ -318,7 +364,8 @@ void validate_lazy_expression_run_released(lazy_expression_allocation_statistics
                                            std::uint64_t reserved_baseline) {
     const std::uint64_t reserved_after =
         bioseq::parallelism::memory_admission_controller::instance().reserved_bytes();
-    if (stats.live_payload_bytes != 0u || stats.live_admitted_bytes != 0u ||
+    if (stats.live_payload_bytes != 0u || stats.live_physical_allocation_bytes != 0u ||
+        stats.live_owner_admission_bound_bytes != 0u || stats.live_retained_reservation_bytes != 0u ||
         reserved_after != reserved_baseline) {
         throw std::runtime_error(
             "lazy-expression materialization ownership did not return to baseline");
@@ -528,12 +575,12 @@ expected_lazy_expression_payload_bytes(bool eager, lazy_expression_size logical_
            lazy_expression_payload_bytes(3u * logical_length / 4u);
 }
 
-/// Return the total memory reservation expected from the chosen strategy.
+/// Sum the requested physical-admission bounds for the chosen strategy.
 [[nodiscard]] std::uint64_t
-expected_lazy_expression_admitted_bytes(bool eager, lazy_expression_size logical_length) {
-    // Compute the memory reservation expected for one packed result.
+expected_lazy_expression_admission_bound_bytes(bool eager, lazy_expression_size logical_length) {
+    // Use the production bound for both payload and stable owner allocations.
     const auto admitted = [](lazy_expression_size bp) {
-        return bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+        return bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(
             bp, lazy_expression_storage_width);
     };
     if (!eager) {
@@ -556,8 +603,8 @@ evaluate_lazy_expression(std::string_view algorithm,
     const std::uint64_t expected_intermediate = eager ? 5u : 0u;
     const std::uint64_t expected_payload =
         expected_lazy_expression_payload_bytes(eager, input.source_logical_length);
-    const std::uint64_t expected_admitted =
-        expected_lazy_expression_admitted_bytes(eager, input.source_logical_length);
+    const std::uint64_t expected_admission_bound =
+        expected_lazy_expression_admission_bound_bytes(eager, input.source_logical_length);
     const auto& allocations = output.allocations;
     const bool correctness_ok =
         output.output_logical_length == input.expected_output_logical_length &&
@@ -569,9 +616,16 @@ evaluate_lazy_expression(std::string_view algorithm,
         allocations.payload_bytes_materialized == expected_payload &&
         allocations.live_payload_bytes == 0u &&
         allocations.peak_live_payload_bytes == expected_payload &&
-        allocations.admitted_bytes_total == expected_admitted &&
-        allocations.live_admitted_bytes == 0u &&
-        allocations.peak_live_admitted_bytes == expected_admitted;
+        allocations.physical_allocation_bytes_total > expected_payload &&
+        allocations.physical_allocation_bytes_total <= expected_admission_bound &&
+        allocations.live_physical_allocation_bytes == 0u &&
+        allocations.live_owned_physical_max_bytes == allocations.physical_allocation_bytes_total &&
+        allocations.requested_admission_bytes_total == expected_admission_bound &&
+        allocations.live_owner_admission_bound_bytes == 0u &&
+        allocations.live_owner_admission_bound_max_bytes == expected_admission_bound &&
+        allocations.retained_reservation_bytes_total <= allocations.physical_allocation_bytes_total &&
+        allocations.live_retained_reservation_bytes == 0u &&
+        allocations.retained_reservation_boundary_max_bytes == allocations.retained_reservation_bytes_total;
     if (!correctness_ok || !allocation_ok) {
         throw std::runtime_error("lazy-expression correctness/allocation contract failed");
     }
@@ -592,9 +646,18 @@ evaluate_lazy_expression(std::string_view algorithm,
                     static_cast<double>(allocations.payload_bytes_materialized));
     metrics.emplace("peak_live_payload_bytes",
                     static_cast<double>(allocations.peak_live_payload_bytes));
-    metrics.emplace("admitted_bytes_total", static_cast<double>(allocations.admitted_bytes_total));
-    metrics.emplace("peak_live_admitted_bytes",
-                    static_cast<double>(allocations.peak_live_admitted_bytes));
+    metrics.emplace("physical_allocation_bytes_total",
+                    static_cast<double>(allocations.physical_allocation_bytes_total));
+    metrics.emplace("live_owned_physical_max_bytes",
+                    static_cast<double>(allocations.live_owned_physical_max_bytes));
+    metrics.emplace("requested_admission_bytes_total",
+                    static_cast<double>(allocations.requested_admission_bytes_total));
+    metrics.emplace("live_owner_admission_bound_max_bytes",
+                    static_cast<double>(allocations.live_owner_admission_bound_max_bytes));
+    metrics.emplace("retained_reservation_bytes_total",
+                    static_cast<double>(allocations.retained_reservation_bytes_total));
+    metrics.emplace("retained_reservation_boundary_max_bytes",
+                    static_cast<double>(allocations.retained_reservation_boundary_max_bytes));
     metrics.emplace("correctness_contract_ok", correctness_ok ? 1.0 : 0.0);
     metrics.emplace("allocation_contract_ok", allocation_ok ? 1.0 : 0.0);
     return metrics;

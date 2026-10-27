@@ -229,7 +229,7 @@
 
   "bench_io_lazy_sequence_expression": {
     "tags": ["io", "lazy-sequence", "materialization"],
-    "description": "Single case comparing eager materialize-each-step with one deferred canonical-facade nested slice/concat expression.",
+    "description": "Single case comparing eager materialize-each-step with one deferred canonical-facade nested slice/concat expression. Physical allocation bytes come from the production observer; requested admission bounds and surviving reservations are reported separately. Reservation maxima cover sampled ownership boundaries, not transient allocator peaks. All requested owners coexist before scope release; bench_lock serializes controller boundary observations.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 377018 },
@@ -340,10 +340,10 @@
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
         },
-        "admitted_bytes_total": {
+        "requested_admission_bytes_total": {
           "type": "evaluation",
           "rules": [
-            [ "lazy_expression_admitted_bytes_drop_70pct",
+            [ "lazy_expression_requested_admission_drop_70pct",
               { "key": "bioseq_lazy_expr_deferred" },
               { "compare": "<", "threshold%": 70, "tolerance%": 0,
                 "aggregate": "p50", "pairing": "by_iteration_ratio",
@@ -352,10 +352,10 @@
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
         },
-        "peak_live_admitted_bytes": {
+        "live_owner_admission_bound_max_bytes": {
           "type": "evaluation",
           "rules": [
-            [ "lazy_expression_peak_admitted_bytes_drop_70pct",
+            [ "lazy_expression_owner_admission_bound_drop_70pct",
               { "key": "bioseq_lazy_expr_deferred" },
               { "compare": "<", "threshold%": 70, "tolerance%": 0,
                 "aggregate": "p50", "pairing": "by_iteration_ratio",
@@ -364,6 +364,10 @@
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
         },
+        "physical_allocation_bytes_total": { "type": "evaluation" },
+        "live_owned_physical_max_bytes": { "type": "evaluation" },
+        "retained_reservation_bytes_total": { "type": "evaluation" },
+        "retained_reservation_boundary_max_bytes": { "type": "evaluation" },
         "correctness_contract_ok": {
           "type": "evaluation",
           "rules": [
