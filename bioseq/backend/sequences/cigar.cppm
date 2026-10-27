@@ -1074,6 +1074,29 @@ public:
     };
 private:
     context::context& memory_;
+
+    /** Encode canonical runs into result storage while borrowing their existing scratch span. */
+    [[nodiscard]] std::expected<sequence_type, cigar_error> encode_canonical_runs(
+            std::span<const run_type> canonical, cigar_space declared_space) {
+        if (!valid_cigar_space(declared_space))
+            return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
+        if (canonical.size() > (std::numeric_limits<std::uint32_t>::max)())
+            return std::unexpected(cigar_error{cigar_error_code::output_too_large});
+        const auto bytes = measure_cigar_payload<Alphabet>(static_cast<std::uint32_t>(canonical.size()));
+        if (!bytes) return std::unexpected(bytes.error());
+        try {
+            auto payload = memory_.template make_result_vector<std::byte>(*bytes);
+            payload.resize(*bytes);
+            const auto encoded = write_cigar_payload<Alphabet>(
+                std::span<std::byte>{payload.data(), payload.size()}, canonical, declared_space);
+            if (!encoded) return std::unexpected(encoded.error());
+            return sequence_type{std::move(payload), *encoded, declared_space};
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
+        } catch (const std::length_error&) {
+            return std::unexpected(cigar_error{cigar_error_code::output_too_large});
+        }
+    }
 public:
     /** Borrow existing admitted arenas, never create another budget service. */
     explicit flat_cigar_backend(context::context& memory) noexcept : memory_(memory) {}
@@ -1118,16 +1141,7 @@ public:
                 auto appended = append_canonical_run(canonical, run);
                 if (!appended) return std::unexpected(appended.error());
             }
-            if (canonical.size() > (std::numeric_limits<std::uint32_t>::max)())
-                return std::unexpected(cigar_error{cigar_error_code::output_too_large});
-            const auto bytes = measure_cigar_payload<Alphabet>(static_cast<std::uint32_t>(canonical.size()));
-            if (!bytes) return std::unexpected(bytes.error());
-            auto payload = memory_.template make_result_vector<std::byte>(*bytes);
-            payload.resize(*bytes);
-            auto encoded = write_cigar_payload<Alphabet>(std::span<std::byte>{payload.data(), payload.size()},
-                std::span<const run_type>{canonical.data(), canonical.size()}, declared_space);
-            if (!encoded) return std::unexpected(encoded.error());
-            return sequence_type{std::move(payload), *encoded, declared_space};
+            return encode_canonical_runs({canonical.data(), canonical.size()}, declared_space);
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
         } catch (const std::length_error&) {
@@ -1149,7 +1163,7 @@ public:
             const auto visited = visit_selected_cigar_runs(
                 *this, view, std::forward<Predicate>(keep), emit);
             if (!visited) return std::unexpected(visited.error());
-            return from_runs({selected.data(), selected.size()}, space(view));
+            return encode_canonical_runs({selected.data(), selected.size()}, space(view));
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
         } catch (const std::length_error&) {
@@ -1164,7 +1178,7 @@ public:
             const auto scope = memory_.template push<context::arena::scratch>();
             auto selected_runs = memory_.template make_scratch_vector<run_type>(selected.run_count());
             for (const auto run : selected.runs()) selected_runs.push_back(run);
-            return from_runs({selected_runs.data(), selected_runs.size()}, selected.space());
+            return encode_canonical_runs({selected_runs.data(), selected_runs.size()}, selected.space());
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
         }
@@ -1188,7 +1202,7 @@ public:
                 auto appended = append_canonical_run(joined, run);
                 if (!appended) return std::unexpected(appended.error());
             }
-            return from_runs({joined.data(), joined.size()}, left.space() == right.space()
+            return encode_canonical_runs({joined.data(), joined.size()}, left.space() == right.space()
                 ? left.space() : cigar_space::compatibility);
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
@@ -1201,7 +1215,7 @@ public:
             auto reversed = memory_.template make_scratch_vector<run_type>(view.run_count());
             for (const auto run : view.runs()) reversed.push_back(run);
             std::reverse(reversed.begin(), reversed.end());
-            return from_runs({reversed.data(), reversed.size()}, view.space());
+            return encode_canonical_runs({reversed.data(), reversed.size()}, view.space());
         } catch (const std::bad_alloc&) {
             return std::unexpected(cigar_error{cigar_error_code::allocation_rejected});
         }
