@@ -9,9 +9,9 @@ import std;
 /** @brief Number of alphabets enabled in this build. */
 export inline constexpr std::size_t pgseq_dispatch_profile_alphabet_count =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    1u;
-#else
     2u;
+#else
+    3u;
 #endif
 
 /** @brief Check whether this build supports a storage-unit width in bytes. */

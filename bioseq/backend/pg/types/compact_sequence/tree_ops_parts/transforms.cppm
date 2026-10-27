@@ -85,6 +85,12 @@ namespace {
     literal_piece const& physical_first = reversed ? right : left;
     literal_piece const& physical_second = reversed ? left : right;
 
+    // Variable-length run payloads remain shared leaves. The canonical run
+    // cursor coalesces equal operations across their boundary without copies.
+    if (left.encoding == literal_encoding::cigar_rle) {
+        return {};
+    }
+
     if (left.encoding == literal_encoding::unbound_ascii) {
         if (combined_length > small_literal_coalesce_bytes) {
             return {};
@@ -122,7 +128,7 @@ namespace {
     }
 
     piece_edge merged{};
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         left.stored_type_params.alphabet_code,
         left.stored_type_params.storage_unit_byte_width,
         [&destination, &physical_first, &physical_second, &left,
@@ -834,7 +840,7 @@ namespace {
         if (!ensure_piece_edge_cleanup_capacity(*ledger, 1u)) return {};
     }
     tracked_piece_edge bound_edge{};
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         result_type.alphabet_code,
         result_type.storage_unit_byte_width,
         [&destination, &bound_edge, result_type,

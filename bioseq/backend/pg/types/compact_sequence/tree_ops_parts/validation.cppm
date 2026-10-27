@@ -269,7 +269,8 @@ inline void validate_retired_join_root_storage(
                      errmsg("bioseq literal leaf metadata is corrupt")));
         }
         if (alphabet_bound
-            && literal.encoding == literal_encoding::packed
+            && (literal.encoding == literal_encoding::packed
+                || literal.encoding == literal_encoding::cigar_rle)
             && literal.stored_type_params.alphabet_code
                 != result_type.alphabet_code) {
             ereport(ERROR,
@@ -451,7 +452,8 @@ inline void validate_bounded_join_leaf(
         || (literal.storage_arena != edge.arena
             && literal.storage_arena->generation >= edge.arena->generation)
         || (alphabet_bound
-            && (literal.encoding != literal_encoding::packed
+            && ((literal.encoding != literal_encoding::packed
+                 && literal.encoding != literal_encoding::cigar_rle)
                 || literal.validation
                     != literal_validation::alphabet_validated
                 || literal.stored_type_params.alphabet_code

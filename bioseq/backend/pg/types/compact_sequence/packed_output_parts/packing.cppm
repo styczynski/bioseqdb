@@ -39,6 +39,8 @@ import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.layout;
+import bioseq.sequences.cigar;
+import bioseq.common.context;
 
 /// Compute an unsigned ceiling division and reject a zero divisor.
 export [[nodiscard]] inline std::uint64_t checked_ceil_div(
@@ -137,6 +139,53 @@ export template<class p_instance>
 
 namespace {
 
+/** Consume a tree cursor under the established read-session cleanup protocol. */
+template<class Result, class Function>
+[[nodiscard]] Result with_cigar_tree_cursor(pg_sequence_expanded const& value, Function&& callback)
+{
+    std::optional<Result> result;
+    std::exception_ptr failure;
+    pg_sequence_read_session* volatile session = nullptr;
+    PG_TRY();
+    {
+        auto* local = begin_pg_sequence_read_session(CurrentMemoryContext);
+        session = local;
+        try {
+            pg_cigar_run_cursor cursor{*local, value.root, 0u, value.bp_length};
+            result.emplace(std::forward<Function>(callback)(cursor));
+            finish_pg_sequence_read_session(local, true);
+        } catch (...) {
+            failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local);
+        }
+        session = nullptr;
+    }
+    PG_CATCH();
+    {
+        abort_pg_sequence_read_session_noexcept(const_cast<pg_sequence_read_session*>(session));
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    if (failure) std::rethrow_exception(std::move(failure));
+    return std::move(*result);
+}
+
+/** Count canonical runs without allocating an expanded position stream. */
+[[nodiscard]] std::uint32_t cigar_tree_run_count(pg_sequence_expanded const& value)
+{
+    return with_cigar_tree_cursor<std::uint32_t>(value, [](pg_cigar_run_cursor& cursor) {
+        std::uint32_t count{};
+        while (true) {
+            const auto next = cursor.next();
+            if (!next) pg_raise_cigar_error(next.error());
+            if (!*next) return count;
+            if (count == (std::numeric_limits<std::uint32_t>::max)())
+                pg_raise_cigar_error({bioseq::cigar_error_code::output_too_large});
+            ++count;
+        }
+    });
+}
+
 [[nodiscard]] inline Size expanded_flat_size(pg_sequence_expanded const& value)
 {
     if (!value.alphabet_bound) {
@@ -151,8 +200,14 @@ namespace {
             bioseq::pg_types::seq::header_bytes(), "flat unbound sequence");
         return total;
     }
+    if (pgseq_is_cigar_alphabet(value.type_params.alphabet_code)) {
+        const auto bytes = bioseq::measure_cigar_payload(cigar_tree_run_count(value));
+        if (!bytes) pg_raise_cigar_error(bytes.error());
+        return checked_materialization_allocation_size(*bytes,
+            bioseq::pg_types::seq::header_bytes(), "flat CIGAR");
+    }
     Size size = 0u;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         value.type_params.alphabet_code,
         value.type_params.storage_unit_byte_width,
         [&size, &value]<class p_instance>() {
@@ -376,6 +431,34 @@ export inline void pg_sequence_flatten_into(
         return;
     }
 
+    if (pgseq_is_cigar_alphabet(value.type_params.alphabet_code)) {
+        const auto run_count = cigar_tree_run_count(value);
+        const auto payload_size = allocated_size - bioseq::pg_types::seq::header_bytes();
+        bioseq::cigar_payload_writer<bioseq::cigar_symbol> writer{
+            std::span<std::byte>{reinterpret_cast<std::byte*>(destination.data), payload_size},
+            run_count, value.type_params.space};
+        const auto extent = with_cigar_tree_cursor<std::uint32_t>(value,
+            [&writer](pg_cigar_run_cursor& cursor) {
+                while (true) {
+                    const auto next = cursor.next();
+                    if (!next) pg_raise_cigar_error(next.error());
+                    if (!*next) break;
+                    const auto appended = writer.append(**next);
+                    if (!appended) pg_raise_cigar_error(appended.error());
+                }
+                const auto finished = writer.finish();
+                if (!finished) pg_raise_cigar_error(finished.error());
+                return *finished;
+            });
+        destination.alphabet_code = value.type_params.alphabet_code;
+        destination.storage_unit_byte_width = sizeof(bioseq::cigar_run);
+        destination.padding_letters = 0u;
+        destination.bp_size = extent;
+        destination.encoding = bioseq::sequence_encoding::cigar_rle;
+        destination.space = value.type_params.space;
+        return;
+    }
+
     pg_sequence_descriptor descriptor{
         .kind = pg_sequence_datum_kind::expanded_read_only,
         .alphabet_code = value.type_params.alphabet_code,
@@ -394,7 +477,7 @@ export inline void pg_sequence_flatten_into(
             CurrentMemoryContext);
         session = local_session;
         try {
-            bioseq::pg_types::seq::dispatch_instance(
+            pgseq_dispatch_biological_instance(
                 value.type_params.alphabet_code,
                 value.type_params.storage_unit_byte_width,
                 [&destination, &value, local_session, header,
@@ -738,10 +821,13 @@ namespace {
             : flat.type_parameters(),
         .encoding = unbound
             ? literal_encoding::unbound_ascii
-            : literal_encoding::packed,
+            : pgseq_is_cigar_alphabet(descriptor.alphabet_code)
+                ? literal_encoding::cigar_rle : literal_encoding::packed,
         .validation = unbound
             ? literal_validation::unvalidated
             : literal_validation::alphabet_validated,
+        .encoded_byte_count = unbound ? 0u : count,
+        .encoded_logical_length = unbound ? 0u : descriptor.bp_length,
     };
 }
 
@@ -922,7 +1008,12 @@ resolve_concat_type(
                             static_cast<int>(right_name.size()),
                             right_name.data())));
         }
-        return left->type_params;
+        auto selected = left->type_params;
+        if (pgseq_is_cigar_alphabet(selected.alphabet_code)
+            && selected.space != right.type_params.space) {
+            selected.space = bioseq::cigar_space::compatibility;
+        }
+        return selected;
     }
     if (left->alphabet_bound) {
         return left->type_params;
@@ -938,16 +1029,54 @@ resolve_concat_type(
 
 /// Join the left and right sequences in order, sharing existing tree pieces.
 /// If only one alphabet is bound, validate and pack the other side using it.
+/** Bind an unbound textual expression to CIGAR grammar once, before edits use
+ * logical positions. An existing CIGAR retains its embedded projection space. */
+export [[nodiscard]] inline Datum bind_pg_cigar_sequence(Datum input)
+{
+    const auto descriptor = classify_and_describe_sequence_header(input);
+    if (descriptor.alphabet_bound) {
+        if (!pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+            pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
+        }
+        return input;
+    }
+    const auto sequence = acquire_sequence_for_read(input);
+    const auto bytes = checked_materialization_allocation_size(
+        sequence.bp_length(), 0u, "CIGAR literal");
+    auto* text = static_cast<std::byte*>(palloc(std::max<Size>(bytes, 1u)));
+    if (!emit_unbound_ascii(sequence.root(), 0u, sequence.bp_length(),
+            std::span<std::byte>{text, bytes})) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::invalid_encoding});
+    }
+    auto* parsed = make_pg_cigar_from_text(std::string_view{
+        reinterpret_cast<const char*>(text), bytes});
+    pfree(text);
+    return PointerGetDatum(parsed);
+}
+
 export [[nodiscard]] Datum concat_pg_sequences(
     Datum left_datum,
     Datum right_datum)
 {
+    const auto left_descriptor = classify_and_describe_sequence_header(left_datum);
+    const auto right_descriptor = classify_and_describe_sequence_header(right_datum);
+    const bool cigar = (left_descriptor.alphabet_bound
+            && pgseq_is_cigar_alphabet(left_descriptor.alphabet_code))
+        || (right_descriptor.alphabet_bound
+            && pgseq_is_cigar_alphabet(right_descriptor.alphabet_code));
+    if (cigar) {
+        left_datum = bind_pg_cigar_sequence(left_datum);
+        right_datum = bind_pg_cigar_sequence(right_datum);
+    }
     auto left = acquire_writable_pg_sequence(left_datum);
     auto right = acquire_sequence_for_read(right_datum);
     const auto result_type = resolve_concat_type(left.value, right);
     const bool bound = left.value->alphabet_bound || right.alphabet_bound;
     const auto result_length = checked_add_bp_lengths(
         left.value->bp_length, right.bp_length());
+    if (cigar && result_length > (std::numeric_limits<std::uint32_t>::max)()) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::length_overflow});
+    }
     const bool bind_left = bound && !left.value->alphabet_bound;
     const bool bind_right = bound && !right.alphabet_bound;
     const piece_edge left_root = left.value->root;
@@ -1025,6 +1154,11 @@ export [[nodiscard]] Datum transform_pg_sequence(
     bioseq::storage::sequence_transform transform)
 {
     auto acquired = acquire_writable_pg_sequence(input);
+    if (acquired.value->alphabet_bound
+        && pgseq_is_cigar_alphabet(acquired.value->type_params.alphabet_code)
+        && bioseq::storage::is_complemented(transform)) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
+    }
     if (!acquired.value->alphabet_bound
         && bioseq::storage::is_complemented(transform)) {
         ereport(ERROR,
@@ -1048,6 +1182,7 @@ export [[nodiscard]] Datum transform_pg_sequence(
 export [[nodiscard]] bool alphabet_has_complete_complement(
     std::uint8_t alphabet_code)
 {
+    if (pgseq_is_cigar_alphabet(alphabet_code)) return false;
     bool complete = true;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
@@ -1115,4 +1250,342 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
                 });
         });
     return pg_sequence_ro_datum(result);
+}
+
+/** One uniquely owned existing cleanup-ledger edge and its sequence metadata. */
+export struct pg_cigar_expression {
+    tracked_piece_edge root;
+    compact_sequence_stdc_type_params type_params;
+};
+
+/** Existing piece-tree representation exposed through the noPG expression concept.
+ * Ownership remains in the PostgreSQL reset ledger even when ERROR skips C++
+ * destructors. The destination arena is acquired after borrowed input arenas. */
+export template<sequence_alphabet Alphabet>
+class pg_sequence_expression_backend {
+public:
+    using alphabet_type = Alphabet;
+    using sequence_type = pg_cigar_expression;
+    using sequence_view_type = pg_sequence_read_handle;
+protected:
+    pg_sequence_read_session& session_;
+    pending_root_cleanup* guard_;
+    compact_sequence_stdc_type_params type_{};
+    void* memory_slot_{};
+
+    /** Lazily acquire the existing allocation/cleanup owner after input binding. */
+    [[nodiscard]] piece_tree_arena& arena()
+    {
+        if (guard_->destination_arena == nullptr) {
+            guard_->destination_arena = bioseq::postgres::support::invoke_pg_as_cpp(
+                [] { return make_piece_tree_arena(); });
+        }
+        return *guard_->destination_arena;
+    }
+public:
+    /** Borrow a call read session; register pending edges in that session's context. */
+    explicit pg_sequence_expression_backend(pg_sequence_read_session& session)
+        : session_(session), guard_(static_cast<pending_root_cleanup*>(
+            MemoryContextAllocZero(session.payload_context, sizeof(pending_root_cleanup))))
+    {
+        guard_->callback.func = pending_root_reset;
+        guard_->callback.arg = guard_;
+        guard_->armed = true;
+        MemoryContextRegisterResetCallback(session.payload_context, &guard_->callback);
+        type_.alphabet_code = pgseq_supported_alphabets::template index_of<Alphabet>();
+        type_.storage_unit_byte_width = 8u;
+        if constexpr (bioseq::cigar_operation_alphabet<Alphabet>) {
+            type_.encoding = bioseq::sequence_encoding::cigar_rle;
+        }
+    }
+    pg_sequence_expression_backend(const pg_sequence_expression_backend&) = delete;
+    pg_sequence_expression_backend& operator=(const pg_sequence_expression_backend&) = delete;
+    /** Release all unpublished tokens through the same reset callback as ERROR. */
+    ~pg_sequence_expression_backend() { pending_root_reset(guard_); }
+
+    /** Borrow one input without transferring its root; parse unbound CIGAR text once. */
+    [[nodiscard]] sequence_view_type borrow_input(Datum input)
+    {
+        return bioseq::postgres::support::invoke_pg_as_cpp([this, input]() mutable {
+            if constexpr (bioseq::cigar_operation_alphabet<Alphabet>) {
+                input = bind_pg_cigar_sequence(input);
+            }
+            auto view = acquire_sequence_for_read(input);
+            if (!view.alphabet_bound || view.type_params.alphabet_code != type_.alphabet_code) {
+                pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
+            }
+            type_ = view.type_params;
+            return view;
+        });
+    }
+    /** Borrow a unique output token; no reference is added. */
+    [[nodiscard]] sequence_view_type borrow(sequence_type& owned) const
+    {
+        return {.backing = nullptr, .root_value = owned.root.edge,
+            .type_params = owned.type_params,
+            .logical_length = owned.root ? owned.root.edge.node->bp_length : 0u,
+            .alphabet_bound = true};
+    }
+    /** Retire a unique token and invalidate it; repeated release is harmless. */
+    void release(sequence_type& owned) noexcept
+    {
+        release_tracked_edge(std::addressof(guard_->build_edges), owned.root);
+        owned.root = {};
+    }
+    /** Return the cached logical position count. */
+    [[nodiscard]] bioseq::storage::sequence_size_t length(sequence_view_type view) const
+    { return view.logical_length; }
+    /** Lazily borrow the existing admitted context for explicit output scratch. */
+    [[nodiscard]] context::context& memory()
+    { return acquire_pg_sequence_admitted_context(session_.payload_context, memory_slot_); }
+    /** Borrow the active source read session for another alphabet adapter. */
+    [[nodiscard]] pg_sequence_read_session& session() noexcept { return session_; }
+
+    /** Share a logical interval through the existing error-atomic tree slicer. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> slice(
+        sequence_view_type view, std::uint64_t from, std::uint64_t to)
+    {
+        if (from > to || to > length(view)) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding});
+        }
+        auto selected = bioseq::postgres::support::invoke_pg_as_cpp([this, view, from, to] {
+            return slice_tree(arena(), guard_->build_edges, view.root(), from, to);
+        });
+        return sequence_type{selected, view.type_params};
+    }
+    /** Join borrowed roots with existing AVL balancing and cleanup ownership. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> concat(
+        sequence_view_type left, sequence_view_type right)
+    {
+        if (left.type_params.alphabet_code != right.type_params.alphabet_code) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::incompatible_alphabet});
+        }
+        const auto combined = bioseq::common::checked_add(length(left), length(right));
+        if (!combined || *combined > (std::numeric_limits<std::uint32_t>::max)()) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::length_overflow});
+        }
+        auto selected_type = left.type_params;
+        if constexpr (bioseq::cigar_operation_alphabet<Alphabet>) {
+            if (left.type_params.space != right.type_params.space)
+                selected_type.space = bioseq::cigar_space::compatibility;
+        }
+        auto joined = bioseq::postgres::support::invoke_pg_as_cpp([this, left, right] {
+            return join_edges_error_atomic(arena(), guard_->build_edges, left.root(), right.root());
+        });
+        return sequence_type{joined, selected_type};
+    }
+    /** Publish a token through the established expanded-object finalizer. */
+    [[nodiscard]] Datum publish(sequence_type& owned)
+    {
+        return bioseq::postgres::support::invoke_pg_as_cpp([this, &owned] {
+            auto* result = make_pg_sequence_expanded(owned.type_params, true);
+            const auto extent = owned.root ? owned.root.edge.node->bp_length : 0u;
+            transfer_piece_edge_cleanup_root_noexcept(
+                guard_->build_edges, owned.root.cleanup, owned.root.edge);
+            publish_root_noexcept(*result, owned.root.edge, owned.type_params, extent, true);
+            owned.root = {};
+            return pg_sequence_rw_datum(result);
+        });
+    }
+
+    /** Generate only the unknown/filler backing, packing repeated ranks by words. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> filled(
+        Alphabet symbol, std::uint64_t count)
+        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+    {
+        if (count > (std::numeric_limits<std::uint32_t>::max)()) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::length_overflow});
+        }
+        sequence_type output{{}, type_};
+        bioseq::postgres::support::invoke_pg_as_cpp([this, symbol, count, &output] {
+        pgseq_dispatch_biological_instance(type_.alphabet_code, type_.storage_unit_byte_width,
+            [this, symbol, count, &output]<class Instance>() {
+                if constexpr (std::same_as<typename Instance::alphabet_type, Alphabet>) {
+                    using traits = typename compact_sequence_range<Instance>::traits;
+                    using unit = typename traits::storage_unit;
+                    const auto unit_count = checked_ceil_div(count, traits::letters_per_unit);
+                    const auto bytes = checked_mul_size(checked_size_cast(unit_count), sizeof(unit));
+                    auto& destination = arena();
+                    auto* storage = allocate_piece_literal_storage(destination, std::max<Size>(bytes, 1u));
+                    using sink = bioseq::sequences::fixed_rank_pack_unit_sink<unit>;
+                    using writer_type = bioseq::sequences::checked_rank_pack_sink<Instance,
+                        bioseq::sequences::invalid_rank_policy::reject,
+                        bioseq::sequences::pack_capacity_policy::fixed_span, sink>;
+                    writer_type writer{sink{std::span<unit>{reinterpret_cast<unit*>(storage),
+                        static_cast<std::size_t>(unit_count)}}};
+                    const auto appended = writer.append_repeated_rank(
+                        static_cast<std::uint8_t>(seqan3::to_rank(symbol)), count);
+                    if (appended != bioseq::sequences::rank_pack_status::ok) rank_pack_error(appended);
+                    const auto finished = writer.finish(count, unit_count);
+                    if (!finished) rank_pack_error(finished.status);
+                    output.root = make_literal_node_error_atomic(destination, guard_->build_edges,
+                        literal_piece{.storage_arena = std::addressof(destination), .bytes = storage,
+                            .symbol_from = 0u, .symbol_to = count, .stored_type_params = type_,
+                            .encoding = literal_encoding::packed,
+                            .validation = literal_validation::alphabet_validated});
+                }
+            });
+        });
+        return output;
+    }
+};
+
+/** CIGAR-specific capabilities over the shared sequence expression backend. */
+export class pg_cigar_backend : public pg_sequence_expression_backend<bioseq::cigar_symbol> {
+    using base = pg_sequence_expression_backend<bioseq::cigar_symbol>;
+public:
+    using base::base;
+    using run_type = bioseq::cigar_run;
+    using run_cursor_type = pg_cigar_run_cursor;
+    /** Return the embedded projection space. */
+    [[nodiscard]] bioseq::cigar_space space(sequence_view_type view) const
+    { return view.type_params.space; }
+    /** Traverse canonical runs independently within a logical window. */
+    [[nodiscard]] run_cursor_type runs(sequence_view_type view, std::uint64_t from, std::uint64_t to)
+    { return run_cursor_type{session_, view.root(), from, to}; }
+    /** Retain only metadata after validating the already filtered retained stream. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> with_space(
+        sequence_view_type view, bioseq::cigar_space target)
+    {
+        if (!bioseq::valid_cigar_space(target)) {
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding});
+        }
+        auto cursor = runs(view, 0u, length(view));
+        while (true) {
+            auto next = cursor.next();
+            if (!next) return std::unexpected(next.error());
+            if (!*next) break;
+            if (!bioseq::visible_in_space((**next).operation, target)) {
+                return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::invalid_operation});
+            }
+        }
+        auto selected = bioseq::postgres::support::invoke_pg_as_cpp([this, view] {
+            return retain_piece_edge_error_atomic(guard_->build_edges, view.root());
+        });
+        auto type = view.type_params;
+        type.space = target;
+        return sequence_type{selected, type};
+    }
+    /** Reverse operation order by changing the existing root edge flag. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> reverse(sequence_view_type view)
+    {
+        const auto transformed = bioseq::postgres::support::invoke_pg_as_cpp([this, view] {
+            return transform_piece_edge_error_atomic(guard_->build_edges,
+                view.root(), bioseq::storage::sequence_transform::reversed);
+        });
+        return sequence_type{transformed, view.type_params};
+    }
+    /** Encode canonical supplied runs into one existing arena-owned literal. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> from_runs(
+        std::span<const run_type> operations, bioseq::cigar_space declared_space)
+    {
+        auto* flat = bioseq::postgres::support::invoke_pg_as_cpp([operations, declared_space] {
+            return make_pg_cigar_from_runs(operations, declared_space);
+        });
+        const pg_sequence_descriptor descriptor{
+            .kind = pg_sequence_datum_kind::flat_bound,
+            .alphabet_code = pgseq_cigar_alphabet_code,
+            .storage_unit_byte_width = sizeof(run_type), .alphabet_bound = true,
+            .bp_length = flat->bp_size, .encoding = flat->encoding, .space = flat->space};
+        auto& destination = arena();
+        const auto literal = bioseq::postgres::support::invoke_pg_as_cpp([&destination, flat, descriptor] {
+            return copy_flat_literal(destination, *flat, descriptor, nullptr, 0u);
+        });
+        const auto type = flat->type_parameters();
+        pfree(flat);
+        const auto root = bioseq::postgres::support::invoke_pg_as_cpp([this, &destination, literal] {
+            return make_literal_node_error_atomic(destination, guard_->build_edges, literal);
+        });
+        return sequence_type{root, type};
+    }
+};
+static_assert(bioseq::cigar_sequence_backend<pg_cigar_backend>);
+
+/** Materialize canonical run input directly, without an intermediate text spelling. */
+export [[nodiscard]] inline Datum pg_cigar_from_runs(
+    std::span<const bioseq::cigar_run> operations,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
+{ return PointerGetDatum(make_pg_cigar_from_runs(operations, space)); }
+
+/** Execute one CIGAR operation under the existing read-session error lifecycle. */
+export template<class Result, class Function>
+Result with_pg_cigar_sequence(Datum input, Function&& callback)
+{
+    std::optional<Result> result;
+    std::exception_ptr failure;
+    pg_sequence_read_session* volatile session = nullptr;
+    PG_TRY();
+    {
+        auto* local = begin_pg_sequence_read_session(CurrentMemoryContext);
+        session = local;
+        try {
+            {
+                pg_cigar_backend backend{*local};
+                auto view = backend.borrow_input(input);
+                result.emplace(std::forward<Function>(callback)(backend, view));
+            }
+            finish_pg_sequence_read_session(local, true);
+        } catch (...) {
+            failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local);
+        }
+        session = nullptr;
+    }
+    PG_CATCH();
+    {
+        abort_pg_sequence_read_session_noexcept(const_cast<pg_sequence_read_session*>(session));
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    if (failure) std::rethrow_exception(std::move(failure));
+    return std::move(*result);
+}
+
+/** Execute a pair operation after binding both operands before allocating result arenas. */
+export template<class Result, class Function>
+Result with_pg_cigar_sequences(Datum left, Datum right, Function&& callback)
+{
+    return with_pg_cigar_sequence<Result>(left,
+        [right, &callback](pg_cigar_backend& backend, pg_sequence_read_handle left_view) {
+            auto right_view = backend.borrow_input(right);
+            return std::forward<Function>(callback)(backend, left_view, right_view);
+        });
+}
+
+/** Apply a CIGAR layout or reconstruction plan while retaining known input pieces. */
+export [[nodiscard]] inline Datum pg_cigar_transform_sequence(
+    Datum cigar, Datum biological, bioseq::cigar_space from_space,
+    bioseq::cigar_space to_space, bool reconstruct, bool assume_m_matches,
+    std::optional<pg_sequence_rank_value> filler)
+{
+    return with_pg_cigar_sequence<Datum>(cigar,
+        [biological, from_space, to_space, reconstruct, assume_m_matches, filler](
+            pg_cigar_backend& cigar_backend, pg_sequence_read_handle cigar_view) -> Datum {
+            const auto bio_descriptor = classify_and_describe_sequence_header(biological);
+            if (!bio_descriptor.alphabet_bound || pgseq_is_cigar_alphabet(bio_descriptor.alphabet_code)) {
+                pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
+            }
+            Datum output{};
+            pgseq_dispatch_biological_instance(bio_descriptor.alphabet_code,
+                bio_descriptor.storage_unit_byte_width,
+                [biological, from_space, to_space, reconstruct, assume_m_matches, filler,
+                 &cigar_backend, cigar_view, &output]<class Instance>() {
+                    using alphabet = typename Instance::alphabet_type;
+                    pg_sequence_expression_backend<alphabet> backend{cigar_backend.session()};
+                    auto input = backend.borrow_input(biological);
+                    std::optional<alphabet> unknown;
+                    if (filler) {
+                        if (filler->alphabet_code != input.type_params.alphabet_code
+                            || filler->rank >= seqan3::alphabet_size<alphabet>) {
+                            pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
+                        }
+                        unknown = alphabet{}.assign_rank(filler->rank);
+                    }
+                    auto transformed = bioseq::transform_cigar_sequence(cigar_backend, cigar_view,
+                        backend, input, from_space, to_space, reconstruct, assume_m_matches, unknown);
+                    if (!transformed) pg_raise_cigar_error(transformed.error());
+                    output = backend.publish(*transformed);
+                });
+            return output;
+        });
 }

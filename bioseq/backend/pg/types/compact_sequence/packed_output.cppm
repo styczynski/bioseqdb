@@ -208,7 +208,7 @@ Datum synthetic_lazy_sequence(std::int64_t requested) {
           .reserved_16 = 0u,
           .shard_index = 0u,
           .fragment_count = length == 0u ? 0u : 1u,
-          .reserved_32 = 0u,
+          .encoded_payload_bytes = 0u,
           .logical_length = length,
           .first_fragment_row = 0u,
           .source_epoch = 1u,

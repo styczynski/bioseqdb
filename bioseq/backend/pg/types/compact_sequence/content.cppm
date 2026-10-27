@@ -10,11 +10,19 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <functional>
 #include <limits>
+#include <memory>
+#include <new>
 #include <span>
+#include <stdexcept>
+
+#include <libassert/assert.hpp>
 
 #include <bioseq/pg_compat.h>
 extern "C" {
@@ -25,12 +33,37 @@ export module bioseq.postgres.types.compact_sequence:content;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
+import :source_abi;
 import :tree_types;
 import :view_session;
 import :packed_output;
 import bioseq.storage.lazy_sequence;
+import bioseq.common.context;
+import bioseq.postgres.support.sql_boundary;
+import bioseq.sequences.cigar;
+import bioseq.sequences.cigar_alphabet;
 
 namespace {
+
+/** Borrow a function's allocator service only when a residual profile tie needs it. */
+struct pg_cigar_comparison_scratch_provider {
+    bioseq::postgres::support::function_call_context const& call;
+
+    /** Acquire function-lifetime admitted scratch, without retaining input values. */
+    [[nodiscard]] std::expected<std::reference_wrapper<context::context>, bioseq::cigar_error>
+    acquire() {
+        try {
+            return std::ref(acquire_pg_sequence_admitted_context(
+                call.function_memory_context(), call.function_extra()));
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::allocation_rejected});
+        } catch (const std::length_error&) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::output_too_large});
+        }
+    }
+};
 
 struct content_operand {
     Datum dispatch;
@@ -186,9 +219,11 @@ inline void read_unbound_chunk(
 
 } // namespace
 
+template<bool p_match_order>
 [[nodiscard]] inline int seq_compare_internal(
     Datum left_input,
-    Datum right_input)
+    Datum right_input,
+    bioseq::postgres::support::function_call_context const* call = nullptr)
 {
     content_operand left = describe_content_operand(left_input);
     content_operand right = describe_content_operand(right_input);
@@ -207,6 +242,28 @@ inline void read_unbound_chunk(
                != right.descriptor.alphabet_code) {
         result = left.descriptor.alphabet_code
                 < right.descriptor.alphabet_code ? -1 : 1;
+    } else if (pgseq_is_cigar_alphabet(left.descriptor.alphabet_code)) {
+        if constexpr (p_match_order) {
+            DEBUG_ASSERT(call != nullptr, "CIGAR ordering requires an explicit scratch provider");
+            pg_cigar_comparison_scratch_provider scratch{*call};
+            const auto comparison = with_pg_cigar_sequences<
+                std::expected<std::strong_ordering, bioseq::cigar_error>>(
+                left.dispatch, right.dispatch,
+                [&scratch](auto& backend, auto left_view, auto right_view) {
+                    return bioseq::compare_cigar(backend, left_view, right_view, scratch);
+                });
+            if (!comparison) pg_raise_cigar_error(comparison.error());
+            result = *comparison < 0 ? -1 : *comparison > 0 ? 1 : 0;
+        } else {
+            const auto equal = with_pg_cigar_sequences<
+                std::expected<bool, bioseq::cigar_error>>(
+                left.dispatch, right.dispatch,
+                [](auto& backend, auto left_view, auto right_view) {
+                    return bioseq::equal_cigar(backend, left_view, right_view);
+                });
+            if (!equal) pg_raise_cigar_error(equal.error());
+            result = *equal ? 0 : 1;
+        }
     } else {
         result = with_pg_sequence_views<int>(
             left_input, right_input,
@@ -225,8 +282,10 @@ export namespace bioseq::pg_types::sql_routines {
 /**
  * @brief Compare two sequences by alphabet binding, alphabet code, and content.
  * Unbound values sort before bound values and compare by text bytes. Bound
- * values sort by alphabet code, then lexicographically by letter rank. A
- * shorter equal prefix sorts first. Packing width and piece-tree layout do
+ * values sort by alphabet code, then by their alphabet's sequence order.
+ * CIGAR prioritizes reported matches and match intervals before rank order.
+ * Other alphabets compare ranks, with a shorter equal prefix first. Packing
+ * width and piece-tree layout do
  * not affect the result; unresolved table locators are rejected.
  * @param left First sequence to compare.
  * @param right Second sequence to compare.
@@ -251,10 +310,11 @@ std::int32_t seq_cmp(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
     })]]
-    Datum right)
+    Datum right,
+    bioseq::postgres::support::function_call_context call)
 {
     return static_cast<std::int32_t>(
-        seq_compare_internal(left, right));
+        seq_compare_internal<true>(left, right, std::addressof(call)));
 }
 
 /**
@@ -291,9 +351,10 @@ bool seq_lt(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
     })]]
-    Datum right)
+    Datum right,
+    bioseq::postgres::support::function_call_context call)
 {
-    return seq_compare_internal(left, right) < 0;
+    return seq_compare_internal<true>(left, right, std::addressof(call)) < 0;
 }
 
 /**
@@ -330,9 +391,10 @@ bool seq_le(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
     })]]
-    Datum right)
+    Datum right,
+    bioseq::postgres::support::function_call_context call)
 {
-    return seq_compare_internal(left, right) <= 0;
+    return seq_compare_internal<true>(left, right, std::addressof(call)) <= 0;
 }
 
 /**
@@ -374,7 +436,7 @@ bool seq_eq(
     })]]
     Datum right)
 {
-    return seq_compare_internal(left, right) == 0;
+    return seq_compare_internal<false>(left, right) == 0;
 }
 
 /**
@@ -413,7 +475,7 @@ bool seq_ne(
     })]]
     Datum right)
 {
-    return seq_compare_internal(left, right) != 0;
+    return seq_compare_internal<false>(left, right) != 0;
 }
 
 /**
@@ -450,9 +512,10 @@ bool seq_ge(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
     })]]
-    Datum right)
+    Datum right,
+    bioseq::postgres::support::function_call_context call)
 {
-    return seq_compare_internal(left, right) >= 0;
+    return seq_compare_internal<true>(left, right, std::addressof(call)) >= 0;
 }
 
 /**
@@ -489,9 +552,10 @@ bool seq_gt(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
     })]]
-    Datum right)
+    Datum right,
+    bioseq::postgres::support::function_call_context call)
 {
-    return seq_compare_internal(left, right) > 0;
+    return seq_compare_internal<true>(left, right, std::addressof(call)) > 0;
 }
 
 [[nodiscard]] inline std::uint64_t seq_hash_internal(
@@ -506,6 +570,15 @@ bool seq_gt(
     if (!operand.descriptor.alphabet_bound) {
         result = hash_unbound(
             operand, prefix_hash_seed(seed, 0u, false, 0u));
+    } else if (pgseq_is_cigar_alphabet(operand.descriptor.alphabet_code)) {
+        const auto hash = with_pg_cigar_sequence<
+            std::expected<std::uint64_t, bioseq::cigar_error>>(
+            operand.dispatch,
+            [seed](auto& backend, auto view) {
+                return bioseq::hash_cigar(backend, view, seed);
+            });
+        if (!hash) pg_raise_cigar_error(hash.error());
+        result = *hash;
     } else {
         const std::uint64_t prefixed = prefix_hash_seed(
             seed, 1u, true, operand.descriptor.alphabet_code);

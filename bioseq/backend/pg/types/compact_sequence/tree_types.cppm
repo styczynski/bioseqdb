@@ -19,6 +19,7 @@ export module bioseq.postgres.types.compact_sequence:tree_types;
 
 import :flat_abi;
 import :source_abi;
+import bioseq.sequences.cigar_alphabet;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
@@ -118,6 +119,7 @@ static_assert(std::is_trivially_destructible_v<tracked_piece_edge>);
 export enum class literal_encoding : std::uint8_t {
     packed,
     unbound_ascii,
+    cigar_rle,
 };
 
 /// Whether a literal has been checked against its alphabet.
@@ -145,6 +147,10 @@ export struct literal_piece {
     compact_sequence_stdc_type_params stored_type_params;
     literal_encoding encoding;
     literal_validation validation;
+    /** Exact encoded backing size; required for variable-width run payloads. */
+    std::uint64_t encoded_byte_count{};
+    /** Logical extent of the complete encoded backing, before leaf slicing. */
+    std::uint64_t encoded_logical_length{};
 };
 
 /// Stored children, of a branch, before any jdge transform changes their order.
@@ -279,6 +285,8 @@ export struct pg_sequence_descriptor {
     std::uint8_t storage_unit_byte_width;
     bool alphabet_bound;
     bioseq::storage::sequence_size_t bp_length;
+    bioseq::sequence_encoding encoding{bioseq::sequence_encoding::rank_packed};
+    bioseq::cigar_space space{bioseq::cigar_space::compatibility};
 };
 
 /// Borrowed tree and metadata, valid while the expanded backing remains alive.

@@ -806,7 +806,7 @@ enum class materialization_size_probe : std::uint8_t {
             static_cast<Size>(VARHDRSZ + 1u), "self-test framed output");
         break;
       case materialization_size_probe::bound_flat_bp_overflow:
-        bioseq::pg_types::seq::dispatch_instance(
+        pgseq_dispatch_biological_instance(
             pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
             []<class p_instance>() {
               (void)bound_flat_size<p_instance>(
@@ -836,7 +836,7 @@ enum class materialization_size_probe : std::uint8_t {
 /** Test accepted sizes and PROGRAM_LIMIT_EXCEEDED errors at allocation limits. */
 [[nodiscard]] bool run_materialization_size_guardrail_matrix() {
   Size zero_flat_size = 0u;
-  bioseq::pg_types::seq::dispatch_instance(
+  pgseq_dispatch_biological_instance(
       pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
       [&zero_flat_size]<class p_instance>() {
         zero_flat_size = bound_flat_size<p_instance>(0u);
@@ -1003,7 +1003,7 @@ namespace {
       .reserved_16 = 0u,
       .shard_index = 0u,
       .fragment_count = 1u,
-      .reserved_32 = 0u,
+      .encoded_payload_bytes = 0u,
       .logical_length = piece_length,
       .first_fragment_row = 0u,
       .source_epoch = 1u,

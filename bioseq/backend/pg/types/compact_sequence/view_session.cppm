@@ -34,6 +34,8 @@ import :source_abi;
 import :tree_types;
 import :tree_ops;
 import bioseq.common.checked_arithmetic;
+import bioseq.sequences.cigar_alphabet;
+import bioseq.sequences;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
@@ -166,8 +168,23 @@ namespace {
 /** Check that a packed sequence's padding and byte size  match its declared length and type. */
 inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 {
+    if (pgseq_is_cigar_alphabet(value.alphabet_code)) {
+        if (value.encoding != bioseq::sequence_encoding::cigar_rle
+            || value.padding_letters != 0u
+            || value.storage_unit_byte_width != sizeof(bioseq::cigar_run)) {
+            invalid_flat_sequence("invalid CIGAR codec metadata");
+        }
+        const auto payload = std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(value.data),
+            bioseq::postgres::support::varlena_4byte_size(&value)
+                - bioseq::pg_types::seq::header_bytes()};
+        const auto valid = bioseq::validate_cigar_payload<bioseq::cigar_symbol>(
+            payload, value.bp_size, value.space);
+        if (!valid) invalid_flat_sequence("invalid canonical CIGAR payload");
+        return;
+    }
     bool valid = false;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         static_cast<std::uint8_t>(value.alphabet_code),
         static_cast<std::uint8_t>(value.storage_unit_byte_width),
         [&valid, &value]<class p_instance>() {
@@ -255,6 +272,8 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                 expanded->type_params.storage_unit_byte_width,
             .alphabet_bound = expanded->alphabet_bound,
             .bp_length = expanded->bp_length,
+            .encoding = expanded->type_params.encoding,
+            .space = expanded->type_params.space,
         };
     }
 
@@ -274,6 +293,8 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                     flat->storage_unit_byte_width),
                 .alphabet_bound = true,
                 .bp_length = flat->bp_size,
+                .encoding = flat->encoding,
+                .space = flat->space,
             };
         case pg_sequence_flat_kind::unbound: {
             if (flat->padding_letters != 0u
@@ -326,6 +347,8 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                 .storage_unit_byte_width = width,
                 .alphabet_bound = true,
                 .bp_length = locator->logical_length,
+                .encoding = flat->encoding,
+                .space = flat->space,
             };
         }
         case pg_sequence_flat_kind::invalid:
@@ -362,7 +385,15 @@ classify_and_describe_sequence_header(Datum input)
     switch (kind) {
         case pg_sequence_flat_kind::bound: {
             bool metadata_ok = false;
-            bioseq::pg_types::seq::dispatch_instance(
+            if (pgseq_is_cigar_alphabet(header->alphabet_code)) {
+                metadata_ok = header->encoding == bioseq::sequence_encoding::cigar_rle
+                    && header->padding_letters == 0u
+                    && header->storage_unit_byte_width == sizeof(bioseq::cigar_run)
+                    && bioseq::valid_cigar_space(header->space)
+                    && raw_size >= bioseq::pg_types::seq::header_bytes()
+                        + sizeof(bioseq::cigar_payload_header)
+                    && raw_size % alignof(std::uint64_t) == 0u;
+            } else pgseq_dispatch_biological_instance(
                 static_cast<std::uint8_t>(header->alphabet_code),
                 static_cast<std::uint8_t>(header->storage_unit_byte_width),
                 [header, raw_size, &metadata_ok]<class p_instance>() {
@@ -397,6 +428,8 @@ classify_and_describe_sequence_header(Datum input)
                     header->storage_unit_byte_width),
                 .alphabet_bound = true,
                 .bp_length = header->bp_size,
+                .encoding = header->encoding,
+                .space = header->space,
             };
             break;
         }
@@ -442,6 +475,8 @@ classify_and_describe_sequence_header(Datum input)
                 .storage_unit_byte_width = physical_width,
                 .alphabet_bound = true,
                 .bp_length = header->bp_size,
+                .encoding = header->encoding,
+                .space = header->space,
             };
             break;
         }
@@ -456,6 +491,223 @@ classify_and_describe_sequence_header(Datum input)
     }
     return descriptor;
 }
+
+/** Bounded byte adapter for a literal or immutable source CIGAR payload. */
+export struct pg_cigar_payload_reader {
+    pg_sequence_read_session* session{};
+    literal_piece const* literal{};
+    source_piece const* source{};
+
+    /** Copy encoded bytes without expanding logical operation positions. */
+    [[nodiscard]] std::expected<void, bioseq::cigar_error> read_bytes(
+        std::size_t offset, std::span<std::byte> output) const
+    {
+        const std::uint64_t capacity = literal != nullptr
+            ? literal->encoded_byte_count : source->locator.encoded_payload_bytes;
+        if (offset > capacity || output.size() > capacity - offset) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::invalid_encoding, offset});
+        }
+        if (literal != nullptr) {
+            std::memcpy(output.data(), literal->bytes + offset, output.size());
+            return {};
+        }
+        if (session == nullptr || source == nullptr
+            || source->source.ops->read_encoded_bytes == nullptr) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::invalid_encoding, offset});
+        }
+        const auto status = bioseq::postgres::support::invoke_pg_as_cpp(
+            [this, offset, output] {
+                return source->source.ops->read_encoded_bytes(
+                    source->source.state, *session, source->locator,
+                    source->stored_type_params, offset,
+                    std::span<std::uint8_t>{
+                        reinterpret_cast<std::uint8_t*>(output.data()), output.size()});
+            });
+        if (status != pg_sequence_source_read_status::ok) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::invalid_encoding, offset});
+        }
+        return {};
+    }
+};
+
+/** Independent canonical cursor over a logical window of the existing AVL tree.
+ * Its bounded stack follows tree height; source reads use the owning session's
+ * existing fragment cache. Only boundary runs are shortened. */
+export class pg_cigar_run_cursor {
+public:
+    using run_type = bioseq::cigar_run;
+private:
+    struct frame {
+        piece_edge edge{};
+        std::uint64_t from{};
+        std::uint64_t to{};
+    };
+    std::array<frame, max_pending_piece_edge_tokens> stack_{};
+    std::size_t stack_size_{};
+    pg_sequence_read_session* session_{};
+    frame leaf_{};
+    std::uint64_t leaf_remaining_{};
+    std::uint32_t run_index_{};
+    std::uint32_t available_{};
+    std::optional<run_type> current_{};
+    std::optional<run_type> pending_{};
+    std::optional<bioseq::cigar_error> failure_{};
+    bool exhausted_{};
+
+    /** Return a codec reader borrowing the active leaf's immutable backing. */
+    [[nodiscard]] auto reader() const
+    {
+        const bool literal = leaf_.edge.node->node_kind == piece_node::kind::literal;
+        auto const* literal_value = literal
+            ? std::addressof(leaf_.edge.node->payload.literal) : nullptr;
+        auto const* source_value = !literal
+            ? std::addressof(leaf_.edge.node->payload.source) : nullptr;
+        const auto logical_length = literal
+            ? literal_value->encoded_logical_length : source_value->locator.logical_length;
+        const auto space = literal ? literal_value->stored_type_params.space
+            : source_value->stored_type_params.space;
+        return bioseq::cigar_rle_reader<bioseq::cigar_symbol, pg_cigar_payload_reader>{
+            pg_cigar_payload_reader{session_, literal_value, source_value},
+            static_cast<std::uint32_t>(logical_length), space};
+    }
+
+    /** Locate the next intersecting leaf, pruning branches outside the window. */
+    [[nodiscard]] std::expected<bool, bioseq::cigar_error> next_leaf()
+    {
+        while (stack_size_ != 0u) {
+            const frame selected = stack_[--stack_size_];
+            if (!selected.edge || selected.from == selected.to) continue;
+            if (selected.edge.node->node_kind == piece_node::kind::branch) {
+                const auto children = bioseq::postgres::support::invoke_pg_as_cpp(
+                    [selected] { return logical_children(selected.edge); });
+                const auto split = children.first.node->bp_length;
+                if (stack_size_ + 2u > stack_.size()) {
+                    return std::unexpected(bioseq::cigar_error{
+                        bioseq::cigar_error_code::invalid_encoding});
+                }
+                if (selected.to > split) {
+                    stack_[stack_size_++] = {children.second,
+                        selected.from > split ? selected.from - split : 0u,
+                        selected.to - split};
+                }
+                if (selected.from < split) {
+                    stack_[stack_size_++] = {children.first, selected.from,
+                        std::min(selected.to, split)};
+                }
+                continue;
+            }
+            leaf_ = selected;
+            if (bioseq::storage::is_complemented(leaf_.edge.transform)) {
+                return std::unexpected(bioseq::cigar_error{
+                    bioseq::cigar_error_code::incompatible_alphabet});
+            }
+            const bool literal = selected.edge.node->node_kind == piece_node::kind::literal;
+            if (literal && selected.edge.node->payload.literal.encoding != literal_encoding::cigar_rle) {
+                return std::unexpected(bioseq::cigar_error{
+                    bioseq::cigar_error_code::invalid_encoding});
+            }
+            const auto physical_from = literal
+                ? selected.edge.node->payload.literal.symbol_from
+                : selected.edge.node->payload.source.from;
+            const auto physical_to = literal
+                ? selected.edge.node->payload.literal.symbol_to
+                : selected.edge.node->payload.source.to;
+            const bool reversed = bioseq::storage::is_reversed(selected.edge.transform);
+            const auto first_position = !reversed ? physical_from + selected.from
+                : physical_to - 1u - selected.from;
+            auto codec = reader();
+            const auto position = codec.seek(static_cast<std::uint32_t>(first_position));
+            if (!position) return std::unexpected(position.error());
+            run_index_ = position->run_index;
+            const auto operation = codec.run_at(run_index_);
+            if (!operation) return std::unexpected(operation.error());
+            current_ = *operation;
+            available_ = !reversed ? operation->length - position->offset
+                : position->offset + 1u;
+            leaf_remaining_ = selected.to - selected.from;
+            return true;
+        }
+        return false;
+    }
+
+    /** Read one physical run fragment; canonicalization is handled by next(). */
+    [[nodiscard]] std::expected<std::optional<run_type>, bioseq::cigar_error> next_raw()
+    {
+        if (leaf_remaining_ == 0u) {
+            const auto selected = next_leaf();
+            if (!selected) return std::unexpected(selected.error());
+            if (!*selected) return std::optional<run_type>{};
+        }
+        if (!current_.has_value()) {
+            auto codec = reader();
+            const auto operation = codec.run_at(run_index_);
+            if (!operation) return std::unexpected(operation.error());
+            current_ = *operation;
+            available_ = operation->length;
+        }
+        const auto count = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(available_, leaf_remaining_));
+        const run_type result{count, current_->operation};
+        leaf_remaining_ -= count;
+        available_ -= count;
+        if (available_ == 0u) {
+            current_.reset();
+            if (leaf_remaining_ != 0u) {
+                if (bioseq::storage::is_reversed(leaf_.edge.transform)) --run_index_;
+                else ++run_index_;
+            }
+        }
+        return std::optional<run_type>{result};
+    }
+public:
+    /** Construct a borrowed cursor; all backing must outlive its consumption. */
+    pg_cigar_run_cursor(pg_sequence_read_session& session, piece_edge root,
+                        std::uint64_t from, std::uint64_t to)
+        : session_(std::addressof(session))
+    {
+        if (from > to || (root ? to > root.node->bp_length : to != 0u)) {
+            failure_ = bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding};
+        } else if (root && from != to) {
+            stack_[stack_size_++] = {root, from, to};
+        }
+    }
+
+    /** Return one canonical run, clean end, or a sticky recoverable failure. */
+    [[nodiscard]] std::expected<std::optional<run_type>, bioseq::cigar_error> next()
+    {
+        if (failure_) return std::unexpected(*failure_);
+        if (exhausted_) return std::optional<run_type>{};
+        auto selected = pending_;
+        pending_.reset();
+        if (!selected) {
+            const auto first = next_raw();
+            if (!first) { failure_ = first.error(); return std::unexpected(*failure_); }
+            if (!first->has_value()) { exhausted_ = true; return std::optional<run_type>{}; }
+            selected = **first;
+        }
+        while (true) {
+            const auto following = next_raw();
+            if (!following) { failure_ = following.error(); return std::unexpected(*failure_); }
+            if (!following->has_value()) {
+                exhausted_ = true;
+                return selected;
+            }
+            const auto operation = **following;
+            if (operation.operation != selected->operation) {
+                pending_ = operation;
+                return selected;
+            }
+            if (operation.length > (std::numeric_limits<std::uint32_t>::max)() - selected->length) {
+                failure_ = bioseq::cigar_error{bioseq::cigar_error_code::length_overflow};
+                return std::unexpected(*failure_);
+            }
+            selected->length += operation.length;
+        }
+    }
+};
 
 namespace {
 
@@ -485,11 +737,33 @@ template<class p_alphabet>
     std::span<std::uint8_t> output)
 {
     const auto& literal = edge.node->payload.literal;
+    if constexpr (bioseq::cigar_operation_alphabet<p_alphabet>) {
+        if (literal.encoding != literal_encoding::cigar_rle
+            || bioseq::storage::is_complemented(edge.transform)) return false;
+        const compact_sequence_range<p_alphabet> full{
+            std::span<const std::byte>{literal.bytes,
+                static_cast<std::size_t>(literal.encoded_byte_count)},
+            static_cast<std::uint32_t>(literal.encoded_logical_length),
+            literal.stored_type_params.space};
+        const bool reversed = bioseq::storage::is_reversed(edge.transform);
+        const auto physical_from = !reversed ? literal.symbol_from + from
+            : literal.symbol_to - to;
+        const auto physical_to = !reversed ? literal.symbol_from + to
+            : literal.symbol_to - from;
+        std::size_t written = 0u;
+        for (const auto run : full.slice(physical_from, physical_to).runs()) {
+            const auto rank = static_cast<std::uint8_t>(seqan3::to_rank(run.operation));
+            const auto offset = !reversed ? written : output.size() - written - run.length;
+            std::fill_n(output.begin() + static_cast<std::ptrdiff_t>(offset), run.length, rank);
+            written += run.length;
+        }
+        return written == output.size();
+    }
     if (literal.encoding != literal_encoding::packed) {
         return false;
     }
     bool ok = false;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         literal.stored_type_params.alphabet_code,
         literal.stored_type_params.storage_unit_byte_width,
         [&ok, &literal, edge, from, to, output]<class p_instance>() {
@@ -589,8 +863,23 @@ template<class p_alphabet>
     std::uint64_t to,
     std::span<std::uint8_t> output)
 {
+    if constexpr (bioseq::cigar_operation_alphabet<p_alphabet>) {
+        const compact_sequence_range<p_alphabet> full{
+            std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(flat.data),
+                bioseq::postgres::support::varlena_4byte_size(&flat)
+                    - bioseq::pg_types::seq::header_bytes()},
+            flat.bp_size, flat.space};
+        std::size_t written = 0u;
+        for (const auto run : full.slice(from, to).runs()) {
+            std::fill_n(output.begin() + static_cast<std::ptrdiff_t>(written), run.length,
+                static_cast<std::uint8_t>(seqan3::to_rank(run.operation)));
+            written += run.length;
+        }
+        return written == output.size();
+    }
     bool ok = false;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         static_cast<std::uint8_t>(flat.alphabet_code),
         static_cast<std::uint8_t>(flat.storage_unit_byte_width),
         [&ok, &flat, from, to, output]<class p_instance>() {
@@ -706,6 +995,9 @@ facade_bp_size(void const *opaque) noexcept {
 /** Check whether this view's backing allows worker-thrad reads. */
 [[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
+  if (state.descriptor.encoding != bioseq::sequence_encoding::rank_packed) {
+    return std::nullopt;
+  }
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
@@ -966,6 +1258,7 @@ template <class p_alphabet>
                                              std::size_t unit_count,
                                              std::uint8_t requested_width) {
   auto const& state = *static_cast<pg_sequence_facade_state const*>(opaque);
+  if (state.descriptor.encoding != bioseq::sequence_encoding::rank_packed) return false;
   constexpr std::uint64_t bits_per_symbol =
       bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol;
   const std::uint64_t letters_per_unit =
@@ -1303,7 +1596,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     auto* local_session = begin_pg_sequence_read_session(CurrentMemoryContext);
     session = local_session;
     try {
-      bioseq::pg_types::seq::dispatch_instance(
+      pgseq_dispatch_biological_instance(
           source_descriptor.alphabet_code,
           source_descriptor.storage_unit_byte_width,
           [local_session, input, source_descriptor, flat_datum,
@@ -1412,7 +1705,11 @@ p_result with_pg_sequence_view(
             CurrentMemoryContext);
         session = local_session;
         try {
-            bioseq::pg_types::seq::dispatch_instance(
+            if (pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+                auto* owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
+                    *local_session, dispatch_datum, descriptor);
+                result.emplace(std::forward<p_function>(view_callback)(owner->view()));
+            } else pgseq_dispatch_biological_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, &view_callback, dispatch_datum, descriptor,
@@ -1496,7 +1793,13 @@ p_result with_pg_sequence_views(
             CurrentMemoryContext);
         session = local_session;
         try {
-            bioseq::pg_types::seq::dispatch_instance(
+            if (pgseq_is_cigar_alphabet(left.alphabet_code)) {
+                auto* left_owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
+                    *local_session, dispatch[0], left);
+                auto* right_owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
+                    *local_session, dispatch[1], right);
+                result.emplace(std::forward<p_function>(callback)(left_owner->view(), right_owner->view()));
+            } else pgseq_dispatch_biological_instance(
                 left.alphabet_code,
                 left.storage_unit_byte_width,
                 [&result, &callback, local_session,
@@ -1545,6 +1848,38 @@ export struct pg_sequence_rank_value {
     std::uint8_t rank;
 };
 
+/** Random-access TOAST byte provider for one CIGAR position lookup. */
+export struct pg_cigar_datum_payload_reader {
+    Datum input;
+    std::size_t payload_bytes;
+    /** Fetch only the requested prefix, checkpoint, or run bytes. */
+    [[nodiscard]] std::expected<void, bioseq::cigar_error> read_bytes(
+        std::size_t offset, std::span<std::byte> output) const
+    {
+        if (offset > payload_bytes || output.size() > payload_bytes - offset) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::invalid_encoding, offset});
+        }
+        if (VARATT_IS_4B_U(DatumGetPointer(input))) {
+            const auto* flat = reinterpret_cast<const bioseq::pg_types::seq*>(DatumGetPointer(input));
+            std::memcpy(output.data(), flat->data + offset, output.size());
+        } else {
+            const auto slice_offset = bioseq::pg_types::seq::header_bytes() - VARHDRSZ + offset;
+            if (slice_offset > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())
+                || output.size() > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())) {
+                return std::unexpected(bioseq::cigar_error{
+                    bioseq::cigar_error_code::output_too_large, offset});
+            }
+            auto* slice = PG_DETOAST_DATUM_SLICE(input,
+                static_cast<std::int32_t>(slice_offset),
+                static_cast<std::int32_t>(output.size()));
+            std::memcpy(output.data(), VARDATA(slice), output.size());
+            pfree(slice);
+        }
+        return {};
+    }
+};
+
 /* Read one letter for SQL subscripting. Flat values need only the header
  * and the packed unit containing that letter. Expanded values use a read
  * session and request one rank from the tree view, preserving lazy source reads. */
@@ -1571,7 +1906,20 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             .alphabet_code = descriptor.alphabet_code,
             .rank = 0u,
         };
-        bioseq::pg_types::seq::dispatch_instance(
+        if (pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+            const auto bytes = static_cast<std::size_t>(toast_raw_datum_size(input))
+                - bioseq::pg_types::seq::header_bytes();
+            const bioseq::cigar_rle_reader<bioseq::cigar_symbol,
+                pg_cigar_datum_payload_reader> reader{
+                    {input, bytes}, static_cast<std::uint32_t>(descriptor.bp_length), descriptor.space};
+            const auto position = reader.seek(static_cast<std::uint32_t>(index));
+            if (!position) pg_raise_cigar_error(position.error());
+            const auto operation = reader.run_at(position->run_index);
+            if (!operation) pg_raise_cigar_error(operation.error());
+            result.rank = static_cast<std::uint8_t>(seqan3::to_rank(operation->operation));
+            return result;
+        }
+        pgseq_dispatch_biological_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [input, index, &result]<class p_instance>() {
@@ -1657,7 +2005,13 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             CurrentMemoryContext);
         session = local_session;
         try {
-            bioseq::pg_types::seq::dispatch_instance(
+            if (pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+                auto* owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
+                    *local_session, dispatch, descriptor);
+                std::array<std::uint8_t, 1> scratch{};
+                owner->view().template copy_ranks<false, false>(scratch, index, index + 1u);
+                result.rank = scratch[0];
+            } else pgseq_dispatch_biological_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, dispatch, descriptor, index,

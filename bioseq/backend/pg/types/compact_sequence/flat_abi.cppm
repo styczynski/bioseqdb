@@ -6,10 +6,14 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <optional>
 #include <limits>
 #include <new>
 #include <span>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 
 #include <bioseq/pg_compat.h>
 
@@ -26,10 +30,11 @@ import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.types.compact_sequence.dispatch_profile_contract;
 import bioseq.sequences;
+import bioseq.sequences.cigar;
 import bioseq.storage.layout;
 
-/// Alphabets enabled for sequence operations in this  build.
-export using pgseq_supported_alphabets =
+/// Rank-packed alphabets enabled for biological algorithms in this build.
+export using pgseq_supported_biological_alphabets =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     supported_alphabets<alphabet_entry<seq::dna4, "dna4">>;
 #else
@@ -37,6 +42,24 @@ export using pgseq_supported_alphabets =
         alphabet_entry<seq::dna4, "dna4">,
         alphabet_entry<seq::dna5, "dna5">>;
 #endif
+
+/// Storage alphabets, derived from the biological registry without duplicating it.
+export using pgseq_supported_alphabets = typename decltype(
+    []<class... p_entries>(std::tuple<p_entries...>) {
+        return std::type_identity<supported_alphabets<
+            p_entries..., alphabet_entry<bioseq::cigar_symbol, "cigar">>>{};
+    }(typename pgseq_supported_biological_alphabets::alphabet_entries_tuple{}))::type;
+
+/// Physical CIGAR family code; projection spaces do not add alphabet types.
+export inline constexpr std::uint8_t pgseq_cigar_alphabet_code =
+    pgseq_supported_alphabets::index_of<bioseq::cigar_symbol>();
+
+/** Return whether an alphabet code selects the run-encoded CIGAR family. */
+export [[nodiscard]] constexpr bool pgseq_is_cigar_alphabet(
+    std::uint8_t alphabet_code) noexcept
+{
+    return alphabet_code == pgseq_cigar_alphabet_code;
+}
 
 /// Storage-unit widths, in bytes, enabled in this build.
 export using pgseq_supported_storage_unit_byte_widths =
@@ -82,7 +105,32 @@ using seq [[bioseq_sql::type({
     std::int32_t,
     pgseq_supported_storage_unit_byte_widths>;
 
+static_assert(seq::header_bytes() == 16u);
+static_assert(seqan3::alphabet_size<bioseq::cigar_symbol>
+              <= std::size_t{1u} << std::numeric_limits<std::uint8_t>::digits,
+              "the PostgreSQL letter and lazy-rank facade require byte-sized ranks");
+static_assert(pgseq_supported_storage_unit_byte_widths::contains<sizeof(bioseq::cigar_run)>);
+
 }  // namespace bioseq::pg_types
+
+/** Dispatch rank-packed alphabets without instantiating CIGAR numeric kernels. */
+export template<class p_handler>
+constexpr void pgseq_dispatch_biological_instance(
+    std::uint8_t alphabet_code,
+    std::uint8_t byte_width,
+    p_handler&& handler)
+{
+    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
+        alphabet_code,
+        [byte_width, &handler]<class p_alphabet>() {
+            pgseq_supported_storage_unit_byte_widths::dispatch(
+                byte_width,
+                [&handler]<std::size_t p_width>() {
+                    handler.template operator()<compact_sequence_stdc_instance<
+                        bioseq::pg_types::seq, p_alphabet, p_width>>();
+                });
+        });
+}
 
 export namespace bioseq::postgres::support::detail {
 
@@ -128,9 +176,9 @@ static_assert(pgseq_unbound_alphabet_code
 
 static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-              == std::string_view{"'dna4'"},
+              == std::string_view{"'dna4', 'cigar'"},
 #else
-              == std::string_view{"'dna4', 'dna5'"},
+              == std::string_view{"'dna4', 'dna5', 'cigar'"},
 #endif
               "supported-alphabet display names drifted");
 static_assert(
@@ -171,9 +219,13 @@ pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 export [[nodiscard]] constexpr compact_sequence_stdc_type_params
 pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
 {
-    params.storage_unit_byte_width =
-        pgseq_normalize_storage_unit_byte_width(
-            params.storage_unit_byte_width);
+    if (pgseq_is_cigar_alphabet(params.alphabet_code)) {
+        params.encoding = bioseq::sequence_encoding::cigar_rle;
+    } else {
+        params.storage_unit_byte_width =
+            pgseq_normalize_storage_unit_byte_width(
+                params.storage_unit_byte_width);
+    }
     return params;
 }
 
@@ -217,12 +269,25 @@ classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
         || width == pgseq_unbound_width_tag) {
         return value->alphabet_code == pgseq_unbound_alphabet_code
                 && width == pgseq_unbound_width_tag
+                && value->encoding == bioseq::sequence_encoding::rank_packed
+                && value->space == bioseq::cigar_space::compatibility
             ? pg_sequence_flat_kind::unbound
             : pg_sequence_flat_kind::invalid;
     }
     if (!is_supported_alphabet_code(
             static_cast<std::uint8_t>(value->alphabet_code))
         || !pgseq_supported_storage_unit_byte_widths::contains_runtime(width)) {
+        return pg_sequence_flat_kind::invalid;
+    }
+    if (pgseq_is_cigar_alphabet(value->alphabet_code)) {
+        if (value->encoding != bioseq::sequence_encoding::cigar_rle
+            || value->storage_unit_byte_width != sizeof(bioseq::cigar_run)
+            || value->padding_letters != 0u
+            || value->space >= bioseq::cigar_space::count) {
+            return pg_sequence_flat_kind::invalid;
+        }
+    } else if (value->encoding != bioseq::sequence_encoding::rank_packed
+               || value->space != bioseq::cigar_space::compatibility) {
         return pg_sequence_flat_kind::invalid;
     }
     return pg_sequence_flat_kind::bound;
@@ -298,6 +363,9 @@ pgseq_canonical_unbound_symbol(unsigned char input) noexcept
     for (std::uint8_t code = 0;
          code < pgseq_supported_alphabets::alphabet_count;
          ++code) {
+        if (pgseq_is_cigar_alphabet(code)) {
+            continue;
+        }
         const auto candidate =
             pgseq_canonical_symbol_for_alphabet(code, input);
         if (!candidate.valid) {
@@ -385,6 +453,136 @@ export inline constexpr auto pg_alloc =
     };
 
 static_assert(stdc_allocator<decltype(pg_alloc), bioseq::pg_types::seq>);
+
+/** Translate a checked CIGAR failure at the PostgreSQL boundary. */
+export [[noreturn]] inline void pg_raise_cigar_error(
+    bioseq::cigar_error const& error,
+    int invalid_sqlstate = ERRCODE_INVALID_TEXT_REPRESENTATION)
+{
+    using code = bioseq::cigar_error_code;
+    const int sqlstate = error.code == code::allocation_rejected
+        ? ERRCODE_OUT_OF_MEMORY
+        : error.code == code::length_overflow
+            || error.code == code::count_overflow
+            || error.code == code::output_too_large
+        ? ERRCODE_PROGRAM_LIMIT_EXCEEDED
+        : error.code == code::invalid_encoding
+        ? (invalid_sqlstate == ERRCODE_INVALID_BINARY_REPRESENTATION
+            ? invalid_sqlstate : ERRCODE_DATA_CORRUPTED)
+        : invalid_sqlstate;
+    const char* reason = "invalid CIGAR value";
+    switch (error.code) {
+        case code::invalid_text: reason = "expected a positive decimal count followed by an operation"; break;
+        case code::zero_count: reason = "zero counts and leading zeros are not allowed"; break;
+        case code::invalid_operation: reason = "operation is outside the declared CIGAR alphabet or space"; break;
+        case code::count_overflow: reason = "operation count exceeds the supported range"; break;
+        case code::length_overflow: reason = "CIGAR length exceeds the supported sequence limit"; break;
+        case code::invalid_encoding: reason = "inconsistent or noncanonical CIGAR encoding"; break;
+        case code::unsupported_geometry: reason = "opaque operations do not define biological geometry"; break;
+        case code::incompatible_alphabet: reason = "sequence alphabets are incompatible"; break;
+        case code::input_length_mismatch: reason = "input length does not match the CIGAR"; break;
+        case code::unknown_symbol_unavailable: reason = "the destination alphabet has no unknown symbol"; break;
+        case code::allocation_rejected: reason = "CIGAR allocation was rejected"; break;
+        case code::output_too_large: reason = "CIGAR output exceeds the allocation limit"; break;
+    }
+    ereport(ERROR,
+            (errcode(sqlstate),
+             errmsg("invalid bioseq CIGAR value: %s", reason),
+             errdetail("input offset=%zu", error.input_offset)));
+    pg_unreachable();
+}
+
+/** Allocate an exact flat CIGAR payload; the caller must complete its run writer. */
+export [[nodiscard]] inline bioseq::pg_types::seq* allocate_pg_cigar_payload(
+    std::uint32_t run_count,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
+{
+    const auto payload_bytes = bioseq::measure_cigar_payload(run_count);
+    if (!payload_bytes) {
+        pg_raise_cigar_error(payload_bytes.error());
+    }
+    if (*payload_bytes > MaxAllocSize - bioseq::pg_types::seq::header_bytes()) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::output_too_large});
+    }
+    const std::size_t total_bytes =
+        bioseq::pg_types::seq::header_bytes() + *payload_bytes;
+    auto* result = pg_alloc(total_bytes);
+    if (result == nullptr) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::allocation_rejected});
+    }
+    SET_VARSIZE(result, total_bytes);
+    result->alphabet_code = pgseq_cigar_alphabet_code;
+    result->storage_unit_byte_width = sizeof(bioseq::cigar_run);
+    result->padding_letters = 0u;
+    result->bp_size = 0u;
+    result->encoding = bioseq::sequence_encoding::cigar_rle;
+    result->space = space;
+    return result;
+}
+
+/** Parse decimal-operation text directly into canonical flat RLE storage. */
+export [[nodiscard]] inline bioseq::pg_types::seq* make_pg_cigar_from_text(
+    std::string_view input,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility,
+    int invalid_sqlstate = ERRCODE_INVALID_TEXT_REPRESENTATION,
+    std::optional<bioseq::cigar_parse_summary> known_measurement = std::nullopt)
+{
+    const auto measured = known_measurement.has_value()
+        ? std::expected<bioseq::cigar_parse_summary, bioseq::cigar_error>{*known_measurement}
+        : bioseq::measure_cigar_text(input, space);
+    if (!measured) {
+        pg_raise_cigar_error(measured.error(), invalid_sqlstate);
+    }
+    if (measured->run_count > (std::numeric_limits<std::uint32_t>::max)()) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::output_too_large});
+    }
+    auto* result = allocate_pg_cigar_payload(
+        static_cast<std::uint32_t>(measured->run_count), space);
+    bioseq::cigar_payload_writer<bioseq::cigar_symbol> writer{
+        std::span<std::byte>{reinterpret_cast<std::byte*>(result->data),
+            static_cast<std::size_t>(VARSIZE(result))
+                - bioseq::pg_types::seq::header_bytes()},
+        static_cast<std::uint32_t>(measured->run_count), space};
+    const auto parsed = bioseq::parse_cigar_runs(
+        input,
+        [&writer](bioseq::cigar_run run)
+            -> std::expected<void, bioseq::cigar_error> {
+            return writer.append(run);
+        },
+        space);
+    const auto finished = writer.finish();
+    if (!parsed || !finished || *finished != measured->logical_length) {
+        pfree(result);
+        pg_raise_cigar_error(!parsed ? parsed.error() : !finished ? finished.error()
+            : bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding},
+            invalid_sqlstate);
+    }
+    result->bp_size = *finished;
+    return result;
+}
+
+/** Allocate an owning flat CIGAR from checked, canonical run input. */
+export [[nodiscard]] inline bioseq::pg_types::seq* make_pg_cigar_from_runs(
+    std::span<const bioseq::cigar_run> runs,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
+{
+    if (runs.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        pg_raise_cigar_error({bioseq::cigar_error_code::output_too_large});
+    }
+    auto* result = allocate_pg_cigar_payload(
+        static_cast<std::uint32_t>(runs.size()), space);
+    const auto payload_bytes = static_cast<std::size_t>(VARSIZE(result))
+        - bioseq::pg_types::seq::header_bytes();
+    const auto written = bioseq::write_cigar_payload<bioseq::cigar_symbol>(
+        std::span<std::byte>{reinterpret_cast<std::byte*>(result->data), payload_bytes},
+        runs, space);
+    if (!written) {
+        pfree(result);
+        pg_raise_cigar_error(written.error());
+    }
+    result->bp_size = *written;
+    return result;
+}
 
 /* Look up current type OIDs each time. Dropping and recreating the extension
  * in one backend gives its types new OIDs, and a missing type is allowed. */

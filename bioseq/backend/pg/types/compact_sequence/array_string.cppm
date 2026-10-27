@@ -37,6 +37,7 @@ import :io;
 import :letter;
 import :subscript;
 import bioseq.sequences.rank_pack;
+import bioseq.sequences.cigar;
 
 namespace {
 
@@ -197,6 +198,41 @@ inline void validate_bridge_array_shape(
     __builtin_unreachable();
 }
 
+/** Pack positional CIGAR letters into canonical runs, filtering only after all
+ * original elements have been checked. Workspace follows canonical run count. */
+[[nodiscard]] inline Datum cigar_from_letter_values(
+    deconstructed_array elements, ArrayType* array, bioseq::cigar_space space)
+{
+    std::size_t run_count{};
+    std::optional<std::uint8_t> previous;
+    for (int index = 0; index < elements.count; ++index) {
+        if (elements.nulls != nullptr && elements.nulls[index]) array_null_error(array, index);
+        const auto letter = validate_letter_datum(elements.values[index]);
+        if (!pgseq_is_cigar_alphabet(letter.alphabet_code)) {
+            mixed_letter_alphabet_error(pgseq_cigar_alphabet_code, letter.alphabet_code);
+        }
+        const auto symbol = bioseq::cigar_symbol{}.assign_rank(letter.rank);
+        if (!bioseq::visible_in_space(symbol, space)) continue;
+        if (!previous || *previous != letter.rank) ++run_count;
+        previous = letter.rank;
+    }
+    const Size workspace = checked_materialization_allocation_size(
+        run_count * sizeof(bioseq::cigar_run), 0u, "CIGAR letter-array runs");
+    auto* storage = static_cast<bioseq::cigar_run*>(palloc(std::max<Size>(workspace, 1u)));
+    bioseq::cigar_run_span_sink<bioseq::cigar_symbol> canonical{
+        std::span<bioseq::cigar_run>{storage, run_count}};
+    for (int index = 0; index < elements.count; ++index) {
+        const auto letter = datum_get_letter(elements.values[index]);
+        const auto symbol = bioseq::cigar_symbol{}.assign_rank(letter.rank);
+        if (!bioseq::visible_in_space(symbol, space)) continue;
+        const auto appended = bioseq::append_canonical_run(canonical, bioseq::cigar_run{1u, symbol});
+        if (!appended) pg_raise_cigar_error(appended.error());
+    }
+    const Datum result = pg_cigar_from_runs(std::span<const bioseq::cigar_run>{storage, canonical.used}, space);
+    pfree(storage);
+    return result;
+}
+
 /**
  * @brief Join letter array elements as text and remember their shared alphabet.
  * @param array Empty or one-dimensional letter array with no NULL elements.
@@ -207,6 +243,14 @@ inline void validate_bridge_array_shape(
 {
     validate_bridge_array_shape(array, "letter");
     const auto elements = deconstruct_letter_values(array);
+    if (elements.count != 0 && !(elements.nulls != nullptr && elements.nulls[0])) {
+        const auto first = validate_letter_datum(elements.values[0]);
+        if (pgseq_is_cigar_alphabet(first.alphabet_code)) {
+            return {cigar_from_letter_values(elements, array,
+                        bioseq::cigar_space::compatibility),
+                    elements.count, true, pgseq_cigar_alphabet_code};
+        }
+    }
     auto* ascii = static_cast<char*>(palloc(
         std::max<std::size_t>(static_cast<std::size_t>(elements.count), 1u)));
     bool has_alphabet = false;
@@ -348,7 +392,8 @@ inline void validate_bridge_array_shape(
     ArrayType* array,
     std::uint8_t alphabet,
     int32_t width_bits,
-    bool require_nonempty)
+    bool require_nonempty,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
 {
     if (require_nonempty && ARR_NDIM(array) != 1) {
         ereport(ERROR,
@@ -383,8 +428,11 @@ inline void validate_bridge_array_shape(
         }
     }
     const auto target = array_target_type(alphabet, width_bits);
+    if (pgseq_is_cigar_alphabet(alphabet)) {
+        return cigar_from_letter_values(elements, array, space);
+    }
     bioseq::pg_types::seq* result = nullptr;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         target.alphabet_code,
         target.storage_unit_byte_width,
         [&result, target, elements, array,
@@ -916,8 +964,10 @@ Datum from_array(
 {
     const auto alphabet = parse_alphabet_name_checked(
         alphabet_name.c_str(), "bioseq.seq");
+    const auto cigar_space = bioseq::cigar_space_from_name(alphabet_name);
     return packed_from_letter_array(
-        array, alphabet, width_bits, false);
+        array, alphabet, width_bits, false,
+        cigar_space.value_or(bioseq::cigar_space::compatibility));
 }
 
 }  // namespace bioseq::pg_types::sql_routines

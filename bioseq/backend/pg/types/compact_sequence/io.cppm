@@ -12,8 +12,11 @@ module;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
 #include <limits>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <variant>
 
@@ -38,6 +41,7 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.simd;
+import bioseq.sequences.cigar;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 
@@ -49,16 +53,22 @@ import bioseq.storage.lazy_sequence;
 export [[nodiscard]] compact_sequence_stdc_type_params
 decode_seq_typmod_checked(int32_t typmod)
 {
-    if (typmod < 0) {
+    if (typmod < 0 || (static_cast<std::uint32_t>(typmod) & 0xff000000u) != 0u
+        || (typmod & 0xff) > 3
+        || ((typmod >> 16) & 0xff)
+            >= static_cast<int>(bioseq::cigar_space::count)) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("bioseq.seq destination typmod is required")));
+                 errmsg("invalid bioseq.seq destination typmod %d", typmod)));
     }
     auto params = pgseq_normalize_type_params(
         compact_sequence_stdc_type_params::decode(typmod));
     if (!is_supported_alphabet_code(params.alphabet_code)
         || !pgseq_supported_storage_unit_byte_widths::contains_runtime(
-            params.storage_unit_byte_width)) {
+            params.storage_unit_byte_width)
+        || (pgseq_is_cigar_alphabet(params.alphabet_code)
+            ? params.storage_unit_byte_width != sizeof(bioseq::cigar_run)
+            : params.space != bioseq::cigar_space::compatibility)) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("invalid bioseq.seq typmod %d", typmod)));
@@ -76,6 +86,11 @@ export [[nodiscard]] std::uint8_t parse_alphabet_name_checked(
     char const* alphabet_name,
     char const* type_name)
 {
+    const std::string_view requested_name{alphabet_name};
+    if ((requested_name == "cigar" || requested_name.starts_with("cigar-"))
+        && bioseq::cigar_space_from_name(requested_name).has_value()) {
+        return pgseq_cigar_alphabet_code;
+    }
     const auto code =
         pgseq_supported_alphabets::try_index_of_name(alphabet_name);
     if (!code.has_value()) {
@@ -180,6 +195,8 @@ namespace {
     result->storage_unit_byte_width = pgseq_unbound_width_tag;
     result->padding_letters = 0u;
     result->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(length);
+    result->encoding = bioseq::sequence_encoding::rank_packed;
+    result->space = bioseq::cigar_space::compatibility;
     for (std::size_t index = 0; index < length; ++index) {
         const unsigned char raw = static_cast<unsigned char>(input[index]);
         const auto canonical = pgseq_canonical_unbound_symbol(raw);
@@ -198,6 +215,34 @@ namespace {
     return result;
 }
 
+/** Infer only complete nonempty CIGAR grammar, otherwise keep ordinary late binding. */
+[[nodiscard]] inline bioseq::pg_types::seq* allocate_sequence_text(
+    char const* input,
+    std::size_t length,
+    bool require_already_canonical)
+{
+    if (length != 0u) {
+        const std::string_view text{input, length};
+        const auto measured = bioseq::measure_cigar_text(text);
+        if (measured) {
+            return make_pg_cigar_from_text(text, bioseq::cigar_space::compatibility,
+                ERRCODE_INVALID_TEXT_REPRESENTATION, *measured);
+        }
+        bool ordinary_spelling = true;
+        for (std::size_t index = 0u; index < length; ++index) {
+            if (!pgseq_canonical_unbound_symbol(
+                    static_cast<unsigned char>(input[index])).valid) {
+                ordinary_spelling = false;
+                break;
+            }
+        }
+        if (!ordinary_spelling) {
+            pg_raise_cigar_error(measured.error());
+        }
+    }
+    return allocate_unbound_ascii(input, length, require_already_canonical);
+}
+
 /**
  * @brief Validate letters against the target alphabet and pack them into a sequence.
  * @param ascii Input symbols.
@@ -210,6 +255,10 @@ namespace {
     std::size_t length,
     compact_sequence_stdc_type_params target)
 {
+    if (pgseq_is_cigar_alphabet(target.alphabet_code)) {
+        return make_pg_cigar_from_text(
+            std::string_view{ascii, length}, target.space);
+    }
     for (std::size_t index = 0; index < length; ++index) {
         std::uint8_t rank = 0;
         if (!pgseq_rank_for_symbol(
@@ -233,13 +282,13 @@ namespace {
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to pack")));
     }
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         target.alphabet_code, target.storage_unit_byte_width,
         [length]<class p_instance>() {
             (void) bound_flat_size<p_instance>(length);
         });
     bioseq::pg_types::seq* result = nullptr;
-    pgseq_supported_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         target.alphabet_code,
         [&result, target, length, ascii]<class p_alphabet>() {
             result = ::bioseq::simd::active_target::
@@ -254,6 +303,8 @@ namespace {
                 (errcode(ERRCODE_OUT_OF_MEMORY),
                  errmsg("out of memory packing bioseq sequence")));
     }
+    result->encoding = bioseq::sequence_encoding::rank_packed;
+    result->space = bioseq::cigar_space::compatibility;
     return result;
 }
 
@@ -478,6 +529,118 @@ void view_to_ascii(
     }
 }
 
+/** Bounded PostgreSQL-owned destination used by the shared CIGAR formatter. */
+struct pg_cigar_text_sink {
+    char* data;
+    std::size_t capacity;
+    std::size_t written{};
+
+    /** Append one formatting chunk without allocating or raising a PG error. */
+    [[nodiscard]] std::expected<void, bioseq::cigar_error> append(
+        std::span<const char> chunk)
+    {
+        if (chunk.size() > capacity - written) {
+            return std::unexpected(bioseq::cigar_error{
+                bioseq::cigar_error_code::output_too_large});
+        }
+        std::memcpy(data + written, chunk.data(), chunk.size());
+        written += chunk.size();
+        return {};
+    }
+};
+
+/** One owning output allocation and its canonical text length. */
+struct pg_cigar_text_result {
+    Datum value;
+    std::size_t text_bytes;
+    std::size_t allocation_bytes;
+};
+
+/** Measure then format CIGAR text, without expanding logical positions. */
+[[nodiscard]] inline pg_cigar_text_result allocate_cigar_text(
+    Datum input,
+    bool cstring_output)
+{
+    return with_pg_cigar_sequence<pg_cigar_text_result>(
+        input,
+        [cstring_output](auto& backend, auto view) {
+            const auto measured = bioseq::measure_cigar_format(backend, view);
+            if (!measured) {
+                pg_raise_cigar_error(measured.error());
+            }
+            const std::size_t overhead = cstring_output ? 1u : VARHDRSZ;
+            const Size total = checked_materialization_allocation_size(
+                *measured, overhead, "CIGAR text output");
+            auto* allocation = static_cast<char*>(palloc(total));
+            auto* output = allocation + (cstring_output ? 0u : VARHDRSZ);
+            pg_cigar_text_sink sink{output, *measured};
+            const auto formatted = bioseq::format_cigar_to(backend, view, sink);
+            if (!formatted || sink.written != *measured) {
+                pfree(allocation);
+                pg_raise_cigar_error(!formatted ? formatted.error()
+                    : bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding});
+            }
+            if (cstring_output) {
+                output[*measured] = '\0';
+            } else {
+                SET_VARSIZE(allocation, total);
+            }
+            return pg_cigar_text_result{
+                PointerGetDatum(allocation), *measured,
+                static_cast<std::size_t>(total)};
+        });
+}
+
+/** Encode the canonical run stream with the versioned CIGAR wire framing. */
+[[nodiscard]] inline pg_cigar_text_result allocate_cigar_wire(Datum input)
+{
+    return with_pg_cigar_sequence<pg_cigar_text_result>(
+        input,
+        [](auto& backend, auto view) {
+            const auto run_count = bioseq::cigar_op_count(backend, view);
+            if (!run_count) {
+                pg_raise_cigar_error(run_count.error());
+            }
+            const auto payload_bytes = std::uint64_t{16u}
+                + std::uint64_t{5u} * *run_count;
+            (void) checked_materialization_allocation_size(
+                payload_bytes, VARHDRSZ + 1u, "CIGAR binary output");
+            StringInfoData buffer;
+            pq_begintypsend(&buffer);
+            enlargeStringInfo(&buffer, static_cast<int>(payload_bytes));
+            constexpr std::uint8_t width_code = sizeof(bioseq::cigar_run) == 1u ? 0u
+                : sizeof(bioseq::cigar_run) == 2u ? 1u
+                : sizeof(bioseq::cigar_run) == 4u ? 2u : 3u;
+            pq_sendint8(&buffer, pgseq_cigar_alphabet_code);
+            pq_sendint8(&buffer, 1u);
+            pq_sendint8(&buffer,
+                        static_cast<std::uint8_t>(bioseq::sequence_encoding::cigar_rle));
+            pq_sendint8(&buffer, static_cast<std::uint8_t>(backend.space(view)));
+            pq_sendint8(&buffer, width_code);
+            pq_sendint8(&buffer, 0u);
+            pq_sendint16(&buffer, 0u);
+            pq_sendint32(&buffer, static_cast<std::uint32_t>(backend.length(view)));
+            pq_sendint32(&buffer, static_cast<std::uint32_t>(*run_count));
+            auto cursor = backend.runs(view, 0u, backend.length(view));
+            for (;;) {
+                const auto next = cursor.next();
+                if (!next) {
+                    pg_raise_cigar_error(next.error());
+                }
+                if (!next->has_value()) {
+                    break;
+                }
+                pq_sendint32(&buffer, (**next).length);
+                pq_sendint8(&buffer, static_cast<std::uint8_t>(
+                    seqan3::to_char((**next).operation)));
+            }
+            auto* output = pq_endtypsend(&buffer);
+            return pg_cigar_text_result{
+                PointerGetDatum(output), static_cast<std::size_t>(payload_bytes),
+                static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(output))};
+        });
+}
+
 } // namespace
 
 /* Copy literals into flat values that own their bytes. PostgreSQL can keep
@@ -487,7 +650,7 @@ export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     std::size_t length,
     bool require_already_canonical)
 {
-    return PointerGetDatum(allocate_unbound_ascii(
+    return PointerGetDatum(allocate_sequence_text(
         input, length, require_already_canonical));
 }
 
@@ -548,32 +711,50 @@ std::int32_t seq_typmod_in(
     int count = 0;
     deconstruct_array(
         array, CSTRINGOID, -2, false, 'c', &values, &nulls, &count);
-    if (count != 2) {
+    if (count != 1 && count != 2) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("bioseq.seq takes exactly 2 type modifiers; got %d",
+                 errmsg("bioseq.seq takes one or two type modifiers; got %d",
                         count),
-                 errhint("Example: bioseq.seq('dna4', 64)")));
+                 errhint("Examples: bioseq.seq('dna4', 64), bioseq.seq('cigar')")));
     }
     const auto alphabet = parse_alphabet_name_checked(
         DatumGetCString(values[0]), "bioseq.seq");
-    const char* width_text = DatumGetCString(values[1]);
-    char* end = nullptr;
-    errno = 0;
-    const long width_bits = std::strtol(width_text, &end, 10);
-    if (end == width_text || *end != '\0' || errno != 0
-        || (width_bits != 8 && width_bits != 16
-            && width_bits != 32 && width_bits != 64)) {
+    long width_bits = pgseq_is_cigar_alphabet(alphabet)
+        ? sizeof(bioseq::cigar_run) * 8u : 64u;
+    if (count == 2) {
+        const char* width_text = DatumGetCString(values[1]);
+        char* end = nullptr;
+        errno = 0;
+        width_bits = std::strtol(width_text, &end, 10);
+        if (end == width_text || *end != '\0' || errno != 0
+            || (width_bits != 8 && width_bits != 16
+                && width_bits != 32 && width_bits != 64)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("bioseq.seq width \"%s\" is not supported", width_text),
+                     errhint("Supported widths: 8, 16, 32, 64")));
+        }
+    }
+    if (pgseq_is_cigar_alphabet(alphabet)
+        && width_bits != sizeof(bioseq::cigar_run) * 8u) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("bioseq.seq width \"%s\" is not supported", width_text),
-                 errhint("Supported widths: 8, 16, 32, 64")));
+                 errmsg("bioseq CIGAR storage width must be %zu bits",
+                        sizeof(bioseq::cigar_run) * 8u)));
     }
-    const auto params = compact_sequence_stdc_type_params{
+    auto params = compact_sequence_stdc_type_params{
         .alphabet_code = alphabet,
-        .storage_unit_byte_width = pgseq_normalize_storage_unit_byte_width(
-            static_cast<std::uint8_t>(width_bits / 8)),
+        .storage_unit_byte_width = static_cast<std::uint8_t>(width_bits / 8),
+        .encoding = pgseq_is_cigar_alphabet(alphabet)
+            ? bioseq::sequence_encoding::cigar_rle
+            : bioseq::sequence_encoding::rank_packed,
+        .space = bioseq::cigar_space::compatibility,
     };
+    if (pgseq_is_cigar_alphabet(alphabet)) {
+        params.space = *bioseq::cigar_space_from_name(DatumGetCString(values[0]));
+    }
+    params = pgseq_normalize_type_params(params);
     return params.encode();
 }
 
@@ -610,10 +791,12 @@ char* seq_typmod_out(std::int32_t typmod)
         return pstrdup("");
     }
     const auto params = decode_seq_typmod_checked(typmod);
-    const auto name = pgseq_supported_alphabets::name_of_alphabet_code(
-        params.alphabet_code);
-    auto* result = static_cast<char*>(palloc(64));
-    std::snprintf(result, 64, "('%.*s',%u)",
+    const auto name = pgseq_is_cigar_alphabet(params.alphabet_code)
+        ? bioseq::cigar_space_name(params.space)
+        : pgseq_supported_alphabets::name_of_alphabet_code(params.alphabet_code);
+    const std::size_t capacity = name.size() + 16u;
+    auto* result = static_cast<char*>(palloc(capacity));
+    std::snprintf(result, capacity, "('%.*s',%u)",
                   static_cast<int>(name.size()), name.data(),
                   static_cast<unsigned>(params.storage_unit_byte_width) * 8u);
     return result;
@@ -653,7 +836,7 @@ bioseq::pg_types::seq* seq_in(
     static_cast<void>(type_oid);
     const std::size_t length = std::strlen(input);
     if (typmod < 0) {
-        return allocate_unbound_ascii(input, length, false);
+        return allocate_sequence_text(input, length, false);
     }
     const auto target = decode_seq_typmod_checked(typmod);
     return pack_ascii_for_target(input, length, target);
@@ -694,12 +877,29 @@ char* seq_out(
         flat_copy = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
         dispatch = PointerGetDatum(flat_copy);
     }
-    const auto descriptor = classify_and_describe_sequence(dispatch);
+    const auto descriptor = classify_and_describe_sequence_header(dispatch);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
+    if (descriptor.alphabet_bound
+        && pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+        const auto output = allocate_cigar_text(dispatch, true);
+        if (flat_copy != nullptr
+            && reinterpret_cast<Pointer>(flat_copy) != DatumGetPointer(input)) {
+            pfree(flat_copy);
+        }
+        record_slice_materialization_success(
+            provenance.attachment, provenance.producer_value_id,
+            materialization_mechanism::text,
+            materialization_reason::client_output,
+            descriptor.bp_length, descriptor.bp_length,
+            output.allocation_bytes, false,
+            output.allocation_bytes, trace_started);
+        return static_cast<char*>(DatumGetPointer(output.value));
+    }
+    (void) classify_and_describe_sequence(dispatch);
     const Size output_size = checked_materialization_allocation_size(
         descriptor.bp_length, 1u, "text output");
     auto* output = static_cast<char*>(palloc(output_size));
@@ -760,12 +960,28 @@ char* seq_out(
         flat_copy = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
         dispatch = PointerGetDatum(flat_copy);
     }
-    const auto descriptor = classify_and_describe_sequence(dispatch);
+    const auto descriptor = classify_and_describe_sequence_header(dispatch);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
+    if (descriptor.alphabet_bound
+        && pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+        const auto output = allocate_cigar_text(dispatch, false);
+        if (flat_copy != nullptr
+            && reinterpret_cast<Pointer>(flat_copy) != DatumGetPointer(input)) {
+            pfree(flat_copy);
+        }
+        record_slice_materialization_success(
+            provenance.attachment, provenance.producer_value_id,
+            materialization_mechanism::text, reason,
+            descriptor.bp_length, descriptor.bp_length,
+            output.allocation_bytes, false,
+            output.allocation_bytes, trace_started);
+        return static_cast<text*>(DatumGetPointer(output.value));
+    }
+    (void) classify_and_describe_sequence(dispatch);
     const Size total = checked_materialization_allocation_size(
         descriptor.bp_length, VARHDRSZ, "text output");
     auto* result = static_cast<text*>(palloc(total));
@@ -858,6 +1074,33 @@ Datum seq_cast(
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("cannot cast bound bioseq.seq across alphabets")));
     }
+    if (pgseq_is_cigar_alphabet(target.alphabet_code)) {
+        if (!descriptor.alphabet_bound) {
+            bool must_free = false;
+            auto* text_value = flatten_sequence_datum(input, must_free);
+            auto* result = make_pg_cigar_from_text(
+                std::string_view{
+                    reinterpret_cast<const char*>(text_value->data),
+                    static_cast<std::size_t>(text_value->bp_size)},
+                target.space);
+            if (must_free) {
+                pfree(text_value);
+            }
+            return PointerGetDatum(result);
+        }
+        if (descriptor.space == target.space) {
+            return input;
+        }
+        return with_pg_cigar_sequence<Datum>(
+            input,
+            [target](auto& backend, auto view) {
+                auto converted = bioseq::cigar_convert(backend, view, target.space);
+                if (!converted) {
+                    pg_raise_cigar_error(converted.error(), ERRCODE_INVALID_PARAMETER_VALUE);
+                }
+                return backend.publish(*converted);
+            });
+    }
     if (descriptor.alphabet_bound
         && descriptor.storage_unit_byte_width
             == target.storage_unit_byte_width) {
@@ -924,6 +1167,19 @@ text* seq_send(
     const auto provenance = trace_provenance_for(input);
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(provenance.attachment);
+    const auto header_descriptor = classify_and_describe_sequence_header(input);
+    if (header_descriptor.alphabet_bound
+        && pgseq_is_cigar_alphabet(header_descriptor.alphabet_code)) {
+        const auto output = allocate_cigar_wire(input);
+        record_slice_materialization_success(
+            provenance.attachment, provenance.producer_value_id,
+            materialization_mechanism::binary,
+            materialization_reason::client_output,
+            header_descriptor.bp_length, header_descriptor.bp_length,
+            output.text_bytes, false,
+            output.allocation_bytes, trace_started);
+        return static_cast<text*>(DatumGetPointer(output.value));
+    }
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
         const auto descriptor = classify_and_describe_sequence(input);
         if (descriptor.kind == pg_sequence_datum_kind::locator) {
@@ -940,7 +1196,7 @@ text* seq_send(
         std::uint64_t unit_count = 0u;
         std::uint16_t padding = 0u;
         if (descriptor.alphabet_bound) {
-            bioseq::pg_types::seq::dispatch_instance(
+            pgseq_dispatch_biological_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [descriptor, &unit_count, &padding]<class p_instance>() {
@@ -1012,7 +1268,7 @@ text* seq_send(
             with_pg_sequence_view<std::monostate>(
                 input,
                 [&buffer, descriptor, unit_count](auto view) {
-                    bioseq::pg_types::seq::dispatch_instance(
+                    pgseq_dispatch_biological_instance(
                         descriptor.alphabet_code,
                         descriptor.storage_unit_byte_width,
                         [&view, &buffer, descriptor,
@@ -1127,6 +1383,74 @@ bioseq::pg_types::seq* seq_recv(
     static_cast<void>(type_oid);
     const std::uint8_t alphabet =
         static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+    if (pgseq_is_cigar_alphabet(alphabet)) {
+        const auto version = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+        const auto encoding = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+        const auto space_byte = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+        const auto width_code = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+        const auto reserved_byte = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
+        const auto reserved_word = static_cast<std::uint16_t>(pq_getmsgint(buffer, 2));
+        const auto logical_length = static_cast<std::uint32_t>(pq_getmsgint(buffer, 4));
+        const auto run_count = static_cast<std::uint32_t>(pq_getmsgint(buffer, 4));
+        constexpr std::uint8_t codec_width_code = sizeof(bioseq::cigar_run) == 1u ? 0u
+            : sizeof(bioseq::cigar_run) == 2u ? 1u
+            : sizeof(bioseq::cigar_run) == 4u ? 2u : 3u;
+        const auto encoded_bytes = std::uint64_t{5u} * run_count;
+        if (version != 1u
+            || encoding != static_cast<std::uint8_t>(bioseq::sequence_encoding::cigar_rle)
+            || space_byte >= static_cast<std::uint8_t>(bioseq::cigar_space::count)
+            || width_code != codec_width_code
+            || reserved_byte != 0u || reserved_word != 0u
+            || encoded_bytes != static_cast<std::uint64_t>(buffer->len - buffer->cursor)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+                     errmsg("invalid bioseq CIGAR binary framing")));
+        }
+        const auto space = static_cast<bioseq::cigar_space>(space_byte);
+        auto* result = allocate_pg_cigar_payload(run_count, space);
+        bioseq::cigar_payload_writer<bioseq::cigar_symbol> writer{
+            std::span<std::byte>{reinterpret_cast<std::byte*>(result->data),
+                static_cast<std::size_t>(VARSIZE(result))
+                    - bioseq::pg_types::seq::header_bytes()},
+            run_count, space};
+        for (std::size_t index = 0u; index < run_count; ++index) {
+            const auto length = static_cast<std::uint32_t>(pq_getmsgint(buffer, 4));
+            const auto operation = static_cast<char>(pq_getmsgint(buffer, 1));
+            if (length == 0u || !seqan3::char_is_valid_for<bioseq::cigar_symbol>(operation)) {
+                pfree(result);
+                pg_raise_cigar_error({length == 0u
+                    ? bioseq::cigar_error_code::zero_count
+                    : bioseq::cigar_error_code::invalid_operation, index},
+                    ERRCODE_INVALID_BINARY_REPRESENTATION);
+            }
+            const auto appended = writer.append(
+                {length, bioseq::cigar_symbol{}.assign_char(operation)});
+            if (!appended) {
+                pfree(result);
+                pg_raise_cigar_error(appended.error(), ERRCODE_INVALID_BINARY_REPRESENTATION);
+            }
+        }
+        const auto finished = writer.finish();
+        if (!finished || *finished != logical_length) {
+            pfree(result);
+            pg_raise_cigar_error(!finished ? finished.error()
+                : bioseq::cigar_error{bioseq::cigar_error_code::invalid_encoding},
+                ERRCODE_INVALID_BINARY_REPRESENTATION);
+        }
+        result->bp_size = *finished;
+        pq_getmsgend(buffer);
+        if (typmod >= 0) {
+            const auto target = decode_seq_typmod_checked(typmod);
+            if (!pgseq_is_cigar_alphabet(target.alphabet_code)) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("CIGAR wire input requires a CIGAR destination")));
+            }
+            return reinterpret_cast<bioseq::pg_types::seq*>(
+                DatumGetPointer(seq_cast(PointerGetDatum(result), typmod, false)));
+        }
+        return result;
+    }
     if (alphabet == pgseq_unbound_alphabet_code) {
         const auto version = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
         const auto tag = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
@@ -1188,7 +1512,7 @@ bioseq::pg_types::seq* seq_recv(
                  errmsg("invalid or oversized bound bioseq wire payload")));
     }
     bool metadata_ok = false;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         alphabet, width,
         [&metadata_ok, unit_count, padding, bp_size]<class p_instance>() {
         using traits = typename compact_sequence_range<p_instance>::traits;
@@ -1206,7 +1530,7 @@ bioseq::pg_types::seq* seq_recv(
                  errmsg("inconsistent bound bioseq wire length/padding")));
     }
     bioseq::pg_types::seq* result = nullptr;
-    pgseq_supported_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         alphabet,
         [&result, width, padding, bp_size, unit_count,
          buffer]<class p_alphabet>() {
@@ -1219,6 +1543,8 @@ bioseq::pg_types::seq* seq_recv(
                 (errcode(ERRCODE_OUT_OF_MEMORY),
                  errmsg("out of memory receiving bioseq.seq")));
     }
+    result->encoding = bioseq::sequence_encoding::rank_packed;
+    result->space = bioseq::cigar_space::compatibility;
     pq_getmsgend(buffer);
     return result;
 }
@@ -1284,9 +1610,21 @@ std::int64_t unit_len(
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
+    if (descriptor.alphabet_bound
+        && pgseq_is_cigar_alphabet(descriptor.alphabet_code)) {
+        return with_pg_cigar_sequence<std::int64_t>(
+            input,
+            [](auto& backend, auto view) {
+                const auto count = bioseq::cigar_op_count(backend, view);
+                if (!count) {
+                    pg_raise_cigar_error(count.error());
+                }
+                return static_cast<std::int64_t>(*count);
+            });
+    }
     std::uint64_t units = descriptor.bp_length;
     if (descriptor.alphabet_bound) {
-        bioseq::pg_types::seq::dispatch_instance(
+        pgseq_dispatch_biological_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [&units, descriptor]<class p_instance>() {

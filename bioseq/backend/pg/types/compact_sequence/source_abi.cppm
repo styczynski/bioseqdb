@@ -7,7 +7,10 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 
@@ -18,6 +21,9 @@ export module bioseq.postgres.types.compact_sequence:source_abi;
 import :flat_abi;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
+import bioseq.common.context;
+import bioseq.parallelism.memory_admission;
+import bioseq.postgres.support.sql_boundary;
 
 /// Thread idenity used to keep a read session on the thread that opened it.
 export struct pg_sequence_backend_thread_token {
@@ -33,6 +39,82 @@ export struct pg_sequence_backend_thread_token {
         return owner == std::this_thread::get_id();
     }
 };
+
+namespace {
+
+/** Allocator lifetime only; never retains sequence data or comparison profiles. */
+struct pg_sequence_admitted_workspace {
+    MemoryContextCallback reset_callback{};
+    pg_sequence_backend_thread_token backend_thread{
+        pg_sequence_backend_thread_token::capture()};
+    std::optional<bioseq::parallelism::memory_admission_failure> last_refusal;
+    std::optional<bioseq::parallelism::admitted_context> admitted;
+};
+
+/** Destroy C++ arena backing before its MemoryContext control storage disappears. */
+void reset_pg_sequence_admitted_workspace(void* opaque_workspace) noexcept {
+    auto* workspace = static_cast<pg_sequence_admitted_workspace*>(opaque_workspace);
+    std::destroy_at(workspace);
+}
+
+/** Record the original allocator refusal even during partial owner construction. */
+void record_pg_sequence_admission_refusal(
+    void* opaque_workspace,
+    const bioseq::parallelism::memory_admission_failure& failure) noexcept {
+    auto& workspace = *static_cast<pg_sequence_admitted_workspace*>(opaque_workspace);
+    workspace.last_refusal = failure;
+}
+
+} // namespace
+
+/**
+ * Lazily acquire admitted scratch owned by a function or sequence read session.
+ * The slot must share the supplied MemoryContext's lifetime. Only allocator state
+ * is retained; callers may not pass this backend-thread-owned context to workers.
+ */
+export [[nodiscard]] inline context::context& acquire_pg_sequence_admitted_context(
+    MemoryContext owner,
+    void*& slot) {
+    if (owner == nullptr) {
+        throw std::invalid_argument{"sequence scratch requires a live memory context"};
+    }
+    auto* workspace = static_cast<pg_sequence_admitted_workspace*>(slot);
+    if (workspace == nullptr) {
+        auto* storage = bioseq::postgres::support::invoke_pg_as_cpp([owner] {
+            return static_cast<pg_sequence_admitted_workspace*>(
+                MemoryContextAllocZero(owner, sizeof(pg_sequence_admitted_workspace)));
+        });
+        workspace = std::construct_at(storage);
+        workspace->reset_callback.func = &reset_pg_sequence_admitted_workspace;
+        workspace->reset_callback.arg = workspace;
+        try {
+            bioseq::postgres::support::invoke_pg_as_cpp([owner, workspace] {
+                MemoryContextRegisterResetCallback(owner, &workspace->reset_callback);
+            });
+        } catch (...) {
+            std::destroy_at(workspace);
+            bioseq::postgres::support::invoke_pg_as_cpp([storage] { pfree(storage); });
+            throw;
+        }
+        // The registered empty holder remains valid when arena construction fails.
+        slot = workspace;
+    }
+    if (!workspace->backend_thread.is_current()) {
+        throw std::logic_error{"sequence scratch cannot be shared with worker threads"};
+    }
+    workspace->last_refusal.reset();
+    if (!workspace->admitted) {
+        workspace->admitted.emplace(
+            bioseq::parallelism::memory_admission_controller::instance(),
+            context::context::arena_configuration{},
+            bioseq::parallelism::live_process_footprint_probe,
+            bioseq::parallelism::memory_admission_failure_observer{
+                .state = workspace,
+                .record = &record_pg_sequence_admission_refusal,
+            });
+    }
+    return workspace->admitted->memory;
+}
 
 /// Outcome of a source-backed rank read.
 export enum class pg_sequence_source_read_status : std::uint8_t {
@@ -79,6 +161,16 @@ export struct pg_sequence_source_backend_ops {
         compact_sequence_stdc_type_params,
         std::uint64_t,
         std::span<std::uint8_t>);
+    /** Read a bounded encoded-byte interval, reusing the source read session.
+     * RLE consumers use this optional callback for checkpoint and run access;
+     * the offset is in the canonical payload, not logical positions. */
+    pg_sequence_source_read_status (*read_encoded_bytes)(
+        void const*,
+        pg_sequence_read_session&,
+        bioseq::storage::sequence_locator const&,
+        compact_sequence_stdc_type_params,
+        std::uint64_t,
+        std::span<std::uint8_t>){};
 };
 
 /// Source state, and callbacks. Copying this handle does not add a source reference.

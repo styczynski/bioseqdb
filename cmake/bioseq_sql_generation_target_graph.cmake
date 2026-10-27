@@ -744,6 +744,7 @@ bioseq_register_sql_owner(
   MODULE bioseq.postgres.types.compact_sequence
   SOURCES
     backend/pg/types/compact_sequence/array_string.cppm
+    backend/pg/types/compact_sequence/cigar.cppm
     backend/pg/types/compact_sequence/concat_reverse.cppm
     backend/pg/types/compact_sequence/content.cppm
     backend/pg/types/compact_sequence/flat_abi.cppm

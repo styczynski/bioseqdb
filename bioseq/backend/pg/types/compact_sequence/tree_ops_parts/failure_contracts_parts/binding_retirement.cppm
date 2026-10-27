@@ -153,7 +153,7 @@ template <class p_instance>
     const bool ledger_empty = piece_edge_cleanup_ledger_empty_noexcept(ledger);
     validate_tree_and_limits(tracked.edge, bound_type, fixture.length, true);
     binding_output_audit output{};
-    bioseq::pg_types::seq::dispatch_instance(bound_type.alphabet_code,
+    pgseq_dispatch_biological_instance(bound_type.alphabet_code,
                                              bound_type.storage_unit_byte_width,
                                              [&output, tracked, expected_rank]<class p_instance>() {
                                                  output = audit_binding_output<p_instance>(
