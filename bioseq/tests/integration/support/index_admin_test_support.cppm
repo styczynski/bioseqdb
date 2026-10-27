@@ -58,7 +58,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
         "  AND (j->>'column_attno')::bigint>0 "
         "  AND j->>'index_name'='{}' "
         "  AND j->>'query_key'=j->'source'->>'sequence_rowno' "
-        "  AND (j->'source'->>'locator_revision')::bigint=3 "
+        "  AND (j->'source'->>'locator_revision')::bigint=4 "
         "  AND (j->'source'->>'num_fragments')::bigint>0 "
         "  AND (j->'source'->>'source_epoch')::bigint>0 "
         "  AND (j->'source'->>'alphabet_code')::bigint=0 "
@@ -309,7 +309,7 @@ void require_preserved_ready_bioseq_source_evidence(
     REQUIRE(source[0].value() == "1");
     REQUIRE(source[1].value() == "1");
     REQUIRE(std::stoll(source[2].value()) > 0);
-    REQUIRE(source[3].value() == "3");
+    REQUIRE(source[3].value() == "4");
     REQUIRE(source[4].value() == "1");
     REQUIRE(source[5].value()
             == std::to_string(k_hoe_probe_sequence.size()));

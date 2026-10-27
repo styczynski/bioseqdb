@@ -212,7 +212,8 @@ TEST_CASE("sequence-source catalog has exact schema indexes and ACL",
         "fragment_storage_id:bigint:1,first_sub_row_no:bigint:1,"
         "num_fragments:bigint:1,total_bp_size:bigint:1,"
         "alphabet_code:smallint:1,storage_unit_byte_width:smallint:1,"
-        "padding_letters:integer:1,source_content_checksum:bigint:1,"
+        "padding_letters:integer:1,encoding:smallint:1,cigar_space:smallint:1,"
+        "encoded_payload_bytes:bigint:1,source_content_checksum:bigint:1,"
         "state:smallint:1");
     REQUIRE(catalog[6].value() == "1");  // extension member, same owner
     REQUIRE(catalog[7].value() == "1");  // no PUBLIC table privilege
@@ -271,7 +272,10 @@ TEST_CASE("sequence-source catalog has exact schema indexes and ACL",
     REQUIRE(constraints[0].value() ==
         "sequence_source_version_alphabet_code_check:c,"
         "sequence_source_version_bucket_idx_check:c,"
+        "sequence_source_version_cigar_space_check:c,"
         "sequence_source_version_column_attno_check:c,"
+        "sequence_source_version_encoded_payload_bytes_check:c,"
+        "sequence_source_version_encoding_check:c,"
         "sequence_source_version_first_sub_row_no_check:c,"
         "sequence_source_version_fragment_shape_check:c,"
         "sequence_source_version_fragment_storage_id_check:c,"

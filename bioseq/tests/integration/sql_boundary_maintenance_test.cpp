@@ -472,17 +472,19 @@ TEST_CASE(
           " locator_version, bucket_idx, shard_idx, fragment_relid,"
           " fragment_storage_id, first_sub_row_no, num_fragments,"
           " total_bp_size, alphabet_code, storage_unit_byte_width,"
-          " padding_letters, source_content_checksum, state"
+          " padding_letters, encoding, cigar_space, encoded_payload_bytes,"
+          " source_content_checksum, state"
           ") VALUES ("
           " {}::bigint, 710077::oid,"
           " (SELECT oid FROM pg_catalog.pg_database"
           "   WHERE datname = current_database()),"
           " (SELECT oid FROM pg_catalog.pg_tablespace"
           "   WHERE spcname = 'pg_default'), 710077::oid,"
-          " 1::bigint, 1::smallint, 3::smallint, 0::smallint,"
+          " 1::bigint, 1::smallint, 4::smallint, 0::smallint,"
           " 0::integer, '4294967294'::oid, 710077::bigint, 0::bigint,"
           " 1::bigint, 1::bigint, 1::smallint, 1::smallint,"
-          " 0::integer, 710077::bigint, 1::smallint);",
+          " 0::integer, 0::smallint, 0::smallint, 0::bigint,"
+          " 710077::bigint, 1::smallint);",
           source_epoch));
   const row_t before = query_one(
       ctx,

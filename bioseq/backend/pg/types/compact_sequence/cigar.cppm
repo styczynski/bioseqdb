@@ -747,9 +747,9 @@ ArrayType* cigar_ops_array(
     .volatility = bioseq::sql::volatility::immutable, .parallel = bioseq::sql::parallel_safety::safe})]]
 [[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
 Datum cigar_ops_from_array(
-    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op[]">})]] ArrayType* values,
+    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op[]">})]] ArrayType* operations,
     const std::string& alphabet) {
-    return cigar_from_ops_array(values, alphabet);
+    return cigar_from_ops_array(operations, alphabet);
 }
 
 /** Count a typed operation whitelist using the exact same noPG mask and accumulation. */
@@ -961,9 +961,9 @@ export namespace bioseq::pg_types::sql_wrappers {
 [[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
 [[bioseq_sql::depends(bioseq::pg_types::sql_routines::cigar_ops_from_array)]]
 [[nodiscard]] bioseq::sql::sql_function_body<Datum> from_array(
-    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op[]">})]] ArrayType* values,
+    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.cigar_op[]">})]] ArrayType* operations,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'cigar'"}})]] const std::string& alphabet) {
-    static_cast<void>(values);
+    static_cast<void>(operations);
     static_cast<void>(alphabet);
     return {.body = bioseq::sql::checked_sql{"SELECT bioseq_internal.cigar_ops_from_array($1,$2)"}};
 }

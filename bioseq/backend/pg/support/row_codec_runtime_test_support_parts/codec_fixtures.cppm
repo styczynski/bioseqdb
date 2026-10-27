@@ -61,6 +61,8 @@ import bioseq.postgres.storage.metadata.sql_row_codecs;
 import bioseq.postgres.storage.metadata.sql_rows;
 import bioseq.postgres.table.sql_row_codecs;
 import bioseq.postgres.table.sql_rows;
+import bioseq.sequences.cigar_alphabet;
+import bioseq.storage.layout;
 import :contract_core;
 import :catalog_lifecycle;
 import :toast_faults;
@@ -773,7 +775,7 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
         "bioseq_internal", "sequence_source_version", [](TupleDesc descriptor, Relation relation) {
             using row = manager_rows::sequence_source_version;
             using codec = manager_codecs::sequence_source_version_codec;
-            static_assert(codec::field_count == 20);
+            static_assert(codec::field_count == 23);
             const auto null_row = [](MemoryContext) {
                 return row{
                     .source_epoch = probe_int64(111),
@@ -783,7 +785,7 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
                     .main_relfilenode = probe_oid(115),
                     .main_storage_id = 52,
                     .column_attno = 16,
-                    .locator_version = 3,
+                    .locator_version = bioseq::storage::sequence_locator_payload_version,
                     .bucket_idx = 17,
                     .shard_idx = 18,
                     .fragment_relid = std::nullopt,
@@ -794,6 +796,9 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
                     .alphabet_code = 4,
                     .storage_unit_byte_width = 1,
                     .padding_letters = 0,
+                    .encoding = static_cast<std::int16_t>(bioseq::sequence_encoding::rank_packed),
+                    .cigar_space = static_cast<std::int16_t>(bioseq::cigar_space::compatibility),
+                    .encoded_payload_bytes = 0,
                     .source_content_checksum = 54,
                     .state = 0,
                 };
@@ -807,7 +812,7 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
                     .main_relfilenode = probe_oid(115),
                     .main_storage_id = 52,
                     .column_attno = 16,
-                    .locator_version = 3,
+                    .locator_version = bioseq::storage::sequence_locator_payload_version,
                     .bucket_idx = 17,
                     .shard_idx = 18,
                     .fragment_relid = probe_oid(116),
@@ -818,6 +823,9 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
                     .alphabet_code = 4,
                     .storage_unit_byte_width = 1,
                     .padding_letters = 0,
+                    .encoding = static_cast<std::int16_t>(bioseq::sequence_encoding::rank_packed),
+                    .cigar_space = static_cast<std::int16_t>(bioseq::cigar_space::compatibility),
+                    .encoded_payload_bytes = 0,
                     .source_content_checksum = 59,
                     .state = 1,
                 };
