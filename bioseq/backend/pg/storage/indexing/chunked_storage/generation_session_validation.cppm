@@ -301,7 +301,7 @@ constexpr minimizer_generation_source_locator k_source_identity_golden{
             .reserved_16 = 0,
             .shard_index = 4,
             .fragment_count = 3,
-            .reserved_32 = 0,
+            .encoded_payload_bytes = 0,
             .logical_length = 12'345,
             .first_fragment_row = 77,
             .source_epoch = 101,

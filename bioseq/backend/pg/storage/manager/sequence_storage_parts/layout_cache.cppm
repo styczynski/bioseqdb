@@ -145,7 +145,7 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
     const auto decoded = decode_sequence_locator_payload(payload);
     if (!decoded.has_value()) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-               "bioseq storage: locator payload is not canonical revision-3 data");
+               "bioseq storage: locator payload is not canonical revision-4 data");
     }
     return *decoded;
 }
@@ -193,6 +193,10 @@ inline void validate_locator_flat_materialization_length(
                      static_cast<unsigned long long>(loc.logical_length),
                      loc.fragment_count,
                      static_cast<unsigned long long>(loc.first_fragment_row))));
+        case error::invalid_encoded_payload_geometry:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator encoded payload geometry is inconsistent")));
         case error::fragment_row_range_exceeds_catalog:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -472,6 +476,56 @@ void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
 inline constexpr std::size_t k_sequence_fragment_storage_units =
     std::size_t{1024};
 
+/** Return fixed physical payload bytes for a sequence's persisted storage width. */
+[[nodiscard]] constexpr std::size_t sequence_fragment_payload_byte_capacity(std::size_t storage_width) noexcept {
+    return k_sequence_fragment_storage_units * storage_width;
+}
+
+/** Verify zero fill outside a complete encoded segment after frame-size validation. */
+[[nodiscard]] inline bool sequence_encoded_fragment_fill_is_zero(
+        const bioseq::pg_types::seq& fragment, std::size_t payload_bytes) noexcept {
+    if (fragment.bp_size > payload_bytes) return false;
+    const auto* bytes = reinterpret_cast<const std::byte*>(fragment.data);
+    return std::all_of(bytes + fragment.bp_size, bytes + payload_bytes,
+        [](std::byte value) { return value == std::byte{}; });
+}
+
+/** Verify source codec, padding and physical fragment count without reading payload bytes. */
+[[nodiscard]] inline bool source_codec_geometry_is_valid(
+        const bioseq::pg_types::seq& header, const sequence_locator& locator) {
+    const auto width = logical_storage_unit_byte_width(&header);
+    if (validate_sequence_locator(locator) != sequence_locator_validation_error::none ||
+        !bioseq::valid_cigar_space(header.space) ||
+        !is_supported_alphabet_code(header.alphabet_code) ||
+        !pgseq_supported_storage_unit_byte_widths::contains_runtime(width) ||
+        (pgseq_is_cigar_alphabet(header.alphabet_code) && width != sizeof(bioseq::cigar_run))) return false;
+    bool valid = false;
+    bioseq::pg_types::seq::dispatch_instance(header.alphabet_code,
+        logical_storage_unit_byte_width(&header),
+        [&valid, &header, &locator]<class Instance>() {
+            using traits = typename compact_sequence_range<Instance>::traits;
+            if constexpr (traits::is_run_encoded) {
+                constexpr std::uint64_t capacity = sequence_fragment_payload_byte_capacity(sizeof(typename Instance::storage_unit));
+                const auto extent = locator.encoded_payload_bytes;
+                valid = header.encoding == bioseq::sequence_encoding::cigar_rle &&
+                    header.padding_letters == 0u &&
+                    ((locator.logical_length == 0u) == (extent == 0u)) &&
+                    locator.fragment_count == extent / capacity + (extent % capacity != 0u ? 1u : 0u);
+            } else {
+                constexpr std::uint64_t letters_per_unit = traits::letters_per_unit;
+                const auto units = locator.logical_length / letters_per_unit +
+                    (locator.logical_length % letters_per_unit != 0u ? 1u : 0u);
+                valid = header.encoding == bioseq::sequence_encoding::rank_packed &&
+                    header.space == bioseq::cigar_space::compatibility &&
+                    locator.encoded_payload_bytes == 0u &&
+                    header.padding_letters == units * letters_per_unit - locator.logical_length &&
+                    locator.fragment_count == units / k_sequence_fragment_storage_units +
+                        (units % k_sequence_fragment_storage_units != 0u ? 1u : 0u);
+            }
+        });
+    return valid;
+}
+
 // Flush fragment writes before an index build reads them in  the same
 // statement. The transaction write-state cache still owns the writers.
 /// Make pending fragment rows available to reads in the same statement.
@@ -644,7 +698,10 @@ struct sequence_storage_manager {
                              std::uint16_t last_fragment_padding_letters,
                              sequence_size_t current_cap_bytes,
                              seq_caches* cache,
-                             p_fragment_producer&& producer);
+                             p_fragment_producer&& producer,
+                             bioseq::sequence_encoding encoding = bioseq::sequence_encoding::rank_packed,
+                             bioseq::cigar_space space = bioseq::cigar_space::compatibility,
+                             std::uint32_t encoded_payload_bytes = 0u);
 
     /// Split an already loaded sequence into stored fragments.
     [[nodiscard]] static pending_sequence_source

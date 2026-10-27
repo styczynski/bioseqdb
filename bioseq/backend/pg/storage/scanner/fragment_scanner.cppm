@@ -38,6 +38,7 @@ extern "C" {
 #include <new>
 #include <span>
 #include <utility>
+#include <type_traits>
 
 export module bioseq.postgres.storage.scanner.fragment_scanner;
 
@@ -142,16 +143,18 @@ void scanner_pg_run_fragment_reads_with_error_cleanup(
 /// Use PostgreSQL-backed instances only on the creating backend thread.
 template <class p_sequence_instance>
 struct postgres_sequence_scanner final {
-    /// Packed unit used by this sequence representation.
-    using storage_unit   = typename p_sequence_instance::storage_unit;
+    /// Physical fragment units: bytes for RLE, packed words otherwise.
+    using traits = typename compact_sequence_range<p_sequence_instance>::traits;
+    static constexpr bool is_run_encoded = traits::is_run_encoded;
+    using storage_unit = std::conditional_t<is_run_encoded, std::uint8_t,
+                                           typename p_sequence_instance::storage_unit>;
     /// Non-owning packed-unit view returned for fragments.
     using base_container = std::span<const storage_unit>;
-    /// Alphabet packing rules for this sequence type.
-    using traits         = typename compact_sequence_range<p_sequence_instance>::traits;
 
     /// Packed-unit capacity of one physical fragment row.
     static constexpr std::size_t fragment_storage_units =
-        default_fragment_storage_units;
+        default_fragment_storage_units
+            * (is_run_encoded ? sizeof(typename p_sequence_instance::storage_unit) : 1u);
 
     /// @return Always `true` for this fragment-oriented scanner.
     [[nodiscard]] [[gnu::always_inline]]
@@ -163,8 +166,12 @@ struct postgres_sequence_scanner final {
     /// @return Packed units needed for the logical sequence length.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t storage_unit_count() const noexcept {
-        constexpr std::size_t lpu = traits::letters_per_unit;
-        return (logical_length_ + lpu - 1) / lpu;
+        if constexpr (is_run_encoded) {
+            return locator_.encoded_payload_bytes;
+        } else {
+            constexpr std::size_t lpu = traits::letters_per_unit;
+            return (logical_length_ + lpu - 1) / lpu;
+        }
     }
     /// @return Packed payload size in bytes.
     [[nodiscard]] [[gnu::always_inline]]
@@ -259,7 +266,8 @@ struct postgres_sequence_scanner final {
         std::int16_t column_attno, const sequence_locator& locator,
         std::size_t last_fragment_padding,
         Snapshot registered_snapshot,
-        seq_caches* caches, MemoryContext parent_mctx)
+        seq_caches* caches, MemoryContext parent_mctx,
+        bioseq::cigar_space stored_space = bioseq::cigar_space::compatibility)
         : db_oid_(db_oid),
           tablespace_oid_(tablespace_oid),
           main_relfilenode_(main_relfilenode),
@@ -267,6 +275,7 @@ struct postgres_sequence_scanner final {
           locator_(locator),
           logical_length_(locator.logical_length),
           trailing_padding_(last_fragment_padding),
+          stored_space_(stored_space),
           fragment_count_(locator.fragment_count),
           snapshot_(registered_snapshot),
           caches_(caches),
@@ -335,6 +344,7 @@ struct postgres_sequence_scanner final {
           mctx_(nullptr),
           in_memory_data_(in_memory_data)
     {
+        if constexpr (is_run_encoded) locator_.encoded_payload_bytes = static_cast<std::uint32_t>(in_memory_data.size());
         for (auto& slot : slots_) {
             slot.fragment_no = std::numeric_limits<std::size_t>::max();
             slot.bytes       = nullptr;
@@ -354,6 +364,7 @@ struct postgres_sequence_scanner final {
           locator_(other.locator_),
           logical_length_(other.logical_length_),
           trailing_padding_(other.trailing_padding_),
+          stored_space_(other.stored_space_),
           fragment_count_(other.fragment_count_),
           snapshot_(other.snapshot_),
           caches_(other.caches_),
@@ -420,7 +431,7 @@ struct postgres_sequence_scanner final {
             && locator_.reserved_16 == locator.reserved_16
             && locator_.shard_index == locator.shard_index
             && locator_.fragment_count == locator.fragment_count
-            && locator_.reserved_32 == locator.reserved_32
+            && locator_.encoded_payload_bytes == locator.encoded_payload_bytes
             && locator_.logical_length == locator.logical_length
             && locator_.first_fragment_row == locator.first_fragment_row
             && locator_.source_epoch == locator.source_epoch;
@@ -442,6 +453,7 @@ private:
     sequence_locator                                          locator_;
     sequence_size_t                                      logical_length_;
     std::size_t                                          trailing_padding_;
+    bioseq::cigar_space stored_space_{bioseq::cigar_space::compatibility};
     std::size_t                                          fragment_count_;
     // Borrowed from the caller, which keeps this snapshot registered.
     // Readers may register a refreshed copy after flushing pending writes,
@@ -753,9 +765,12 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
 
     constexpr std::size_t bytes_to_copy =
         fragment_storage_units * sizeof(storage_unit);
-    constexpr std::uint64_t letters_per_fragment =
-        static_cast<std::uint64_t>(fragment_storage_units)
-        * traits::letters_per_unit;
+    constexpr std::uint64_t letters_per_fragment = [] {
+        if constexpr (is_run_encoded) return static_cast<std::uint64_t>(fragment_storage_units);
+        else return static_cast<std::uint64_t>(fragment_storage_units) * traits::letters_per_unit;
+    }();
+    const auto stored_extent = is_run_encoded
+        ? static_cast<std::uint64_t>(locator_.encoded_payload_bytes) : logical_length_;
     constexpr std::uint8_t expected_alphabet =
         pgseq_supported_alphabets::template index_of<
             typename p_sequence_instance::alphabet_type>();
@@ -764,17 +779,17 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(raw)) - bioseq::pg_types::seq::header_bytes();
     const std::uint64_t fragment_from =
         static_cast<std::uint64_t>(fragment_no) * letters_per_fragment;
-    const bool fragment_geometry_valid = fragment_from < logical_length_
+    const bool fragment_geometry_valid = fragment_from < stored_extent
         && (is_last_fragment
-            || logical_length_ - fragment_from >= letters_per_fragment);
+            || stored_extent - fragment_from >= letters_per_fragment);
     const std::uint64_t expected_fragment_bp = !fragment_geometry_valid
         ? 0u
         : (is_last_fragment
-            ? logical_length_ - fragment_from
+            ? stored_extent - fragment_from
             : letters_per_fragment);
     if (static_cast<std::uint8_t>(raw->alphabet_code) != expected_alphabet
         || static_cast<std::uint8_t>(raw->storage_unit_byte_width)
-            != sizeof(storage_unit)
+            != sizeof(typename p_sequence_instance::storage_unit)
         || (!is_last_fragment && raw->padding_letters != 0u)
         || (is_last_fragment
             && static_cast<std::size_t>(raw->padding_letters)
@@ -782,7 +797,12 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         || !fragment_geometry_valid
         || static_cast<std::uint64_t>(raw->bp_size)
             != expected_fragment_bp
-        || raw_payload_bytes != bytes_to_copy) {
+        || raw_payload_bytes != bytes_to_copy
+        || raw->encoding != (is_run_encoded ? bioseq::sequence_encoding::cigar_rle_fragment
+                                           : bioseq::sequence_encoding::rank_packed)
+        || raw->space != stored_space_
+        || (is_run_encoded && is_last_fragment
+            && !sequence_encoded_fragment_fill_is_zero(*raw, raw_payload_bytes))) {
         bioseq::postgres::support::invoke_pg_as_cpp(
             [row_no, raw_payload_bytes, is_last_fragment,
              expected_padding = trailing_padding_,
@@ -836,6 +856,21 @@ template <class p_sequence_instance>
 inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
     std::span<storage_unit> destination) const
 {
+    if constexpr (is_run_encoded) {
+        if (destination.size() != storage_unit_count()) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("encoded source destination has invalid byte length")));
+            });
+        }
+        std::size_t copied{};
+        for (std::size_t fragment = 0; fragment < fragment_count_; ++fragment) {
+            const auto bytes = load_fragment(fragment);
+            std::copy(bytes.begin(), bytes.end(), destination.begin() + copied);
+            copied += bytes.size();
+        }
+        return;
+    }
     const std::size_t required_units = static_cast<std::size_t>(storage_unit_count());
     if (destination.size() != required_units) {
         bioseq::postgres::support::invoke_pg_as_cpp(

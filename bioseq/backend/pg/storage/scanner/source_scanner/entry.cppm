@@ -28,6 +28,9 @@ extern "C" {
 #include <limits>
 #include <new>
 #include <span>
+#include <algorithm>
+#include <array>
+#include <expected>
 
 export module bioseq.postgres.storage.scanner:source_scanner_entry;
 
@@ -62,9 +65,13 @@ template <class p_sequence_instance>
 [[nodiscard]] constexpr std::uint16_t
 locator_padding_letters(const sequence_locator& locator) noexcept {
     using range = compact_sequence_range<p_sequence_instance>;
-    constexpr std::uint64_t letters_per_unit = range::traits::letters_per_unit;
-    const std::uint64_t remainder = locator.logical_length % letters_per_unit;
-    return static_cast<std::uint16_t>(remainder == 0u ? 0u : letters_per_unit - remainder);
+    if constexpr (range::traits::is_run_encoded) {
+        return 0u;
+    } else {
+        constexpr std::uint64_t letters_per_unit = range::traits::letters_per_unit;
+        const std::uint64_t remainder = locator.logical_length % letters_per_unit;
+        return static_cast<std::uint16_t>(remainder == 0u ? 0u : letters_per_unit - remainder);
+    }
 }
 
 /// Check the locator version, reserved fields, sourve epoch and fragment count.
@@ -77,6 +84,10 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
                                                     compact_sequence_stdc_type_params stored_type,
                                                     std::uint16_t last_padding_letters,
                                                     bool validate_padding = true) {
+    if (!is_supported_alphabet_code(stored_type.alphabet_code) ||
+        !pgseq_supported_storage_unit_byte_widths::contains_runtime(stored_type.storage_unit_byte_width) ||
+        (pgseq_is_cigar_alphabet(stored_type.alphabet_code) &&
+            stored_type.storage_unit_byte_width != sizeof(bioseq::cigar_run))) return false;
     bool dispatched = false;
     bool valid = false;
     bioseq::pg_types::seq::dispatch_instance(
@@ -86,24 +97,88 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
          &valid,
          locator,
          last_padding_letters,
-         validate_padding]<class p_sequence_instance>() {
+         validate_padding,
+         stored_type]<class p_sequence_instance>() {
             using range = compact_sequence_range<p_sequence_instance>;
-            constexpr std::uint64_t letters_per_fragment =
-                static_cast<std::uint64_t>(
-                    postgres_sequence_scanner<p_sequence_instance>::fragment_storage_units) *
-                range::traits::letters_per_unit;
-            const std::uint64_t complete = locator.logical_length / letters_per_fragment;
-            const std::uint64_t remainder = locator.logical_length % letters_per_fragment;
-            const std::uint64_t expected_fragments = complete + (remainder == 0u ? 0u : 1u);
+            constexpr bool is_rle = range::traits::is_run_encoded;
+            constexpr std::uint64_t letters_per_fragment = [] {
+                if constexpr (is_rle) {
+                    return static_cast<std::uint64_t>(
+                        postgres_sequence_scanner<p_sequence_instance>::fragment_storage_units);
+                } else {
+                    return static_cast<std::uint64_t>(
+                        postgres_sequence_scanner<p_sequence_instance>::fragment_storage_units)
+                            * range::traits::letters_per_unit;
+                }
+            }();
+            const std::uint64_t extent = is_rle ? locator.encoded_payload_bytes : locator.logical_length;
+            const std::uint64_t expected_fragments = extent / letters_per_fragment +
+                (extent % letters_per_fragment != 0u ? 1u : 0u);
+            const bool codec_valid = is_rle
+                ? stored_type.encoding == bioseq::sequence_encoding::cigar_rle &&
+                    bioseq::valid_cigar_space(stored_type.space) &&
+                    ((locator.logical_length == 0u) == (locator.encoded_payload_bytes == 0u)) &&
+                    locator.logical_length <= std::numeric_limits<std::uint32_t>::max()
+                : stored_type.encoding == bioseq::sequence_encoding::rank_packed &&
+                    stored_type.space == bioseq::cigar_space::compatibility &&
+                    locator.encoded_payload_bytes == 0u;
             dispatched = true;
-            valid = locator.payload_version == sequence_locator_payload_version &&
-                    locator.reserved_16 == 0u && locator.reserved_32 == 0u &&
-                    locator.source_epoch != 0u && locator.fragment_count == expected_fragments &&
+            valid = validate_sequence_locator(locator) == sequence_locator_validation_error::none &&
+                    codec_valid && locator.fragment_count == expected_fragments &&
                     (!validate_padding ||
                      last_padding_letters == locator_padding_letters<p_sequence_instance>(locator));
         });
     return dispatched && valid;
 }
+
+/** Copy only requested canonical bytes, crossing cached physical fragments as needed. */
+template<class p_sequence_instance>
+inline void typed_scanner_read_encoded_bytes(source_scanner_entry& entry,
+        std::uint64_t byte_offset, std::span<std::uint8_t> output) {
+    using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
+    auto& scanner = *static_cast<scanner_type*>(entry.concrete_scanner);
+    const std::uint64_t available = scanner.bp_size() == 0u
+        ? sizeof(bioseq::cigar_payload_header) : scanner.storage_byte_count();
+    if (byte_offset > available || output.size() > available - byte_offset) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq encoded source read exceeds its verified locator")));
+        });
+    }
+    if (scanner.bp_size() == 0u) {
+        std::fill(output.begin(), output.end(), std::uint8_t{0});
+        return;
+    }
+    std::size_t copied = 0u;
+    while (copied < output.size()) {
+        const std::uint64_t physical = byte_offset + copied;
+        const std::size_t fragment_no = static_cast<std::size_t>(physical / scanner_type::fragment_storage_units);
+        const std::size_t local = static_cast<std::size_t>(physical % scanner_type::fragment_storage_units);
+        const auto bytes = scanner.load_fragment(fragment_no);
+        if (local >= bytes.size()) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("bioseq encoded source fragment is truncated")));
+            });
+        }
+        const std::size_t count = std::min(output.size() - copied, bytes.size() - local);
+        std::memcpy(output.data() + copied, bytes.data() + local, count);
+        copied += count;
+    }
+}
+
+/** Adapt the source scanner to the no-Postgres indexed codec without retaining scratch. */
+template<class p_sequence_instance>
+struct source_cigar_byte_reader {
+    source_scanner_entry& entry;
+    /** Read one exact byte interval into caller-owned codec scratch. */
+    [[nodiscard]] std::expected<void, bioseq::cigar_error> read_bytes(
+            std::size_t offset, std::span<std::byte> destination) const {
+        typed_scanner_read_encoded_bytes<p_sequence_instance>(entry, offset,
+            {reinterpret_cast<std::uint8_t*>(destination.data()), destination.size()});
+        return {};
+    }
+};
 
 /// Read an interval as decoded alphabet ranks, applying the requested transformation.
 /// @param entry Entry holding the matching concrete scanner.
@@ -121,6 +196,47 @@ inline void typed_scanner_read_ranks(source_scanner_entry& entry,
     using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
     using range = compact_sequence_range<p_sequence_instance>;
     using traits = typename range::traits;
+    if constexpr (traits::is_run_encoded) {
+        if (bioseq::storage::is_complemented(transform)) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("bioseq CIGAR alphabet has no complement operation")));
+            });
+        }
+        using alphabet = typename p_sequence_instance::alphabet_type;
+        const source_cigar_byte_reader<p_sequence_instance> bytes{entry};
+        auto& scanner = *static_cast<scanner_type*>(entry.concrete_scanner);
+        const auto space = entry.domain->stored_type.space;
+        const bioseq::cigar_rle_reader<alphabet, source_cigar_byte_reader<p_sequence_instance>>
+            reader{bytes, static_cast<std::uint32_t>(scanner.bp_size()), space};
+        const auto header = reader.read_header();
+        const auto seek = reader.seek(static_cast<std::uint32_t>(source_from));
+        if (!header || !seek) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("bioseq CIGAR source directory is invalid")));
+            });
+        }
+        std::uint32_t run_index = seek->run_index;
+        std::uint32_t offset = seek->offset;
+        std::size_t copied = 0u;
+        while (copied < output.size()) {
+            const auto run = reader.run_at(run_index++, header->run_count);
+            if (!run || offset >= run->length) {
+                bioseq::postgres::support::invoke_pg_as_cpp([] {
+                    ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                        errmsg("bioseq CIGAR source run is invalid")));
+                });
+            }
+            const std::size_t count = std::min(output.size() - copied,
+                static_cast<std::size_t>(run->length - offset));
+            std::fill_n(output.data() + copied, count,
+                static_cast<std::uint8_t>(seqan3::to_rank(run->operation)));
+            copied += count;
+            offset = 0u;
+        }
+        if (bioseq::storage::is_reversed(transform)) std::reverse(output.begin(), output.end());
+    } else {
     using unit = typename traits::storage_unit;
     auto& scanner = *static_cast<scanner_type*>(entry.concrete_scanner);
     constexpr std::uint64_t letters_per_fragment =
@@ -178,6 +294,7 @@ inline void typed_scanner_read_ranks(source_scanner_entry& entry,
             }
         }
         output[output_index] = rank;
+    }
     }
 }
 
@@ -373,6 +490,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
             [entry,
              payload_context,
              locator = factory.locator,
+             stored_type = factory.stored_type,
              &dispatched]<class p_sequence_instance>() {
                 using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
                 void* storage = bioseq::postgres::support::invoke_pg_as_cpp([payload_context] {
@@ -380,8 +498,11 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
                 });
                 entry->concrete_scanner = storage;
                 entry->read_ranks = &typed_scanner_read_ranks<p_sequence_instance>;
-                entry->read_packed_units =
-                    &typed_scanner_read_packed_units<p_sequence_instance>;
+                if constexpr (compact_sequence_range<p_sequence_instance>::traits::is_run_encoded) {
+                    entry->read_encoded_bytes = &typed_scanner_read_encoded_bytes<p_sequence_instance>;
+                } else {
+                    entry->read_packed_units = &typed_scanner_read_packed_units<p_sequence_instance>;
+                }
                 entry->finish = &finish_typed_scanner_entry<p_sequence_instance>;
                 entry->abort_noexcept = &abort_typed_scanner_entry_noexcept<p_sequence_instance>;
                 retain_domain(entry->domain);
@@ -403,7 +524,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
                                              locator_padding_letters<p_sequence_instance>(locator),
                                              entry->domain->registered_snapshot,
                                              entry->domain->read_caches,
-                                             payload_context);
+                                             payload_context, stored_type.space);
                 entry->constructed = true;
                 dispatched = true;
             });
@@ -581,8 +702,11 @@ read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
 /// @param session Session that caches scanner entries.
 /// @param locator Checked source locator.
 /// @param stored_type Stored alphabet and packed-unit width.
+enum class source_storage_read_kind : std::uint8_t { packed_units, encoded_bytes };
+
+template<source_storage_read_kind Kind>
 [[nodiscard]] inline pg_sequence_source_read_status
-read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
+read_domain_storage_bytes_on_backend(pg_sequence_source_domain* domain,
                                     pg_sequence_read_session& session,
                                     const sequence_locator& locator,
                                     compact_sequence_stdc_type_params stored_type,
@@ -595,6 +719,11 @@ read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
              errmsg("bioseq source transaction has ended"),
              errhint("consume locator-backed values while their owning transaction is live")));
     }
+    if (domain->stored_type != stored_type ||
+        !locator_geometry_is_valid(locator, stored_type, 0u, /*validate_padding=*/false)) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+            errmsg("bioseq source bytes do not match their verified representation")));
+    }
     bool type_dispatched = false;
     std::uint64_t available_units = 0u;
     bioseq::pg_types::seq::dispatch_instance(
@@ -602,20 +731,24 @@ read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
         stored_type.storage_unit_byte_width,
         [&type_dispatched, &available_units, locator]<class p_sequence_instance>() {
             using range = compact_sequence_range<p_sequence_instance>;
-            constexpr std::uint64_t letters_per_unit = range::traits::letters_per_unit;
-            available_units = locator.logical_length / letters_per_unit +
-                              (locator.logical_length % letters_per_unit != 0u ? 1u : 0u);
-            type_dispatched = true;
+            if constexpr (Kind == source_storage_read_kind::encoded_bytes) {
+                if constexpr (range::traits::is_run_encoded) {
+                    available_units = locator.logical_length == 0u
+                        ? sizeof(bioseq::cigar_payload_header) : locator.encoded_payload_bytes;
+                    type_dispatched = true;
+                }
+            } else if constexpr (!range::traits::is_run_encoded) {
+                constexpr std::uint64_t letters_per_unit = range::traits::letters_per_unit;
+                available_units = locator.logical_length / letters_per_unit +
+                                  (locator.logical_length % letters_per_unit != 0u ? 1u : 0u);
+                type_dispatched = true;
+            }
         });
-    const bool byte_geometry_valid =
-        stored_type.storage_unit_byte_width != 0u &&
-        output.size() % stored_type.storage_unit_byte_width == 0u;
-    const std::uint64_t requested_units = byte_geometry_valid
-                                              ? output.size() /
-                                                    stored_type.storage_unit_byte_width
-                                              : 0u;
-    if (domain->stored_type != stored_type || !type_dispatched ||
-        !locator_geometry_is_valid(locator, stored_type, 0u, /*validate_padding=*/false) ||
+    const std::size_t unit_width = Kind == source_storage_read_kind::encoded_bytes
+        ? 1u : stored_type.storage_unit_byte_width;
+    const bool byte_geometry_valid = unit_width != 0u && output.size() % unit_width == 0u;
+    const std::uint64_t requested_units = byte_geometry_valid ? output.size() / unit_width : 0u;
+    if (!type_dispatched ||
         !byte_geometry_valid ||
         first_unit > available_units || requested_units > available_units - first_unit) {
         ereport(ERROR,
@@ -653,7 +786,9 @@ read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
                                               create_source_scanner_entry,
                                               finish_source_scanner_entry,
                                               abort_source_scanner_entry_noexcept));
-    if (reader == nullptr || reader->read_packed_units == nullptr) {
+    if (reader == nullptr ||
+        (Kind == source_storage_read_kind::encoded_bytes
+            ? reader->read_encoded_bytes == nullptr : reader->read_packed_units == nullptr)) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("bioseq source read session has no packed scanner capability")));
@@ -670,7 +805,11 @@ read_domain_packed_units_on_backend(pg_sequence_source_domain* domain,
     char detail[512] = "std::exception without detail";
     try {
         CurrentResourceOwner = domain->resource_owner;
-        reader->read_packed_units(*reader, first_unit, output);
+        if constexpr (Kind == source_storage_read_kind::encoded_bytes) {
+            reader->read_encoded_bytes(*reader, first_unit, output);
+        } else {
+            reader->read_packed_units(*reader, first_unit, output);
+        }
         CurrentResourceOwner = saved_owner;
     } catch (bioseq::postgres::support::postgres_error& error) {
         CurrentResourceOwner = saved_owner;
@@ -738,8 +877,9 @@ read_domain_ranks(const void* opaque,
 /// Copy packed units after checking the  domain and session belong to this thread.
 /// @return `wrong_thread` for a missing domain or mismatched thread.
 /// @throws C++ exception if the PostgreSQL read fails.
+template<source_storage_read_kind Kind>
 [[nodiscard]] inline pg_sequence_source_read_status
-read_domain_packed_units(const void* opaque,
+read_domain_storage_bytes(const void* opaque,
                          pg_sequence_read_session& session,
                          const sequence_locator& locator,
                          compact_sequence_stdc_type_params stored_type,
@@ -757,7 +897,7 @@ read_domain_packed_units(const void* opaque,
     }
     return bioseq::postgres::support::invoke_pg_as_cpp(
         [domain, &session, locator, stored_type, first_unit, output] {
-            return read_domain_packed_units_on_backend(
+            return read_domain_storage_bytes_on_backend<Kind>(
                 domain, session, locator, stored_type, first_unit, output);
         });
 }
@@ -770,7 +910,8 @@ read_domain_packed_units(const void* opaque,
         .identity = domain_identity,
         .worker_shareable = domain_worker_shareable,
         .read_ranks = read_domain_ranks,
-        .read_packed_units = read_domain_packed_units,
+        .read_packed_units = read_domain_storage_bytes<source_storage_read_kind::packed_units>,
+        .read_encoded_bytes = read_domain_storage_bytes<source_storage_read_kind::encoded_bytes>,
     };
     return ops;
 }

@@ -45,6 +45,7 @@ export import bioseq.postgres.storage.indexing.minimizer_read_stats;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
+import bioseq.sequences;
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
 import bioseq.indexing.storage;           // index storage concepts
@@ -167,6 +168,8 @@ struct minimizer_generation_source_locator {
     std::uint8_t alphabet_code = 0;
     std::uint8_t storage_unit_byte_width = 0;
     std::uint16_t padding_letters = 0;
+    bioseq::sequence_encoding encoding{bioseq::sequence_encoding::rank_packed};
+    bioseq::cigar_space space{bioseq::cigar_space::compatibility};
     std::uint64_t storage_contract_checksum = 0;
 
     /** Compares every persisted source identity field. */
@@ -177,13 +180,14 @@ struct minimizer_generation_source_locator {
                locator.reserved_16 == other.locator.reserved_16 &&
                locator.shard_index == other.locator.shard_index &&
                locator.fragment_count == other.locator.fragment_count &&
-               locator.reserved_32 == other.locator.reserved_32 &&
+               locator.encoded_payload_bytes == other.locator.encoded_payload_bytes &&
                locator.logical_length == other.locator.logical_length &&
                locator.first_fragment_row == other.locator.first_fragment_row &&
                locator.source_epoch == other.locator.source_epoch &&
                alphabet_code == other.alphabet_code &&
                storage_unit_byte_width == other.storage_unit_byte_width &&
                padding_letters == other.padding_letters &&
+               encoding == other.encoding && space == other.space &&
                storage_contract_checksum == other.storage_contract_checksum;
     }
 };

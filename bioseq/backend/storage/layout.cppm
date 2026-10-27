@@ -23,7 +23,7 @@ import bioseq.common.checked_arithmetic;
 export namespace bioseq::storage {
 
 /** Version byte stored in each, locator payload. */
-inline constexpr std::uint8_t sequence_locator_payload_version = 3u;
+inline constexpr std::uint8_t sequence_locator_payload_version = 4u;
 
 /** Width-byte marker indicating that a flat sequence value holds a locator. */
 inline constexpr std::uint8_t sequence_locator_stub_width_marker = 0x80u;
@@ -39,7 +39,7 @@ inline constexpr std::uint8_t sequence_locator_stub_width_marker = 0x80u;
  * 40-byte locator stored inside a PostgreSQL sequence stub.
  *
  * The payload is copied in host byte order. Field sizes and offsets must stay
- * compatible with stored records, including the reserved fields.
+ * fixed across the current codec definitions; encoded bytes are zero for rank packing.
  */
 struct sequence_locator {
     std::uint8_t payload_version = sequence_locator_payload_version;
@@ -47,7 +47,8 @@ struct sequence_locator {
     std::uint16_t reserved_16 = 0u;
     std::uint32_t shard_index = 0u;
     std::uint32_t fragment_count = 0u;
-    std::uint32_t reserved_32 = 0u;
+    /** Canonical encoded RLE bytes; zero for rank-packed and empty sources. */
+    std::uint32_t encoded_payload_bytes = 0u;
     std::uint64_t logical_length = 0u;
     std::uint64_t first_fragment_row = 0u;
     std::uint64_t source_epoch = 0u;
@@ -73,8 +74,7 @@ static_assert(
 {
     if (output.size() != sizeof(sequence_locator)
         || locator.payload_version != sequence_locator_payload_version
-        || locator.reserved_16 != 0u
-        || locator.reserved_32 != 0u) {
+        || locator.reserved_16 != 0u) {
         return false;
     }
     std::memcpy(output.data(), std::addressof(locator), sizeof(locator));
@@ -91,8 +91,7 @@ decode_sequence_locator_payload(std::span<const std::byte> payload) noexcept
     sequence_locator locator{};
     std::memcpy(std::addressof(locator), payload.data(), sizeof(locator));
     if (locator.payload_version != sequence_locator_payload_version
-        || locator.reserved_16 != 0u
-        || locator.reserved_32 != 0u) {
+        || locator.reserved_16 != 0u) {
         return std::nullopt;
     }
     return locator;
@@ -108,6 +107,7 @@ enum class sequence_locator_validation_error : std::uint8_t {
     first_fragment_row_exceeds_catalog,
     inconsistent_fragment_geometry,
     fragment_row_range_exceeds_catalog,
+    invalid_encoded_payload_geometry,
 };
 
 /** Checks locator metadata, catalog integer limits, and the fragment row interval. */
@@ -118,7 +118,6 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
         (std::numeric_limits<std::int64_t>::max)());
     if (locator.payload_version != sequence_locator_payload_version
         || locator.reserved_16 != 0u
-        || locator.reserved_32 != 0u
         || locator.source_epoch == 0u
         || locator.source_epoch > sql_bigint_max) {
         return sequence_locator_validation_error::invalid_payload_metadata;
@@ -147,6 +146,10 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
             && locator.first_fragment_row != 0u)) {
         return sequence_locator_validation_error::
             inconsistent_fragment_geometry;
+    }
+    if ((locator.encoded_payload_bytes != 0u && locator.fragment_count == 0u)
+        || (locator.logical_length == 0u && locator.encoded_payload_bytes != 0u)) {
+        return sequence_locator_validation_error::invalid_encoded_payload_geometry;
     }
     if (locator.fragment_count > 0u
         && locator.first_fragment_row

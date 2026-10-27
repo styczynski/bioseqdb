@@ -168,7 +168,7 @@ same_minimizer_generation_sequence_locator(const sequence_locator& left,
     return left.payload_version == right.payload_version &&
            left.bucket_index == right.bucket_index && left.reserved_16 == right.reserved_16 &&
            left.shard_index == right.shard_index && left.fragment_count == right.fragment_count &&
-           left.reserved_32 == right.reserved_32 && left.logical_length == right.logical_length &&
+           left.encoded_payload_bytes == right.encoded_payload_bytes && left.logical_length == right.logical_length &&
            left.first_fragment_row == right.first_fragment_row &&
            left.source_epoch == right.source_epoch;
 }
@@ -296,8 +296,7 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
                 "authoritative current-generation source is not an epoch-bearing locator stub");
         }
         const sequence_locator locator = decode_locator_from_stub(source_header);
-        if (locator.payload_version != sequence_locator_payload_version ||
-            locator.reserved_16 != 0 || locator.reserved_32 != 0 || locator.source_epoch == 0) {
+        if (!source_codec_geometry_is_valid(*source_header, locator)) {
             switch_context(previous_context);
             minimizer_generation_storage_error("authoritative source locator is invalid");
         }
@@ -307,6 +306,8 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
             .alphabet_code = alphabet_code,
             .storage_unit_byte_width = storage_width,
             .padding_letters = padding_letters,
+            .encoding = source_header->encoding,
+            .space = source_header->space,
             .storage_contract_checksum = 0,
         };
 
@@ -326,30 +327,61 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
             !same_minimizer_generation_sequence_locator(source_catalog->locator, locator) ||
             source_catalog->alphabet_code != alphabet_code ||
             source_catalog->storage_unit_byte_width != storage_width ||
-            source_catalog->padding_letters != padding_letters) {
+            source_catalog->padding_letters != padding_letters ||
+            source_catalog->encoding != source_header->encoding ||
+            source_catalog->space != source_header->space) {
             switch_context(previous_context);
             minimizer_generation_storage_error(
                 "authoritative source epoch/catalog binding disagrees");
         }
 
         crc64_ecma182_accumulator content_checksum{};
+        const bool is_rle = source_header->encoding == bioseq::sequence_encoding::cigar_rle;
+        const auto space = source_header->space;
+        if (is_rle) {
+            content_checksum.update(std::string_view{"bioseq.cigar.rle.v1"});
+            content_checksum.update_byte(static_cast<std::uint8_t>(space));
+            if (locator.logical_length == 0u) {
+                const bioseq::cigar_payload_header empty_header{};
+                content_checksum.update(std::as_bytes(std::span{&empty_header, std::size_t{1}}));
+            }
+        }
         std::uint64_t decoded_bp = 0;
         const auto consume_visible_fragment =
             [&content_checksum,
              &decoded_bp,
              &minimizer_generation_storage_error,
              alphabet_code,
-             storage_width](const bioseq::pg_types::seq* fragment) {
+             storage_width, is_rle, space, locator](const bioseq::pg_types::seq* fragment) {
                 if (fragment == nullptr || is_locator_stub(fragment) ||
                     static_cast<std::uint8_t>(fragment->alphabet_code) != alphabet_code ||
-                    logical_storage_unit_byte_width(fragment) != storage_width) {
+                    logical_storage_unit_byte_width(fragment) != storage_width ||
+                    fragment->space != space ||
+                    fragment->encoding != (is_rle ? bioseq::sequence_encoding::cigar_rle_fragment
+                                                   : bioseq::sequence_encoding::rank_packed)) {
                     minimizer_generation_storage_error(
                         "authoritative source fragment header disagrees");
+                }
+                if (is_rle) {
+                    const std::size_t capacity = sequence_fragment_payload_byte_capacity(storage_width);
+                    const auto frame_bytes = bioseq::postgres::support::varlena_4byte_size(fragment);
+                    const auto remaining = static_cast<std::uint64_t>(locator.encoded_payload_bytes) - decoded_bp;
+                    const auto expected = std::min<std::uint64_t>(capacity, remaining);
+                    if (frame_bytes != bioseq::pg_types::seq::header_bytes() + capacity ||
+                        fragment->bp_size != expected || expected == 0u ||
+                        (expected < capacity && !sequence_encoded_fragment_fill_is_zero(*fragment, capacity))) {
+                        minimizer_generation_storage_error("authoritative encoded source geometry disagrees");
+                    }
+                    content_checksum.update(std::span<const std::byte>{
+                        reinterpret_cast<const std::byte*>(fragment->data), fragment->bp_size});
+                    decoded_bp += fragment->bp_size;
+                    return;
                 }
                 fragment->convert_to([&content_checksum,
                                       &decoded_bp,
                                       &minimizer_generation_storage_error]<class p_sequence_type>(
                                          const compact_sequence_range<p_sequence_type>& range) {
+                    if constexpr (!compact_sequence_range<p_sequence_type>::traits::is_run_encoded) {
                     const std::string decoded =
                         ::bioseq::simd::active_target::decode_sequence_simd<p_sequence_type>(range);
                     if (decoded.size() != range.bp_size() ||
@@ -360,6 +392,9 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
                     content_checksum.update(
                         std::as_bytes(std::span<const char>{decoded.data(), decoded.size()}));
                     decoded_bp += decoded.size();
+                    } else {
+                        minimizer_generation_storage_error("unexpected public CIGAR in packed source checksum");
+                    }
                 });
             };
 
@@ -450,7 +485,7 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
                 switch_context(state->work_context);
             }
         }
-        if (decoded_bp != locator.logical_length) {
+        if (decoded_bp != (is_rle ? locator.encoded_payload_bytes : locator.logical_length)) {
             switch_context(previous_context);
             minimizer_generation_storage_error(
                 "authoritative source decoded length disagrees with locator");
@@ -773,9 +808,7 @@ authorize_minimizer_generation_catalog_source_pg(
         const std::uint8_t alphabet_code = static_cast<std::uint8_t>(source_header->alphabet_code);
         const std::uint8_t storage_width = logical_storage_unit_byte_width(source_header);
         const std::uint16_t padding_letters = source_header->padding_letters;
-        if (locator.payload_version != sequence_locator_payload_version ||
-            locator.source_epoch == 0 || locator.reserved_16 != 0 || locator.reserved_32 != 0 ||
-            storage_width == 0) {
+        if (!source_codec_geometry_is_valid(*source_header, locator)) {
             switch_context(previous_context);
             minimizer_generation_storage_error("catalog source locator is invalid");
         }
@@ -821,7 +854,8 @@ authorize_minimizer_generation_catalog_source_pg(
             !same_minimizer_generation_sequence_locator(catalog->locator, locator) ||
             catalog->alphabet_code != alphabet_code ||
             catalog->storage_unit_byte_width != storage_width ||
-            catalog->padding_letters != padding_letters) {
+            catalog->padding_letters != padding_letters ||
+            catalog->encoding != source_header->encoding || catalog->space != source_header->space) {
             switch_context(previous_context);
             minimizer_generation_storage_error("catalog source epoch binding disagrees");
         }
@@ -865,6 +899,8 @@ authorize_minimizer_generation_catalog_source_pg(
             .alphabet_code = alphabet_code,
             .storage_unit_byte_width = storage_width,
             .padding_letters = padding_letters,
+            .encoding = source_header->encoding,
+            .space = source_header->space,
             .storage_contract_checksum = 0,
         };
         authorization.source_content_checksum_ = catalog->source_content_checksum;

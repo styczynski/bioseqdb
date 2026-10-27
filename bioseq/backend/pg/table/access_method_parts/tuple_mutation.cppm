@@ -362,7 +362,7 @@ inline void run_insert_with_page_cache_restore(
                     static_cast<std::uint8_t>(sequence_header->storage_unit_byte_width),
                     sequence_header->padding_letters,
                     /*total_bp_size=*/sequence_locator.logical_length,
-                    sequence_locator);
+                    sequence_locator, sequence_header->encoding, sequence_header->space);
             });
         values_for_write[attribute_index] = PointerGetDatum(locator_stub);
     }

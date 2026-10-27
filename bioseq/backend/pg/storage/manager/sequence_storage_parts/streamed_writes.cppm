@@ -116,8 +116,14 @@ inline void update_canonical_source_checksum(
         source_version_detail::source_catalog_error(
             "canonical checksum received a non-fragment value");
     }
+    if (fragment->encoding == bioseq::sequence_encoding::cigar_rle_fragment) {
+        checksum.update(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(fragment->data), fragment->bp_size});
+        return;
+    }
     fragment->convert_to([&checksum]<class p_alphabet>(
             const compact_sequence_range<p_alphabet>& range) {
+        if constexpr (!compact_sequence_range<p_alphabet>::traits::is_run_encoded) {
         const std::string decoded =
             ::bioseq::simd::active_target::decode_sequence_simd<p_alphabet>(
                 range);
@@ -126,6 +132,10 @@ inline void update_canonical_source_checksum(
                 "canonical checksum decoded length disagrees");
         }
         checksum.update(std::string_view{decoded});
+        } else {
+            source_version_detail::source_catalog_error(
+                "canonical checksum received a public CIGAR value instead of a fragment envelope");
+        }
     });
 }
 
@@ -179,7 +189,10 @@ sequence_storage_manager<
     std::uint16_t last_fragment_padding_letters,
     sequence_size_t current_cap_bytes,
     seq_caches* cache,
-    p_fragment_producer&& producer)
+    p_fragment_producer&& producer,
+    bioseq::sequence_encoding encoding,
+    bioseq::cigar_space space,
+    std::uint32_t encoded_payload_bytes)
 {
     if (!OidIsValid(user_relid) || main_storage_id == 0) {
         storage_error_as_cpp(
@@ -197,22 +210,44 @@ sequence_storage_manager<
         cache->main_relfilenode    = main_relfilenode;
     }
 
-    const auto alpha_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
-    const std::size_t lpu = detail::letters_per_unit_for(alpha_code,
-                                                         logical_storage_unit_byte_width);
-    if (lpu == 0) {
-        storage_error_as_cpp(
-            ERRCODE_INTERNAL_ERROR,
-            fmt::format(
-                "bioseq storage: insert_sequence_streamed could not derive "
-                "letters_per_unit (alphabet_code={}, byte_width={})",
-                static_cast<unsigned>(alpha_code),
-                static_cast<unsigned>(logical_storage_unit_byte_width)));
+    const bool is_rle = encoding == bioseq::sequence_encoding::cigar_rle;
+    if ((encoding != bioseq::sequence_encoding::rank_packed && !is_rle) ||
+        !bioseq::valid_cigar_space(space) ||
+        (!is_rle && (space != bioseq::cigar_space::compatibility || encoded_payload_bytes != 0u)) ||
+        (is_rle && (last_fragment_padding_letters != 0u ||
+                    ((total_bp_size == 0u) != (encoded_payload_bytes == 0u))))) {
+        storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+            "bioseq storage: invalid sequence codec metadata");
     }
-    const sequence_size_t frag_bp =
-        static_cast<sequence_size_t>(detail::k_fragment_storage_units) * lpu;
-    const sequence_size_t num_fragments =
-        total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
+    if (!is_supported_alphabet_code(logical_alphabet_code) ||
+        !pgseq_supported_storage_unit_byte_widths::contains_runtime(logical_storage_unit_byte_width) ||
+        (is_rle && logical_storage_unit_byte_width != sizeof(bioseq::cigar_run))) {
+        storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+            "bioseq storage: unsupported fragment codec width or alphabet");
+    }
+    bool codec_matches_alphabet = false;
+    bioseq::pg_types::seq::dispatch_instance(
+        static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code),
+        logical_storage_unit_byte_width,
+        [&codec_matches_alphabet, is_rle]<class Instance>() {
+            codec_matches_alphabet = compact_sequence_range<Instance>::traits::is_run_encoded == is_rle;
+        });
+    if (!codec_matches_alphabet) {
+        storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+            "bioseq storage: sequence codec is incompatible with its alphabet and width");
+    }
+    const auto alpha_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
+    const std::size_t lpu = is_rle ? 1u : detail::letters_per_unit_for(
+        alpha_code, logical_storage_unit_byte_width);
+    if (lpu == 0u || logical_storage_unit_byte_width == 0u) {
+        storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+            "bioseq storage: unsupported fragment sequence type");
+    }
+    const sequence_size_t frag_bp = static_cast<sequence_size_t>(
+        detail::k_fragment_storage_units) * (is_rle ? logical_storage_unit_byte_width : lpu);
+    const sequence_size_t stored_extent = is_rle ? encoded_payload_bytes : total_bp_size;
+    const sequence_size_t num_fragments = stored_extent / frag_bp +
+        (stored_extent % frag_bp != 0u ? 1u : 0u);
     if (num_fragments > static_cast<sequence_size_t>(
             std::numeric_limits<std::uint32_t>::max())) {
         storage_error_as_cpp(
@@ -239,6 +274,14 @@ sequence_storage_manager<
     const std::uint64_t source_epoch =
         sequence_source_version_manager::allocate_epoch();
     bioseq::indexing::crc64_ecma182_accumulator source_checksum{};
+    if (is_rle) {
+        source_checksum.update(std::string_view{"bioseq.cigar.rle.v1"});
+        source_checksum.update_byte(static_cast<std::uint8_t>(space));
+        if (total_bp_size == 0u) {
+            const bioseq::cigar_payload_header empty_header{};
+            source_checksum.update(std::as_bytes(std::span{&empty_header, std::size_t{1}}));
+        }
+    }
 
     if (num_fragments == 0) {
         sequence_locator empty_locator{};
@@ -264,6 +307,8 @@ sequence_storage_manager<
                 .alphabet_code = logical_alphabet_code,
                 .storage_unit_byte_width = logical_storage_unit_byte_width,
                 .padding_letters = last_fragment_padding_letters,
+                .encoding = encoding,
+                .space = space,
                 .source_content_checksum = source_checksum.checksum(),
                 .state = k_sequence_source_state_unpublished,
             });
@@ -434,6 +479,9 @@ sequence_storage_manager<
                     logical_alphabet_code);
             frag->storage_unit_byte_width =
                 logical_storage_unit_byte_width;
+            frag->encoding = is_rle ? bioseq::sequence_encoding::cigar_rle_fragment
+                                    : bioseq::sequence_encoding::rank_packed;
+            frag->space = space;
             // Producer fills bp_size + padding_letters + data[] for fragment `n`.
             std::forward<p_fragment_producer>(producer)(
                 static_cast<std::size_t>(fragment_no),
@@ -443,7 +491,7 @@ sequence_storage_manager<
 
             // Check that the producer filled  the expected length and padding.
             const sequence_size_t expected_bp = is_last
-                ? (total_bp_size - fragment_no * frag_bp)
+                ? (stored_extent - fragment_no * frag_bp)
                 : frag_bp;
             if (static_cast<sequence_size_t>(frag->bp_size)
                 != expected_bp) {
@@ -538,7 +586,7 @@ sequence_storage_manager<
     out.reserved_16           = 0;
     out.shard_index        = static_cast<std::uint32_t>(shard_idx);
     out.fragment_count    = static_cast<std::uint32_t>(num_fragments);
-    out.reserved_32           = 0;
+    out.encoded_payload_bytes = encoded_payload_bytes;
     out.logical_length    = total_bp_size;
     out.first_fragment_row = first_sub_row_no;
     out.source_epoch     = source_epoch;
@@ -563,6 +611,8 @@ sequence_storage_manager<
             .alphabet_code = logical_alphabet_code,
             .storage_unit_byte_width = logical_storage_unit_byte_width,
             .padding_letters = last_fragment_padding_letters,
+            .encoding = encoding,
+            .space = space,
             .source_content_checksum = source_checksum.checksum(),
             .state = k_sequence_source_state_unpublished,
         });
@@ -621,32 +671,33 @@ sequence_storage_manager<
     const std::uint16_t last_fragment_padding =
         static_cast<std::uint16_t>(original_hdr->padding_letters);
 
-    const auto alpha_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
-    const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
-    if (lpu == 0) {
-        bioseq_log<logging_level::error, logging_target::postgres>(
-               "bioseq storage: insert_payload_as_fragments could not derive "
-               "letters_per_unit (alphabet_code={}, byte_width={})",
-               static_cast<unsigned>(alpha_code),
-               static_cast<unsigned>(logical_byte_width));
-    }
-    const sequence_size_t frag_bp =
-        static_cast<sequence_size_t>(detail::k_fragment_storage_units) * lpu;
-    const sequence_size_t num_fragments =
-        total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
-    const std::size_t bytes_per_unit =
-        static_cast<std::size_t>(logical_byte_width);
-    const std::size_t fragment_bytes =
-        detail::k_fragment_storage_units * bytes_per_unit;
-
-    // Copy slices from the existing packed payload.
+    const bool is_rle = original_hdr->encoding == bioseq::sequence_encoding::cigar_rle;
+    const std::size_t src_bytes =
+        static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(original_hdr))
+            - bioseq::pg_types::seq::header_bytes();
     const std::uint8_t* const src_data =
         reinterpret_cast<const std::uint8_t*>(original_hdr->data);
-    const std::size_t src_bytes =
-        static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(original_hdr)) - bioseq::pg_types::seq::header_bytes();
-
+    if (is_rle) {
+        const auto validation = bioseq::validate_cigar_payload<bioseq::cigar_symbol>(
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(src_data), src_bytes},
+            original_hdr->bp_size, original_hdr->space);
+        if (!validation || src_bytes > std::numeric_limits<std::uint32_t>::max()) {
+            storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+                "bioseq storage: invalid canonical CIGAR payload");
+        }
+    }
+    const auto alpha_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
+    const std::size_t lpu = is_rle ? 1u : detail::letters_per_unit_for(alpha_code, logical_byte_width);
+    if (lpu == 0u || logical_byte_width == 0u) {
+        storage_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+            "bioseq storage: unsupported fragment sequence type");
+    }
+    const std::size_t fragment_bytes = detail::k_fragment_storage_units * logical_byte_width;
+    const sequence_size_t frag_bp = is_rle ? fragment_bytes
+        : static_cast<sequence_size_t>(detail::k_fragment_storage_units) * lpu;
+    const sequence_size_t stored_extent = is_rle ? src_bytes : total_bp_size;
     // Fill one fragment without decoding or repacking its symbols.
-    auto producer = [src_data, src_bytes, fragment_bytes, frag_bp, total_bp_size,
+    auto producer = [src_data, src_bytes, fragment_bytes, frag_bp, stored_extent,
                      last_fragment_padding](
         std::size_t fragment_no, bioseq::pg_types::seq* dst, MemoryContext /*scratch*/,
         bool is_last) noexcept
@@ -659,7 +710,7 @@ sequence_storage_manager<
         }
         // Trailing bytes already zero from palloc0.
         const sequence_size_t this_fragment_bp = is_last
-            ? (total_bp_size - static_cast<sequence_size_t>(fragment_no) * frag_bp)
+            ? (stored_extent - static_cast<sequence_size_t>(fragment_no) * frag_bp)
             : frag_bp;
         dst->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(this_fragment_bp);
         dst->padding_letters = is_last ? last_fragment_padding : std::uint16_t{0};
@@ -670,7 +721,8 @@ sequence_storage_manager<
         db_oid, spc_oid, main_relfilenode, column_attno, parent_tupdesc,
         logical_alphabet_code, logical_byte_width,
         total_bp_size, last_fragment_padding, current_cap_bytes, cache,
-        producer);
+        producer, original_hdr->encoding, original_hdr->space,
+        is_rle && total_bp_size != 0u ? static_cast<std::uint32_t>(src_bytes) : 0u);
 }
 
 // This writer accepts chunks before the final  sequence length is known.
@@ -723,6 +775,10 @@ void sequence_stream_writer::begin(
         caches_->main_relfilenode    = main_relfilenode;
     }
 
+    if (pgseq_is_cigar_alphabet(alphabet_code)) {
+        storage_error_as_cpp(ERRCODE_FEATURE_NOT_SUPPORTED,
+            "bioseq.load: counted CIGAR values require strict CIGAR input parsing");
+    }
     const auto alpha = static_cast<bioseq::pg_types::seq::alphabet_code_t>(alphabet_code);
     const std::size_t lpu = detail::letters_per_unit_for(alpha, byte_width);
     if (lpu == 0) {
@@ -940,7 +996,7 @@ pending_sequence_source sequence_stream_writer::finish(
     out.reserved_16           = 0;
     out.shard_index        = static_cast<std::uint32_t>(shard_idx_);
     out.fragment_count    = num_fragments_;
-    out.reserved_32           = 0;
+    out.encoded_payload_bytes           = 0;
     out.logical_length    = total_bp;
     out.first_fragment_row = first_sub_row_no_;
     out.source_epoch     = source_epoch_;

@@ -92,7 +92,7 @@ void validate_binding(const postgres_lazy_sequence_binding<p_sequence_config>& b
     const std::uint64_t expected_padding = packed_units * letters_per_unit - locator.logical_length;
 
     const bool valid_locator = locator.payload_version == sequence_locator_payload_version &&
-                               locator.reserved_16 == 0u && locator.reserved_32 == 0u &&
+                               locator.reserved_16 == 0u && locator.encoded_payload_bytes == 0u &&
                                locator.source_epoch != 0u &&
                                expected_fragments == locator.fragment_count &&
                                expected_padding == binding.last_fragment_padding();

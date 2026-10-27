@@ -146,6 +146,8 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
     const compact_sequence_stdc_type_params stored_type{
         .alphabet_code = descriptor.alphabet_code,
         .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+        .encoding = descriptor.encoding,
+        .space = descriptor.space,
     };
     const auto last_padding_letters = static_cast<std::uint16_t>(header->padding_letters);
     if (!locator_geometry_is_valid(locator, stored_type, last_padding_letters)) {

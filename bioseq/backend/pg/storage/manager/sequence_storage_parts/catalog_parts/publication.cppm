@@ -161,7 +161,17 @@ struct sequence_source_version_manager {
                 static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) ||
             input.locator.source_epoch != input.source_epoch ||
             input.locator.payload_version != sequence_locator_payload_version ||
-            input.locator.reserved_16 != 0 || input.locator.reserved_32 != 0 ||
+            input.locator.reserved_16 != 0 ||
+            !bioseq::valid_cigar_space(input.space) ||
+            (input.encoding != bioseq::sequence_encoding::rank_packed
+                && input.encoding != bioseq::sequence_encoding::cigar_rle) ||
+            (input.encoding == bioseq::sequence_encoding::cigar_rle && input.padding_letters != 0u) ||
+            (input.encoding == bioseq::sequence_encoding::rank_packed
+                && (input.locator.encoded_payload_bytes != 0u
+                    || input.space != bioseq::cigar_space::compatibility)) ||
+            (input.encoding == bioseq::sequence_encoding::cigar_rle
+                && ((input.locator.logical_length == 0u)
+                    != (input.locator.encoded_payload_bytes == 0u))) ||
             input.locator.shard_index >
                 static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()) ||
             input.locator.first_fragment_row >

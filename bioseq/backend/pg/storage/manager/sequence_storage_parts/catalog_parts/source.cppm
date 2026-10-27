@@ -244,7 +244,10 @@ struct sequence_source_version_row {
     std::uint8_t storage_unit_byte_width = 0;
     /// Unused letters in the final packed unit.
     std::uint16_t padding_letters = 0;
-    /// CRC-64/ECMA-182 checksum of decoded sequence symbols.
+    /// Physical codec and declared CIGAR projection space.
+    bioseq::sequence_encoding encoding{bioseq::sequence_encoding::rank_packed};
+    bioseq::cigar_space space{bioseq::cigar_space::compatibility};
+    /// CRC-64/ECMA-182 checksum of the codec's canonical content.
     std::uint64_t source_content_checksum = 0;
     /// Unpublished, ready or permanently invalid.
     std::int16_t state = k_sequence_source_state_unpublished;
@@ -532,6 +535,27 @@ inline void validate_bound_read_catalog_contract(
         source_catalog_error("source padding is outside its wire domain");
     }
     row.padding_letters = static_cast<std::uint16_t>(padding);
+    if (catalog.encoding < 0
+        || catalog.encoding > static_cast<std::int16_t>(bioseq::sequence_encoding::cigar_rle)
+        || catalog.cigar_space < 0
+        || catalog.cigar_space >= static_cast<std::int16_t>(bioseq::cigar_space::count)
+        || catalog.encoded_payload_bytes < 0
+        || static_cast<std::uint64_t>(catalog.encoded_payload_bytes)
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        source_catalog_error("source encoding metadata is outside its codec domain");
+    }
+    row.encoding = static_cast<bioseq::sequence_encoding>(catalog.encoding);
+    row.space = static_cast<bioseq::cigar_space>(catalog.cigar_space);
+    row.locator.encoded_payload_bytes = static_cast<std::uint32_t>(catalog.encoded_payload_bytes);
+    if ((row.encoding == bioseq::sequence_encoding::rank_packed
+            && (row.space != bioseq::cigar_space::compatibility
+                || row.locator.encoded_payload_bytes != 0u))
+        || (row.encoding == bioseq::sequence_encoding::cigar_rle
+            && (row.padding_letters != 0u || row.storage_unit_byte_width != sizeof(bioseq::cigar_run) ||
+                !pgseq_is_cigar_alphabet(row.alphabet_code) ||
+                ((row.locator.logical_length == 0u) != (row.locator.encoded_payload_bytes == 0u))))) {
+        source_catalog_error("source encoding metadata disagrees with its locator");
+    }
     row.source_content_checksum = bigint_bits(catalog.source_content_checksum);
     row.state = catalog.state;
     if (row.state != k_sequence_source_state_unpublished &&
@@ -568,6 +592,9 @@ inline void validate_bound_read_catalog_contract(
         .alphabet_code = static_cast<std::int16_t>(row.alphabet_code),
         .storage_unit_byte_width = static_cast<std::int16_t>(row.storage_unit_byte_width),
         .padding_letters = static_cast<std::int32_t>(row.padding_letters),
+        .encoding = static_cast<std::int16_t>(row.encoding),
+        .cigar_space = static_cast<std::int16_t>(row.space),
+        .encoded_payload_bytes = static_cast<std::int64_t>(row.locator.encoded_payload_bytes),
         .source_content_checksum = std::bit_cast<std::int64_t>(row.source_content_checksum),
         .state = row.state,
     };

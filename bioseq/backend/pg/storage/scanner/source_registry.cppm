@@ -90,6 +90,9 @@ struct source_scanner_entry {
     /// Read packed units in the stored sequence order.
     void (*read_packed_units)(source_scanner_entry&, std::uint64_t,
                               std::span<std::uint8_t>) = nullptr;
+    /// Copy canonical encoded bytes through the same physical fragment cache.
+    void (*read_encoded_bytes)(source_scanner_entry&, std::uint64_t,
+                               std::span<std::uint8_t>) = nullptr;
     /// Release resources after a successful read. May report an error.
     void (*finish)(source_scanner_entry&) = nullptr;
     /// Failure cleanup callback that does not propagate errors.
@@ -1039,6 +1042,8 @@ inline void ensure_callbacks_registered() {
         && row.alphabet_code == stored_type.alphabet_code
         && row.storage_unit_byte_width
             == stored_type.storage_unit_byte_width
+        && row.encoding == stored_type.encoding
+        && row.space == stored_type.space
         && row.padding_letters == last_padding_letters;
 }
 

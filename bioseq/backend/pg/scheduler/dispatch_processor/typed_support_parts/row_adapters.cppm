@@ -40,7 +40,7 @@ same_dispatch_target_locator(const bioseq::storage::sequence_locator& left,
     return left.payload_version == right.payload_version &&
            left.bucket_index == right.bucket_index && left.reserved_16 == right.reserved_16 &&
            left.shard_index == right.shard_index && left.fragment_count == right.fragment_count &&
-           left.reserved_32 == right.reserved_32 && left.logical_length == right.logical_length &&
+           left.encoded_payload_bytes == right.encoded_payload_bytes && left.logical_length == right.logical_length &&
            left.first_fragment_row == right.first_fragment_row &&
            left.source_epoch == right.source_epoch;
 }

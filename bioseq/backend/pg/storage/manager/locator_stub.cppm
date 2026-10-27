@@ -20,6 +20,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.layout;
 import bioseq.storage.size;
+import bioseq.sequences;
 
 export namespace bioseq::storage {
 
@@ -44,13 +45,21 @@ inline void encode_locator_into_stub(
     std::uint8_t logical_byte_width,
     std::uint16_t padding_letters,
     sequence_size_t total_bp_size,
-    const sequence_locator& loc)
+    const sequence_locator& loc,
+    bioseq::sequence_encoding encoding = bioseq::sequence_encoding::rank_packed,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
 {
     if (logical_byte_width == 0 || logical_byte_width > 0x0Fu
         || loc.payload_version != sequence_locator_payload_version || loc.source_epoch == 0
-        || loc.reserved_16 != 0 || loc.reserved_32 != 0) {
+        || loc.reserved_16 != 0 || !bioseq::valid_cigar_space(space)
+        || (encoding != bioseq::sequence_encoding::rank_packed
+            && encoding != bioseq::sequence_encoding::cigar_rle)
+        || (encoding == bioseq::sequence_encoding::rank_packed
+            && (loc.encoded_payload_bytes != 0u || space != bioseq::cigar_space::compatibility))
+        || (encoding == bioseq::sequence_encoding::cigar_rle
+            && (padding_letters != 0u || ((total_bp_size == 0u) != (loc.encoded_payload_bytes == 0u))))) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: locator stub input is outside the revision-3 wire domain");
+            "bioseq storage: locator stub input is outside the revision-4 wire domain");
     }
     std::memset(dst, 0, k_locator_stub_varlena_bytes);
     SET_VARSIZE(dst, k_locator_stub_varlena_bytes);
@@ -58,6 +67,8 @@ inline void encode_locator_into_stub(
     dst->storage_unit_byte_width = static_cast<std::uint8_t>(
         sequence_locator_stub_width_marker | logical_byte_width);
     dst->padding_letters = padding_letters;
+    dst->encoding = encoding;
+    dst->space = space;
     constexpr sequence_size_t k_base_pair_size_field_maximum =
         static_cast<sequence_size_t>(std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max());
     dst->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(
@@ -67,7 +78,7 @@ inline void encode_locator_into_stub(
         reinterpret_cast<std::byte*>(dst->data), sizeof(sequence_locator)};
     if (!encode_sequence_locator_payload(payload, loc)) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: failed to encode canonical revision-3 locator payload");
+            "bioseq storage: failed to encode canonical revision-4 locator payload");
     }
 }
 
@@ -82,13 +93,15 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
     std::uint8_t logical_byte_width,
     std::uint16_t padding_letters,
     sequence_size_t total_bp_size,
-    const sequence_locator& loc)
+    const sequence_locator& loc,
+    bioseq::sequence_encoding encoding = bioseq::sequence_encoding::rank_packed,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility)
 {
     bioseq::postgres::support::memory_context_scope ctx_guard{mctx};
     bioseq::pg_types::seq* dst = static_cast<bioseq::pg_types::seq*>(
         palloc0(k_locator_stub_varlena_bytes));
     encode_locator_into_stub(dst, logical_alphabet_code, logical_byte_width,
-                             padding_letters, total_bp_size, loc);
+                             padding_letters, total_bp_size, loc, encoding, space);
     return dst;
 }
 
@@ -104,15 +117,17 @@ alloc_locator_stub_datum_in(MemoryContext mctx,
                             std::uint8_t logical_byte_width,
                             std::uint16_t padding_letters,
                             sequence_size_t total_bp_size,
-                            const sequence_locator& loc) {
+                            const sequence_locator& loc,
+    bioseq::sequence_encoding encoding = bioseq::sequence_encoding::rank_packed,
+    bioseq::cigar_space space = bioseq::cigar_space::compatibility) {
     return bioseq::postgres::support::invoke_pg_as_cpp(
-        [mctx, logical_alphabet_code, logical_byte_width, padding_letters, total_bp_size, &loc] {
+        [mctx, logical_alphabet_code, logical_byte_width, padding_letters, total_bp_size, &loc, encoding, space] {
             return PointerGetDatum(alloc_locator_stub_in(mctx,
                                                          logical_alphabet_code,
                                                          logical_byte_width,
                                                          padding_letters,
                                                          total_bp_size,
-                                                         loc));
+                                                         loc, encoding, space));
         });
 }
 

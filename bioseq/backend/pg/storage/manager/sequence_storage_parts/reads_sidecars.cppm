@@ -174,12 +174,26 @@ sequence_storage_manager<
     const bool retain_read_state =
         registered_mvcc_snapshot || snapshot == SnapshotAny;
 
-    // An empty sequence has no fragment rows. Return an empty sequence header.
-    if (loc.fragment_count == 0) {
+    // Empty sources retain their alphabet/codec metadata in the source catalog.
+    if (loc.fragment_count == 0u) {
+        const auto source = sequence_source_version_manager::lookup(
+            loc.source_epoch, snapshot, false);
+        if (!source || source->database_oid != db_oid || source->tablespace_oid != spc_oid ||
+            source->main_relfilenode != main_relfilenode || source->column_attno != column_attno ||
+            std::memcmp(&source->locator, &loc, sizeof(loc)) != 0) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq empty source metadata does not match its locator")));
+        }
+        const Size payload_bytes = source->encoding == bioseq::sequence_encoding::cigar_rle
+            ? sizeof(bioseq::cigar_payload_header) : 0u;
+        const Size bytes = bioseq::pg_types::seq::header_bytes() + payload_bytes;
         bioseq::postgres::support::memory_context_scope ctx{out_mctx};
-        bioseq::pg_types::seq* out = static_cast<bioseq::pg_types::seq*>(palloc0(bioseq::pg_types::seq::header_bytes()));
-        SET_VARSIZE(out, bioseq::pg_types::seq::header_bytes());
-        // The empty header has zero, length, width, alphabet code and padding.
+        auto* out = static_cast<bioseq::pg_types::seq*>(palloc0(bytes));
+        SET_VARSIZE(out, bytes);
+        out->alphabet_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(source->alphabet_code);
+        out->storage_unit_byte_width = source->storage_unit_byte_width;
+        out->encoding = source->encoding;
+        out->space = source->space;
         return out;
     }
 
@@ -271,16 +285,23 @@ sequence_storage_manager<
                  static_cast<unsigned>(logical_byte_width))));
     }
 
+    const bool is_rle = first_raw->encoding == bioseq::sequence_encoding::cigar_rle_fragment;
+    if ((!is_rle && first_raw->encoding != bioseq::sequence_encoding::rank_packed) ||
+        !bioseq::valid_cigar_space(first_raw->space) ||
+        (!is_rle && (first_raw->space != bioseq::cigar_space::compatibility || loc.encoded_payload_bytes != 0u)) ||
+        (is_rle && (loc.encoded_payload_bytes == 0u ||
+            logical_byte_width != sizeof(bioseq::cigar_run) ||
+            !pgseq_is_cigar_alphabet(logical_alphabet_code)))) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+            errmsg("bioseq fragment codec disagrees with its locator")));
+    }
+    const auto encoding = first_raw->encoding;
+    const auto space = first_raw->space;
     const auto alpha_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
-    const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
-    if (lpu == 0) {
-        ereport(ERROR,
-            (errcode(ERRCODE_DATA_CORRUPTED),
-             errmsg("bioseq fragment row has an unsupported sequence type"),
-             errdetail("fragment row=%llu alphabet=%u width=%u",
-                 static_cast<unsigned long long>(loc.first_fragment_row),
-                 static_cast<unsigned>(alpha_code),
-                 static_cast<unsigned>(logical_byte_width))));
+    const std::size_t lpu = is_rle ? 1u : detail::letters_per_unit_for(alpha_code, logical_byte_width);
+    if (lpu == 0u) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+            errmsg("bioseq fragment row has an unsupported sequence type")));
     }
     const std::size_t bytes_per_unit = static_cast<std::size_t>(logical_byte_width);
     const Size fragment_storage_bytes = checked_mul_size(
@@ -295,15 +316,17 @@ sequence_storage_manager<
     const std::uint64_t total_units_u64 = checked_ceil_div(
         loc.logical_length, static_cast<std::uint64_t>(lpu));
     const Size total_units = checked_size_cast(total_units_u64);
-    const Size total_payload_bytes = checked_mul_size(
+    const Size total_payload_bytes = is_rle ? loc.encoded_payload_bytes : checked_mul_size(
         total_units, bytes_per_unit);
     const Size assembled_varlena_bytes =
         checked_materialization_allocation_size(
-            checked_round_up_to_uint64(total_payload_bytes),
+            is_rle ? total_payload_bytes : checked_round_up_to_uint64(total_payload_bytes),
             bioseq::pg_types::seq::header_bytes(), "flat sequence");
 
     const std::uint64_t expected_fragments =
-        expected_sequence_fragment_count(
+        is_rle ? checked_ceil_div(std::uint64_t{loc.encoded_payload_bytes},
+                                 static_cast<std::uint64_t>(fragment_storage_bytes))
+        : expected_sequence_fragment_count(
             loc.logical_length, static_cast<std::uint64_t>(lpu),
             detail::k_fragment_storage_units);
     if (expected_fragments != loc.fragment_count) {
@@ -314,15 +337,16 @@ sequence_storage_manager<
                  static_cast<unsigned long long>(expected_fragments),
                  loc.fragment_count)));
     }
-    const std::uint64_t fragment_bp =
+    const std::uint64_t fragment_bp = is_rle ? fragment_storage_bytes :
         static_cast<std::uint64_t>(detail::k_fragment_storage_units)
-        * static_cast<std::uint64_t>(lpu);
-    const std::uint64_t expected_last_padding =
+            * static_cast<std::uint64_t>(lpu);
+    const std::uint64_t stored_extent = is_rle ? loc.encoded_payload_bytes : loc.logical_length;
+    const std::uint64_t expected_last_padding = is_rle ? 0u :
         (static_cast<std::uint64_t>(lpu)
             - loc.logical_length % static_cast<std::uint64_t>(lpu))
         % static_cast<std::uint64_t>(lpu);
     const std::uint64_t first_expected_bp = loc.fragment_count == 1u
-        ? loc.logical_length
+        ? stored_extent
         : fragment_bp;
     const std::uint64_t first_expected_padding = loc.fragment_count == 1u
         ? expected_last_padding
@@ -331,6 +355,11 @@ sequence_storage_manager<
         first_raw, logical_alphabet_code, logical_byte_width,
         first_expected_bp, first_expected_padding,
         loc.first_fragment_row);
+    if (is_rle && loc.fragment_count == 1u &&
+        !sequence_encoded_fragment_fill_is_zero(*first_raw, fragment_storage_bytes)) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+            errmsg("bioseq encoded fragment has nonzero physical fill")));
+    }
 
     bioseq::postgres::support::memory_context_scope ctx{out_mctx};
     bioseq::pg_types::seq* out = static_cast<bioseq::pg_types::seq*>(palloc0(assembled_varlena_bytes));
@@ -338,6 +367,9 @@ sequence_storage_manager<
     out->alphabet_code           = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
     out->storage_unit_byte_width = logical_byte_width;
     out->bp_size                 = static_cast<bioseq::pg_types::seq::bp_size_t>(loc.logical_length);
+    out->encoding = is_rle ? bioseq::sequence_encoding::cigar_rle
+                           : bioseq::sequence_encoding::rank_packed;
+    out->space = space;
     // Last-fragment padding is also the padding of the assembled varlena.
 
     std::uint8_t* const out_data = reinterpret_cast<std::uint8_t*>(out->data);
@@ -387,15 +419,23 @@ sequence_storage_manager<
         }
         validate_sequence_fragment_frame(
             raw_bytes, expected_fragment_bytes, row_no);
+        if (raw->encoding != encoding || raw->space != space) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq fragment codec metadata changes within a source")));
+        }
         const bool is_last = fragment_no + 1u == loc.fragment_count;
         const std::uint64_t expected_bp = is_last
-            ? loc.logical_length
+            ? stored_extent
                 - static_cast<std::uint64_t>(fragment_no) * fragment_bp
             : fragment_bp;
         validate_sequence_fragment_metadata(
             raw, logical_alphabet_code, logical_byte_width,
             expected_bp, is_last ? expected_last_padding : 0u,
             row_no);
+        if (is_rle && is_last && !sequence_encoded_fragment_fill_is_zero(*raw, fragment_storage_bytes)) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq encoded fragment has nonzero physical fill")));
+        }
         const Size dst_offset = checked_mul_size(
             checked_size_cast(fragment_no), fragment_storage_bytes);
         if (dst_offset > total_payload_bytes) {
@@ -411,6 +451,15 @@ sequence_storage_manager<
         }
     }
 
+    if (is_rle) {
+        const auto validation = bioseq::validate_cigar_payload<bioseq::cigar_symbol>(
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(out->data), total_payload_bytes},
+            out->bp_size, out->space);
+        if (!validation) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq assembled CIGAR payload is invalid")));
+        }
+    }
     if (transient_read_state) {
         end_column_read(read_state);
     }

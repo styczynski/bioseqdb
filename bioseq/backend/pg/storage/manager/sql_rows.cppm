@@ -297,10 +297,10 @@ first_sub_row_no)SQL"},
     })]]
     std::int16_t column_attno;
 
-    /// @brief Sequence-locator format version; currently 3.
+    /// @brief Sequence-locator format version; currently 4.
     [[bioseq_sql::check({
         .name = "sequence_source_version_locator_version_check",
-        .expression = bioseq::sql::checked_sql{"locator_version = 3"},
+        .expression = bioseq::sql::checked_sql{"locator_version = 4"},
     })]]
     std::int16_t locator_version;
 
@@ -391,7 +391,29 @@ AND fragment_storage_id > 0))SQL"},
     })]]
     std::int32_t padding_letters;
 
-    /// @brief CRC-64 checksum of the decoded sequence symbols.
+    /// @brief Physical codec: ordinary packed ranks or canonical run-length bytes.
+    [[bioseq_sql::check({
+        .name = "sequence_source_version_encoding_check",
+        .expression = bioseq::sql::checked_sql{"encoding BETWEEN 0 AND 1"},
+    })]]
+    std::int16_t encoding;
+
+    /// @brief Projection-space ordinal; validated against the alphabet at read time.
+    [[bioseq_sql::check({
+        .name = "sequence_source_version_cigar_space_check",
+        .expression = bioseq::sql::checked_sql{"cigar_space BETWEEN 0 AND 255"},
+    })]]
+    std::int16_t cigar_space;
+
+    /// @brief Canonical RLE byte count; zero for packed ranks and empty sources.
+    [[bioseq_sql::check({
+        .name = "sequence_source_version_encoded_payload_bytes_check",
+        .expression = bioseq::sql::checked_sql{
+            "encoded_payload_bytes BETWEEN 0 AND 4294967295"},
+    })]]
+    std::int64_t encoded_payload_bytes;
+
+    /// @brief CRC-64 checksum of canonical symbols or canonical RLE bytes.
     std::int64_t source_content_checksum;
 
     /// @brief Publication state: 0 is unpublished, 1 is ready, and 2 is invalid.
