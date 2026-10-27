@@ -305,9 +305,16 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
      * its own packed uploads. Only the test baseline needs flat payloads here. */
     const bool requires_flat_sequence_payloads = forced_flat_baseline;
 
+    if (static_cast<std::size_t>(mmsearch_state.alphabet_code)
+            >= pgseq_supported_biological_alphabets::alphabet_count
+        || (per_row_mode()
+            && static_cast<std::size_t>(mmsearch_state.query_alphabet_code)
+                >= pgseq_supported_biological_alphabets::alphabet_count)) {
+        throw std::invalid_argument{"mmsearch requires biological sequence alphabets"};
+    }
     std::size_t lpu_for_hydration = 0;
     std::size_t bytes_per_unit_for_hydration = 0;
-    bioseq::pg_types::seq::dispatch_instance(
+    pgseq_dispatch_biological_instance(
         mmsearch_state.alphabet_code,
         mmsearch_state.storage_unit_byte_width,
         /** @brief Get the target packing sizes used to estimate full-payload memory. */
@@ -319,7 +326,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     std::size_t query_lpu_for_hydration = lpu_for_hydration;
     std::size_t query_bytes_per_unit_for_hydration = bytes_per_unit_for_hydration;
     if (per_row_mode()) {
-        bioseq::pg_types::seq::dispatch_instance(
+        pgseq_dispatch_biological_instance(
             mmsearch_state.query_alphabet_code,
             mmsearch_state.query_storage_unit_byte_width,
             /** @brief Get the  query packing sizes, which may differ from the target width. */

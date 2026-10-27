@@ -65,7 +65,7 @@ namespace {
             algorithm_identity.effective_algorithm);
     const auto producer =
         bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
-    return static_cast<std::size_t>(alphabet_code) < pgseq_supported_alphabets::alphabet_count &&
+    return static_cast<std::size_t>(alphabet_code) < pgseq_supported_biological_alphabets::alphabet_count &&
            (storage_unit_byte_width == 4u || storage_unit_byte_width == 8u) &&
            params.kmer_size > 0 &&
            params.kmer_size <= static_cast<int>((std::numeric_limits<std::uint16_t>::max)()) &&

@@ -604,8 +604,14 @@ struct alphabet_dispatch {
                                                pg_identifier_writer& tuple_writer,
                                                const char* file_path,
                                                bioseq::io::sequence_file_kind kind) {
+    if (static_cast<std::size_t>(ctx.cols.alphabet_code) >=
+            pgseq_supported_biological_alphabets::alphabet_count) {
+        raise_load_error_as_cpp(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "FASTA/FASTQ loading requires a biological sequence alphabet; use SQL text input or COPY for CIGAR");
+    }
     std::int64_t records_loaded = 0;
-    pgseq_supported_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         ctx.cols.alphabet_code,
         load_dispatch::alphabet_dispatch{
             ctx, tuple_writer, file_path, kind.format, records_loaded});

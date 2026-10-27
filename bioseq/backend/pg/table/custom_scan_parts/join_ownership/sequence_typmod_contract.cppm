@@ -16,7 +16,7 @@ export {
         }
         const auto decoded = compact_sequence_stdc_type_params::decode(typmod);
         const bool alphabet_supported =
-            decoded.alphabet_code < pgseq_dispatch_profile_alphabet_count;
+            decoded.alphabet_code < pgseq_dispatch_profile_biological_alphabet_count;
         const bool width_supported =
             pgseq_dispatch_profile_contains_storage_unit_byte_width(
                 decoded.storage_unit_byte_width);

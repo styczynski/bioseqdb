@@ -66,7 +66,11 @@ void tuple_dispatch_buffer::hydrate_one_column(
     const std::uint8_t column_storage_unit_byte_width =
         is_query ? mmsearch_state.query_storage_unit_byte_width
                  : mmsearch_state.storage_unit_byte_width;
-    bioseq::pg_types::seq::dispatch_instance(
+    if (static_cast<std::size_t>(column_alphabet_code)
+        >= pgseq_supported_biological_alphabets::alphabet_count) {
+        throw std::invalid_argument{"mmsearch hydration requires a biological alphabet"};
+    }
+    pgseq_dispatch_biological_instance(
         column_alphabet_code,
         column_storage_unit_byte_width,
         [&lpu_for_column, &bytes_per_unit_for_col]<class p_sequence>() noexcept {

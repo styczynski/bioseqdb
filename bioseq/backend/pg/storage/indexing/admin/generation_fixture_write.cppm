@@ -470,6 +470,14 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
         result.locator = decode_locator_from_stub(source_header);
         result.alphabet_code = static_cast<std::uint8_t>(source_header->alphabet_code);
         result.storage_unit_byte_width = logical_storage_unit_byte_width(source_header);
+        if (static_cast<std::size_t>(result.alphabet_code) >=
+                pgseq_supported_biological_alphabets::alphabet_count) {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [previous_context] { MemoryContextSwitchTo(previous_context); });
+            ready_minimizer_error_as_cpp(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                "READY minimizer fixture requires a biological sequence alphabet");
+        }
         if (result.locator.payload_version != sequence_locator_payload_version ||
             result.locator.source_epoch == 0 || result.locator.logical_length == 0 ||
             result.locator.fragment_count == 0) {
@@ -511,7 +519,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
         state->fragment_caches->main_tablespace_oid = relation_identity.tablespace_oid;
         state->fragment_caches->main_relfilenode = relation_identity.relfilenode;
 
-        bioseq::pg_types::seq::dispatch_instance(
+        pgseq_dispatch_biological_instance(
             result.alphabet_code,
             result.storage_unit_byte_width,
             [state,

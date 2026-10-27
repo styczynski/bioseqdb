@@ -71,6 +71,8 @@ export using pgseq_supported_storage_unit_byte_widths =
 
 static_assert(pgseq_supported_alphabets::alphabet_count
               == pgseq_dispatch_profile_alphabet_count);
+static_assert(pgseq_supported_biological_alphabets::alphabet_count
+              == pgseq_dispatch_profile_biological_alphabet_count);
 static_assert([] consteval {
     for (unsigned value = 0u; value <= 0xffu; ++value) {
         const auto byte_width = static_cast<std::uint8_t>(value);

@@ -97,7 +97,8 @@ struct compact_sequence_range_base {
         static_assert(sizeof(storage_unit) >= sizeof(letter_unit));
 
         /** @brief Returns the rank of the alphabet complement. */
-        [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept {
+        [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept
+            requires requires(alphabet_type symbol) { seqan3::complement(std::move(symbol)); } {
             return seqan3::complement(std::move((typename traits::alphabet_type()).assign_rank(letter))).to_rank();
         };
 
@@ -510,6 +511,9 @@ struct compact_sequence_range_base {
      * Reverse-complement output requires an  alphabet with complementation
      */
     template<bool p_is_reversed>
+        requires (!p_is_reversed || requires(typename traits::storage_unit rank) {
+            traits::letter_complement(rank);
+        })
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector(size_t bp_from, size_t bp_to) const {
         if (bp_from >= bp_to) return {};
         const size_t region_length = bp_to - bp_from;
@@ -562,6 +566,9 @@ struct compact_sequence_range_base {
      * An empty interval or undersized destination leaves dst unchanged.
      */
     template<bool p_is_reversed, bool p_write_reversed = false>
+        requires (!p_is_reversed || requires(typename traits::storage_unit rank) {
+            traits::letter_complement(rank);
+        })
     void to_encoded_into(std::span<uint8_t> dst, size_t bp_from, size_t bp_to) const {
         if (bp_from >= bp_to) return;
         const size_t region_length = bp_to - bp_from;
@@ -598,9 +605,10 @@ struct compact_sequence_range_base {
 
             auto emit_letter = [&dst, &region_length, &produced](
                                    typename traits::storage_unit raw) {
-                const auto letter = p_is_reversed
-                    ? static_cast<uint8_t>(traits::letter_complement(raw))
-                    : static_cast<uint8_t>(raw);
+                auto letter = static_cast<uint8_t>(raw);
+                if constexpr (p_is_reversed) {
+                    letter = static_cast<uint8_t>(traits::letter_complement(raw));
+                }
                 if constexpr (descending_write) {
                     dst[region_length - 1 - produced] = letter;
                 } else {
@@ -692,10 +700,11 @@ struct compact_sequence_range_base {
         // only when more output remains.
         auto refresh_unit_if_needed =
             [&unit_val, &base_iter, &bit_no, &region_length](size_t step_idx) {
+                if (step_idx + 1u >= region_length) return;
                 if constexpr (lpu == 1) {
                     unit_val = static_cast<typename traits::storage_unit>(*base_iter);
                 } else {
-                    if (bit_no == 0 && step_idx + 1 < region_length) {
+                    if (bit_no == 0) {
                         unit_val = static_cast<typename traits::storage_unit>(*base_iter);
                     }
                 }
@@ -732,7 +741,10 @@ struct compact_sequence_range_base {
      * Requires alphabet complementation and ranks that fit in uint8_t.
      * @return Complemented ranks in reverse sequence order.
      */
-    [[nodiscard]] std::vector<uint8_t> to_reverse_complement_encoded_vector() const {
+    [[nodiscard]] std::vector<uint8_t> to_reverse_complement_encoded_vector() const
+        requires requires(typename traits::storage_unit rank) {
+            traits::letter_complement(rank);
+        } {
         const size_t sequence_length = bp_size();
         std::vector<uint8_t> reverse_complement_ranks(sequence_length);
         size_t write_position = sequence_length;

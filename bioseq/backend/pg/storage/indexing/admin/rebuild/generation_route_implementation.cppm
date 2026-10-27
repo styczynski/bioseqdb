@@ -130,7 +130,13 @@ inline void build_and_verify_hash_major_minimizer_generation(
 
 void build_and_verify_locator_minimizer_generation(
     const locator_generation_rebuild_request& request) {
-    bioseq::pg_types::seq::dispatch_instance(
+    if (static_cast<std::size_t>(request.alphabet_code) >=
+            pgseq_supported_biological_alphabets::alphabet_count) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "minimizer generation requires a biological sequence alphabet");
+    }
+    pgseq_dispatch_biological_instance(
         request.alphabet_code,
         request.storage_width,
         [&request]<class p_sequence_type>() {

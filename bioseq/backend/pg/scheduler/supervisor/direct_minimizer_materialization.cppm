@@ -193,6 +193,13 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
             static_cast<unsigned long long>(claim.target.sequence_rowno));
         return;
     }
+    if (static_cast<std::size_t>(meta->alphabet_code) >=
+            pgseq_supported_biological_alphabets::alphabet_count) {
+        bioseq_log<logging_level::debug>(
+            "[bioseq] index: discarded async minimizer-sequence build with non-biological alphabet row={}",
+            static_cast<unsigned long long>(claim.target.sequence_rowno));
+        return;
+    }
     persist_target target = claim.target;
     target.index_name = meta->index_name;
     if (!worker_target_accepts_index_persist(target, meta->index_name)) {
@@ -296,7 +303,7 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
                          "identity; the queued build is rejected without fallback")));
             });
         }
-        bioseq::pg_types::seq::dispatch_instance(
+        pgseq_dispatch_biological_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
             [&caches,
