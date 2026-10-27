@@ -96,14 +96,16 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
 
     // Packed views with another storage-unit type, for resident storage only.
     template <class p_storage_unit>
-    [[nodiscard]] [[gnu::always_inline]] auto bit_cast_to_storage_unit() const noexcept {
+    [[nodiscard]] [[gnu::always_inline]] auto bit_cast_to_storage_unit() const noexcept
+        requires traits::is_bit_packed {
         return range_->template bit_cast_to_storage_unit<p_storage_unit>();
     }
 
     // Rank copies used by  alignment code.
     template <bool p_is_reversed, bool p_write_reversed = false>
     [[gnu::always_inline]]
-    void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const {
+    void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const
+        requires (!p_is_reversed || lazy_sequence_detail::complementable_sequence_alphabet<typename traits::alphabet_type>) {
         if (from > to || to > bp_size() || destination.size() < to - from) {
             abort_lazy_sequence_access("resident lazy rank range is invalid");
         }
@@ -146,7 +148,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
               bool p_write_reversed,
               class p_stored_type,
               std::size_t p_max_loaded_slots = 2>
-    [[nodiscard]] auto rank_reader() const noexcept {
+    [[nodiscard]] auto rank_reader() const noexcept
+        requires (!p_is_reversed || lazy_sequence_detail::complementable_sequence_alphabet<typename traits::alphabet_type>) {
         return rank_window_reader<p_is_reversed,
                                   p_write_reversed,
                                   p_stored_type,
@@ -155,20 +158,23 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
 
     // Both read_cptr overloads borrow the existing resident words.
     [[nodiscard]] [[gnu::always_inline]]
-    const storage_unit* read_cptr(const iterator_impl& it) const noexcept {
+    const storage_unit* read_cptr(const iterator_impl& it) const noexcept
+        requires traits::is_bit_packed {
         return compact_sequence_range<p_sequence_range>::read_cptr(it);
     }
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it,
                                   std::span<storage_unit> /*scratch unused*/,
-                                  std::size_t /*required_length unused*/) const noexcept {
+                                  std::size_t /*required_length unused*/) const noexcept
+        requires traits::is_bit_packed {
         return compact_sequence_range<p_sequence_range>::read_cptr(it);
     }
 };
 /** Owns a fragmented scanner and a bounded cache of its loaded fragments. */
 
 template <class p_sequence_range, class p_scanner>
-    requires(p_scanner::is_fragmented())
+    requires(p_scanner::is_fragmented()
+             && compact_sequence_range<p_sequence_range>::traits::is_bit_packed)
 struct lazy_sequence<p_sequence_range, p_scanner> {
     using range_type = p_sequence_range;
     using scanner_type = p_scanner;
@@ -764,6 +770,7 @@ is_worker_shareable(const lazy_sequence<p_sequence_range, p_scanner>&) noexcept 
 
 /// Constructs a fragmented sanner owner at a fixed address for one callback.
 template <class p_sequence_range, class p_scanner_factory, class p_callback>
+    requires compact_sequence_range<p_sequence_range>::traits::is_bit_packed
 inline void with_fragmented_lazy_sequence(p_scanner_factory&& scanner_factory,
                                           p_callback&& callback) {
     using scanner_type = std::invoke_result_t<p_scanner_factory>;

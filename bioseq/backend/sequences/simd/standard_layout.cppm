@@ -313,66 +313,6 @@ inline p_sequence_header* stdc_rewidth_to_type_params(
     return result;
 }
 
-/**
- * @brief Compares standard-layout sequences in alphabet-rank order.
- *
- * Both sequences must use the same alphabet. Lazy views read each packed
- * layout, so the storage widths may differ.
- * @return Less, equal, or greater for the logical sequences.
- */
-template<class p_sequence_header>
-requires (is_compact_sequence_stdc<p_sequence_header>)
-[[nodiscard]]
-inline std::strong_ordering stdc_compare(
-    const p_sequence_header& lhs,
-    const p_sequence_header& rhs)
-{
-    // PostgreSQL reports an alphabet mismatch as an error. Standalone builds
-    // check this caller requirement with a debug assertion.
-#ifndef NO_POSTGRES
-    if (lhs.alphabet_code != rhs.alphabet_code) {
-        bioseq_log<logging_level::error, logging_target::postgres>(
-            "stdc_compare: callers must pass same-alphabet sequences "
-            "(lhs={}, rhs={})",
-            static_cast<unsigned>(lhs.alphabet_code),
-            static_cast<unsigned>(rhs.alphabet_code));
-    }
-#else
-    DEBUG_ASSERT(lhs.alphabet_code == rhs.alphabet_code,
-                 fmt::format("stdc_compare across alphabets: {} vs {}",
-                             static_cast<unsigned>(lhs.alphabet_code),
-                             static_cast<unsigned>(rhs.alphabet_code)));
-#endif
-    std::strong_ordering result = std::strong_ordering::equal;
-    lhs.convert_to([&result, &rhs]<class p_left_instance>(
-                       const compact_sequence_range<p_left_instance>& left) {
-        rhs.convert_to([&result, &left]<class p_right_instance>(
-                           const compact_sequence_range<p_right_instance>& right) {
-            using left_traits =
-                typename compact_sequence_range<p_left_instance>::traits;
-            using right_traits =
-                typename compact_sequence_range<p_right_instance>::traits;
-            if constexpr (
-                !std::is_same_v<typename left_traits::alphabet_type,
-                                typename right_traits::alphabet_type>
-            ) {
-                (void)left;
-                (void)right;
-            } else {
-                const auto left_view =
-                    bioseq::storage::make_lazy_sequence_view(left);
-                const auto right_view =
-                    bioseq::storage::make_lazy_sequence_view(right);
-                const int comparison = bioseq::storage::compare_lazy_sequences(
-                    left_view, right_view);
-                result = comparison < 0 ? std::strong_ordering::less
-                    : comparison > 0 ? std::strong_ordering::greater
-                                     : std::strong_ordering::equal;
-            }
-        });
-    });
-    return result;
-}
 
 }
 HWY_AFTER_NAMESPACE();

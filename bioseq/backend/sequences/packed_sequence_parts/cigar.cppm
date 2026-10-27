@@ -533,6 +533,27 @@ public:
             return run_ == other.run_ && remaining_ == other.remaining_;
         }
     };
+    /** Adapt a physical run boundary to lazy position iteration in the selected mode. */
+    template<iterator_mode Mode>
+    [[nodiscard]] auto iter(const run_iterator& cursor) const {
+        return position_iterator<Mode>{cursor, end()};
+    }
+    /** Expand only a requested position window into caller-owned rank scratch. */
+    template<bool IsReverseComplement, bool WriteReversed = false>
+        requires (!IsReverseComplement && seqan3::alphabet_size<Alphabet> <=
+                  std::numeric_limits<std::uint8_t>::max() + std::size_t{1})
+    void to_encoded_into(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const {
+        if (from >= to || to > bp_size() || destination.size() < to - from) return;
+        const auto selected = slice(from, to);
+        const auto length = to - from;
+        std::size_t written = 0u;
+        for (const auto run : selected.runs()) {
+            const auto start = WriteReversed ? length - written - run.length : written;
+            std::fill_n(destination.data() + start, run.length,
+                        static_cast<std::uint8_t>(seqan3::to_rank(run.operation)));
+            written += run.length;
+        }
+    }
     /** Expand positions lazily in the existing rank/symbol iterator vocabulary. */
     template<iterator_mode Mode> [[nodiscard]] auto iterable() const {
         return std::ranges::subrange{position_iterator<Mode>{begin(), end()}, position_iterator<Mode>{end(), end()}};

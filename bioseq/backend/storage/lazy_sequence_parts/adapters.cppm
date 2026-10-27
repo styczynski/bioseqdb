@@ -70,7 +70,9 @@ template <class p_sequence_range, class p_scanner>
     using view_type = lazy_sequence_view<alphabet_type>;
     using descriptor_type = typename view_type::resident_packed_sequence;
 
-    if constexpr (p_scanner::is_fragmented()) {
+    if constexpr (!range_traits::is_bit_packed || p_scanner::is_fragmented()) {
+        // Run records are not packed ranks. Fragmented readers can also evict
+        // their bytes, so neither representation can be borrowed here.
         // Later reads can evict fragment-cache slots, so their pointers cannot
         // be borrowed for the lifetime of the view.
         (void)state;
@@ -145,7 +147,7 @@ template <class p_sequence_range, class p_scanner>
     using range_traits = typename compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename range_traits::storage_unit;
     using alphabet_type = typename range_traits::alphabet_type;
-    if constexpr (requires(const p_scanner& scanner, std::span<storage_unit> output) {
+    if constexpr (range_traits::is_bit_packed && requires(const p_scanner& scanner, std::span<storage_unit> output) {
                       { scanner.copy_packed_to(output) } -> std::same_as<void>;
                   }) {
         constexpr std::uint8_t k_physical_width = static_cast<std::uint8_t>(sizeof(storage_unit));
@@ -193,33 +195,43 @@ template <class p_sequence_range, class p_scanner>
     using range_traits = typename compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename range_traits::storage_unit;
     using alphabet_type = typename range_traits::alphabet_type;
-    constexpr std::uint8_t k_physical_width = static_cast<std::uint8_t>(sizeof(storage_unit));
-    constexpr std::size_t k_logical_bits =
-        lazy_sequence_traits<alphabet_type>::k_logical_bits_per_symbol;
-    const auto& sequence = *static_cast<const lazy_sequence<p_sequence_range, p_scanner>*>(state);
-    if (requested_width != k_physical_width || range_traits::bits_per_char != k_logical_bits ||
-        first_unit > sequence.size() || unit_count > sequence.size() - first_unit ||
-        (unit_count != 0u && destination == nullptr) ||
-        (unit_count != 0u &&
-         reinterpret_cast<std::uintptr_t>(destination) % alignof(storage_unit) != 0u)) {
+    if constexpr (!range_traits::is_bit_packed) {
+        (void)state;
+        (void)destination;
+        (void)first_unit;
+        (void)unit_count;
+        (void)requested_width;
         return false;
-    }
-    if (unit_count == 0u) {
+    } else {
+        constexpr std::uint8_t k_physical_width = static_cast<std::uint8_t>(sizeof(storage_unit));
+        constexpr std::size_t k_logical_bits =
+            lazy_sequence_traits<alphabet_type>::k_logical_bits_per_symbol;
+        const auto& sequence = *static_cast<const lazy_sequence<p_sequence_range, p_scanner>*>(state);
+        if (requested_width != k_physical_width || range_traits::bits_per_char != k_logical_bits ||
+            first_unit > sequence.size() || unit_count > sequence.size() - first_unit ||
+            (unit_count != 0u && destination == nullptr) ||
+            (unit_count != 0u &&
+             reinterpret_cast<std::uintptr_t>(destination) % alignof(storage_unit) != 0u)) {
+            return false;
+        }
+        if (unit_count == 0u) {
+            return true;
+        }
+        auto begin = sequence.cbegin();
+        begin += static_cast<sequence_size_t>(first_unit);
+        std::span<storage_unit> output{static_cast<storage_unit*>(destination), unit_count};
+        const storage_unit* source = sequence.read_cptr(begin, output, unit_count);
+        if (source != output.data()) {
+            std::memcpy(output.data(), source, unit_count * sizeof(storage_unit));
+        }
         return true;
     }
-    auto begin = sequence.cbegin();
-    begin += static_cast<sequence_size_t>(first_unit);
-    std::span<storage_unit> output{static_cast<storage_unit*>(destination), unit_count};
-    const storage_unit* source = sequence.read_cptr(begin, output, unit_count);
-    if (source != output.data()) {
-        std::memcpy(output.data(), source, unit_count * sizeof(storage_unit));
-    }
-    return true;
 }
 
 template <class p_sequence_range, class p_scanner> struct owned_sequence_adapter {
     using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
+    static constexpr bool is_bit_packed = compact_sequence_range<p_sequence_range>::traits::is_bit_packed;
 
     static inline const typename view_type::backend_ops k_ops{
         .bp_size = &owned_sequence_bp_size<p_sequence_range, p_scanner>,
@@ -230,9 +242,9 @@ template <class p_sequence_range, class p_scanner> struct owned_sequence_adapter
                 &owned_sequence_read_at<true, false, p_sequence_range, p_scanner>,
                 &owned_sequence_read_at<true, true, p_sequence_range, p_scanner>,
             },
-        .try_resident_packed = &owned_sequence_resident_probe<p_sequence_range, p_scanner>,
-        .copy_packed_sequence = &owned_sequence_copy_packed<p_sequence_range, p_scanner>,
-        .copy_packed_window = &owned_sequence_copy_packed_window<p_sequence_range, p_scanner>,
+        .try_resident_packed = is_bit_packed ? &owned_sequence_resident_probe<p_sequence_range, p_scanner> : nullptr,
+        .copy_packed_sequence = is_bit_packed ? &owned_sequence_copy_packed<p_sequence_range, p_scanner> : nullptr,
+        .copy_packed_window = is_bit_packed ? &owned_sequence_copy_packed_window<p_sequence_range, p_scanner> : nullptr,
         .worker_shareable = &owned_sequence_worker_shareable<p_sequence_range, p_scanner>,
     };
 };
@@ -300,6 +312,7 @@ template <class p_sequence_range>
 template <class p_sequence_range> struct compact_range_adapter {
     using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
+    static constexpr bool is_bit_packed = compact_sequence_range<p_sequence_range>::traits::is_bit_packed;
 
     static inline const typename view_type::backend_ops k_ops{
         .bp_size = &compact_range_bp_size<p_sequence_range>,
@@ -310,9 +323,9 @@ template <class p_sequence_range> struct compact_range_adapter {
                 &compact_range_read_at<true, false, p_sequence_range>,
                 &compact_range_read_at<true, true, p_sequence_range>,
             },
-        .try_resident_packed = &compact_range_resident_probe<p_sequence_range>,
+        .try_resident_packed = is_bit_packed ? &compact_range_resident_probe<p_sequence_range> : nullptr,
         .copy_packed_sequence = nullptr,
-        .copy_packed_window = &compact_range_copy_packed_window<p_sequence_range>,
+        .copy_packed_window = is_bit_packed ? &compact_range_copy_packed_window<p_sequence_range> : nullptr,
         .worker_shareable = &compact_range_worker_shareable<p_sequence_range>,
     };
 };
@@ -337,7 +350,8 @@ namespace lazy_sequence_detail {
  * for finishing source resources after success and abandoning them during cleanup.
  */
 template <class p_sequence_range, class p_scanner, class p_resource_lifecycle>
-    requires(p_scanner::is_fragmented())
+    requires(p_scanner::is_fragmented()
+             && compact_sequence_range<p_sequence_range>::traits::is_bit_packed)
 class fragmented_facade_owner final {
   public:
     using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
@@ -398,6 +412,7 @@ make_lazy_sequence_view(const compact_sequence_range<p_sequence_range>& owner) n
 template <std::size_t p_fragment_storage_units = default_fragment_storage_units,
           class p_sequence_range,
           class p_callback>
+    requires compact_sequence_range<p_sequence_range>::traits::is_bit_packed
 inline void with_chunked_lazy_sequence(const compact_sequence_range<p_sequence_range>& range,
                                        p_callback&& callback) {
     using scanner_type = chunked_span_sequence_scanner<
@@ -412,6 +427,8 @@ template <std::size_t p_fragment_storage_units = default_fragment_storage_units,
           class p_left_sequence_range,
           class p_right_sequence_range,
           class p_callback>
+    requires (compact_sequence_range<p_left_sequence_range>::traits::is_bit_packed
+              && compact_sequence_range<p_right_sequence_range>::traits::is_bit_packed)
 inline void
 with_chunked_lazy_sequence(const compact_sequence_range<p_left_sequence_range>& left_range,
                            const compact_sequence_range<p_right_sequence_range>& right_range,

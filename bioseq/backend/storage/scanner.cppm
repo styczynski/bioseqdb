@@ -116,6 +116,7 @@ struct chunked_span_sequence_scanner final {
     /// Borrows the packed words of an in-memory compact range.
     /// The caller must keep those words alive for the scanner's lifetime.
     template <class p_range>
+        requires compact_sequence_range<p_range>::traits::is_bit_packed
     [[nodiscard]] static chunked_span_sequence_scanner
     from_range(const compact_sequence_range<p_range>& range) noexcept {
         using traits = typename compact_sequence_range<p_range>::traits;
@@ -267,8 +268,10 @@ concept lazy_sequence_view_contract =
     }
     && oriented_lazy_sequence_view<p_view, false, false>
     && oriented_lazy_sequence_view<p_view, false, true>
-    && oriented_lazy_sequence_view<p_view, true, false>
-    && oriented_lazy_sequence_view<p_view, true, true>;
+    && (!requires(typename p_view::traits::alphabet_type symbol) {
+            seqan3::complement(symbol);
+        } || (oriented_lazy_sequence_view<p_view, true, false>
+              && oriented_lazy_sequence_view<p_view, true, true>));
 
 template <typename p_view>
 concept resident_packed_sequence_view =

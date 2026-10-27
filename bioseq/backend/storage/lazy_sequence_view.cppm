@@ -131,7 +131,8 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
                   k_logical_bits_per_symbol <= std::numeric_limits<unsigned char>::digits);
 
     /** Applies the alphabet's packed complement operation  to rank. */
-    [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
+    [[nodiscard]] static storage_unit letter_complement(storage_unit rank)
+        requires lazy_sequence_detail::complementable_sequence_alphabet<p_alphabet> {
         return static_cast<storage_unit>(packed_traits::letter_complement(rank));
     }
 };
