@@ -237,6 +237,58 @@ public:
     }
 
     /**
+     * @brief Packs a repeated rank without constructing an expanded rank buffer.
+     *
+     * Builds one repeated storage word and copies its low-rank groups through
+     * the shared packer. Work follows output words, including boundary words,
+     * rather than invoking append_rank for every generated symbol.
+     * @param rank Alphabet rank repeated in the output.
+     * @param count Number of logical symbols to append.
+     * @return Current status; overflow is rejected before changing the state.
+     */
+    [[nodiscard]] rank_pack_status append_repeated_rank(
+            std::uint8_t rank, std::uint64_t count) {
+        if (status_ != rank_pack_status::ok || finished_ || count == 0u) {
+            return status_;
+        }
+        if (rank >= traits::alphabet_size) {
+            if constexpr (p_invalid_policy == invalid_rank_policy::drop) {
+                return status_;
+            }
+            status_ = rank_pack_status::invalid_rank;
+            return status_;
+        }
+        if (count > (std::numeric_limits<std::uint64_t>::max)()
+                        - emitted_symbols_) {
+            status_ = rank_pack_status::length_mismatch;
+            return status_;
+        }
+
+        storage_unit repeated_word{};
+        for (std::size_t slot = 0; slot < traits::letters_per_unit; ++slot) {
+            repeated_word |= static_cast<storage_unit>(
+                static_cast<storage_unit>(rank) << (slot * traits::bits_per_char));
+        }
+        auto write_unit = [this](storage_unit value) {
+            return sink_.try_write(value);
+        };
+        while (count != 0u) {
+            const std::size_t available = traits::letters_per_unit - partial_letters_;
+            const std::size_t take = count < available
+                ? static_cast<std::size_t>(count) : available;
+            if (!rank_pack_detail::append_prepacked_ranks_lsb<
+                    storage_unit, traits::bits_per_char, traits::letters_per_unit>(
+                        partial_word_, partial_letters_, emitted_symbols_,
+                        repeated_word, take, write_unit)) {
+                status_ = rank_pack_status::capacity_overflow;
+                return status_;
+            }
+            count -= take;
+        }
+        return status_;
+    }
+
+    /**
      * @brief Finishes packing and checks any expected output counts.
      *
      * Writes the partial final word if no earlier error occurred. Stores the result
