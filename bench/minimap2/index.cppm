@@ -24,6 +24,7 @@ extern "C" {
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -192,6 +193,7 @@ inline void apply_parameters(
  * @param[in] target_length Target length in bases.
  * @param[in] parameters Shared result-projection policy.
  * @return Shared PAF-like result record.
+ * @throws std::runtime_error When native CIGAR words violate the shared codec.
  */
 [[nodiscard]] match_result region_to_match_result(
     const mm_reg1_t& native_region,
@@ -239,13 +241,12 @@ inline void apply_parameters(
             : 0;
     }
     if (result.has_cigar) {
-        // minimap2 packs CIGAR as (length << 4) | opcode, same wire
-        // format as bioseq_cigar::append_cigar expects, so we reuse the
-        // shared helper instead of re-deriving the mask here.
-        const std::vector<std::uint32_t> packed_cigar(
-            native_region.p->cigar,
-            native_region.p->cigar + native_region.p->n_cigar);
-        bioseq::simd::append_cigar(result.cigar, packed_cigar);
+        // Borrow native words and translate through the shared checked codec.
+        const std::span<const std::uint32_t> packed_cigar{
+            native_region.p->cigar, static_cast<std::size_t>(native_region.p->n_cigar)};
+        if (!bioseq::decode_native_cigar(packed_cigar, result.cigar)) {
+            throw std::runtime_error{"native minimap2 produced an invalid CIGAR"};
+        }
     }
     return result;
 }
