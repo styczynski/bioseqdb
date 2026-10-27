@@ -97,7 +97,7 @@ namespace bench_instr_shim_detail {
 /// RAII wrapper around the extern-"C" begin/end pair. Stack-only.
 struct ScopedRegion {
     const void*    desc;
-    std::uint64_t  t_begin_ns;
+    uint64_t       t_begin_ns;
 
     explicit ScopedRegion(const void* d) noexcept
         : desc(d), t_begin_ns(::bench_instr_region_begin(d)) {}
