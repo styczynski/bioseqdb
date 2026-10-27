@@ -208,7 +208,7 @@ struct aligner_output {
 };
 
 using bench_pair_t = typename bench_generator_t::query_target_pair;
-using bench_sequence_t = typename bench_generator_t::seq_t;
+using bench_sequence_t = typename bench_generator_t::sequence_type;
 
 /// One fixed endpoint-corpus item. Every backend receives this exact query and
 /// this exact single target; `target_ordinal` is compared before coordinates so
