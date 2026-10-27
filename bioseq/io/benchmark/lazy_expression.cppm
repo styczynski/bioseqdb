@@ -7,10 +7,14 @@ module;
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <functional>
 #include <libassert/assert.hpp>
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
+#include <random>
 #include <optional>
 #include <simdjson.h>
 #include <span>
@@ -25,6 +29,11 @@ module bioseq.io.benchmark:lazy_expression;
 import :common;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.common.context;
+import bioseq.simd.sorting;
+import bioseq.storage.batch_sort;
+import bioseq.instrumentation.clock;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.parallelism.memory_admission;
@@ -596,5 +605,368 @@ void cleanup_lazy_expression(std::string_view,
                              std::string_view,
                              simdjson::dom::element,
                              const lazy_expression_input&) noexcept {}
+
+
+/// Construct a known-valid fixture operation without maintaining a second opcode mapping.
+[[nodiscard]] cigar_run cigar_benchmark_run(std::uint32_t length, char operation) {
+    return cigar_run{length, cigar_symbol{}.assign_char(operation)};
+}
+
+/// Encode canonical fixture runs outside timing using the production counted-run codec.
+[[nodiscard]] cigar_benchmark_value encode_cigar_benchmark_value(std::vector<cigar_run> runs) {
+    const auto bytes = measure_cigar_payload<cigar_symbol>(static_cast<std::uint32_t>(runs.size()));
+    if (!bytes) throw std::runtime_error("CIGAR benchmark payload measurement failed");
+    cigar_benchmark_value value{.literal_runs = std::move(runs),
+                                .payload = std::vector<std::byte>(*bytes)};
+    const auto encoded = write_cigar_payload<cigar_symbol>(
+        value.payload, value.literal_runs, cigar_space::compatibility);
+    if (!encoded) throw std::runtime_error("CIGAR benchmark fixture encoding failed");
+    value.logical_length = *encoded;
+    return value;
+}
+
+/// Borrow a prevalidated encoded fixture; its bytes remain owned by the cached input.
+[[nodiscard]] compact_sequence_range<cigar_symbol>
+cigar_benchmark_view(const cigar_benchmark_value& value) {
+    return compact_sequence_range<cigar_symbol>{value.payload, value.logical_length};
+}
+
+/// Reject unreasonable fixture dimensions before either estimation or allocation.
+[[nodiscard]] std::size_t cigar_benchmark_dimension(
+        simdjson::dom::element data, std::string_view key, std::int64_t fallback) {
+    const auto configured = read_int_field(data, key, fallback);
+    if (configured < 4 || configured > 256)
+        throw std::invalid_argument("CIGAR benchmark rows/profile_intervals must be in [4,256]");
+    return static_cast<std::size_t>(configured);
+}
+
+/// Build arithmetic oracles for counted processing and six independent ordering tiers.
+[[nodiscard]] cigar_benchmark_fixture build_cigar_benchmark_fixture(
+        std::string_view scenario, std::size_t rows, std::size_t intervals, std::uint64_t seed) {
+    cigar_benchmark_fixture fixture;
+    const auto run = cigar_benchmark_run;
+    if (scenario == "literal" || scenario == "huge_N_2000" ||
+        scenario == "huge_N_2000000000") {
+        const auto count = scenario == "literal" ? 64u :
+            scenario == "huge_N_2000" ? 2000u : 2000000000u;
+        fixture.expected_count = count;
+        fixture.values.push_back(encode_cigar_benchmark_value(
+            {run(count, scenario == "literal" ? 'M' : 'N')}));
+        return fixture;
+    }
+    const bool tiny = scenario == "tiny_256" || scenario == "tiny_16384";
+    const bool filtering = scenario == "filter_256" || scenario == "filter_16384";
+    const bool stripping = scenario == "strip_256" || scenario == "strip_16384";
+    if (tiny || filtering || stripping) {
+        const std::size_t count = scenario.ends_with("16384") ? 16384u : 256u;
+        fixture.operation = filtering ? cigar_benchmark_operation::filter :
+            stripping ? cigar_benchmark_operation::strip : cigar_benchmark_operation::count;
+        std::vector<cigar_run> source;
+        source.reserve(count + static_cast<std::size_t>(stripping));
+        for (std::size_t index = 0u; index < count / 4u; ++index) {
+            source.push_back(run(1u, stripping ? 'D' : 'M'));
+            source.push_back(run(1u, 'I'));
+            source.push_back(run(1u, stripping ? 'N' : '='));
+            source.push_back(run(1u, 'I'));
+            if (filtering || stripping) {
+                fixture.expected_runs.push_back(run(1u, stripping ? 'D' : 'M'));
+                fixture.expected_runs.push_back(run(1u, stripping ? 'N' : '='));
+            }
+        }
+        if (stripping) {
+            source.push_back(run(1u, 'M'));
+            fixture.expected_runs.push_back(run(1u, 'M'));
+        }
+        fixture.expected_count = source.size();
+        fixture.values.push_back(encode_cigar_benchmark_value(std::move(source)));
+        return fixture;
+    }
+    if (scenario != "identical" && scenario != "totals" && scenario != "largest" &&
+        scenario != "deep_profile" && scenario != "profile_equal" && scenario != "no_match")
+        throw std::invalid_argument("unknown CIGAR benchmark scenario");
+    fixture.operation = cigar_benchmark_operation::order;
+    std::vector<std::size_t> ordinals(rows);
+    std::iota(ordinals.begin(), ordinals.end(), std::size_t{0u});
+    std::mt19937_64 random(seed);
+    std::shuffle(ordinals.begin(), ordinals.end(), random);
+    for (const auto ordinal : ordinals) {
+        std::vector<cigar_run> source;
+        const auto ordinal32 = static_cast<std::uint32_t>(ordinal);
+        const auto rows32 = static_cast<std::uint32_t>(rows);
+        if (scenario == "identical") source.push_back(run(64u, 'M'));
+        else if (scenario == "totals") source.push_back(run(ordinal32 + 1u, 'M'));
+        else if (scenario == "no_match") source = {run(ordinal32 + 1u, 'I'), run(1u, 'D')};
+        else if (scenario == "largest") source = {
+            run(ordinal32 + 1u, 'M'), run(1u, 'I'), run(2u * (rows32 + 2u) - ordinal32 - 1u, 'M')};
+        else {
+            for (std::size_t interval = 0u; interval < intervals; ++interval) {
+                const auto length = scenario == "profile_equal" || interval < intervals - 2u
+                    ? rows32 * 8u : interval == intervals - 2u
+                        ? rows32 + ordinal32 + 1u : 3u * rows32 - ordinal32 - 1u;
+                source.push_back(run(length, 'M'));
+                if (interval + 1u < intervals) source.push_back(run(
+                    scenario == "profile_equal" && interval == 0u ? ordinal32 + 1u : 1u, 'I'));
+            }
+        }
+        fixture.values.push_back(encode_cigar_benchmark_value(std::move(source)));
+    }
+    fixture.expected_order.resize(rows);
+    std::iota(fixture.expected_order.begin(), fixture.expected_order.end(), std::size_t{0u});
+    if (scenario != "identical") {
+        const bool reverse_ordinals = scenario == "largest" || scenario == "deep_profile";
+        // These fixtures have unique arithmetic ordering. No production CIGAR comparator
+        // or match-profile collector participates in constructing the oracle.
+        std::sort(fixture.expected_order.begin(), fixture.expected_order.end(),
+            [&ordinals, reverse_ordinals](std::size_t left, std::size_t right) {
+                return reverse_ordinals ? ordinals[left] > ordinals[right] : ordinals[left] < ordinals[right];
+            });
+    }
+    return fixture;
+}
+
+/// Estimate encoded fixtures, literal oracles, profiles, and existing context block classes.
+[[nodiscard]] run_constraints estimate_cigar_benchmark_resources(
+        std::string_view, std::string_view, simdjson::dom::element data) {
+    const auto rows = cigar_benchmark_dimension(data, "rows", 64);
+    const auto intervals = cigar_benchmark_dimension(data, "profile_intervals", 64);
+    // All default scenarios together fit this conservative bound; positions are
+    // never expanded, so the two-billion-position N fixture costs one run.
+    const std::size_t fixture_bytes = 6u * 16385u * 32u + 6u * rows * intervals * 64u;
+    return {.base_memory = fixture_bytes, .extra_memory = 16u * 1024u * 1024u + rows * intervals * 64u};
+}
+
+/// Cache only selected scenarios and initialize the production memory owner outside timing.
+[[nodiscard]] cigar_benchmark_input build_cigar_benchmark_input(
+        std::string_view, std::string_view, simdjson::dom::element data,
+        const run_constraints& constraints) {
+    const auto rows = cigar_benchmark_dimension(data, "rows", 64);
+    const auto intervals = cigar_benchmark_dimension(data, "profile_intervals", 64);
+    const auto seed = static_cast<std::uint64_t>(read_int_field(data, "seed", 377019));
+    cigar_benchmark_input input;
+    for (const auto& tuple : constraints.execution_tuples) {
+        const std::string scenario{tuple.params.at("scenario").as_string()};
+        if (!input.fixtures.contains(scenario))
+            input.fixtures.emplace(scenario, build_cigar_benchmark_fixture(scenario, rows, intervals, seed));
+    }
+    input.workspace = std::make_unique<cigar_benchmark_workspace>();
+    return input;
+}
+
+/// Count actual backend run cursors and selection callbacks, preserving the flat fast path.
+class counted_cigar_benchmark_backend : public flat_cigar_backend<cigar_symbol> {
+    using base_type = flat_cigar_backend<cigar_symbol>;
+    cigar_benchmark_measurement& statistics_;
+public:
+    /// Wrap a base cursor without moving it or expanding its counted runs.
+    class run_cursor_type {
+        base_type::run_cursor_type cursor_;
+        cigar_benchmark_measurement& statistics_;
+    public:
+        using run_type = cigar_run;
+        /// Open an independent production cursor and bind its visit counter.
+        run_cursor_type(const base_type& backend, sequence_view_type view,
+                        storage::sequence_size_t from, storage::sequence_size_t to,
+                        cigar_benchmark_measurement& statistics)
+            : cursor_(backend.runs(view, from, to)), statistics_(statistics) {}
+        /// Count each emitted source run exactly once, including partial traversal.
+        [[nodiscard]] std::expected<std::optional<cigar_run>, cigar_error> next() {
+            auto next = cursor_.next();
+            if (next && *next) ++statistics_.backend_run_visits;
+            return next;
+        }
+    };
+    /// Use the existing admitted arenas; instrumentation adds no allocation policy.
+    counted_cigar_benchmark_backend(context::context& memory, cigar_benchmark_measurement& statistics)
+        : base_type(memory), statistics_(statistics) {}
+    /// Instrument only real backend traversal, not inferred positional work.
+    [[nodiscard]] run_cursor_type runs(sequence_view_type view, storage::sequence_size_t from,
+                                       storage::sequence_size_t to) const {
+        return run_cursor_type{*this, view, from, to, statistics_};
+    }
+    /// Preserve the production one-pass retained-run builder while counting its input visits.
+    template<class Predicate>
+    [[nodiscard]] std::expected<sequence_type, cigar_error> select_runs(
+            sequence_view_type view, Predicate&& keep) {
+        return base_type::select_runs(view,
+            [&keep, &statistics = statistics_](cigar_run run, storage::sequence_size_t position) {
+                ++statistics.backend_run_visits;
+                return keep(run, position);
+            });
+    }
+};
+static_assert(cigar_sequence_backend<counted_cigar_benchmark_backend>);
+
+/// Borrow the existing context only when the production scalar comparator requests scratch.
+struct cigar_benchmark_scratch_provider {
+    context::context& memory;
+    cigar_benchmark_measurement& statistics;
+    /// Record real lazy scratch acquisition without constructing another budget service.
+    [[nodiscard]] std::expected<std::reference_wrapper<context::context>, cigar_error> acquire() {
+        ++statistics.scratch_acquire_calls;
+        return std::ref(memory);
+    }
+};
+
+/// Execute core weighted operations or compare scalar ordering against prepared profiles.
+[[nodiscard]] cigar_benchmark_measurement run_cigar_benchmark(
+        std::string_view algorithm, const parameter_map& parameters, const cigar_benchmark_input& input) {
+    const auto& fixture = input.fixtures.at(std::string{parameters.at("scenario").as_string()});
+    auto& workspace = *input.workspace;
+    auto& memory = workspace.admitted.memory;
+    cigar_benchmark_measurement output;
+    counted_cigar_benchmark_backend backend(memory, output);
+    output.reserved_before_bytes = workspace.controller.reserved_bytes();
+    const auto now = bioseq::instrumentation::clock::now_ns;
+    const auto started = now();
+    if (algorithm == "bioseq_cigar_literal_sum") {
+        if (fixture.operation != cigar_benchmark_operation::count)
+            throw std::invalid_argument("literal baseline only measures canonical run counting");
+        for (const auto run : fixture.values.front().literal_runs) {
+            output.observed_count += run.length;
+            ++output.backend_run_visits;
+        }
+        output.operation_ns = now() - started;
+    } else if (algorithm == "bioseq_cigar_core") {
+        const auto view = cigar_benchmark_view(fixture.values.front());
+        if (fixture.operation == cigar_benchmark_operation::count) {
+            const auto counted = cigar_count(backend, view,
+                cigar_space_mask<cigar_symbol>(cigar_space::compatibility));
+            output.operation_ns = now() - started;
+            if (!counted) throw std::runtime_error("CIGAR weighted count failed");
+            output.observed_count = *counted;
+        } else {
+            auto selected = fixture.operation == cigar_benchmark_operation::filter
+                ? cigar_filter(backend, view, cigar_space_mask<cigar_symbol>(cigar_space::pairwise_dense))
+                : cigar_strip(backend, view, true, true);
+            output.operation_ns = now() - started;
+            if (!selected) throw std::runtime_error("CIGAR filter/strip failed");
+            const auto selected_view = backend.borrow(*selected);
+            output.encoded_output_bytes = selected_view.encoded_payload_bytes();
+            output.reserved_at_result_bytes = workspace.controller.reserved_bytes();
+            output.output_runs.assign(selected_view.begin(), selected_view.end());
+        }
+    } else {
+        if (fixture.operation != cigar_benchmark_operation::order ||
+            (algorithm != "bioseq_cigar_scalar_order" && algorithm != "bioseq_cigar_prepared_order"))
+            throw std::invalid_argument("unknown CIGAR benchmark algorithm/workload combination");
+        std::vector<compact_sequence_range<cigar_symbol>> views;
+        views.reserve(fixture.values.size());
+        for (const auto& value : fixture.values) views.push_back(cigar_benchmark_view(value));
+        if (algorithm == "bioseq_cigar_scalar_order") {
+            cigar_benchmark_scratch_provider provider{memory, output};
+            const auto sort_started = now();
+            output.order = storage::sort_batch_permutation(views, {},
+                [&backend, &provider, &output](auto left, auto right) {
+                    ++output.comparator_calls;
+                    const auto compared = compare_cigar(backend, left, right, provider);
+                    if (!compared) throw std::runtime_error("CIGAR scalar ordering failed");
+                    return *compared;
+                }, false);
+            output.sort_ns = now() - sort_started;
+        } else {
+            const auto scope = memory.push<context::arena::scratch>();
+            auto keys = memory.make_scratch_vector<cigar_order_key<cigar_symbol>>(views.size());
+            std::size_t profile_count{};
+            for (const auto view : views) {
+                const auto summary = summarize_cigar_order(backend, view);
+                if (!summary) throw std::runtime_error("CIGAR ordering summary failed");
+                profile_count += summary->match_intervals;
+                keys.push_back({view, *summary, {}});
+            }
+            auto profiles = memory.alloc_scratch_array<storage::sequence_size_t>(profile_count);
+            std::size_t offset{};
+            for (auto& key : keys) {
+                auto profile = profiles.subspan(offset, key.summary.match_intervals);
+                offset += profile.size();
+                const auto collected = collect_cigar_match_profile(backend, key.canonical, profile);
+                if (!collected) throw std::runtime_error("CIGAR prepared profile collection failed");
+                if (!profile.empty()) ++output.prepared_profile_arrays;
+                output.prepared_profile_lengths += profile.size();
+                if (profile.size() > 1u) {
+                    bioseq::simd::sorting::sort_unsigned_64_descending(profile.data(), profile.size());
+                    ++output.prepared_profile_sorts;
+                }
+                key.descending_match_lengths = profile;
+            }
+            output.preparation_ns = now() - started;
+            const auto sort_started = now();
+            output.order = storage::sort_batch_permutation(
+                std::span<const cigar_order_key<cigar_symbol>>{keys.data(), keys.size()}, {},
+                [&output](const auto& left, const auto& right) {
+                    ++output.comparator_calls;
+                    return compare_cigar_order_keys(left, right);
+                }, false);
+            output.sort_ns = now() - sort_started;
+            output.reserved_at_result_bytes = workspace.controller.reserved_bytes();
+        }
+        output.operation_ns = now() - started;
+    }
+    if (fixture.operation == cigar_benchmark_operation::count || algorithm == "bioseq_cigar_scalar_order")
+        output.reserved_at_result_bytes = workspace.controller.reserved_bytes();
+    output.retained_after_bytes = workspace.admitted.retention.retained_bytes();
+    return output;
+}
+
+/// Check independent result oracles and export observed counters without fabricated peak/PG metrics.
+[[nodiscard]] std::map<std::string, double> evaluate_cigar_benchmark(
+        std::string_view algorithm, const parameter_map& parameters, const cigar_benchmark_input& input,
+        const cigar_benchmark_measurement& output) {
+    const auto& fixture = input.fixtures.at(std::string{parameters.at("scenario").as_string()});
+    const bool correct = fixture.operation == cigar_benchmark_operation::order
+        ? output.order == fixture.expected_order : fixture.operation == cigar_benchmark_operation::count
+            ? output.observed_count == fixture.expected_count : output.output_runs == fixture.expected_runs;
+    if (!correct) throw std::runtime_error("CIGAR benchmark independent correctness contract failed");
+    std::uint64_t input_runs{}, input_positions{}, encoded_bytes{};
+    for (const auto& value : fixture.values) {
+        input_runs += value.literal_runs.size();
+        input_positions += value.logical_length;
+        encoded_bytes += value.payload.size();
+    }
+    const std::string_view scenario = parameters.at("scenario").as_string();
+    const bool prepared = algorithm == "bioseq_cigar_prepared_order";
+    if (fixture.operation != cigar_benchmark_operation::order || prepared) {
+        const auto passes = prepared || fixture.operation == cigar_benchmark_operation::strip ? 2u : 1u;
+        if (output.backend_run_visits != passes * input_runs)
+            throw std::runtime_error("CIGAR benchmark weighted traversal count changed");
+    }
+    if (algorithm == "bioseq_cigar_scalar_order") {
+        const bool profile_required = scenario == "deep_profile" || scenario == "profile_equal";
+        if ((output.scratch_acquire_calls != 0u) != profile_required)
+            throw std::runtime_error("CIGAR benchmark scalar ordering shortcut contract failed");
+    }
+    if (prepared) {
+        const auto rows = fixture.values.size();
+        const auto expected_arrays = scenario == "no_match" ? 0u : rows;
+        const auto expected_sorts = scenario == "largest" || scenario == "deep_profile" ||
+            scenario == "profile_equal" ? rows : 0u;
+        if (output.prepared_profile_arrays != expected_arrays ||
+            output.prepared_profile_sorts != expected_sorts || output.scratch_acquire_calls != 0u)
+            throw std::runtime_error("CIGAR benchmark prepared-key amortization contract failed");
+    }
+    return {{"input_run_count", static_cast<double>(input_runs)},
+            {"input_logical_positions", static_cast<double>(input_positions)},
+            {"encoded_input_bytes", static_cast<double>(encoded_bytes)},
+            {"output_run_count", static_cast<double>(output.output_runs.size())},
+            {"encoded_output_bytes", static_cast<double>(output.encoded_output_bytes)},
+            {"observed_count", static_cast<double>(output.observed_count)},
+            {"backend_run_visits", static_cast<double>(output.backend_run_visits)},
+            {"comparator_calls", static_cast<double>(output.comparator_calls)},
+            {"scratch_acquire_calls", static_cast<double>(output.scratch_acquire_calls)},
+            {"prepared_profile_arrays", static_cast<double>(output.prepared_profile_arrays)},
+            {"prepared_profile_lengths", static_cast<double>(output.prepared_profile_lengths)},
+            {"prepared_profile_sorts", static_cast<double>(output.prepared_profile_sorts)},
+            {"operation_ns", static_cast<double>(output.operation_ns)},
+            {"preparation_ns", static_cast<double>(output.preparation_ns)},
+            {"sort_ns", static_cast<double>(output.sort_ns)},
+            {"reserved_before_bytes", static_cast<double>(output.reserved_before_bytes)},
+            {"reserved_at_result_bytes", static_cast<double>(output.reserved_at_result_bytes)},
+            {"retained_after_bytes", static_cast<double>(output.retained_after_bytes)},
+            {"parallel_sort", 0.0},
+            {"correctness_contract_ok", 1.0}};
+}
+
+/// Cached fixture and admitted arena owners release themselves after the case group.
+void cleanup_cigar_benchmark(std::string_view, std::string_view, simdjson::dom::element,
+                             const cigar_benchmark_input&) noexcept {}
 
 } // namespace bioseq::io::benchmark::detail

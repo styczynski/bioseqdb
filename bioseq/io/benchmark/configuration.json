@@ -28,7 +28,11 @@
     "bioseq_identifier_parse_uniprot_fasta": {"_": {"type": "integer", "default": 0}},
 
     "bioseq_lazy_expr_eager_each_step": {"_": {"type": "integer", "default": 0}},
-    "bioseq_lazy_expr_deferred":        {"_": {"type": "integer", "default": 0}}
+    "bioseq_lazy_expr_deferred":        {"_": {"type": "integer", "default": 0}},
+    "bioseq_cigar_literal_sum": {"scenario": {"type": "string", "enum": ["literal", "tiny_256", "tiny_16384", "huge_N_2000", "huge_N_2000000000"], "default": "literal"}},
+    "bioseq_cigar_core": {"scenario": {"type": "string", "enum": ["literal", "tiny_256", "tiny_16384", "huge_N_2000", "huge_N_2000000000", "filter_256", "filter_16384", "strip_256", "strip_16384"], "default": "literal"}},
+    "bioseq_cigar_scalar_order": {"scenario": {"type": "string", "enum": ["identical", "totals", "largest", "deep_profile", "profile_equal", "no_match"], "default": "identical"}},
+    "bioseq_cigar_prepared_order": {"scenario": {"type": "string", "enum": ["identical", "totals", "largest", "deep_profile", "profile_equal", "no_match"], "default": "identical"}}
   },
 
   "test_cases": {
@@ -48,7 +52,138 @@
 
     "FASTA_IDENTIFIER_UNIPROT_SHORT": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200, "seed": 101, "header_shape": "uniprot_metadata" }, "description": "~9 MiB FASTA of ~200 bp records with UniProt-like metadata headers" },
 
-    "LAZY_SEQUENCE_EXPRESSION_8M": { "concurrency": 1, "data": { "kind": "lazy_sequence_expression", "bp_size": 8388608, "seed": 377 }, "description": "8 Mi-bp deterministic DNA4 nested slice/concat expression" }
+    "LAZY_SEQUENCE_EXPRESSION_8M": { "concurrency": 1, "data": { "kind": "lazy_sequence_expression", "bp_size": 8388608, "seed": 377 }, "description": "8 Mi-bp deterministic DNA4 nested slice/concat expression" },
+    "CIGAR_SEQUENCE_SCALING": { "concurrency": 1, "data": { "kind": "cigar_sequence", "rows": 64, "profile_intervals": 64, "seed": 377019 }, "description": "Encoded counted-run processing and six semantic ordering tiers, including huge N without positional expansion" }
+  },
+
+  "bench_io_cigar_sequence": {
+    "tags": [
+      "io",
+      "materialization"
+    ],
+    "description": "One noPG case: canonical literal-run sum baseline versus production weighted count, adversarial alternating M/= filter and D/N terminal strip, plus scalar/prepared semantic ordering. Sources are preencoded and the existing admitted context is reused. Both ordering variants use the shared CPU permutation sorter serially to isolate key preparation; operation_ns includes preparation and sort. backend_run_visits counts instrumented backend cursor/selection passes (literal baseline visits raw runs); prepared-key lexical iterator work remains timed but is not included in this counter. Reservation fields are phase-boundary observations, not transient memory peaks. PostgreSQL fragment reads and lazy expressions are validated separately with SQL.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 377019
+    },
+    "matrix": {
+      "for": {
+        "CIGAR_SEQUENCE_SCALING": 8
+      },
+      "over": {
+        "bioseq_cigar_literal_sum": {
+          "scenario": [
+            "literal",
+            "tiny_256",
+            "tiny_16384",
+            "huge_N_2000",
+            "huge_N_2000000000"
+          ]
+        },
+        "bioseq_cigar_core": {
+          "scenario": [
+            "literal",
+            "tiny_256",
+            "tiny_16384",
+            "huge_N_2000",
+            "huge_N_2000000000",
+            "filter_256",
+            "filter_16384",
+            "strip_256",
+            "strip_16384"
+          ]
+        },
+        "bioseq_cigar_scalar_order": {
+          "scenario": [
+            "identical",
+            "totals",
+            "largest",
+            "deep_profile",
+            "profile_equal",
+            "no_match"
+          ]
+        },
+        "bioseq_cigar_prepared_order": {
+          "scenario": [
+            "identical",
+            "totals",
+            "largest",
+            "deep_profile",
+            "profile_equal",
+            "no_match"
+          ]
+        }
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {},
+        "input_run_count": {
+          "type": "evaluation"
+        },
+        "input_logical_positions": {
+          "type": "evaluation"
+        },
+        "encoded_input_bytes": {
+          "type": "evaluation"
+        },
+        "output_run_count": {
+          "type": "evaluation"
+        },
+        "encoded_output_bytes": {
+          "type": "evaluation"
+        },
+        "observed_count": {
+          "type": "evaluation"
+        },
+        "backend_run_visits": {
+          "type": "evaluation"
+        },
+        "comparator_calls": {
+          "type": "evaluation"
+        },
+        "scratch_acquire_calls": {
+          "type": "evaluation"
+        },
+        "prepared_profile_arrays": {
+          "type": "evaluation"
+        },
+        "prepared_profile_lengths": {
+          "type": "evaluation"
+        },
+        "prepared_profile_sorts": {
+          "type": "evaluation"
+        },
+        "operation_ns": {
+          "type": "evaluation"
+        },
+        "preparation_ns": {
+          "type": "evaluation"
+        },
+        "sort_ns": {
+          "type": "evaluation"
+        },
+        "reserved_before_bytes": {
+          "type": "evaluation"
+        },
+        "reserved_at_result_bytes": {
+          "type": "evaluation"
+        },
+        "retained_after_bytes": {
+          "type": "evaluation"
+        },
+        "parallel_sort": {
+          "type": "evaluation"
+        },
+        "correctness_contract_ok": {
+          "type": "evaluation"
+        }
+      }
+    }
   },
 
   "bench_io_identifier_parser": {

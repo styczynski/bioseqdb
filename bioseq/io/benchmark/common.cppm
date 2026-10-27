@@ -12,6 +12,8 @@ module;
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <memory>
 #include <random>
 #include <simdjson.h>
 #include <string>
@@ -25,6 +27,9 @@ module bioseq.io.benchmark:common;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.common.context;
+import bioseq.parallelism.memory_admission;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.io.reader;
@@ -145,6 +150,57 @@ struct lazy_expression_measurement {
     lazy_expression_size output_logical_length = 0;
     std::uint64_t logical_hash = 0;
     lazy_expression_allocation_statistics allocations{};
+};
+
+/// One canonical counted-run fixture and its independently retained literal form.
+struct cigar_benchmark_value {
+    std::vector<cigar_run> literal_runs;
+    std::vector<std::byte> payload;
+    std::uint32_t logical_length{};
+};
+
+/// Workload selection; each scenario supplies one operation or one sorting tier.
+enum class cigar_benchmark_operation { count, filter, strip, order };
+
+/// Expected results are constructed from fixture arithmetic, without core comparisons.
+struct cigar_benchmark_fixture {
+    cigar_benchmark_operation operation{cigar_benchmark_operation::count};
+    std::vector<cigar_benchmark_value> values;
+    std::vector<cigar_run> expected_runs;
+    std::vector<std::size_t> expected_order;
+    std::uint64_t expected_count{};
+};
+
+/// Reuse the production admission controller and context throughout a cached input.
+struct cigar_benchmark_workspace {
+    bioseq::parallelism::memory_admission_controller controller;
+    bioseq::parallelism::admitted_context admitted{controller};
+};
+
+/// Fixtures are encoded before timing; the heap owner gives the nonmovable context stability.
+struct cigar_benchmark_input {
+    std::map<std::string, cigar_benchmark_fixture> fixtures;
+    std::unique_ptr<cigar_benchmark_workspace> workspace;
+};
+
+/// Functional counters and timed phases; reservation snapshots are not transient peaks.
+struct cigar_benchmark_measurement {
+    std::vector<cigar_run> output_runs;
+    std::vector<std::size_t> order;
+    std::uint64_t observed_count{};
+    std::uint64_t backend_run_visits{};
+    std::uint64_t comparator_calls{};
+    std::uint64_t scratch_acquire_calls{};
+    std::uint64_t prepared_profile_arrays{};
+    std::uint64_t prepared_profile_lengths{};
+    std::uint64_t prepared_profile_sorts{};
+    std::uint64_t operation_ns{};
+    std::uint64_t preparation_ns{};
+    std::uint64_t sort_ns{};
+    std::uint64_t encoded_output_bytes{};
+    std::uint64_t reserved_before_bytes{};
+    std::uint64_t reserved_at_result_bytes{};
+    std::uint64_t retained_after_bytes{};
 };
 
 /// Read an integer property or use the fallback for an absent or ill-typed value.

@@ -91,6 +91,16 @@ int run(int argc, char** argv) {
     using lazy_expression_cleanup = std::function<void(
         std::string_view, std::string_view, simdjson::dom::element, const lazy_expression_input&)>;
 
+    using cigar_builder = std::function<cigar_benchmark_input(
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
+    using cigar_runner = std::function<cigar_benchmark_measurement(
+        std::string_view, const parameter_map&, const cigar_benchmark_input&)>;
+    using cigar_evaluator = std::function<std::map<std::string, double>(
+        std::string_view, const parameter_map&, const cigar_benchmark_input&,
+        const cigar_benchmark_measurement&)>;
+    using cigar_cleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element, const cigar_benchmark_input&)>;
+
     return bioseq::bench::framework::run(
         argc,
         argv,
@@ -158,7 +168,16 @@ int run(int argc, char** argv) {
             lazy_expression_builder{build_lazy_expression_input},
             lazy_expression_runner{run_lazy_expression},
             lazy_expression_evaluator{evaluate_lazy_expression},
-            lazy_expression_cleanup{cleanup_lazy_expression}));
+            lazy_expression_cleanup{cleanup_lazy_expression}),
+        create_benchmark<cigar_benchmark_input, cigar_benchmark_measurement>(
+            "CIGAR counted sequences — run scaling and semantic ordering",
+            "bench_io_cigar_sequence",
+            config_path,
+            resource_estimator{estimate_cigar_benchmark_resources},
+            cigar_builder{build_cigar_benchmark_input},
+            cigar_runner{run_cigar_benchmark},
+            cigar_evaluator{evaluate_cigar_benchmark},
+            cigar_cleanup{cleanup_cigar_benchmark}));
 }
 
 } // namespace bioseq::io::benchmark
