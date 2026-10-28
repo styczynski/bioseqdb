@@ -29,6 +29,7 @@ SOFTWARE.
 module;
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -337,6 +338,8 @@ template <int ___ = 0> class fmtlogDetailT {
     uint32_t flushBufSize = 8 * 1024;
     /** Minimum record level that forces an immediate flush. */
     fmtlog::LogLevel flushLogLevel = fmtlog::OFF;
+    /** Admits one queue consumer; busy and reentrant polls leave records queued. */
+    std::atomic_flag poll_active{};
     /** Protects @c threadBuffers while queues are registered. */
     std::mutex bufferMutex;
     /** Per-thread queues registered since the last poll. */
@@ -597,24 +600,42 @@ template <int ___ = 0> class fmtlogDetailT {
      * Only consumes records older  than this poll's start time whose log-site
      * metadata has arrived. Queue fronts form a min-heap so the next record
      * comes from the thread with the oldest pending timestamp.
+     *
+     * Concurrent and reentrant calls leave records for a later poll. forceFlush
+     * bypasses the file-buffer delay only when this call acquires the consumer
+     * gate. The gate is released on every normal return and C++ exception.
      */
     void poll(bool forceFlush) {
+        if (poll_active.test_and_set(std::memory_order_acquire))
+            return;
+        struct poll_consumer_release {
+            std::atomic_flag& active;
+            /** Releases this poll's consumer ownership after returns or unwinding. */
+            ~poll_consumer_release() noexcept {
+                active.clear(std::memory_order_release);
+            }
+        };
+        const poll_consumer_release release{poll_active};
         fmtlog_wrapper<>::instance.tscns.calibrate();
         int64_t tsc = fmtlog_wrapper<>::instance.tscns.rdtsc();
-        if (logInfos.size()) {
+        {
             std::unique_lock<std::mutex> lock(logInfoMutex);
-            for (auto& info : logInfos) {
-                info.processLocation();
+            if (!logInfos.empty()) {
+                for (auto& info : logInfos) {
+                    info.processLocation();
+                }
+                bgLogInfos.insert(bgLogInfos.end(), logInfos.begin(), logInfos.end());
+                logInfos.clear();
             }
-            bgLogInfos.insert(bgLogInfos.end(), logInfos.begin(), logInfos.end());
-            logInfos.clear();
         }
-        if (threadBuffers.size()) {
+        {
             std::unique_lock<std::mutex> lock(bufferMutex);
-            for (auto tb : threadBuffers) {
-                bgThreadBuffers.emplace_back(tb);
+            if (!threadBuffers.empty()) {
+                for (auto tb : threadBuffers) {
+                    bgThreadBuffers.emplace_back(tb);
+                }
+                threadBuffers.clear();
             }
-            threadBuffers.clear();
         }
 
         for (size_t i = 0; i < bgThreadBuffers.size(); i++) {
