@@ -4943,6 +4943,8 @@ export namespace bioseq::bench::alignment {
 
 int run(int argc, char** argv) {
     configure_logging(true);
+    // Match the e2e runner: per-minimizer debug traces overwhelm measured work.
+    bioseq_set_fallback_debug_logging_enabled(false);
 
     const std::string config_path{BIOSEQ_BENCH_CONFIG_PATH};
     const std::string report_dir{BIOSEQ_BENCH_REPORT_DIR};
