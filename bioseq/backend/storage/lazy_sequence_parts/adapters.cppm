@@ -35,14 +35,13 @@ template <bool p_is_reversed, bool p_write_reversed, class p_sequence_range, cla
         throw std::invalid_argument(
             "reverse-complement encoding requires a complementable alphabet");
     } else {
-        auto cursor =
-            sequence.template rank_reader<p_is_reversed, p_write_reversed, std::uint8_t, 2>();
-        const std::uint8_t* result = cursor.read_at(bp_from, required_length, scratch);
-        // The local reader owns its decoded fragment buffers and dies on return
-        // Copy any borrowed ranks to caller scratch before that happens.
-        if (result != scratch.data()) {
-            std::memcpy(scratch.data(), result, required_length);
+        if (bp_from > (std::numeric_limits<std::size_t>::max)()
+            || required_length > (std::numeric_limits<std::size_t>::max)() - bp_from) {
+            abort_lazy_sequence_access("rank-window coordinates exceed size_t");
         }
+        sequence.template copy_ranks<p_is_reversed, p_write_reversed>(
+            scratch, static_cast<std::size_t>(bp_from),
+            static_cast<std::size_t>(bp_from) + required_length);
         return scratch.data();
     }
 }

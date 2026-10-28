@@ -45,6 +45,19 @@ struct substitution_summary final {
 };
 
 /**
+ * Return whether the candidate gap pair costs no more at every integer length >= 1.
+ * A length-n gap costs (open + extend) + (n - 1) * extend, so compare its
+ * first-symbol cost and slope. Widen both sums before comparing caller-supplied costs.
+ */
+[[nodiscard]] constexpr bool affine_gap_dominates(
+    std::int32_t candidate_open, std::int32_t candidate_extend,
+    std::int32_t other_open, std::int32_t other_extend) noexcept {
+    return std::int64_t{candidate_open} + candidate_extend
+               <= std::int64_t{other_open} + other_extend
+        && candidate_extend <= other_extend;
+}
+
+/**
  * Check accumulation and optional int8 difference-encoding bounds before allocation.
  * Gap pairs are positive extension/nonnegative opening costs; omitted long costs use
  * the single pair. All arithmetic is widened before multiplication or normalization.
@@ -63,10 +76,10 @@ validate_alignment_numeric_contract(
         return std::unexpected(alignment_contract_error::gap_penalty);
     }
     if (gap_open_long >= 0) {
-        if (gap_open <= gap_open_long && gap_extend <= gap_extend_long) {
+        if (affine_gap_dominates(gap_open, gap_extend, gap_open_long, gap_extend_long)) {
             gap_open_long = gap_open;
             gap_extend_long = gap_extend;
-        } else if (gap_open_long <= gap_open && gap_extend_long <= gap_extend) {
+        } else if (affine_gap_dominates(gap_open_long, gap_extend_long, gap_open, gap_extend)) {
             gap_open = gap_open_long;
             gap_extend = gap_extend_long;
         }

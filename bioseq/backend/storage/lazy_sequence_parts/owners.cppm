@@ -478,22 +478,63 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
      *
      * With p_is_reversed, coordinates refer to the full reverse complement.
      * p_write_reversed reverses the chosen output interval again. The destination
-     * must have room for to - from ranks.
+     * must have room for to - from ranks. Expands only touched packed words from
+     * the source fragment cache; no decoded-fragment allocation is made.
      */
     template <bool p_is_reversed, bool p_write_reversed = false>
-    void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const {
+    void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const
+        requires (!p_is_reversed || lazy_sequence_detail::complementable_sequence_alphabet<typename traits::alphabet_type>) {
         if (from > to || to > bp_size() || destination.size() < to - from) {
             abort_lazy_sequence_access("fragmented lazy rank range is invalid");
         }
         if (from == to) {
             return;
         }
+        if (bp_size() >
+            static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)())) {
+            abort_lazy_sequence_access("rank-window coordinates exceed size_t");
+        }
         const std::size_t length = to - from;
-        auto reader = rank_reader<p_is_reversed, p_write_reversed, std::uint8_t, 2>();
-        const std::uint8_t* ranks =
-            reader.read_at(static_cast<sequence_size_t>(from), length, destination);
-        if (ranks != destination.data()) {
-            std::memcpy(destination.data(), ranks, length);
+        std::size_t source_position = from;
+        if constexpr (p_is_reversed) {
+            source_position = static_cast<std::size_t>(bp_size()) - to;
+        }
+        constexpr bool descending_write = p_is_reversed != p_write_reversed;
+        std::size_t copied = 0u;
+        while (copied < length) {
+            const fragment_type& fragment =
+                ensure_fragment(source_position / k_fragment_logical_capacity);
+            const std::size_t fragment_offset =
+                source_position % k_fragment_logical_capacity;
+            const std::size_t fragment_length = std::min(
+                static_cast<std::size_t>(fragment.logical_length) - fragment_offset,
+                length - copied);
+            std::size_t fragment_copied = 0u;
+            while (fragment_copied < fragment_length) {
+                const std::size_t fragment_position = fragment_offset + fragment_copied;
+                const std::size_t first_slot = fragment_position % k_letters_per_unit;
+                const auto ranks = extract_ranks_from_unit<
+                    storage_unit, k_bits_per_symbol, k_letters_per_unit>(
+                    fragment.data[fragment_position / k_letters_per_unit]);
+                const std::size_t count = std::min(
+                    k_letters_per_unit - first_slot, fragment_length - fragment_copied);
+                for (std::size_t rank_index = 0u; rank_index < count; ++rank_index) {
+                    storage_unit rank = ranks[first_slot + rank_index];
+                    if constexpr (p_is_reversed) {
+                        rank = traits::letter_complement(rank);
+                    }
+                    const std::size_t output_index = copied + fragment_copied + rank_index;
+                    if constexpr (descending_write) {
+                        destination[length - 1u - output_index] =
+                            static_cast<std::uint8_t>(rank);
+                    } else {
+                        destination[output_index] = static_cast<std::uint8_t>(rank);
+                    }
+                }
+                fragment_copied += count;
+            }
+            copied += fragment_length;
+            source_position += fragment_length;
         }
     }
 

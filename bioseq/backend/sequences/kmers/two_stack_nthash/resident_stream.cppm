@@ -240,7 +240,7 @@ struct sequence_simd_iteration_state {
         for (const bool valid : invalid_streams)
             if (!valid) { failure = two_stack_continuation_status::invalid_state; return; }
         }
-        auto ranks = lift_operation([d](auto rank) {
+        auto ranks = vector_stream_detail::lift_operation([d](auto rank) {
             return exact_hash_rank<alphabet_type>(d, rank);
         }, bp_v);
         if constexpr (has_unseedable_rank) {
@@ -256,7 +256,7 @@ struct sequence_simd_iteration_state {
                 ranks),
             v_kmer_mask);
         if constexpr (hash_traits::canonical_reverse_complement) {
-        const vector_stream_type complemented = lift_operation([d](auto rank) {
+        const vector_stream_type complemented = vector_stream_detail::lift_operation([d](auto rank) {
             return lexic_hasher<hash_alphabet>::template simd_hash<storage_unit, simd_tag_type>::apply_complement(d, rank);
         }, ranks);
         vector_stream_type new_high;

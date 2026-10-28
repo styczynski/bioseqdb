@@ -925,10 +925,10 @@ public:
     }
 
     /**
-     * Align half-opmn query and target intervals with two gap-penalty pairs.
+     * Align half-open query and target intervals with two gap-penalty pairs.
      *
-     * The cheaper pair determines the cost of each gap. This  wrapper puts the
-     * pair with the cheaper one-symbol gap first before calling the core.
+     * The cheaper pair determines the cost of each positive-length gap. Collapse
+     * dominated pairs, then put the cheaper one-symbol gap first for the core.
      * p_is_reversed selects the query strand, and parameters controls the band
      * and output flags. Return the score, endpoints and optional CIGAR.
      */
@@ -948,10 +948,12 @@ public:
         if (parameters.gap_open_short < 0 || parameters.gap_open_long < 0
             || parameters.gap_extend_short <= 0 || parameters.gap_extend_long <= 0)
             return std::unexpected(alignment_contract_error::gap_penalty);
-        const bool short_dominates = parameters.gap_open_short <= parameters.gap_open_long
-            && parameters.gap_extend_short <= parameters.gap_extend_long;
-        const bool long_dominates = parameters.gap_open_long <= parameters.gap_open_short
-            && parameters.gap_extend_long <= parameters.gap_extend_short;
+        const bool short_dominates = affine_gap_dominates(
+            parameters.gap_open_short, parameters.gap_extend_short,
+            parameters.gap_open_long, parameters.gap_extend_long);
+        const bool long_dominates = affine_gap_dominates(
+            parameters.gap_open_long, parameters.gap_extend_long,
+            parameters.gap_open_short, parameters.gap_extend_short);
         if (short_dominates || long_dominates) {
             const ksw_single_affine_parameters single{
                 .gap_open = short_dominates ? parameters.gap_open_short : parameters.gap_open_long,
@@ -961,10 +963,13 @@ public:
             return align_single_affine<p_is_reversed>(query_sequence, target_sequence,
                 query_start, query_end, target_start, target_end, scoring_matrix, single);
         }
-        if (parameters.gap_open_short > parameters.gap_open_long) {
+        if (std::int64_t{parameters.gap_open_short} + parameters.gap_extend_short
+            > std::int64_t{parameters.gap_open_long} + parameters.gap_extend_long) {
             std::swap(parameters.gap_open_short, parameters.gap_open_long);
             std::swap(parameters.gap_extend_short, parameters.gap_extend_long);
         }
+        // Remaining curves cross after length one: first cost is smaller, but its
+        // extension cost is larger. These are the core crossover's preconditions.
         return align_ksw2_core<ksw_aligner_mode::dual_affine, p_is_reversed>(
             query_sequence, target_sequence,
             query_start, query_end, target_start, target_end,

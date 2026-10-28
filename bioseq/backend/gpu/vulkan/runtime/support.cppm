@@ -620,10 +620,14 @@ alignment_extension_push(std::uint32_t job_count,
 [[nodiscard]] alignment_cigar_push_constants
 alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& params) noexcept {
     auto canonical = params;
-    if (canonical.gap_open_short <= canonical.gap_open_long && canonical.gap_extend_short <= canonical.gap_extend_long) {
+    if (bioseq::simd::affine_gap_dominates(
+            canonical.gap_open_short, canonical.gap_extend_short,
+            canonical.gap_open_long, canonical.gap_extend_long)) {
         canonical.gap_open_long = canonical.gap_open_short;
         canonical.gap_extend_long = canonical.gap_extend_short;
-    } else if (canonical.gap_open_long <= canonical.gap_open_short && canonical.gap_extend_long <= canonical.gap_extend_short) {
+    } else if (bioseq::simd::affine_gap_dominates(
+                   canonical.gap_open_long, canonical.gap_extend_long,
+                   canonical.gap_open_short, canonical.gap_extend_short)) {
         canonical.gap_open_short = canonical.gap_open_long;
         canonical.gap_extend_short = canonical.gap_extend_long;
     }

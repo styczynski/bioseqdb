@@ -132,8 +132,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     };
     append_records(queries, query_records);
     append_records(targets, target_records);
-    const std::uint64_t query_bytes = std::max<std::uint64_t>(packed_bytes, sizeof(std::uint32_t));
-    const std::uint64_t target_bytes = std::max<std::uint64_t>(
+    const std::uint64_t packed_sequence_bytes = std::max<std::uint64_t>(packed_bytes, sizeof(std::uint32_t));
+    const std::uint64_t query_record_bytes = std::max<std::uint64_t>(
         query_records.size() * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
     const std::uint64_t target_record_bytes = std::max<std::uint64_t>(
         target_records.size() * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
@@ -142,11 +142,12 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
         sizeof(std::uint32_t));
     const std::uint64_t result_bytes =
         static_cast<std::uint64_t>(jobs.size()) * sizeof(bioseq::prefilter::prefilter_result);
+    constexpr std::uint64_t rank_policy_bytes = sizeof(vulkan_rank_lut);
 
-    for (const auto [label, bytes] : {std::pair{"query ranks", query_bytes},
-                                      std::pair{"query descriptors", target_bytes},
+    for (const auto [label, bytes] : {std::pair{"packed sequences", packed_sequence_bytes},
+                                      std::pair{"query descriptors", query_record_bytes},
                                       std::pair{"target descriptors", target_record_bytes},
-                                      std::pair{"rank policy", sizeof(vulkan_rank_lut)},
+                                      std::pair{"rank policy", rank_policy_bytes},
                                       std::pair{"jobs", job_bytes},
                                       std::pair{"results", result_bytes}}) {
         if (bytes > features_.max_storage_buffer_range) {
@@ -162,9 +163,9 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     std::vector<bioseq::prefilter::prefilter_result> results;
     try {
         ensure_prefilter_workspace_buffer_locked(
-            prefilter_query_buffer_, query_bytes, k_compute_buffer_usage);
+            prefilter_query_buffer_, packed_sequence_bytes, k_compute_buffer_usage);
         ensure_prefilter_workspace_buffer_locked(
-            prefilter_target_buffer_, target_bytes, k_compute_buffer_usage);
+            prefilter_target_buffer_, query_record_bytes, k_compute_buffer_usage);
         ensure_prefilter_workspace_buffer_locked(
             prefilter_jobs_buffer_, job_bytes, k_compute_buffer_usage);
         ensure_prefilter_workspace_buffer_locked(
@@ -172,7 +173,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
         ensure_prefilter_workspace_buffer_locked(
             prefilter_target_records_buffer_, target_record_bytes, k_compute_buffer_usage);
         ensure_prefilter_workspace_buffer_locked(
-            prefilter_rank_lut_buffer_, sizeof(vulkan_rank_lut), k_compute_buffer_usage);
+            prefilter_rank_lut_buffer_, rank_policy_bytes, k_compute_buffer_usage);
         if (prefilter_target_records_buffer_.mapped == nullptr ||
             prefilter_rank_lut_buffer_.mapped == nullptr ||
             prefilter_query_buffer_.mapped == nullptr ||
@@ -185,10 +186,10 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
         }
 
         // Each original packed window is copied directly into the admitted arena.
-        const auto upload_records = [this, query_bytes](auto uploads, const auto& records) {
+        const auto upload_records = [this, packed_sequence_bytes](auto uploads, const auto& records) {
             const std::span<std::byte> destination{
                 static_cast<std::byte*>(prefilter_query_buffer_.mapped),
-                static_cast<std::size_t>(query_bytes)};
+                static_cast<std::size_t>(packed_sequence_bytes)};
             for (std::size_t index = 0u; index < uploads.size(); ++index) {
                 if (!place_packed_sequence_upload(uploads[index],
                         static_cast<std::size_t>(records[index].seq_word_offset * sizeof(std::uint32_t)),

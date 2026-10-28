@@ -97,9 +97,12 @@ struct compact_sequence_range_base {
         static_assert(bits_per_char_unit >= bits_per_char);
         static_assert(sizeof(storage_unit) >= sizeof(letter_unit));
 
-        /** @brief Returns the rank of the alphabet complement. */
+        /** @brief Complements valid ranks, preserving invalid ranks for checked consumers. */
         [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept
             requires requires(alphabet_type symbol) { seqan3::complement(std::move(symbol)); } {
+            if (letter >= alphabet_size) {
+                return letter;
+            }
             return seqan3::complement(std::move((typename traits::alphabet_type()).assign_rank(letter))).to_rank();
         };
 
