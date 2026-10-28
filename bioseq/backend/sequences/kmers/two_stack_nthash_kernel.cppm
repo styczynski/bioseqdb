@@ -13,6 +13,7 @@ import std;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
 import bioseq.highway.sources.minimizer_two_stack_nthash_drivers;
 
@@ -69,65 +70,27 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
     // The selected driver checks that both requested masks match the output
     // record. The caller must choose compatible layouts for the index and query.
     bool is_internally_consistent = false;
-    switch (invocation.output_layout) {
-        case minimizer_output_layout::sequence_log2_15_kmer_15_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<15u, 15u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        case minimizer_output_layout::sequence_log2_28_kmer_15_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<28u, 15u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        case minimizer_output_layout::sequence_log2_33_kmer_15_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<33u, 15u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        // These record types reserve wider hash fields. The driver xtill uses the
-        // requested k-mer and window sizes.
-        case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<20u, 20u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        case minimizer_output_layout::sequence_log2_23_kmer_20_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<23u, 20u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        case minimizer_output_layout::sequence_log2_63_kmer_15_uint128:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<63u, 15u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-        case minimizer_output_layout::sequence_log2_63_kmer_20_uint128:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<63u, 20u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-        case minimizer_output_layout::sequence_log2_49_kmer_7_uint64:
-            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
-                minimizer_representation<49u, 7u>, p_alphabet, p_storage_unit>(
-                    invocation, result);
-            break;
-#endif
-        case minimizer_output_layout::unsupported:
-        default:
-            return reject_output_layout();
-    }
+    bool admitted_record = false;
+    const bool found = ::bioseq::minimizers::visit_minimizer_output_layout(
+        invocation.output_layout,
+        [&invocation, &result, &is_internally_consistent, &admitted_record]<class p_record>() {
+            if constexpr (::bioseq::minimizers::two_stack_simd_minimizer_representation<p_record>) {
+                admitted_record = true;
+                is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
+                    p_record, p_alphabet, p_storage_unit>(invocation, result);
+            }
+        });
+    if (!found || !admitted_record) return reject_output_layout();
     if (!is_internally_consistent && result.status == minimizer_kernel_status::ok) {
         result.status = minimizer_kernel_status::invalid_sequence_view;
     }
     return result;
 }
 
-/** Checks packed input dimensions before running a nucleotide minimizer case. */
+/** Checks packed input dimensions before running a biological minimizer case. */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
-    seqan3::nucleotide_alphabet<p_alphabet>
+    (seqan3::nucleotide_alphabet<p_alphabet> || seqan3::aminoacid_alphabet<p_alphabet>)
     && (std::same_as<p_storage_unit, std::uint8_t>
         || std::same_as<p_storage_unit, std::uint16_t>
         || std::same_as<p_storage_unit, std::uint32_t>

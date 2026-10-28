@@ -17,6 +17,80 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
+/**
+ * Compare native packed windows with trait-derived masks and SIMD population counts.
+ * Reverse readers supply a verified rank-XOR complement mask; forward readers use zero.
+ */
+template<class Traits, bool QueryReversed, class D>
+[[nodiscard]] HWY_INLINE sequence_symbol_equality count_equal_packed_symbols(
+    D descriptor, const typename Traits::storage_unit* query_units,
+    const typename Traits::storage_unit* target_units,
+    std::size_t query_total, std::size_t query_start, std::size_t target_start,
+    std::size_t length, typename Traits::storage_unit complement_mask = 0) {
+    using unit_type = typename Traits::storage_unit;
+    static_assert(std::same_as<hn::TFromD<D>, unit_type>);
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> query_words{};
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> target_words{};
+    constexpr unit_type low_symbol_bits = [] {
+        unit_type mask = 0;
+        for (std::size_t offset = 0; offset < Traits::unit_used_bits; offset += Traits::bits_per_char)
+            mask |= unit_type{1} << offset;
+        return mask;
+    }();
+    sequence_symbol_equality result{};
+    const std::size_t lanes = hn::Lanes(descriptor);
+    const std::size_t word_count = length / Traits::letters_per_unit
+        + static_cast<std::size_t>(length % Traits::letters_per_unit != 0);
+    for (std::size_t first_word = 0; first_word < word_count; first_word += lanes) {
+        const std::size_t active_lanes = std::min(lanes, word_count - first_word);
+        for (std::size_t lane = 0; lane < active_lanes; ++lane) {
+            const std::size_t symbol_offset = (first_word + lane) * Traits::letters_per_unit;
+            const std::size_t symbol_count = std::min(Traits::letters_per_unit, length - symbol_offset);
+            if constexpr (QueryReversed) {
+                const std::size_t source_start = query_total - query_start - symbol_offset - symbol_count;
+                const auto forward = load_packed_symbol_window<Traits>(query_units, source_start, symbol_count);
+                query_words[lane] = (reverse_packed_symbol_groups<Traits>(forward)
+                    >> ((Traits::letters_per_unit - symbol_count) * Traits::bits_per_char))
+                    ^ (complement_mask & packed_symbol_mask<Traits>(symbol_count));
+            } else {
+                query_words[lane] = load_packed_symbol_window<Traits>(query_units,
+                    query_start + symbol_offset, symbol_count);
+            }
+            target_words[lane] = load_packed_symbol_window<Traits>(target_units,
+                target_start + symbol_offset, symbol_count);
+        }
+        const auto active = hn::FirstN(descriptor, active_lanes);
+        const auto query_packed = hn::MaskedLoad(active, descriptor, query_words.data());
+        const auto target_packed = hn::MaskedLoad(active, descriptor, target_words.data());
+        if constexpr (Traits::alphabet_size != (unit_type{1} << Traits::bits_per_char)) {
+            auto invalid = hn::FirstN(descriptor, 0);
+            bioseq::common::templating::for_each_index<Traits::letters_per_unit>(
+                [descriptor, query_packed, target_packed, &invalid]<std::size_t Symbol>(
+                    std::integral_constant<std::size_t, Symbol>) {
+                    const auto rank_mask = hn::Set(descriptor, static_cast<unit_type>(Traits::char_mask));
+                    const auto maximum_rank = hn::Set(descriptor, static_cast<unit_type>(Traits::alphabet_size - 1));
+                    const auto query_rank = hn::And(hn::ShiftRight<Symbol * Traits::bits_per_char>(query_packed), rank_mask);
+                    const auto target_rank = hn::And(hn::ShiftRight<Symbol * Traits::bits_per_char>(target_packed), rank_mask);
+                    invalid = hn::Or(invalid, hn::Or(hn::Gt(query_rank, maximum_rank), hn::Gt(target_rank, maximum_rank)));
+                });
+            if (!hn::AllFalse(descriptor, hn::And(active, invalid))) {
+                result.valid_ranks = false;
+                return result;
+            }
+        }
+        const auto different = hn::Xor(query_packed, target_packed);
+        auto different_symbols = different;
+        bioseq::common::templating::for_each_index<Traits::bits_per_char - 1>([different, &different_symbols]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
+            different_symbols = hn::Or(different_symbols, hn::ShiftRight<Shift + 1>(different));
+        });
+        const auto mismatches = hn::PopulationCount(hn::And(different_symbols, hn::Set(descriptor, low_symbol_bits)));
+        result.equal_symbols += hn::ReduceSum(descriptor, hn::IfThenElseZero(active, mismatches));
+        ++result.vector_batches;
+    }
+    result.equal_symbols = length - result.equal_symbols;
+    return result;
+}
+
 /** Compare one bounded byte chunk entirely within its owning Highway target. */
 template<class D, sequence_rank_validation Validation>
 [[nodiscard]] HWY_INLINE sequence_symbol_equality count_equal_rank_chunk_for(

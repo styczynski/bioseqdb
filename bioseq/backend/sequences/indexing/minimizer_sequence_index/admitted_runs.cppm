@@ -322,24 +322,11 @@ inline void restore_pair_run_sort_override(
     }
 }
 
-/**
- * Convert max_occ to the  threshold used by a direct bucket. A negative value
- * removes the limit. GPU-built buckets add one to a positive threshold.
- */
+/** Normalize the common occurrence limit; a negative value disables the limit. */
 [[nodiscard]] constexpr std::uint32_t effective_max_occ_threshold(
-    std::int32_t max_occ,
-    bool is_gpu_built) noexcept
-{
-    if (max_occ < 0) {
-        return (std::numeric_limits<std::uint32_t>::max)();
-    }
-    const std::uint32_t threshold = static_cast<std::uint32_t>(max_occ);
-    if (!is_gpu_built || threshold == 0u) {
-        return threshold;
-    }
-    const std::uint32_t limit =
-        (std::numeric_limits<std::uint32_t>::max)();
-    return threshold == limit ? limit : threshold + 1u;
+    const std::int32_t max_occ) noexcept {
+    return max_occ < 0 ? (std::numeric_limits<std::uint32_t>::max)()
+                       : static_cast<std::uint32_t>(max_occ);
 }
 
 /** Pack the hash above the position so unsigned 128-bit sorting orders both fields. */

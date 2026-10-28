@@ -65,8 +65,8 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
     if constexpr (!two_stack_simd_minimizer_representation<p_minimizer_type>) {
         return rejected(
             two_stack_continuation_status::unsupported_representation);
-    } else if constexpr (!seqan3::nucleotide_alphabet<
-            typename traits::alphabet_type>) {
+    } else if constexpr (!(seqan3::nucleotide_alphabet<typename traits::alphabet_type>
+            || seqan3::aminoacid_alphabet<typename traits::alphabet_type>)) {
         return rejected(two_stack_continuation_status::unsupported_alphabet);
     } else if constexpr (!std::is_integral_v<storage_unit>
         || !(sizeof(storage_unit) == 1 || sizeof(storage_unit) == 2
@@ -257,7 +257,7 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
     if constexpr (!two_stack_simd_minimizer_representation<p_minimizer_type>) {
         return rejected(
             two_stack_continuation_status::unsupported_representation);
-    } else if constexpr (!seqan3::nucleotide_alphabet<p_alphabet>) {
+    } else if constexpr (!(seqan3::nucleotide_alphabet<p_alphabet> || seqan3::aminoacid_alphabet<p_alphabet>)) {
         return rejected(two_stack_continuation_status::unsupported_alphabet);
     } else {
         const bioseq::storage::sequence_size_t total_bp_64 =
@@ -616,20 +616,20 @@ template<class p_minimizer_type,
 }
 
 /**
- * @brief Runs the resident DNA4 stream kernel over 32-bit packed units.
+ * @brief Runs the resident stream kernel directly over native packed units.
  *
  * Converts exact_simd_runtime_error to result status, flushes the collector,
  * and records the number of committed minimizers.
  * @return Whether the packed descriptor is valid. Check result.status for
  * kenel or collector failure.
  */
-template<class p_minimizer_type>
+template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] bool run_resident_vector_stream(
     minimizer_kernel_invocation& invocation,
     minimizer_kernel_result& result)
 {
     return ::bioseq::minimizers::kernel_detail::
-        with_borrowed_compact_range<seq::dna4, std::uint32_t>(
+        with_borrowed_compact_range<p_alphabet, p_storage_unit>(
             invocation.sequence,
             // Runs the resident stream against the borrowed compact range.
             [&invocation, &result]<class p_range>(p_range& range) {
@@ -666,8 +666,8 @@ template<class p_minimizer_type>
  * @brief Checks the output record and dispatches the requested two-stack route
  *
  * The hash and,  position masks must match p_minimizer_type. The resident
- * stream route requires whole-sequence DNA4 in 32-bit units, K15/W10, and
- * zero output offset. The continuation route also accepts scanner fragments.
+ * stream route requires whole resident input and zero output offset. Its
+ * exact-rank capacity is checked by the shared resident dispatcher.
  * @return Whether dispatch reached a compatible implementation. The run
  * status is stored in result.
  */
@@ -698,27 +698,18 @@ template<class p_minimizer_type,
                 : run<p_minimizer_type, p_alphabet, p_storage_unit>(
                     invocation, result);
         case two_stack_route::resident_vector_stream:
-            if constexpr (
-                !exact_simd_minimizer_representation<p_minimizer_type>
-                || !std::same_as<p_alphabet, seq::dna4>
-                || !std::same_as<p_storage_unit, std::uint32_t>) {
+            if (invocation.emitted_position_base != 0u
+                || invocation.sequence.begin_symbol != 0u
+                || invocation.fragments.is_present()
+                || (invocation.sequence.end_symbol != 0u
+                    && invocation.sequence.end_symbol - 1u > p_minimizer_type::k_position_field_mask)) {
                 result.family_status = static_cast<std::uint32_t>(
                     two_stack_continuation_status::invalid_static_configuration);
                 result.status = minimizer_kernel_status::invalid_configuration;
                 return false;
-            } else {
-                if (invocation.window != 10u
-                    || invocation.kmer != 15u
-                    || invocation.emitted_position_base != 0u
-                    || invocation.fragments.is_present()) {
-                    result.family_status = static_cast<std::uint32_t>(
-                        two_stack_continuation_status::invalid_static_configuration);
-                    result.status = minimizer_kernel_status::invalid_configuration;
-                    return false;
-                }
-                return run_resident_vector_stream<p_minimizer_type>(
-                    invocation, result);
             }
+            return run_resident_vector_stream<p_minimizer_type, p_alphabet, p_storage_unit>(
+                invocation, result);
     }
     return false;
 }

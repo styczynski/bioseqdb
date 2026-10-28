@@ -4,6 +4,8 @@
  */
 module;
 
+#include <expected>
+
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -361,17 +363,17 @@ struct alignment_kernels final {
     using matrix_type = scoring_matrix<p_alphabet>;
 
     /** KSW2 function with one  affine gap-cost model */
-    using align_ksw2_single_affine_kernel = ksw_alignment_result (*)(
+    using align_ksw2_single_affine_kernel = std::expected<ksw_alignment_result, alignment_contract_error> (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const matrix_type&, const ksw_single_affine_parameters&);
     /** KSW2 function with two affine gap-cost models. */
-    using align_ksw2_dual_affine_kernel = ksw_alignment_result (*)(
+    using align_ksw2_dual_affine_kernel = std::expected<ksw_alignment_result, alignment_contract_error> (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const matrix_type&, ksw_dual_affine_parameters);
     /** KSW2 function that aligns fills collected from several regions. */
-    using align_ksw2_batched_kernel = void (*)(
+    using align_ksw2_batched_kernel = std::expected<void, alignment_contract_error> (*)(
         std::span<alignment_region>,
         std::span<const bioseq::chaining::anchor>,
         view_type, view_type, const matrix_type&, const minimap2_parameters&,
@@ -386,7 +388,7 @@ struct alignment_kernels final {
         std::size_t, std::size_t, std::size_t, std::size_t,
         const block_global_gap_certificate_plan&) noexcept;
     /** Runs Block Aligner on a pair of sequence ranges. */
-    using align_block_kernel = ksw_alignment_result (*)(
+    using align_block_kernel = std::expected<ksw_alignment_result, alignment_contract_error> (*)(
         bool, bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const matrix_type&, const block_aligner_parameters&,

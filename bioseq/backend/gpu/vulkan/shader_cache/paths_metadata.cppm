@@ -7,6 +7,9 @@ module;
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+// Anchor libc++ allocation declarations before Clang 22 imports both std and
+// the textual-header-backed alignment/SeqAn module closure.
+#include <new>
 #if defined(__APPLE__)
 #include <dlfcn.h>
 #endif

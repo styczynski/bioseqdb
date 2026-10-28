@@ -97,7 +97,7 @@ enum class gpu_index_representation : std::uint8_t {
 
 /// Version of the sorted descriptor-array layout shared with the GPU.
 inline constexpr std::uint32_t
-    k_minimizer_sorted_dense_gpu_abi_revision = 1u;
+    k_minimizer_sorted_dense_gpu_abi_revision = 2u;
 
 /// Return the stable diagnostic name for a device representation.
 [[nodiscard]] inline constexpr std::string_view gpu_index_representation_name(
@@ -260,6 +260,9 @@ struct gpu_minimizer_index_cache_key {
     // so separate operations cannot reuse each other's resident buffers.
     std::uint64_t operation_identity = 0;
     std::uint32_t alphabet_size = 0;
+    std::uint32_t alphabet_code = 0;
+    std::uint32_t seed_policy_id = 0;
+    std::uint32_t packed_storage_bits = 32u;
     std::uint32_t kmer_size = 0;
     std::uint32_t window_size = 0;
     std::uint32_t minimizer_size = 0;
@@ -288,6 +291,9 @@ struct gpu_minimizer_index_cache_key {
             || position_count != other.position_count
             || operation_identity != other.operation_identity
             || alphabet_size != other.alphabet_size
+            || alphabet_code != other.alphabet_code
+            || seed_policy_id != other.seed_policy_id
+            || packed_storage_bits != other.packed_storage_bits
             || kmer_size != other.kmer_size
             || window_size != other.window_size
             || minimizer_size != other.minimizer_size
@@ -351,6 +357,9 @@ struct gpu_minimizer_index_cache_key_hash {
         h ^= splitmix64(k.position_count + (h << 1));
         h ^= splitmix64(k.operation_identity + (h << 1));
         h ^= splitmix64(k.alphabet_size + (h << 1));
+        h ^= splitmix64(k.alphabet_code + (h << 1));
+        h ^= splitmix64(k.seed_policy_id + (h << 1));
+        h ^= splitmix64(k.packed_storage_bits + (h << 1));
         h ^= splitmix64(k.kmer_size + (h << 1));
         h ^= splitmix64(k.window_size + (h << 1));
         h ^= splitmix64(k.minimizer_size + (h << 1));
@@ -415,6 +424,9 @@ struct gpu_index_cache_identity {
     std::uint64_t position_count = 0;
     std::uint64_t operation_identity = 0;
     std::uint32_t alphabet_size = 0;
+    std::uint32_t alphabet_code = 0;
+    std::uint32_t seed_policy_id = 0;
+    std::uint32_t packed_storage_bits = 32u;
     std::uint32_t kmer_size = 0;
     std::uint32_t window_size = 0;
     std::uint32_t minimizer_size = 0;
@@ -444,6 +456,9 @@ struct gpu_index_cache_identity {
     const auto bind_gate = [identity](gpu_minimizer_index_cache_key key) noexcept {
         key.operation_identity = identity.operation_identity;
         key.alphabet_size = identity.alphabet_size;
+        key.alphabet_code = identity.alphabet_code;
+        key.seed_policy_id = identity.seed_policy_id;
+        key.packed_storage_bits = identity.packed_storage_bits;
         key.kmer_size = identity.kmer_size;
         key.window_size = identity.window_size;
         key.minimizer_size = identity.minimizer_size;

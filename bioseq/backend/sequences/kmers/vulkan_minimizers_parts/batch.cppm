@@ -373,7 +373,8 @@ make_minimap_sketch_data_vulkan_upload_batch_admission_plan(
         throw vulkan_runtime_error{
             "Vulkan batch sketch has invalid host materialization mode"};
     }
-    if (kmer_size == 0u || kmer_size > 32u
+    if (kmer_size == 0u || kmer_size > 31u
+        || minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u
         || !vulkan_minimizer_window_size_supported(window_size)) {
         return std::nullopt;
     }

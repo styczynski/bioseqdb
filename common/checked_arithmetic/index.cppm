@@ -4,6 +4,7 @@
  */
 module;
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <limits>
@@ -26,6 +27,21 @@ enum class checked_arithmetic_error : std::uint8_t {
     invalid_alignment,
     truncated,
 };
+
+/** Return a low-bit mask, including a full-width mask, or no value for excess width. */
+template<class p_integer>
+    requires(std::is_unsigned_v<p_integer>)
+[[nodiscard]] constexpr std::optional<p_integer> checked_low_bits_mask(
+    const std::size_t bit_count) noexcept {
+    constexpr std::size_t digits = std::numeric_limits<p_integer>::digits;
+    if (bit_count > digits) {
+        return std::nullopt;
+    }
+    if (bit_count == digits) {
+        return (std::numeric_limits<p_integer>::max)();
+    }
+    return static_cast<p_integer>((p_integer{1u} << bit_count) - p_integer{1u});
+}
 
 /** Add unsigned integers, returning no value if the sum would overflow. */
 template <class p_left_type, class p_right_type>

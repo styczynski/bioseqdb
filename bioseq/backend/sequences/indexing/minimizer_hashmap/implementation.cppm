@@ -360,8 +360,7 @@ struct kernel_sink_adapter {
         auto& self = *static_cast<kernel_sink_adapter*>(opaque);
         if (!self.accepted || self.acquired
             || self.append_raw == nullptr
-            || layout != bioseq::minimizers::minimizer_output_layout::
-                sequence_log2_28_kmer_15_uint64
+            || layout != output_layout
             || (count != 0u && values == nullptr)) {
             self.accepted = false;
             return false;

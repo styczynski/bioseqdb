@@ -267,12 +267,12 @@ public:
             || key.operation_identity == 0u
             || key.source_id != 0u
             || key.caller_identity != key.operation_identity
-            || (key.alphabet_size != 4u && key.alphabet_size != 5u)
-            || key.kmer_size != 15u || key.window_size != 10u
-            || key.minimizer_size != 8u
-            || key.minimizer_alignment != 8u
-            || key.minimizer_hash_bits != 30u
-            || key.minimizer_position_bits != 33u
+            || !gpu_source_direct_tuple_supported(
+                key.alphabet_size, key.alphabet_code, key.kmer_size, key.window_size,
+                key.minimizer_size, key.minimizer_alignment,
+                key.minimizer_hash_bits, key.minimizer_position_bits)
+            || key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id
+            || key.packed_storage_bits != 32u
             || !device_uuid_bound
             || key.device_uuid != runtime.features().device_uuid
             || key.representation != gpu_index_representation::source_direct_sorted_dense
@@ -367,8 +367,10 @@ public:
             key.device_uuid.begin(), key.device_uuid.end(),
             [](std::uint8_t byte) noexcept { return byte != 0u; });
         if (!gpu_source_direct_tuple_supported<p_minimizer>(
-                key.alphabet_size, key.kmer_size, key.window_size) ||
+                key.alphabet_size, key.alphabet_code, key.kmer_size, key.window_size) ||
             !key.source_direct_sorted_dense ||
+            key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id ||
+            key.packed_storage_bits != 32u ||
             key.operation_identity == 0u || key.source_id != 0u ||
             key.caller_identity != key.operation_identity ||
             key.minimizer_size != sizeof(p_minimizer) ||

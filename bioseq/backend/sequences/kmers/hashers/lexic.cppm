@@ -7,6 +7,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <utility>
 
@@ -34,39 +35,48 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
 
         /**
          * @brief Initializes the rolling state for the requested k-mer length.
-         * @param[in] kmer_length Positive symbol count, clamped to the scalar word capacity.
+         * @param[in] kmer_length Positive symbol count within the scalar word capacity.
          * @pre `kmer_length > 0`.
          */
         explicit scalar_hash(std::size_t kmer_length)
-            : mask_(traits::template kmer_mask<p_input_type>(
-                  std::min(kmer_length, traits::k_max_kmer_length))),
+            : mask_(traits::exact_kmer_mask(kmer_length)),
               reverse_shift_(traits::bits_per_char *
-                             (std::min(kmer_length, traits::k_max_kmer_length) - 1u)),
-              forward_state_(0), reverse_complement_state_(0) {}
+                             (kmer_length - 1u)),
+              forward_state_(0), reverse_complement_state_{} {}
 
         /**
          * @brief Updates both strand codes and returns the smaller code with its strand.
          * @param incoming Rank appended to the forward code.
-         * @param outgoing Rank whose complement is prepended to the reverse code.
          * Equal codes return sequence_strand_mode::equal.
          */
-        constexpr typename traits::hasher_return_type next(typename traits::input_type incoming,
-                                                           typename traits::input_type outgoing) {
+        constexpr typename traits::hasher_return_type next(typename traits::input_type incoming) {
             forward_state_ = (forward_state_ << traits::bits_per_char | incoming) & mask_;
-            // Convert  to the full word type before shifting. A DNA5 k-mer can
-            // need a shift larger than the promoted int type permits.
-            reverse_complement_state_ =
-                (reverse_complement_state_ >> traits::bits_per_char) |
-                (static_cast<p_input_type>(traits::letter_complement(outgoing)) << reverse_shift_);
-            return traits::select_min_hash_strand(std::move(forward_state_),
-                                                  std::move(reverse_complement_state_));
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] =
+                    (reverse_complement_state_[0] >> traits::bits_per_char) |
+                    (static_cast<p_input_type>(traits::letter_complement(incoming))
+                        << reverse_shift_);
+                return traits::select_min_hash_strand(
+                    std::move(forward_state_), std::move(reverse_complement_state_[0]));
+            } else {
+                return {forward_state_, sequence_strand_mode::forward};
+            }
+        }
+
+        /** Restart exact k-mer construction after an unseedable rank. */
+        constexpr void reset() noexcept {
+            forward_state_ = 0u;
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] = 0u;
+            }
         }
 
       private:
         p_input_type mask_;
         std::size_t reverse_shift_;
         p_input_type forward_state_;
-        p_input_type reverse_complement_state_;
+        [[no_unique_address]] std::array<p_input_type,
+            traits::canonical_reverse_complement ? 1u : 0u> reverse_complement_state_;
     };
 
     /**

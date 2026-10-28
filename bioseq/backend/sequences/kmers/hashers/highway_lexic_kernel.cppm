@@ -36,11 +36,13 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
       private:
         typename traits::input_vector_type mask_;
         typename traits::input_vector_type forward_state_;
-        typename traits::input_vector_type reverse_complement_state_;
+        [[no_unique_address]] std::array<typename traits::input_vector_type,
+            traits::canonical_reverse_complement ? 1u : 0u> reverse_complement_state_;
         std::size_t reverse_shift_;
 
         /** @brief Maps alphabet ranks to their complement ranks. */
-        static constexpr auto make_complement_lut() {
+        static constexpr auto make_complement_lut()
+            requires traits::canonical_reverse_complement {
             std::array<p_input_type, traits::alphabet_size> lut{};
             for (std::size_t rank = 0; rank < traits::alphabet_size; ++rank) {
                 lut[rank] = static_cast<p_input_type>(
@@ -50,14 +52,22 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
         }
 
         /** @brief Compile-time rank-to-complement mapping for the selected alphabet. */
-        static constexpr std::array<p_input_type, traits::alphabet_size> k_complement_lut =
-            make_complement_lut();
+        static constexpr auto k_complement_lut = []() constexpr {
+            if constexpr (traits::canonical_reverse_complement) {
+                return make_complement_lut();
+            } else {
+                return std::array<p_input_type, 0u>{};
+            }
+        }();
 
         /**
          * @brief Checks whether every complement can be computed with one XOR.
          * Alphabets that fail this check use the rank lookup table.
          */
         static constexpr bool k_is_xor_complement = []() constexpr {
+            if constexpr (!traits::canonical_reverse_complement) {
+                return false;
+            } else {
             using storage_unit = typename traits::storage_unit;
             constexpr storage_unit k_xor_mask =
                 static_cast<storage_unit>(traits::alphabet_size - 1);
@@ -69,8 +79,10 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
                     return false;
             }
             return true;
+            }
         }();
 
+      public:
         /** @brief Finds the complement rank in each lane using XOR or the lookup table. */
         [[always_inline]] static constexpr typename traits::input_vector_type
         apply_complement(const typename traits::input_simd_tag_type& simd_tag,
@@ -95,50 +107,72 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
       public:
         /**
          * @brief Starts empty, rolling k-mers with the requested lengtn.
-         * The length is capped at the lane capacity
+         * The complete rank bits must fit in each lane.
          * @pre kmer_length is positive.
          */
         explicit simd_hash(const typename traits::input_simd_tag_type& simd_tag,
                            std::size_t kmer_length)
             : mask_(hn::Set(simd_tag,
-                            traits::template kmer_mask<p_input_type>(
-                                std::min(kmer_length, traits::k_max_kmer_length)))),
-              forward_state_(hn::Zero(simd_tag)), reverse_complement_state_(hn::Zero(simd_tag)),
+                            traits::exact_kmer_mask(kmer_length))),
+              forward_state_(hn::Zero(simd_tag)), reverse_complement_state_{},
               reverse_shift_(traits::bits_per_char *
-                             (std::min(kmer_length, traits::k_max_kmer_length) - 1u)) {}
+                             (kmer_length - 1u)) {
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] = hn::Zero(simd_tag);
+            }
+        }
 
         /**
          * @brief Updates both strand codes and returns the smaller code in each lane.
          * @param incoming Rank appended to  the forward code.
-         * @param outgoing Rank whose complement is prepended to the reverse code.
          */
         HWY_INLINE typename traits::hasher_return_type
         next(const typename traits::input_simd_tag_type& simd_tag,
-             typename traits::input_vector_type incoming,
-             typename traits::input_vector_type outgoing) {
+             typename traits::input_vector_type incoming) {
             forward_state_ = hn::And(
                 hn::Or(hn::ShiftLeft<traits::bits_per_char>(forward_state_), incoming), mask_);
-            const typename traits::input_vector_type complement =
-                hn::ShiftLeftSame(apply_complement(simd_tag, outgoing), reverse_shift_);
-            reverse_complement_state_ = hn::Or(
-                hn::ShiftRight<traits::bits_per_char>(reverse_complement_state_), complement);
-            return hn::Min(forward_state_, reverse_complement_state_);
+            if constexpr (traits::canonical_reverse_complement) {
+                const typename traits::input_vector_type complement =
+                    hn::ShiftLeftSame(apply_complement(simd_tag, incoming), reverse_shift_);
+                reverse_complement_state_[0] = hn::Or(
+                    hn::ShiftRight<traits::bits_per_char>(reverse_complement_state_[0]), complement);
+                return hn::Min(forward_state_, reverse_complement_state_[0]);
+            } else {
+                return forward_state_;
+            }
+        }
+
+        /** Restart selected lanes after an unseedable source rank. */
+        HWY_INLINE void reset(const p_simd_tag& simd_tag, hn::Mask<p_simd_tag> invalid) {
+            forward_state_ = hn::IfThenElse(invalid, hn::Zero(simd_tag), forward_state_);
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] = hn::IfThenElse(invalid,
+                    hn::Zero(simd_tag), reverse_complement_state_[0]);
+            }
         }
 
         /**
          * @brief Marks lanes with equal forward and reverse-complement codes.
          * Minimizer selection uses this mask to exclude palindromic k-mers.
          */
-        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> palindrome_mask(const p_simd_tag&) const {
-            return hn::Eq(forward_state_, reverse_complement_state_);
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> palindrome_mask(const p_simd_tag& simd_tag) const {
+            if constexpr (traits::canonical_reverse_complement) {
+                return hn::Eq(forward_state_, reverse_complement_state_[0]);
+            } else {
+                return hn::MaskFalse(simd_tag);
+            }
         }
 
         /**
          * @brief Marks lanes where the reverse-complement code is smaller.
          * Equal codes return false and can be checked with palindrome_mask().
          */
-        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> reverse_strand_mask(const p_simd_tag&) const {
-            return hn::Lt(reverse_complement_state_, forward_state_);
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> reverse_strand_mask(const p_simd_tag& simd_tag) const {
+            if constexpr (traits::canonical_reverse_complement) {
+                return hn::Lt(reverse_complement_state_[0], forward_state_);
+            } else {
+                return hn::MaskFalse(simd_tag);
+            }
         }
     };
 };

@@ -18,7 +18,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.pipeline.runtime_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.minimizer_layout_geometry;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.scanner;

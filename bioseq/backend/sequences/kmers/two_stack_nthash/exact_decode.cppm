@@ -213,7 +213,8 @@ decode_packed_nt4_rank_vector(
     using alphabet_type = typename p_alphabet_traits::alphabet_type;
     using storage_unit = typename p_alphabet_traits::storage_unit;
     using unsigned_storage = std::make_unsigned_t<storage_unit>;
-    static_assert(seqan3::nucleotide_alphabet<alphabet_type>);
+    static_assert(seqan3::nucleotide_alphabet<alphabet_type>
+        || seqan3::aminoacid_alphabet<alphabet_type>);
     static_assert(std::is_integral_v<storage_unit>);
     static_assert(sizeof(storage_unit) == 1 || sizeof(storage_unit) == 2
         || sizeof(storage_unit) == 4 || sizeof(storage_unit) == 8);
@@ -241,23 +242,11 @@ decode_packed_nt4_rank_vector(
             hn::LoadU(d, source_words.data()),
             hn::LoadU(d, source_shifts.data())),
         hn::Set(d, (std::uint64_t{1} << bits_per_char) - 1));
-    auto nt4_codes = hn::Set(
-        d, static_cast<std::uint64_t>(k_nt4_sentinel));
-    for (std::size_t rank = 0;
-         rank < seqan3::alphabet_size<alphabet_type>;
-         ++rank) {
-        nt4_codes = hn::IfThenElse(
-            hn::Eq(ranks, hn::Set(d, static_cast<std::uint64_t>(rank))),
-            hn::Set(d, static_cast<std::uint64_t>(
-                k_nt4_lut<alphabet_type>[rank])),
-            nt4_codes);
-    }
+    const auto nt4_codes = exact_hash_rank<alphabet_type>(d, ranks);
+    constexpr std::uint64_t rank_limit = exact_rank_limit<alphabet_type>;
     const auto active = hn::FirstN(d, rank_count);
-    const auto ambiguous = hn::And(
-        active,
-        hn::Ge(
-            nt4_codes,
-            hn::Set(d, static_cast<std::uint64_t>(k_nt4_sentinel))));
+    const auto ambiguous = hn::And(active,
+        hn::Ge(nt4_codes, hn::Set(d, rank_limit)));
 
     const hn::Rebind<std::uint32_t, p_simd_tag> d_u32;
     const hn::Rebind<std::uint16_t, p_simd_tag> d_u16;

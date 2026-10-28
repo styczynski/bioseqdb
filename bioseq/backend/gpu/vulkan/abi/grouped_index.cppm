@@ -20,8 +20,8 @@ export namespace bioseq::gpu::vulkan {
 // segment-local coordinate and strand as `(bp << 1) | strand`. Loading adjusts
 // array offsets for the combined GPU buffers while preserving the stored bytes.
 /** @brief Version of the, grouped-SoA layout kept in GPU memory. */
-inline constexpr std::uint32_t k_gpu_grouped_soa_abi_revision = 3u;
-/** @brief Version of the seed-shader parameters. Saved grouped indexes use revision 3. */
+inline constexpr std::uint32_t k_gpu_grouped_soa_abi_revision = 4u;
+/** @brief Version of the seed-shader parameters, independent of the saved-index ABI. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_seed_push_abi_revision = 6u;
 /** @brief Version of the Format-5 control-then-position stream layout. */
 inline constexpr std::uint32_t k_gpu_shape_v5_stream_abi_revision = 3u;

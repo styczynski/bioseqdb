@@ -4,6 +4,10 @@
  */
 module;
 
+// Keep libc++ allocation declarations canonical before Clang 22 imports
+// std together with the textual-header-backed alignment/SeqAn closure.
+#include <new>
+
 #include <spirv_cross/spirv_msl.hpp>
 
 export module bioseq.gpu.vulkan.shader_cache:compiler;

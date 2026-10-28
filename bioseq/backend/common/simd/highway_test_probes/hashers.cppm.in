@@ -86,7 +86,7 @@ template<
     std::size_t position = 0U;
     for (const auto rank : sequence.template iterable<logical_rank>()) {
         const auto [hash, strand] = scalar_hasher.next(
-            static_cast<p_input>(rank), static_cast<p_input>(rank));
+            static_cast<p_input>(rank));
         (void)strand;
         if (position >= k_kmer_length) {
             scalar_results.emplace_back(position, hash);
@@ -102,11 +102,9 @@ template<
             const auto& offsets,
             auto& callback_simd_tag,
             auto& mask,
-            auto&& incoming,
-            auto,
-            auto outgoing) -> void {
+            auto&& incoming) -> void {
             const auto hash = simd_hasher.next(
-                callback_simd_tag, incoming, outgoing);
+                callback_simd_tag, incoming);
             if (position >= k_kmer_length) {
                 std::array<p_input, k_maximum_lanes> values{};
                 std::array<p_input, k_maximum_lanes> masks{};
@@ -125,7 +123,7 @@ template<
             }
             ++position;
         },
-        [](const auto&, auto&, auto&) -> void {}, 0U);
+        [](const auto&, auto&, auto&) -> void {});
 
     return std::set(scalar_results.begin(), scalar_results.end())
         == std::set(simd_results.begin(), simd_results.end());

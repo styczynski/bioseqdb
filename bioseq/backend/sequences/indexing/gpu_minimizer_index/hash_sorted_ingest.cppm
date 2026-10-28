@@ -69,6 +69,7 @@ make_gpu_source_direct_sorted_dense_identity(
     std::uint64_t minimizer_count,
     std::uint64_t distinct_count,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) noexcept
 {
@@ -79,6 +80,9 @@ make_gpu_source_direct_sorted_dense_identity(
         .position_count = minimizer_count,
         .operation_identity = operation_identity,
         .alphabet_size = alphabet_size,
+        .alphabet_code = alphabet_code,
+        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
+        .packed_storage_bits = 32u,
         .kmer_size = kmer_size,
         .window_size = window_size,
         .minimizer_size = sizeof(p_minimizer),
@@ -101,6 +105,7 @@ make_gpu_source_direct_sorted_dense_identity(
 /// cache identity does not carry the alphabet  code or packed sequence width.
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::int64_t kmer_size,
     std::int64_t window_size,
     std::size_t minimizer_size,
@@ -119,7 +124,8 @@ make_gpu_source_direct_sorted_dense_identity(
         return false;
     }
 
-    const auto representation_matches = [&](
+    const auto representation_matches = [minimizer_size, minimizer_alignment,
+                                         minimizer_hash_bits, minimizer_position_bits](
         const bioseq::minimizers::minimizer_physical_record_descriptor& candidate) {
         const std::size_t expected_alignment =
             std::min<std::size_t>(candidate.record_bytes, alignof(std::uint64_t));
@@ -132,29 +138,15 @@ make_gpu_source_direct_sorted_dense_identity(
 
     const auto runtime_kmer_size = static_cast<std::uint16_t>(kmer_size);
     const auto runtime_window_size = static_cast<std::uint16_t>(window_size);
-    for (const auto& candidate :
-         bioseq::minimizers::registered_minimizer_runtime_profiles()) {
-        const auto* selected = bioseq::minimizers::find_minimizer_runtime_profile(
-            bioseq::simd::minimizer_algorithm::vulkan_minimap_integer,
-            candidate.alphabet_id,
-            runtime_kmer_size,
-            runtime_window_size,
-            static_cast<std::uint8_t>(minimizer_position_bits),
-            candidate.packed_storage_bits);
-        if (selected == nullptr ||
-            selected->effective_algorithm !=
-                bioseq::simd::minimizer_algorithm::vulkan_minimap_integer) {
-            continue;
-        }
-        // Records with the same size can belong to different K/W profiles.
-        // Compare the record selected for this profile.
-        const auto* physical_record =
-            bioseq::minimizers::find_minimizer_physical_record(selected->record_id);
-        if (physical_record != nullptr && representation_matches(*physical_record)) {
-            return true;
-        }
-    }
-    return false;
+    const auto* selected = bioseq::minimizers::find_minimizer_runtime_profile(
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer,
+        alphabet_code, runtime_kmer_size, runtime_window_size,
+        static_cast<std::uint8_t>(minimizer_position_bits), 32u);
+    if (selected == nullptr || selected->effective_algorithm !=
+            bioseq::simd::minimizer_algorithm::vulkan_minimap_integer) return false;
+    const auto* physical_record =
+        bioseq::minimizers::find_minimizer_physical_record(selected->record_id);
+    return physical_record != nullptr && representation_matches(*physical_record);
 }
 
 /// Check profile support using the packed minimizer type's size and bit widths.
@@ -162,12 +154,14 @@ make_gpu_source_direct_sorted_dense_identity(
 template <class p_minimizer>
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::int64_t kmer_size,
     std::int64_t window_size) noexcept
 {
     using layout = typename p_minimizer::layout_type;
     return gpu_source_direct_tuple_supported(
         alphabet_size,
+        alphabet_code,
         kmer_size,
         window_size,
         sizeof(p_minimizer),
@@ -190,10 +184,13 @@ template <class p_minimizer>
         && identity.table_size <= identity.position_count;
     return identity.source_direct_sorted_dense
         && identity.operation_identity != 0u
+        && identity.seed_policy_id == bioseq::minimizers::k_bounded_nthash_scheme_id
+        && identity.packed_storage_bits == 32u
         && (empty != nonempty)
         && identity.canonical_empty == empty
         && gpu_source_direct_tuple_supported(
             identity.alphabet_size,
+            identity.alphabet_code,
             identity.kmer_size,
             identity.window_size,
             identity.minimizer_size,
@@ -750,13 +747,10 @@ materialize_sorted_dense_from_presorted_minimizers(
     bioseq::parallelism::memory_permit& resident_permit)
 {
     using layout = typename p_minimizer::layout_type;
-    if constexpr (sizeof(p_minimizer) != 8u
-        || alignof(p_minimizer) != 8u
-        || !std::is_standard_layout_v<p_minimizer>
+    if constexpr (!std::is_standard_layout_v<p_minimizer>
         || !std::is_trivially_copyable_v<p_minimizer>
-        || layout::k_storage_bits != 64u
-        || layout::k_hash_bits != 30u
-        || layout::k_position_bits != 33u) {
+        || layout::k_hash_bits < 32u || layout::k_hash_bits > 64u
+        || layout::k_position_bits == 0u || layout::k_position_bits > 63u) {
         return std::unexpected{gpu_source_direct_materialization_failure{
             .error = gpu_source_direct_materialization_error::
                 representation_ineligible}};
@@ -781,8 +775,10 @@ materialize_sorted_dense_from_presorted_minimizers(
         || key.operation_identity == 0u
         || key.source_id != 0u
         || key.caller_identity != key.operation_identity
-        || (key.alphabet_size != 4u && key.alphabet_size != 5u)
-        || key.kmer_size != 15u || key.window_size != 10u
+        || !gpu_source_direct_tuple_supported<p_minimizer>(
+            key.alphabet_size, key.alphabet_code, key.kmer_size, key.window_size)
+        || key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id
+        || key.packed_storage_bits != 32u
         || key.minimizer_size != sizeof(p_minimizer)
         || key.minimizer_alignment != alignof(p_minimizer)
         || key.minimizer_hash_bits != layout::k_hash_bits
@@ -1062,6 +1058,7 @@ make_gpu_mapped_fragment_sorted_dense_key(
     std::uint64_t distinct_count,
     std::uint64_t position_count,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) noexcept {
     using layout = typename p_minimizer::layout_type;
@@ -1073,6 +1070,9 @@ make_gpu_mapped_fragment_sorted_dense_key(
         .position_count = position_count,
         .operation_identity = operation_identity,
         .alphabet_size = alphabet_size,
+        .alphabet_code = alphabet_code,
+        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
+        .packed_storage_bits = 32u,
         .kmer_size = kmer_size,
         .window_size = window_size,
         .minimizer_size = sizeof(p_minimizer),
@@ -1096,6 +1096,7 @@ make_gpu_runtime_built_sorted_dense_key(
     std::uint64_t distinct_count,
     std::uint64_t position_count,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) noexcept {
     return make_gpu_mapped_fragment_sorted_dense_key<p_minimizer>(runtime,
@@ -1104,6 +1105,7 @@ make_gpu_runtime_built_sorted_dense_key(
                                                                   distinct_count,
                                                                   position_count,
                                                                   alphabet_size,
+        alphabet_code,
                                                                   kmer_size,
                                                                   window_size);
 }
@@ -1237,14 +1239,13 @@ materialize_sorted_dense_from_segmented_spill_replay(
     bioseq::storage::sequence_size_t target_len,
     std::uint64_t operation_identity,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) {
     using layout = typename p_minimizer::layout_type;
     static_assert(std::is_unsigned_v<p_hash>);
     constexpr std::uint32_t selected_hash_bits =
-        layout::k_storage_bits == 128u
-            ? std::min<std::uint32_t>(layout::k_hash_bits, 56u)
-            : layout::k_hash_bits;
+        layout::k_hash_bits;
     constexpr std::uint64_t selected_hash_mask = []() noexcept {
         if constexpr (selected_hash_bits == 64u) {
             return (std::numeric_limits<std::uint64_t>::max)();
@@ -1274,7 +1275,7 @@ materialize_sorted_dense_from_segmented_spill_replay(
         replay.completed_scan_count() != 0u || replay.failed_scan_count() != 0u ||
         replay.illegal_span_transition_count() != 0u ||
         !gpu_source_direct_tuple_supported<p_minimizer>(
-            alphabet_size, kmer_size, window_size)) {
+            alphabet_size, alphabet_code, kmer_size, window_size)) {
         return std::unexpected{gpu_source_direct_materialization_failure{
             .error = gpu_source_direct_materialization_error::invalid_shape}};
     }
@@ -1584,6 +1585,7 @@ materialize_sorted_dense_from_segmented_spill_replay(
         distinct_count,
         expected_event_count,
         alphabet_size,
+        alphabet_code,
         kmer_size,
         window_size);
     resident->gate_identity = gpu_index_gate_identity_from_key(resident->key);
@@ -2009,6 +2011,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
     bioseq::storage::sequence_size_t target_len,
     std::uint64_t operation_identity,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) {
     using layout = typename p_minimizer::layout_type;
@@ -2016,9 +2019,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
     const std::uint64_t position_count = reader.fragment_source_position_count();
     const std::uint32_t source_hash_bits = reader.fragment_source_hash_bits();
     constexpr std::uint32_t selected_hash_bits =
-        layout::k_storage_bits == 128u
-            ? std::min<std::uint32_t>(layout::k_hash_bits, 56u)
-            : layout::k_hash_bits;
+        layout::k_hash_bits;
     const bool device_uuid_bound = std::any_of(
         runtime.features().device_uuid.begin(),
         runtime.features().device_uuid.end(),
@@ -2037,8 +2038,8 @@ materialize_sorted_dense_from_mapped_fragment_reader(
         position_count == 0u || control_upper_bound > position_count ||
         source_hash_bits == 0u || source_hash_bits > selected_hash_bits ||
         !gpu_source_direct_tuple_supported<p_minimizer>(
-            alphabet_size, kmer_size, window_size) ||
-        source_hash_bits != 2u * kmer_size ||
+            alphabet_size, alphabet_code, kmer_size, window_size) ||
+        source_hash_bits != 32u ||
         control_upper_bound > (std::numeric_limits<std::uint32_t>::max)() ||
         position_count > (std::numeric_limits<std::uint32_t>::max)()) {
         return std::unexpected{gpu_source_direct_materialization_failure{
@@ -2334,6 +2335,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
         stats.shape.distinct_count,
         position_count,
         alphabet_size,
+        alphabet_code,
         kmer_size,
         window_size);
     resident->gate_identity = gpu_index_gate_identity_from_key(resident->key);
@@ -2367,6 +2369,7 @@ materialize_sorted_dense_from_mapped_fragment_query_union(
     bioseq::storage::sequence_size_t target_len,
     std::uint64_t operation_identity,
     std::uint32_t alphabet_size,
+    std::uint32_t alphabet_code,
     std::uint32_t kmer_size,
     std::uint32_t window_size) {
     static_assert(std::same_as<p_hash, std::uint32_t> ||
@@ -2423,6 +2426,7 @@ materialize_sorted_dense_from_mapped_fragment_query_union(
             target_len,
             operation_identity,
             alphabet_size,
+        alphabet_code,
             kmer_size,
             window_size);
     if (!materialized || !materialized->resident ||
@@ -2657,7 +2661,7 @@ adopt_gpu_built_index(
  */
 [[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
     const bioseq::gpu::vulkan::runtime& runtime,
-    gpu_resident_minimizer_index& resident) noexcept {
+    gpu_resident_minimizer_index& resident, bool strict_prefix = true) noexcept {
     const auto& key = resident.key;
     if (!runtime.is_usable() || !resident.slots.is_valid() ||
         !resident.positions.is_valid() || resident.slots.owner != &runtime ||
@@ -2666,19 +2670,22 @@ adopt_gpu_built_index(
         !resident.slots.is_host_visible_coherent() ||
         !resident.positions.is_host_visible_coherent() ||
         resident.representation != gpu_index_representation::source_direct_sorted_dense ||
-        !key.source_direct_sorted_dense ||
-        key.representation != gpu_index_representation::source_direct_sorted_dense ||
-        key.sorted_dense_abi_revision != k_minimizer_sorted_dense_gpu_abi_revision ||
+        (strict_prefix && (!key.source_direct_sorted_dense ||
+            key.representation != gpu_index_representation::source_direct_sorted_dense ||
+            key.sorted_dense_abi_revision != k_minimizer_sorted_dense_gpu_abi_revision)) ||
+        key.alphabet_size == 0u || key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id ||
+        !resident.gate_identity.is_exactly_equal_to(gpu_index_gate_identity_from_key(key)) ||
         key.target_len != static_cast<std::uint64_t>(resident.target_len) ||
         key.table_size != resident.bucket_count ||
         key.position_count != resident.position_count || resident.bucket_count == 0u ||
         resident.position_count == 0u || resident.bucket_count > resident.position_count ||
-        resident.slot_mask != 0u || resident.target_position_offset != 0u ||
+        resident.slot_mask != 0u || (strict_prefix && resident.target_position_offset != 0u) ||
         resident.unique_key_count != resident.bucket_count ||
-        resident.slot_capacity != resident.bucket_count || resident.gate_identity.enabled ||
-        key.gate_enabled || key.gate_word_count != 0u || key.gate_mask != 0u ||
-        key.gate_digest_lo != 0u || key.gate_digest_hi != 0u ||
-        key.gate_canonical_words || key.device_uuid != runtime.features().device_uuid ||
+        resident.slot_capacity != resident.bucket_count ||
+        (strict_prefix && (resident.gate_identity.enabled || key.gate_enabled ||
+            key.gate_word_count != 0u || key.gate_mask != 0u || key.gate_digest_lo != 0u ||
+            key.gate_digest_hi != 0u || key.gate_canonical_words)) ||
+        key.device_uuid != runtime.features().device_uuid ||
         resident.ownership.count_emit_parity_verified != 1u ||
         resident.ownership.counted_minimizer_count != resident.position_count ||
         resident.ownership.verified_emit_count != resident.position_count ||

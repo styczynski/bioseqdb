@@ -7,17 +7,46 @@
  */
 module;
 
+#include <libassert/assert.hpp>
 #include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <optional>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
 export module bioseq.sequences.kmers.hashers.base;
 
 import bioseq.common.seqan_adapter;
+import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
+
+export namespace bioseq::minimizers {
+
+/** Effective packed-rank width for the exact minimap scheme; nucleotides use its A/C/G/T codes. */
+template<sequence_alphabet p_alphabet>
+inline constexpr std::size_t minimizer_exact_rank_bits =
+    seqan3::nucleotide_alphabet<p_alphabet>
+        ? seqan3::detail::ceil_log2(seqan3::alphabet_size<seq::dna4>)
+        : seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
+
+/** Resolve exact-hash rank width from the authoritative biological registry. */
+[[nodiscard]] constexpr std::optional<std::size_t> exact_rank_bits_for_alphabet_code(
+    const std::size_t alphabet_code) noexcept {
+    constexpr auto rank_widths = []<class... p_entries>(std::tuple<p_entries...>) constexpr {
+        return std::array<std::size_t, sizeof...(p_entries)>{
+            minimizer_exact_rank_bits<typename p_entries::alphabet_type>...};
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+    if (alphabet_code >= rank_widths.size()) {
+        return std::nullopt;
+    }
+    return rank_widths[alphabet_code];
+}
+
+} // namespace bioseq::minimizers
 
 export namespace bioseq::simd {
 
@@ -34,6 +63,21 @@ template <sequence_alphabet p_alphabet, typename p_input_type> struct hasher_bas
         static constexpr std::size_t k_max_kmer_length =
             sizeof(p_input_type) * 8u /
             compact_sequence_range<p_alphabet>::compact_sequence_range_base::traits::bits_per_char;
+
+        /** Whether this alphabet has a reverse-complement strand. */
+        static constexpr bool canonical_reverse_complement =
+            seqan3::nucleotide_alphabet<p_alphabet>;
+
+        /** Validate an exact k-mer shape before any shifting or truncation. */
+        [[nodiscard]] static constexpr p_input_type exact_kmer_mask(
+            const std::size_t kmer_length) {
+            if (kmer_length == 0u || kmer_length > k_max_kmer_length) {
+                DEBUG_ASSERT(false, "exact k-mer exceeds the selected hash word capacity");
+                std::abort();
+            }
+            return *bioseq::common::checked_low_bits_mask<p_input_type>(
+                kmer_length * traits::bits_per_char);
+        }
 
         /**
          * @brief Returns the smaller strand code and identifies which strand it  came from.
@@ -66,7 +110,7 @@ concept supports_scalar_hash =
     sequence_alphabet<p_alphabet> &&
     requires(p_scalar_hasher_type& hasher, p_input_type&& incoming) {
         {
-            hasher.next(std::move(incoming), std::move(incoming))
+            hasher.next(std::move(incoming))
         } -> std::same_as<typename p_scalar_hasher_type::traits::hasher_return_type>;
     };
 

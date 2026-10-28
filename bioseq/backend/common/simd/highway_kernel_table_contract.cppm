@@ -42,7 +42,7 @@ export namespace bioseq::simd_dispatch {
 
 /** @brief Function signature for a SneakySnake batch on one CPU target. */
 using sneaky_snake_simd_batch_kernel =
-    std::vector<::bioseq::prefilter::prefilter_result> (*)(
+    ::bioseq::prefilter::prefilter_batch_result (*)(
         const ::bioseq::prefilter::prefilter_batch_input&,
         ::bioseq::prefilter::sneaky_snake_options);
 
@@ -52,6 +52,8 @@ struct highway_common_kernels final {
     sneaky_snake_simd_batch_kernel sneaky_snake_simd_batch = nullptr;
     /** Target-owned bounded rank equality, exposed through scalar arguments only. */
     ::bioseq::simd::sequence_rank_equality_kernel count_equal_rank_chunk = nullptr;
+    /** Native rank translation/synthesis algebra selected for this CPU target. */
+    ::bioseq::simd::sequence_rank_transform_kernel transform_sequence_rank_chunk = nullptr;
 };
 
 static_assert(std::is_standard_layout_v<highway_common_kernels>);
@@ -143,6 +145,8 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
             return "alignment::block_aligner";
         case highway_kernel::sequence_rank_equality:
             return "sequence::rank_equality";
+        case highway_kernel::sequence_rank_transform:
+            return "sequence::rank_transform";
         case highway_kernel::count:
             break;
     }
@@ -253,6 +257,7 @@ struct highway_kernel_table final {
             || minimizers.bounded_nthash == nullptr
             || common.sneaky_snake_simd_batch == nullptr
             || common.count_equal_rank_chunk == nullptr
+            || common.transform_sequence_rank_chunk == nullptr
             || chaining.chain_anchors_simd == nullptr
             || alphabet_identities.empty()
             || alphabet_identities.size() != alignment_by_alphabet.size()) {

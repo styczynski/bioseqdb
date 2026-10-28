@@ -11,6 +11,7 @@ export module bioseq.highway.sources.minimizer_two_stack_nthash_continuation;
 
 import std;
 import bioseq.common.seqan_adapter;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
@@ -44,7 +45,7 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
     state = {};
     using alphabet_type = typename p_alphabet_traits::alphabet_type;
     using storage_unit = typename p_alphabet_traits::storage_unit;
-    if constexpr (!seqan3::nucleotide_alphabet<alphabet_type>) {
+    if constexpr (!(seqan3::nucleotide_alphabet<alphabet_type> || seqan3::aminoacid_alphabet<alphabet_type>)) {
         return two_stack_internal::reject_continuation(
             state, two_stack_continuation_status::unsupported_alphabet);
     } else if constexpr (!std::is_integral_v<storage_unit>
@@ -94,7 +95,10 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
         return two_stack_internal::reject_continuation(
             state, two_stack_continuation_status::invalid_window_size);
     }
-    if (runtime_k == 0 || runtime_k > k_max_exact_two_stack_kmer) {
+    constexpr std::size_t hash_rank_bits =
+        bioseq::minimizers::minimizer_exact_rank_bits<alphabet_type>;
+    if (runtime_k == 0 || runtime_k > k_max_exact_two_stack_kmer
+        || runtime_k > std::numeric_limits<std::uint64_t>::digits / hash_rank_bits) {
         return two_stack_internal::reject_continuation(
             state, two_stack_continuation_status::invalid_kmer_size);
     }
@@ -153,8 +157,8 @@ consume_two_stack_nthash_packed_fragment(
         return two_stack_internal::reject_continuation(
             state, two_stack_continuation_status::already_finalized);
     }
-    if constexpr (!seqan3::nucleotide_alphabet<
-        typename p_alphabet_traits::alphabet_type>) {
+    if constexpr (!(seqan3::nucleotide_alphabet<typename p_alphabet_traits::alphabet_type>
+        || seqan3::aminoacid_alphabet<typename p_alphabet_traits::alphabet_type>)) {
         return two_stack_internal::reject_continuation(
             state, two_stack_continuation_status::unsupported_alphabet);
     } else if constexpr (!std::is_integral_v<storage_unit>

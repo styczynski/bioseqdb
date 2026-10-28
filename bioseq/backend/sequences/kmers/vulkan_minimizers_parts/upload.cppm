@@ -35,6 +35,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.common.checked_arithmetic;
 import bioseq.gpu.vulkan.abi;
+import bioseq.prefilter.types;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.scanner;
@@ -293,7 +294,7 @@ public:
 };
 
 /**
- * @brief Holds one owned or borrowed input window in the 32-bit upload layout.
+ * @brief Holds owned canonical-u32 staging or stable borrowed native packed upload bytes.
  * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet> struct canonical_u32_window {
@@ -377,11 +378,18 @@ public:
 
   [[gnu::noinline]] canonical_u32_window_batch(
       canonical_u32_window_batch &&other) noexcept
-      : windows_(std::move(other.windows_)) {}
+      : windows_metadata_permit_(std::move(other.windows_metadata_permit_)),
+        uploads_metadata_permit_(std::move(other.uploads_metadata_permit_)),
+        windows_(std::move(other.windows_)), uploads_(std::move(other.uploads_)),
+        symbol_count_(std::exchange(other.symbol_count_, 0u)) {}
 
   [[gnu::noinline]] canonical_u32_window_batch &
   operator=(canonical_u32_window_batch &&other) noexcept {
     windows_ = std::move(other.windows_);
+    uploads_ = std::move(other.uploads_);
+    windows_metadata_permit_ = std::move(other.windows_metadata_permit_);
+    uploads_metadata_permit_ = std::move(other.uploads_metadata_permit_);
+    symbol_count_ = std::exchange(other.symbol_count_, 0u);
     return *this;
   }
 
@@ -391,15 +399,46 @@ public:
   }
 
   /** Releases all saved input windows. */
-  [[gnu::noinline]] void clear() noexcept { windows_.clear(); }
+  [[gnu::noinline]] void clear() noexcept {
+    uploads_.clear();
+    windows_.clear();
+    symbol_count_ = 0u;
+  }
 
   /** Returns the number of input windows. */
   [[nodiscard, gnu::noinline]] std::size_t size() const noexcept {
     return windows_.size();
   }
 
+  /** Reserve descriptor/owner metadata through the existing shared admission controller. */
+  [[gnu::noinline]] void reserve_native_uploads(std::size_t count, std::uint64_t symbol_count) {
+    DEBUG_ASSERT(windows_.empty() && uploads_.empty(), "native window batch must be fresh");
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+        windows_, windows_metadata_permit_, count);
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+        uploads_, uploads_metadata_permit_, count);
+    symbol_count_ = symbol_count;
+  }
+
+  /** Retain packed bytes and their descriptor until a synchronous consumer finishes. */
+  [[gnu::noinline]] void push_native_upload(window_type&& window, gpu_packed_sequence_upload upload) {
+    DEBUG_ASSERT(windows_.size() < windows_.capacity() && uploads_.size() < uploads_.capacity(),
+                 "native window metadata must be admitted before appending");
+    uploads_.push_back(upload);
+    windows_.push_back(std::move(window));
+  }
+
+  /** Borrow the native descriptors; this batch and borrowed source must outlive every GPU fence. */
+  [[nodiscard]] gpu_native_sequence_upload view() const noexcept {
+    return {.windows = uploads_, .symbol_count = symbol_count_};
+  }
+
 private:
+  bioseq::parallelism::memory_permit windows_metadata_permit_;
+  bioseq::parallelism::memory_permit uploads_metadata_permit_;
   std::vector<window_type> windows_;
+  std::vector<gpu_packed_sequence_upload> uploads_;
+  std::uint64_t symbol_count_{};
 };
 
 /**
@@ -414,6 +453,8 @@ private:
 template <sequence_alphabet p_alphabet, class p_function>
 decltype(auto) with_canonical_u32_upload_source(
     const canonical_u32_window<p_alphabet> &window, p_function &&fn) {
+  if (window.descriptor.storage_unit_width != sizeof(std::uint32_t))
+    throw vulkan_runtime_error("canonical-u32 upload adapter received a native word of another width");
   if (window.borrow_kind
       == bioseq::storage::sequence_resident_borrow_kind::
           reinterpreted_bytes) {
@@ -484,8 +525,13 @@ prepare_canonical_u32_window(
   }
   auto owner = bioseq::storage::materialize_packed_sequence(
       sequence, from, to, sizeof(std::uint32_t), std::move(*permit));
+  if (!owner) {
+    if (decline_out != nullptr)
+      decline_out->reason = vulkan_sketch_decline_reason::source_read_failed;
+    return std::nullopt;
+  }
   return std::optional<canonical_u32_window<p_alphabet>>{std::in_place,
-                                                       std::move(owner)};
+                                                       std::move(*owner)};
 }
 
 /**
@@ -680,17 +726,11 @@ public:
         != upload.bp_size + upload.padding_letters) {
         return false;
     }
-    if (upload.alphabet_kind == alphabet_kernel_kind::dna4_nt4) {
-        return true;
-    }
+    if (rank_lut.alphabet_size != upload.alphabet_size) return false;
     for (std::uint32_t rank = 0u; rank < upload.alphabet_size; ++rank) {
-        const std::uint32_t code = rank_lut.rank_to_code[rank];
-        const std::uint32_t rc_code = rank_lut.rank_to_rc_code[rank];
-        if (code > 4u || rc_code > 4u) {
-            return false;
-        }
-        if (upload.alphabet_kind == alphabet_kernel_kind::generic
-            && code != (rank < 4u ? rank : 4u)) {
+        if (rank_lut.rank_to_code[rank] != rank ||
+            (rank_lut.canonical_reverse_complement != 0u &&
+             rank_lut.rank_to_rc_code[rank] >= upload.alphabet_size)) {
             return false;
         }
     }
@@ -1156,6 +1196,182 @@ template <sequence_alphabet p_alphabet>
         .alphabet_kind = kernel,
     };
 }
+/** Describe an already checked packed window in its native storage geometry. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] gpu_packed_sequence_upload make_sequence_upload_view(
+    const admitted_sequence_detail::canonical_u32_window<Alphabet>& window,
+    std::uint64_t origin, const vulkan_rank_lut& rank_lut) {
+    using instance = admitted_sequence_detail::borrowed_u32_instance<Alphabet>;
+    using range_type = compact_sequence_range<instance>;
+    const auto& descriptor = window.descriptor;
+    const auto unit_bits = static_cast<std::uint32_t>(
+        descriptor.storage_unit_width * std::numeric_limits<unsigned char>::digits);
+    const auto bits = static_cast<std::uint32_t>(descriptor.bits_per_symbol);
+    const auto checked_bytes = bioseq::common::checked_mul<std::uint64_t>(
+        descriptor.unit_count, descriptor.storage_unit_width);
+    if (!checked_bytes || *checked_bytes > std::numeric_limits<std::size_t>::max()
+        || bits == 0u || bits >= std::numeric_limits<std::uint32_t>::digits)
+        throw vulkan_runtime_error("native packed upload extent is invalid");
+    const auto bytes = *checked_bytes;
+    return gpu_packed_sequence_upload{
+        .sequence = {
+            .seq_word_offset = 0u,
+            .byte_count = bytes,
+            .padded_byte_count = aligned_upload_bytes(bytes),
+            .unit_count = descriptor.unit_count,
+            .bp_offset = origin,
+            .bp_count = descriptor.logical_length,
+            .letters_per_unit = unit_bits / bits,
+            .bits_per_char = bits,
+            .unit_bits = unit_bits,
+            .alphabet_size = rank_lut.alphabet_size,
+            .char_mask = (std::uint32_t{1u} << bits) - 1u,
+            .padding_letters = descriptor.trailing_padding,
+            .alphabet_kind = static_cast<std::uint32_t>(choose_alphabet_kernel<range_type>()),
+            .leading_symbol_offset = descriptor.leading_symbol_offset,
+            .alphabet_code = rank_lut.alphabet_code,
+            .seed_policy_id = rank_lut.seed_policy_id,
+        },
+        .bytes = {static_cast<const std::byte*>(descriptor.units), static_cast<std::size_t>(bytes)},
+    };
+}
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END make_sequence_upload_view
+
+/** Borrow any native resident word width, including nonzero leading offsets, before staging. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] auto prepare_native_packed_window(
+    bioseq::storage::lazy_sequence_view<Alphabet> source,
+    std::uint64_t begin, std::uint64_t end) {
+    using window_type = admitted_sequence_detail::canonical_u32_window<Alphabet>;
+    if (begin > end || end > source.bp_size())
+        throw vulkan_runtime_error("native source interval is outside its logical sequence");
+    for (std::size_t width = sizeof(std::uint8_t); width <= sizeof(std::uint64_t); width *= 2u) {
+        if (!all_storage_unit_byte_widths::contains_runtime(static_cast<std::uint8_t>(width))) continue;
+        const auto descriptor = source.try_resident_packed(begin, end, static_cast<std::uint8_t>(width));
+        if (descriptor)
+            return window_type{*descriptor, bioseq::storage::sequence_resident_borrow_kind::native_typed_storage};
+    }
+    vulkan_sketch_decline decline{};
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(source, begin, end, &decline);
+    if (!window) {
+        if (decline.reason == vulkan_sketch_decline_reason::source_read_failed)
+            throw vulkan_runtime_error("native packed window source read failed");
+        throw vulkan_runtime_error("native packed window admission failed");
+    }
+    return std::move(*window);
+}
+
+/** Admit, sort, and coalesce requested native intervals; enumerate must repeat the same intervals.
+ * Only covered intervals are staged. Resident bytes are borrowed in their original word width.
+ * The returned batch and the source backing must remain alive through the consuming GPU fence.
+ */
+template<sequence_alphabet Alphabet, class Enumerator>
+requires requires(Enumerator& enumerate) { enumerate([](sequence_upload_interval) {}); }
+[[nodiscard]] auto prepare_native_seed_windows(
+    bioseq::storage::lazy_sequence_view<Alphabet> source, Enumerator enumerate) {
+    std::size_t interval_count = 0u;
+    enumerate([&interval_count, source](sequence_upload_interval interval) {
+        if (interval.begin > interval.end || interval.end > source.bp_size())
+            throw vulkan_runtime_error("native seed coverage interval is invalid");
+        if (interval.begin == interval.end) return;
+        if (interval_count == std::numeric_limits<std::size_t>::max())
+            throw vulkan_runtime_error("native seed coverage count overflowed");
+        ++interval_count;
+    });
+    bioseq::parallelism::memory_permit interval_permit;
+    std::vector<sequence_upload_interval> intervals;
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+        intervals, interval_permit, interval_count);
+    enumerate([&intervals, interval_count, source](sequence_upload_interval interval) {
+        if (interval.begin > interval.end || interval.end > source.bp_size())
+            throw vulkan_runtime_error("native seed coverage changed during preparation");
+        if (interval.begin == interval.end) return;
+        if (intervals.size() == interval_count)
+            throw vulkan_runtime_error("native seed coverage count changed during preparation");
+        intervals.push_back(interval);
+    });
+    if (intervals.size() != interval_count)
+        throw vulkan_runtime_error("native seed coverage count changed during preparation");
+    std::ranges::sort(intervals, [](const auto& left, const auto& right) {
+        return left.begin < right.begin || (left.begin == right.begin && left.end < right.end);
+    });
+    std::size_t merged_count = 0u;
+    for (const auto interval : intervals) {
+        if (merged_count != 0u && interval.begin <= intervals[merged_count - 1u].end)
+            intervals[merged_count - 1u].end = std::max(intervals[merged_count - 1u].end, interval.end);
+        else intervals[merged_count++] = interval;
+    }
+    using instance = admitted_sequence_detail::borrowed_u32_instance<Alphabet>;
+    const auto rank_lut = make_vulkan_rank_lut<compact_sequence_range<instance>>();
+    admitted_sequence_detail::canonical_u32_window_batch<Alphabet> windows;
+    windows.reserve_native_uploads(merged_count, source.bp_size());
+    for (std::size_t index = 0u; index < merged_count; ++index) {
+        const auto interval = intervals[index];
+        auto window = prepare_native_packed_window(source, interval.begin, interval.end);
+        const auto upload = make_sequence_upload_view(window, interval.begin, rank_lut);
+        windows.push_native_upload(std::move(window), upload);
+    }
+    return windows;
+}
+
+/** Prepare caller-provided coverage through the same admitted coalescing owner. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] auto prepare_native_seed_windows(
+    bioseq::storage::lazy_sequence_view<Alphabet> source,
+    std::span<const sequence_upload_interval> intervals) {
+    return prepare_native_seed_windows(source, [intervals](auto emit) {
+        for (const auto interval : intervals) emit(interval);
+    });
+}
+
+/** Runs a synchronous consumer over only the packed intervals requested by prefilter jobs.
+ * Owners retain admitted staging until the consumer's GPU fence has completed.
+ */
+template <sequence_alphabet p_alphabet, class p_function>
+[[nodiscard]] decltype(auto) with_prefilter_packed_windows(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target,
+    std::span<const bioseq::prefilter::prefilter_job> jobs,
+    p_function&& consume) {
+    using instance = admitted_sequence_detail::borrowed_u32_instance<p_alphabet>;
+    using range_type = compact_sequence_range<instance>;
+    const auto rank_lut = make_vulkan_rank_lut<range_type>();
+    admitted_sequence_detail::canonical_u32_window_batch<p_alphabet> owners;
+    std::vector<gpu_packed_sequence_upload> queries;
+    std::vector<gpu_packed_sequence_upload> targets;
+    std::vector<bioseq::prefilter::prefilter_job> local_jobs;
+    queries.reserve(jobs.size());
+    targets.reserve(jobs.size());
+    local_jobs.reserve(jobs.size());
+    const auto append_window = [&owners, &rank_lut](auto source, std::size_t begin,
+                                                   std::size_t length, auto& uploads) {
+        auto window = prepare_native_packed_window(source, begin, begin + length);
+        uploads.push_back(make_sequence_upload_view(window, begin, rank_lut));
+        owners.push_back(std::move(window));
+    };
+    for (const auto& job : jobs) {
+        const bool reverse = job.orientation == 3u;
+        if (job.target_record_index != 0u || job.query_record_index != (reverse ? 1u : 0u) ||
+            (job.orientation != 0u && !reverse) || (reverse && rank_lut.canonical_reverse_complement == 0u) ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(query.bp_size(), job.query_start, job.query_length) ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(target.bp_size(), job.target_start, job.target_length)) {
+            throw vulkan_runtime_error("invalid native prefilter job");
+        }
+        const std::size_t query_begin = reverse
+            ? query.bp_size() - job.query_start - job.query_length : job.query_start;
+        append_window(query, query_begin, job.query_length, queries);
+        append_window(target, job.target_start, job.target_length, targets);
+        auto local = job;
+        local.query_record_index = static_cast<std::uint32_t>(local_jobs.size());
+        local.target_record_index = local.query_record_index;
+        local.query_start = 0u;
+        local.target_start = 0u;
+        local_jobs.push_back(local);
+    }
+    return std::forward<p_function>(consume)(
+        std::span<const gpu_packed_sequence_upload>{queries},
+        std::span<const gpu_packed_sequence_upload>{targets}, rank_lut,
+        std::span<const bioseq::prefilter::prefilter_job>{local_jobs});
+}
 
 } // namespace bioseq::gpu::vulkan

@@ -36,11 +36,11 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
         /**
          * @brief Initializes the rolling lexicographic state and k-mer mask.
          * @param[in] kmer_length Positive symbol count representable by `p_input_type`.
-         * @pre Twice `kmer_length` is smaller than the bit width of `p_input_type`.
+         * @pre The complete rank bits fit in `p_input_type`.
          */
         explicit scalar_hash(std::size_t kmer_length)
             : base_hasher_(kmer_length),
-              mask_((static_cast<typename traits::input_type>(1) << (2u * kmer_length)) - 1u) {}
+              mask_(traits::exact_kmer_mask(kmer_length)) {}
 
         /** @brief Limits a requested bit shift  to one less than the scalar word width. */
         template <std::size_t p_offset>
@@ -49,15 +49,16 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
         /**
          * @brief Updates the strand codes and hashes the smaller code.
          * @param incoming Rank appended to the forward code.
-         * @param outgoing Rank whose complement is prepended to the reverse code.
          * @return The mixed hash with the strand chosen before mixing.
          */
-        constexpr typename traits::hasher_return_type next(typename traits::input_type incoming,
-                                                           typename traits::input_type outgoing) {
-            auto [key, base_strand] = base_hasher_.next(std::move(incoming), std::move(outgoing));
+        constexpr typename traits::hasher_return_type next(typename traits::input_type incoming) {
+            auto [key, base_strand] = base_hasher_.next(std::move(incoming));
             key = minimap_int_hasher::template scramble<p_input_type>(key, mask_);
             return std::make_pair(key, base_strand);
         }
+
+        /** Restart the shared exact rolling state after an unseedable rank. */
+        constexpr void reset() noexcept { base_hasher_.reset(); }
 
       private:
         typename base_hasher_type::template scalar_hash<p_input_type> base_hasher_;

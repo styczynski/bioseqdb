@@ -189,18 +189,9 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            // Check hash  capacity for direct resident calls too. The 128-bit record
-            // reserves one byte for the span, leaving at most 56 hash bits.
-            constexpr std::size_t record_hash_bits =
-                minimizer_type::layout_type::k_hash_bits;
-            constexpr std::size_t wire_hash_bits = sizeof(minimizer_type) == 16u
-                ? std::min<std::size_t>(record_hash_bits, 56u)
-                : record_hash_bits;
-            if (kmer_size > wire_hash_bits / 2u) {
-                path_decline.reason =
-                    vulkan_sketch_decline_reason::kmer_size_unsupported;
-                throw_vulkan_strict_decline(
-                    "Vulkan segment minimizer pair record capacity", path_decline);
+            if constexpr (minimizer_type::layout_type::k_hash_bits < 32u) {
+                path_decline.reason = vulkan_sketch_decline_reason::kmer_size_unsupported;
+                throw_vulkan_strict_decline("native32 Vulkan record requires all hash bits", path_decline);
             }
             if (!vulkan_minimizer_window_size_supported(window_size)) {
                 path_decline.reason =

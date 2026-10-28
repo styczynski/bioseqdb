@@ -33,6 +33,7 @@ import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.hashers.base;
+import bioseq.sequences.kmers.bounded_nthash_seed_policy;
 import bioseq.common.checked_arithmetic;
 import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
@@ -148,8 +149,10 @@ enum class vulkan_sketch_decline_reason : std::uint8_t {
     target_index_build_invariant_failed,
     fragmented_sequence_unsupported,
     sequence_type_unsupported,
+    source_read_failed,
     alphabet_unsupported,
     kmer_size_unsupported,
+    minimizer_layout_unsupported,
     window_size_unsupported,
     sequence_size_exceeds_u32,
     padded_sequence_size_overflow,
@@ -220,10 +223,14 @@ vulkan_sketch_decline_reason_name(vulkan_sketch_decline_reason reason) noexcept
             return "fragmented_sequence_unsupported";
         case vulkan_sketch_decline_reason::sequence_type_unsupported:
             return "sequence_type_unsupported";
+        case vulkan_sketch_decline_reason::source_read_failed:
+            return "source_read_failed";
         case vulkan_sketch_decline_reason::alphabet_unsupported:
             return "alphabet_unsupported";
         case vulkan_sketch_decline_reason::kmer_size_unsupported:
             return "kmer_size_unsupported";
+        case vulkan_sketch_decline_reason::minimizer_layout_unsupported:
+            return "minimizer_layout_unsupported";
         case vulkan_sketch_decline_reason::window_size_unsupported:
             return "window_size_unsupported";
         case vulkan_sketch_decline_reason::sequence_size_exceeds_u32:
@@ -323,7 +330,9 @@ vulkan_sketch_decline_allows_segment_split(
         case vulkan_sketch_decline_reason::target_index_build_invariant_failed:
         case vulkan_sketch_decline_reason::fragmented_sequence_unsupported:
         case vulkan_sketch_decline_reason::sequence_type_unsupported:
+        case vulkan_sketch_decline_reason::source_read_failed:
         case vulkan_sketch_decline_reason::alphabet_unsupported:
+        case vulkan_sketch_decline_reason::minimizer_layout_unsupported:
         case vulkan_sketch_decline_reason::kmer_size_unsupported:
         case vulkan_sketch_decline_reason::window_size_unsupported:
         case vulkan_sketch_decline_reason::hardware_device_unavailable:
@@ -464,11 +473,8 @@ struct minimizer_wire_traits<p_record_type> {
     static constexpr bool k_is_packed_uint16 = false;
     static constexpr std::uint32_t k_words32_per_minimizer = 4u;
     static constexpr std::uint32_t k_position_bits = p_record_type::layout_type::k_position_bits;
-    // The high word reserves eight bits for the span, leaving at most 56 hash
-    // bits. Use that stored width so shader comparisons agree with host records.
-    static constexpr std::uint32_t k_hash_bits =
-        p_record_type::layout_type::k_hash_bits < 56u ? static_cast<std::uint32_t>(p_record_type::layout_type::k_hash_bits) : 56u;
-    static constexpr std::uint32_t k_hash_shift = 8u;
+    static constexpr std::uint32_t k_hash_bits = p_record_type::layout_type::k_hash_bits;
+    static constexpr std::uint32_t k_hash_shift = 0u;
     static constexpr std::uint64_t k_position_mask =
         p_record_type::k_position_field_mask;
     static constexpr minimizer_word_kind k_word_kind =
@@ -615,8 +621,8 @@ template <class p_traits>
 /**
  * @brief Checks whether a k-mer fits the shader rolling state.
  *
- * Nucleotides use two bits per base. Generic ranks use bits_per_char.
- * At  most 32 symbols and 64 bits are supported.
+ * Native bounded hashes consume source ranks directly and support the shared
+ * k range independently of alphabet cardinality or exact-key rank width.
  */
 [[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
     alphabet_kernel_kind alphabet_kind,
@@ -625,12 +631,8 @@ template <class p_traits>
     if (bits_per_char == 0u || bits_per_char > 32u) {
         return false;
     }
-    const std::size_t step_bits =
-        alphabet_kind == alphabet_kernel_kind::generic
-            ? bits_per_char
-            : std::size_t{2u};
-    return kmer_size != 0u && kmer_size <= 64u / step_bits
-        && kmer_size <= 32u;
+    (void)alphabet_kind;
+    return kmer_size != 0u && kmer_size <= 31u;
 }
 
 /**
@@ -652,11 +654,11 @@ template <class p_traits>
     }
 }
 
-/** Accepts minimizer windows containing 1 through 256 k-mers. */
+/** Accepts the registered native minimizer windows containing 1 through 64 k-mers. */
 [[nodiscard]] constexpr bool vulkan_minimizer_window_size_supported(
     std::size_t window_size) noexcept
 {
-    return window_size != 0 && window_size <= 256;
+    return window_size != 0 && window_size <= 64;
 }
 
 /** Checks the packed alphabet metadata required for Vulkan minimizer sketching. */
@@ -677,28 +679,20 @@ template <class p_sequence>
 [[nodiscard]] vulkan_rank_lut make_vulkan_rank_lut() {
     using traits = typename std::remove_cvref_t<p_sequence>::traits;
     using alphabet_type = typename traits::alphabet_type;
+    using policy = bioseq::minimizers::bounded_nthash_seed_policy<alphabet_type>;
     vulkan_rank_lut lut{};
+    lut.rank_to_code.fill(static_cast<std::uint32_t>(vulkan_rank_lut::rank_capacity));
+    lut.rank_to_rc_code.fill(static_cast<std::uint32_t>(vulkan_rank_lut::rank_capacity));
+    lut.alphabet_size = static_cast<std::uint32_t>(policy::alphabet_size);
+    lut.alphabet_code = policy::alphabet_code;
+    lut.seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id;
+    lut.canonical_reverse_complement = policy::canonical_reverse_complement;
     for (std::uint32_t rank = 0; rank < traits::alphabet_size; ++rank) {
-        std::uint32_t code = 4u;
-        std::uint32_t rc_code = 4u;
-        if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
-            code = bioseq::simd::nt4_normalize<alphabet_type>(
-                static_cast<std::uint8_t>(rank));
-            const std::uint32_t complement_rank =
-                static_cast<std::uint32_t>(traits::letter_complement(
-                    static_cast<typename traits::storage_unit>(rank)));
-            rc_code = complement_rank < traits::alphabet_size
-                ? bioseq::simd::nt4_normalize<alphabet_type>(
-                    static_cast<std::uint8_t>(complement_rank))
-                : 4u;
-        } else {
-            const std::uint32_t comp_rank = static_cast<std::uint32_t>(
-                traits::letter_complement(static_cast<typename traits::storage_unit>(rank)));
-            code = rank < 4u ? rank : 4u;
-            rc_code = comp_rank < 4u ? comp_rank : 4u;
+        lut.rank_to_code[rank] = rank;
+        lut.forward_seeds[rank] = policy::forward_seeds[rank];
+        if constexpr (policy::canonical_reverse_complement) {
+            lut.rank_to_rc_code[rank] = policy::complement_rank(rank);
         }
-        lut.rank_to_code[rank] = code;
-        lut.rank_to_rc_code[rank] = rc_code;
     }
     return lut;
 }

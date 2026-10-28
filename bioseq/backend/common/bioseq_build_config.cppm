@@ -11,18 +11,18 @@ export namespace bioseq::build_config {
 
 /**
  * @brief Selects which template specializations are included  in the build.
- * @remark Unit: profile_ordinal. Domain: 0..5. Default: 0U.
+ * @remark Unit: profile_ordinal. Domain: 0..4. Default: 0U.
  */
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0U;
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..4")]] = 0U;
 
 /**
  * @brief Builds every supported alphabet with 64-bit sequence coordinates.
- * @remark Unit: boolean. Domain: false|true. Default: false.
+ * @remark Unit: boolean. Domain: false|true. Default: true.
  */
 inline constexpr bool bioseq_template_flatten_has_all_alphabets_uint64 [[bioseq::build_config(
     "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64", "boolean", "false|true")]] =
-    false;
+    true;
 
 /**
  * @brief Builds every supported sequence-coordinate width.
@@ -57,10 +57,10 @@ inline constexpr bool bioseq_template_flatten_has_full_specialization [[bioseq::
 
 /**
  * @brief Number of generated compilation units for typed scheduler code.
- * @remark Unit: count. Domain: 7|14|56. Default: 7U.
+ * @remark Unit: count. Domain: 7..7168. Default: 7U.
  */
 inline constexpr unsigned int bioseq_scheduler_typed_heavy_unit_count [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT", "count", "7|14|56")]] = 7U;
+    "BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT", "count", "7..7168")]] = 7U;
 
 /**
  * @brief Includes indexes used only by tests.

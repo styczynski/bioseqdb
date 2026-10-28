@@ -28,7 +28,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.indexing.storage;
 import bioseq.pipeline.runtime_contract;
-import bioseq.sequences.kmers.minimizer_layout_geometry;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::indexing::hash_major_minimizer_detail {

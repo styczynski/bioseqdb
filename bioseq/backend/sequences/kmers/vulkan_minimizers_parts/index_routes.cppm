@@ -101,10 +101,8 @@ template <class p_minimizer_type, class p_sequence>
             decline(vulkan_sketch_decline_reason::alphabet_unsupported);
             return std::nullopt;
         } else {
-            constexpr std::size_t step_bits =
-                choose_alphabet_kernel<bare>() == alphabet_kernel_kind::generic
-                    ? traits::bits_per_char : std::size_t{2};
-            if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) {
+            if (kmer_size == 0 || kmer_size > 31 ||
+                minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
                 decline(vulkan_sketch_decline_reason::kmer_size_unsupported);
                 return std::nullopt;
             }
@@ -183,10 +181,8 @@ template <class p_minimizer_type, class p_sequence>
             decline(vulkan_sketch_decline_reason::alphabet_unsupported);
             return std::nullopt;
         } else {
-            constexpr std::size_t step_bits =
-                alphabet_kernel_kind_of_traits<traits>() == alphabet_kernel_kind::generic
-                    ? traits::bits_per_char : std::size_t{2};
-            if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) {
+            if (kmer_size == 0 || kmer_size > 31 ||
+                minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
                 decline(vulkan_sketch_decline_reason::kmer_size_unsupported);
                 return std::nullopt;
             }

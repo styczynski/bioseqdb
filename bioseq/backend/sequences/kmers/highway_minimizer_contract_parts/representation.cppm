@@ -4,6 +4,7 @@
  */
 module;
 
+#include <libassert/assert.hpp>
 #include <algorithm>
 #include <array>
 #include <compare>
@@ -105,7 +106,7 @@ inline void emit_admitted_shared_owner_failure(
 
 export namespace bioseq::minimizers {
 
-template <std::size_t p_max_sequence_log2, std::size_t p_kmer_length, bool p_is_128_bit>
+template <std::size_t p_max_sequence_log2, std::size_t p_hash_bits, bool p_is_128_bit>
 struct minimizer_representation;
 
 namespace minimizer_physical_record_detail {
@@ -116,16 +117,16 @@ struct record_coordinates {
 };
 
 template <std::size_t p_position_log2,
-          std::size_t p_physical_kmer_size,
+          std::size_t p_hash_bits,
           bool p_is_128_bit>
 struct record_coordinates<minimizer_representation<
     p_position_log2,
-    p_physical_kmer_size,
+    p_hash_bits,
     p_is_128_bit>> {
     static constexpr bool is_representation = true;
     static constexpr bool is_128_bit = p_is_128_bit;
     static constexpr std::size_t position_log2 = p_position_log2;
-    static constexpr std::size_t physical_kmer_size = p_physical_kmer_size;
+    static constexpr std::size_t hash_bits = p_hash_bits;
 };
 
 /** Find the generated record ID matching this minimizer_representation type. */
@@ -138,7 +139,7 @@ template <class p_record>
     } else {
         for (const auto& descriptor : registered_minimizer_physical_records()) {
             if (descriptor.position_log2 == coordinates::position_log2 &&
-                descriptor.physical_kmer_size == coordinates::physical_kmer_size &&
+                descriptor.hash_bits == coordinates::hash_bits &&
                 (descriptor.storage_bits == 128u) == coordinates::is_128_bit &&
                 descriptor.storage_bits == sizeof(record_type) * 8u &&
                 descriptor.record_bytes == sizeof(record_type)) {
@@ -180,7 +181,7 @@ concept generated_minimizer_physical_batch_record =
 
 /** Record format families, separate from the runtime k-mer and  window sizes. */
 enum class minimizer_physical_layout_family : std::uint8_t {
-    fixed_u32_hash_legacy_k15,
+    fixed_u32_hash,
     minimap2_reference_exact_k,
     minimap2_scalar_reference_exact_k,
 };
@@ -193,7 +194,7 @@ struct minimizer_physical_layout_selection {
     ::bioseq::simd::minimizer_algorithm effective_algorithm;
     std::uint16_t alphabet_id;
     std::uint8_t record_position_log2;
-    std::uint8_t physical_kmer_size;
+    std::uint8_t hash_bits;
     minimizer_scalar_width hash_width;
     std::uint8_t packed_storage_bits;
     std::uint16_t runtime_kmer_size;
@@ -243,8 +244,8 @@ class minimizer_physical_batch_view {
         return descriptor.record_id ==
                    minimizer_physical_record_detail::record_id<p_record>() &&
                descriptor.position_log2 == coordinates::position_log2 &&
-               descriptor.physical_kmer_size ==
-                   coordinates::physical_kmer_size &&
+               descriptor.hash_bits ==
+                   coordinates::hash_bits &&
                descriptor.storage_bits == sizeof(p_record) * 8u &&
                descriptor.record_bytes == sizeof(p_record);
     }
@@ -269,7 +270,7 @@ class minimizer_physical_batch_view {
         : data_identity_(data_identity), size_(size), record_id_(record_id),
           record_bytes_(record_bytes),
           hash_word_offset_(record_bytes == 16u ? 8u : 0u),
-          hash_shift_(record_bytes == 16u ? 8u
+          hash_shift_(record_bytes == 16u ? 0u
                                          : static_cast<std::uint8_t>(position_log2 + 1u)),
           position_strand_mask_(position_strand_mask(position_log2)) {}
 
@@ -422,7 +423,7 @@ class minimizer_physical_batch_view {
             std::memcpy(std::addressof(hash_word), record + 8u, sizeof(hash_word));
             visitor(ordinal,
                     minimizer_physical_record_value{
-                        .hash = hash_word >> 8u,
+                        .hash = hash_word,
                         .position_strand = position_word & position_strand_mask_,
                     });
         }
@@ -475,7 +476,7 @@ class minimizer_physical_batch_view {
             std::memcpy(std::addressof(hash_word), record + 8u, sizeof(hash_word));
             visitor(ordinal,
                     minimizer_physical_record_value{
-                        .hash = hash_word >> 8u,
+                        .hash = hash_word,
                         .position_strand = position_word & position_strand_mask_,
                     });
         }
@@ -664,7 +665,7 @@ class minimizer_physical_batch_owner {
         return descriptor != nullptr &&
                minimizer_physical_batch_view::record_descriptor_matches_<p_record>(*descriptor) &&
                layout.record_position_log2 == descriptor->position_log2 &&
-               layout.physical_kmer_size == descriptor->physical_kmer_size;
+               layout.hash_bits == descriptor->hash_bits;
     }
 
     /** Store a shared vector after checking that its type matches the selected format. */
@@ -869,8 +870,8 @@ class minimizer_physical_batch_owner {
     }
     using algorithm_type = ::bioseq::simd::minimizer_algorithm;
     const auto family = algorithm == algorithm_type::bounded_nthash_simd ||
-                                algorithm == algorithm_type::two_stack_nthash
-        ? minimizer_physical_layout_family::fixed_u32_hash_legacy_k15
+            algorithm == algorithm_type::vulkan_minimap_integer
+        ? minimizer_physical_layout_family::fixed_u32_hash
         : profile->effective_algorithm == algorithm_type::scalar
             ? minimizer_physical_layout_family::minimap2_scalar_reference_exact_k
             : minimizer_physical_layout_family::minimap2_reference_exact_k;
@@ -881,7 +882,7 @@ class minimizer_physical_batch_owner {
         .effective_algorithm = profile->effective_algorithm,
         .alphabet_id = alphabet_id,
         .record_position_log2 = record->position_log2,
-        .physical_kmer_size = record->physical_kmer_size,
+        .hash_bits = record->hash_bits,
         .hash_width = profile->hash_width,
         .packed_storage_bits = packed_storage_bits,
         .runtime_kmer_size = runtime_kmer_size,
@@ -911,269 +912,154 @@ template <sequence_alphabet p_alphabet, class p_storage_unit>
     }
 }
 
-/**
- * @brief Chooses a storage width from the required position and hash bits.
- * p_kmer_length sizes the hash field. It can differ from the runtime k-mer size.
- */
-template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length>
+/** Physical minimizer layout: hash width is independent of runtime k and alphabet. */
+template<std::size_t p_max_sequence_log2, std::size_t p_hash_bits>
 struct minimizer_layout {
-    /// K-mer size used to choose the record fmrmat.
-    static constexpr std::size_t k_physical_kmer_size = p_kmer_length;
+    static_assert(p_max_sequence_log2 >= 1u && p_max_sequence_log2 <= 63u);
+    static_assert(p_hash_bits >= 1u && p_hash_bits <= 64u);
     static constexpr unsigned k_strand_bits = 1u;
     static constexpr unsigned k_position_bits = p_max_sequence_log2;
-    static constexpr unsigned k_minimum_hash_bits =
-        (2u * p_kmer_length < 56u) ? static_cast<unsigned>(2u * p_kmer_length) : 56u;
-    static constexpr int k_uint16_hash_bits = 16 - 1 - static_cast<int>(k_position_bits);
-    static constexpr int k_uint32_hash_bits = 32 - 1 - static_cast<int>(k_position_bits);
-    static constexpr int k_uint64_hash_bits = 64 - 1 - static_cast<int>(k_position_bits);
-    static constexpr int k_uint128_hash_bits =
-        128 - 1 - static_cast<int>(k_position_bits) - 8;
+    static constexpr unsigned k_hash_bits = p_hash_bits;
     static constexpr unsigned k_storage_bits = static_cast<unsigned>(
-        minimizer_record_storage_bits(p_max_sequence_log2, p_kmer_length));
-    static constexpr unsigned k_hash_bits =
-        (k_storage_bits == 16u) ? static_cast<unsigned>(k_uint16_hash_bits)
-        : (k_storage_bits == 32u) ? static_cast<unsigned>(k_uint32_hash_bits)
-        : (k_storage_bits == 64u) ? static_cast<unsigned>(k_uint64_hash_bits)
-        : static_cast<unsigned>(k_uint128_hash_bits);
-    static constexpr unsigned k_span_bits = k_storage_bits == 128u ? 8u : 0u;
+        minimizer_record_storage_bits(p_max_sequence_log2, p_hash_bits));
     using storage_type =
         std::conditional_t<k_storage_bits == 16u, std::uint16_t,
         std::conditional_t<k_storage_bits == 32u, std::uint32_t,
         std::conditional_t<k_storage_bits == 64u, std::uint64_t, void>>>;
 };
 
-/**
- * @brief Packs a minimizer  into the selected record width.
- * p_max_sequence_log2 gives position bits. p_kmer_length sizes the hash field.
- * p_is_128_bit selects the two-word specialization.
- */
-template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length,
+/** Select a single-word or two-word record from its exact field widths. */
+template<std::size_t p_max_sequence_log2, std::size_t p_hash_bits,
          bool p_is_128_bit =
-             (minimizer_layout<p_max_sequence_log2, p_kmer_length>::k_storage_bits == 128u)>
+             (minimizer_layout<p_max_sequence_log2, p_hash_bits>::k_storage_bits == 128u)>
 struct minimizer_representation;
 
-/**
- * @brief Stores hash, position, and strand in one unsigned integer.
- * @tparam p_max_sequence_log2 Position bits carried by the record.
- * @tparam p_kmer_length K-mer length used to size the hash field.
- */
-template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length>
-struct minimizer_representation<p_max_sequence_log2, p_kmer_length, false> {
-    using layout_type = minimizer_layout<p_max_sequence_log2, p_kmer_length>;
+/** Single-word record. All unused high bits remain zero; every hash value is valid. */
+template<std::size_t p_max_sequence_log2, std::size_t p_hash_bits>
+struct minimizer_representation<p_max_sequence_log2, p_hash_bits, false> {
+    using layout_type = minimizer_layout<p_max_sequence_log2, p_hash_bits>;
     using storage_type = typename layout_type::storage_type;
     static_assert(!std::is_void_v<storage_type>);
-
     static constexpr unsigned k_strand_shift = 0u;
     static constexpr unsigned k_position_shift = layout_type::k_strand_bits;
-    static constexpr unsigned k_hash_shift =
-        layout_type::k_strand_bits + layout_type::k_position_bits;
+    static constexpr unsigned k_hash_shift = k_position_shift + layout_type::k_position_bits;
     static constexpr storage_type k_hash_field_mask =
-        (layout_type::k_hash_bits >= sizeof(storage_type) * 8u)
-            ? static_cast<storage_type>(~storage_type{0})
-            : static_cast<storage_type>(
-                (storage_type{1} << layout_type::k_hash_bits) - storage_type{1});
+        *bioseq::common::checked_low_bits_mask<storage_type>(p_hash_bits);
     static constexpr storage_type k_position_field_mask =
-        (layout_type::k_position_bits >= sizeof(storage_type) * 8u)
-            ? static_cast<storage_type>(~storage_type{0})
-            : static_cast<storage_type>(
-                (storage_type{1} << layout_type::k_position_bits) - storage_type{1});
-    static constexpr storage_type k_strand_field_mask = storage_type{1};
+        *bioseq::common::checked_low_bits_mask<storage_type>(p_max_sequence_log2);
+    static constexpr storage_type k_strand_field_mask = storage_type{1u};
     static constexpr storage_type k_hash_mask =
         static_cast<storage_type>(k_hash_field_mask << k_hash_shift);
     static constexpr storage_type k_position_strand_mask =
-        static_cast<storage_type>(~k_hash_mask);
+        static_cast<storage_type>((k_position_field_mask << k_position_shift) | k_strand_field_mask);
+    storage_type value_{};
 
-    storage_type value_;
+    /** Construct a valid zero-hash record at position zero on the forward strand. */
+    constexpr minimizer_representation() noexcept = default;
 
-    /** Construct a record with all bits zero. */
-    constexpr minimizer_representation() noexcept : value_(0) {}
+    /** Pack a validated hash, final-symbol position and strand without truncation. */
+    constexpr minimizer_representation(const std::uint64_t kmer_hash,
+        const std::uint64_t last_position, const std::uint64_t strand_bit) noexcept {
+        if (kmer_hash > k_hash_field_mask || last_position > k_position_field_mask || strand_bit > 1u) {
+            DEBUG_ASSERT(false, "minimizer fields exceed the selected physical record");
+            std::abort();
+        }
+        value_ = static_cast<storage_type>((kmer_hash << k_hash_shift)
+            | (last_position << k_position_shift) | strand_bit);
+    }
 
-    /** Pack hash, k-mer end position and strand, masking each value to its field width. */
-    constexpr minimizer_representation(
-        const std::uint64_t kmer_hash,
-        const std::uint64_t last_position,
-        const std::uint64_t strand_bit) noexcept
-        : value_(static_cast<storage_type>(
-            ((static_cast<storage_type>(kmer_hash) & k_hash_field_mask)
-                << k_hash_shift)
-            | ((static_cast<storage_type>(last_position)
-                    & k_position_field_mask)
-                << k_position_shift)
-            | (static_cast<storage_type>(strand_bit) & k_strand_field_mask)))
-    {}
-
-    /** Restore a record from its exact packed storage word. */
+    /** Restore a validated physical word, rejecting nonzero unused high bits. */
     [[nodiscard]] static constexpr minimizer_representation from_raw_storage(
-        const storage_type value) noexcept
-    {
+        const storage_type value) noexcept {
+        if ((value & static_cast<storage_type>(~(k_hash_mask | k_position_strand_mask))) != 0u) {
+            DEBUG_ASSERT(false, "minimizer physical word has nonzero padding bits");
+            std::abort();
+        }
         minimizer_representation result;
         result.value_ = value;
         return result;
     }
-    /** Canonical k-mer hash. */
+    /** Return the complete hash, including the all-ones hash. */
     [[nodiscard]] constexpr std::uint64_t kmer() const noexcept {
-        return static_cast<std::uint64_t>(value_) >> k_hash_shift;
+        return (static_cast<std::uint64_t>(value_) >> k_hash_shift) & k_hash_field_mask;
     }
-    /** Zero-based position of the k-mer's final symbol. */
+    /** Return the zero-based final-symbol position. */
     [[nodiscard]] constexpr std::uint64_t last_pos() const noexcept {
-        return (static_cast<std::uint64_t>(value_) >> k_position_shift)
-            & static_cast<std::uint64_t>(k_position_field_mask);
+        return (static_cast<std::uint64_t>(value_) >> k_position_shift) & k_position_field_mask;
     }
-    /** Canonical strand bit. */
-    [[nodiscard]] constexpr std::uint64_t strand() const noexcept {
-        return static_cast<std::uint64_t>(value_) & 1ULL;
-    }
-    /** Packed position and strand bits. */
+    /** Return zero for forward or one for reverse-complement. */
+    [[nodiscard]] constexpr std::uint64_t strand() const noexcept { return value_ & 1u; }
+    /** Return the packed position and strand. */
     [[nodiscard]] constexpr std::uint64_t pos_strand_encoded() const noexcept {
-        return static_cast<std::uint64_t>(value_)
-            & static_cast<std::uint64_t>(k_position_strand_mask);
+        return value_ & k_position_strand_mask;
     }
-    /** Exact packed storage word. */
-    [[nodiscard]] constexpr storage_type raw_value() const noexcept {
-        return value_;
+    /** Return the exact physical word. */
+    [[nodiscard]] constexpr storage_type raw_value() const noexcept { return value_; }
+    /** Compare hashes; position and strand do not participate. */
+    [[nodiscard]] constexpr auto operator<=>(const minimizer_representation& other) const noexcept {
+        return kmer() <=> other.kmer();
     }
-    /** Return the reserved maximum-hash sentinel with zero position and strand. */
-    [[nodiscard]] static constexpr minimizer_representation maximum() noexcept {
-        return from_raw_storage(k_hash_mask);
+    /** Compare hash equality; position and strand do not participate. */
+    [[nodiscard]] constexpr bool operator==(const minimizer_representation& other) const noexcept {
+        return kmer() == other.kmer();
     }
-    /** Whether this record carries the maximum sentinel hash. */
-    [[nodiscard]] constexpr bool is_max() const noexcept {
-        return (value_ & k_hash_mask) == k_hash_mask;
-    }
-    /** Replace this record with the maximum sentinel. */
-    constexpr void set_max() noexcept {
-        value_ = k_hash_mask;
-    }
-    /** @brief Compares hashes, ignoring position and strand. */
-    [[nodiscard]] constexpr auto operator<=> (
-        const minimizer_representation& other) const noexcept
-    {
-        return (value_ & k_hash_mask) <=> (other.value_ & k_hash_mask);
-    }
-    /** @brief Tests whether the hashes are equal. Position and strand are ignored. */
-    [[nodiscard]] constexpr bool operator==(
-        const minimizer_representation& other) const noexcept
-    {
-        return (value_ & k_hash_mask) == (other.value_ & k_hash_mask);
-    }
-    /** Test for equal hashes at different encoded positions or strands. */
+    /** Report equal hashes at different positions or strands. */
     [[nodiscard]] static constexpr bool does_sketch_match(
-        const minimizer_representation& first,
-        const minimizer_representation& second) noexcept
-    {
-        return ((first.value_ ^ second.value_) & k_hash_mask) == 0u
-            && first.value_ != second.value_;
+        const minimizer_representation& first, const minimizer_representation& second) noexcept {
+        return first.kmer() == second.kmer() && first.pos_strand_encoded() != second.pos_strand_encoded();
     }
 };
 
-/**
- * @brief Stores hash, span, position, and strand in two 64-bit words.
- * @tparam p_max_sequence_log2 Position bits carried by the record.
- * @tparam p_kmer_length K-mer length used as the default span.
- */
-template<std::size_t p_max_sequence_log2, std::size_t p_kmer_length>
-struct minimizer_representation<p_max_sequence_log2, p_kmer_length, true> {
-    using layout_type = minimizer_layout<p_max_sequence_log2, p_kmer_length>;
-    static_assert(layout_type::k_position_bits + 1u <= 64u);
-
-    static constexpr unsigned k_high_span_shift = 0u;
-    static constexpr unsigned k_high_hash_shift = 8u;
+/** Two-word record: low is position/strand; high is the complete hash, without a span byte. */
+template<std::size_t p_max_sequence_log2, std::size_t p_hash_bits>
+struct minimizer_representation<p_max_sequence_log2, p_hash_bits, true> {
+    using layout_type = minimizer_layout<p_max_sequence_log2, p_hash_bits>;
+    static constexpr unsigned k_high_hash_shift = 0u;
     static constexpr std::uint64_t k_hash_field_mask =
-        layout_type::k_hash_bits >= 64u
-            ? ~std::uint64_t{0}
-            : (std::uint64_t{1} << layout_type::k_hash_bits) - std::uint64_t{1};
+        *bioseq::common::checked_low_bits_mask<std::uint64_t>(p_hash_bits);
     static constexpr std::uint64_t k_position_field_mask =
-        layout_type::k_position_bits >= 64u
-            ? ~std::uint64_t{0}
-            : (std::uint64_t{1} << layout_type::k_position_bits) - std::uint64_t{1};
-    static constexpr std::uint64_t k_span_field_mask = std::uint64_t{0xFFu};
-    static constexpr std::uint64_t k_high_hash_mask =
-        k_hash_field_mask << k_high_hash_shift;
+        *bioseq::common::checked_low_bits_mask<std::uint64_t>(p_max_sequence_log2);
+    static constexpr std::uint64_t k_high_hash_mask = k_hash_field_mask;
     static constexpr std::uint64_t k_low_position_mask = k_position_field_mask << 1u;
+    std::uint64_t low_{};
+    std::uint64_t high_{};
 
-    std::uint64_t low_;
-    std::uint64_t high_;
-
-    /** Construct the zero-valued two-word record. */
-    constexpr minimizer_representation() noexcept : low_(0), high_(0) {}
-
-    /** Pack all fields into  two 64-bit words, masking each to its available width */
-    constexpr minimizer_representation(
-        const std::uint64_t kmer_hash,
-        const std::uint64_t last_position,
-        const std::uint64_t strand_bit,
-        const std::uint64_t span = static_cast<std::uint64_t>(p_kmer_length)) noexcept
-        : low_(((last_position & k_position_field_mask) << 1u)
-                | (strand_bit & 1ULL)),
-          high_(((kmer_hash & k_hash_field_mask) << k_high_hash_shift)
-                | (span & k_span_field_mask))
-    {}
-
-    /** Low packed position/strand word. */
-    [[nodiscard]] constexpr std::uint64_t data_low_64() const noexcept {
-        return low_;
+    /** Construct a valid zero-hash record at position zero on the forward strand. */
+    constexpr minimizer_representation() noexcept = default;
+    /** Pack validated fields; all hash bits remain available to the caller. */
+    constexpr minimizer_representation(const std::uint64_t kmer_hash,
+        const std::uint64_t last_position, const std::uint64_t strand_bit) noexcept {
+        if (kmer_hash > k_hash_field_mask || last_position > k_position_field_mask || strand_bit > 1u) {
+            DEBUG_ASSERT(false, "minimizer fields exceed the selected physical record");
+            std::abort();
+        }
+        low_ = (last_position << 1u) | strand_bit;
+        high_ = kmer_hash;
     }
-    /** High packed hash/span word. */
-    [[nodiscard]] constexpr std::uint64_t data_high_64() const noexcept {
-        return high_;
+    /** Return the low physical position/strand word. */
+    [[nodiscard]] constexpr std::uint64_t data_low_64() const noexcept { return low_; }
+    /** Return the high physical hash word. */
+    [[nodiscard]] constexpr std::uint64_t data_high_64() const noexcept { return high_; }
+    /** Return the complete hash, including all ones. */
+    [[nodiscard]] constexpr std::uint64_t kmer() const noexcept { return high_; }
+    /** Return the zero-based final-symbol position. */
+    [[nodiscard]] constexpr std::uint64_t last_pos() const noexcept { return low_ >> 1u; }
+    /** Return zero for forward or one for reverse-complement. */
+    [[nodiscard]] constexpr std::uint64_t strand() const noexcept { return low_ & 1u; }
+    /** Return the physical position/strand word. */
+    [[nodiscard]] constexpr std::uint64_t pos_strand_encoded() const noexcept { return low_; }
+    /** Compare hashes; position and strand do not participate. */
+    [[nodiscard]] constexpr auto operator<=>(const minimizer_representation& other) const noexcept {
+        return high_ <=> other.high_;
     }
-    /** @brief Returns the canonical hash field. */
-    [[nodiscard]] constexpr std::uint64_t kmer() const noexcept {
-        return high_ >> k_high_hash_shift;
+    /** Compare hash equality; position and strand do not participate. */
+    [[nodiscard]] constexpr bool operator==(const minimizer_representation& other) const noexcept {
+        return high_ == other.high_;
     }
-    /** @brief Returns the stored k-mer span. */
-    [[nodiscard]] constexpr std::uint64_t span() const noexcept {
-        return high_ & k_span_field_mask;
-    }
-    /** @brief Returns the zero-based position of the final k-mer symbol. */
-    [[nodiscard]] constexpr std::uint64_t last_pos() const noexcept {
-        return (low_ >> 1u) & k_position_field_mask;
-    }
-    /** @brief Returns the canonical strand bit. */
-    [[nodiscard]] constexpr std::uint64_t strand() const noexcept {
-        return low_ & 1ULL;
-    }
-    /** @brief Returns the packed position and strand word. */
-    [[nodiscard]] constexpr std::uint64_t pos_strand_encoded() const noexcept {
-        return low_;
-    }
-    /** @brief Returns the reserved maximum-hash sentinel with all other fields zero. */
-    [[nodiscard]] static constexpr minimizer_representation maximum() noexcept {
-        minimizer_representation result;
-        result.high_ = k_high_hash_mask;
-        return result;
-    }
-    /** @brief Reports whether the record carries the maximum sentinel hash. */
-    [[nodiscard]] constexpr bool is_max() const noexcept {
-        return (high_ & k_high_hash_mask) == k_high_hash_mask;
-    }
-    /** @brief Replaces the record with the maximum sentinel. */
-    constexpr void set_max() noexcept {
-        high_ = k_high_hash_mask;
-        low_ = 0u;
-    }
-    /** @brief Compares hashes, ignoring span, position and strand. */
-    [[nodiscard]] constexpr auto operator<=> (
-        const minimizer_representation& other) const noexcept
-    {
-        return (high_ & k_high_hash_mask) <=> (other.high_ & k_high_hash_mask);
-    }
-    /** @brief Tests hash equality, ignoring span, position and strand. */
-    [[nodiscard]] constexpr bool operator==(
-        const minimizer_representation& other) const noexcept
-    {
-        return (high_ & k_high_hash_mask) == (other.high_ & k_high_hash_mask);
-    }
-    /** @brief Tests for equal hashes at different encoded positions or strands. Span is ignored. */
+    /** Report equal hashes at different positions or strands. */
     [[nodiscard]] static constexpr bool does_sketch_match(
-        const minimizer_representation& first,
-        const minimizer_representation& second) noexcept
-    {
-        constexpr std::uint64_t k_high_identity_mask = ~k_span_field_mask;
-        return ((first.high_ ^ second.high_) & k_high_hash_mask) == 0u
-            && ((first.high_ & k_high_identity_mask)
-                    != (second.high_ & k_high_identity_mask)
-                || first.low_ != second.low_);
+        const minimizer_representation& first, const minimizer_representation& second) noexcept {
+        return first.high_ == second.high_ && first.low_ != second.low_;
     }
 };
 
@@ -1185,10 +1071,10 @@ minimizer_physical_batch_view::at(const std::size_t ordinal) const {
     return at_unchecked(ordinal);
 }
 
-/** Default 64-bit sketch record with 35 hash bits, 28 position bits and one strand bit. */
-using minimap_sketch_data = minimizer_representation<28u, 15u>;
+/** Default 64-bit sketch record with 32 hash bits, 28 position bits and one strand bit. */
+using minimap_sketch_data = minimizer_representation<28u, 32u>;
 
-static_assert(std::same_as<minimap_sketch_data, minimizer_representation<28u, 15u>>);
+static_assert(std::same_as<minimap_sketch_data, minimizer_representation<28u, 32u>>);
 static_assert(sizeof(minimap_sketch_data) == sizeof(std::uint64_t));
 static_assert(alignof(minimap_sketch_data) == alignof(std::uint64_t));
 static_assert(std::is_standard_layout_v<minimap_sketch_data>);
@@ -1255,18 +1141,12 @@ static_assert(std::is_standard_layout_v<minimap_sketch_data>);
 static_assert(std::is_trivially_copyable_v<minimap_sketch_data>);
 static_assert(std::is_trivially_destructible_v<minimap_sketch_data>);
 
-// Storage and wire consumers require the canonical 35:28:1 bit layout.
-static_assert(minimizer_layout<28u, 15u>::k_storage_bits == 64u,
-    "minimap_sketch_data = minimizer_representation<28, 15> must remain a 64-bit storage type. "
-    "Postgres sidecar / dispatch_buffer rely on sizeof(minimap_sketch_data) == 8 "
-    "and the bit-layout (hash:35 | pos:28 | strand:1) is hardcoded in the wire "
-    "protocol.  Update the sidecar wire format before relaxing this constraint.");
-
-// Check each field of the default packed format.
+// The default layout retains measured position geometry with an explicit u32 hash.
+static_assert(minimizer_layout<28u, 32u>::k_storage_bits == 64u);
 static_assert(minimap_sketch_data::layout_type::k_position_bits == 28u);
-static_assert(minimap_sketch_data::layout_type::k_hash_bits == 35u);
+static_assert(minimap_sketch_data::layout_type::k_hash_bits == 32u);
 static_assert(minimap_sketch_data::layout_type::k_strand_bits == 1u);
 static_assert(minimap_sketch_data::k_hash_shift == 29u);
-static_assert(minimap_sketch_data::k_hash_mask == 0xFFFFFFFFE0000000ULL);
+static_assert(minimap_sketch_data::k_hash_mask == (std::uint64_t{0xffffffffu} << 29u));
 
 } // namespace bioseq::minimizers

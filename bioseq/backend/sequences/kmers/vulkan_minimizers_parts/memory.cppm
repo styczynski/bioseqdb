@@ -439,8 +439,8 @@ template <class p_minimizer_type>
 /**
  * @brief Estimates an initial output  capacity for a minimizer dispatch
  *
- * The estimate can be too small for some sequences. Callers must check overflow
- * or count records before allocating exact output storage.
+ * The bound includes both equal-hash window endpoints, including repetitive
+ * inputs. Target-index construction can count first for an exact allocation.
  * @param bp_size Input length in symbols.
  * @param window_size K-mers per window.
  * @return Suggested record capacity.
@@ -448,16 +448,11 @@ template <class p_minimizer_type>
 [[nodiscard]] inline std::uint64_t estimate_vulkan_minimizer_capacity(
     std::uint64_t bp_size, std::uint64_t window_size) noexcept
 {
-    using bioseq::common::saturating_mul;
-    // Small inputs reserve at least one record per base. Larger inputs use an
-    // expected minimizer density to reduce buffer sizes. Sketch calls reject
-    // overflow. Target-index construction counts records first and uses that
-    // exact count for the  final output allocation.
-    if (bp_size <= k_default_sketch_tile_bp) {
-        return std::max<std::uint64_t>(64u, bp_size);
-    }
-    const std::uint64_t base = window_size == 0 ? bp_size : (bp_size / window_size + 64u);
-    return std::max<std::uint64_t>(64u, saturating_mul(base, 3u));
+    (void)window_size;
+    // A bounded window can emit both equal-hash endpoints. Dense repeated
+    // ranks approach two records per position; a density estimate is unsound.
+    return std::max<std::uint64_t>(64u,
+        bioseq::common::saturating_mul(bp_size, std::uint64_t{2u}));
 }
 
 /**

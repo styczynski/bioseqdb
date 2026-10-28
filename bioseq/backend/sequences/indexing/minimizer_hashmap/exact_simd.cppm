@@ -515,8 +515,11 @@ collect_reference_simd_index_range_or_throw(
                 throw exact_simd_index_runtime_error{
                     exact_simd_index_status::non_contiguous_range, operation};
             }
-            owner.emplace(bioseq::storage::materialize_packed_sequence(
-                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+            auto materialized = bioseq::storage::materialize_packed_sequence(
+                sequence, lo_bp, hi_bp, packed_width, std::move(*permit));
+            if (!materialized) throw exact_simd_index_runtime_error{
+                exact_simd_index_status::invalid_state, "reference SIMD source read failed"};
+            owner.emplace(std::move(*materialized));
             descriptor = owner->descriptor();
         }
         if (descriptor.logical_length != static_cast<std::size_t>(hi_bp - lo_bp) ||
@@ -595,12 +598,86 @@ struct exact_simd_index_bridge_result {
 [[nodiscard]] exact_simd_index_bridge_result
 collect_exact_simd_index_erased(const exact_simd_index_bridge_request& request);
 
+namespace exact_simd_index_detail {
+
+/** Retain one admitted native fragment until the synchronous bridge releases it. */
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN exact_simd_index_admitted_fragments
+template<sequence_alphabet Alphabet>
+struct admitted_fragment_source {
+    using view_type = bioseq::storage::lazy_sequence_view<Alphabet>;
+    using descriptor_type = typename view_type::resident_packed_sequence;
+    static constexpr std::size_t fragment_units = bioseq::storage::default_fragment_storage_units;
+
+    view_type sequence;
+    sequence_size_t source_begin;
+    std::size_t logical_length;
+    std::size_t total_units;
+    std::size_t letters_per_unit;
+    std::uint8_t packed_width;
+    std::optional<descriptor_type> resident;
+    std::optional<bioseq::storage::admitted_packed_sequence<Alphabet>> owner;
+    std::string_view operation;
+
+    /** Borrow a resident subspan or materialize one checked native-rank fragment. */
+    [[nodiscard]] static exact_simd_index_packed_fragment read_fragment(
+            void* opaque, const std::size_t fragment_no) {
+        constexpr auto bits_per_symbol =
+            bioseq::storage::lazy_sequence_traits<Alphabet>::k_logical_bits_per_symbol;
+        auto& context = *static_cast<admitted_fragment_source*>(opaque);
+        if (context.total_units == 0u || fragment_no >
+            (context.total_units - 1u) / fragment_units)
+            return {};
+        const std::size_t unit_begin = fragment_no * fragment_units;
+        const std::size_t unit_count = std::min(fragment_units, context.total_units - unit_begin);
+        if (context.resident) {
+            const auto& descriptor = *context.resident;
+            if (descriptor.logical_length != context.logical_length
+                || descriptor.unit_count != context.total_units
+                || descriptor.bits_per_symbol != bits_per_symbol
+                || descriptor.leading_symbol_offset != 0u
+                || descriptor.bit_order != view_type::packed_symbol_order::least_significant_symbol_first
+                || descriptor.units == nullptr)
+                throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range,
+                                                    context.operation};
+            return {.data = static_cast<const std::byte*>(descriptor.units)
+                        + unit_begin * context.packed_width,
+                    .storage_units = unit_count};
+        }
+        const std::size_t local_begin = unit_begin * context.letters_per_unit;
+        const std::size_t local_end = std::min(context.logical_length,
+            local_begin + unit_count * context.letters_per_unit);
+        const auto access = bioseq::storage::plan_sequence_access(
+            context.sequence, bioseq::storage::sequence_access_requirement::bounded_random_window,
+            context.source_begin + local_begin, context.source_begin + local_end, context.packed_width);
+        auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+            access.admission_bytes);
+        if (!permit)
+            throw exact_simd_index_runtime_error{exact_simd_index_status::non_contiguous_range,
+                                                context.operation};
+        auto admitted = bioseq::storage::materialize_packed_sequence(
+            context.sequence, access.from, access.to, context.packed_width, std::move(*permit));
+        if (!admitted)
+            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state, context.operation};
+        context.owner.emplace(std::move(*admitted));
+        const auto descriptor = context.owner->descriptor();
+        return {.data = descriptor.units, .storage_units = descriptor.unit_count};
+    }
+
+    /** Release only the fragment whose synchronous consumer has completed. */
+    static void release_fragment(void* opaque, std::size_t) noexcept {
+        static_cast<admitted_fragment_source*>(opaque)->owner.reset();
+    }
+};
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END exact_simd_index_admitted_fragments
+
+} // namespace exact_simd_index_detail
+
 /// Run two-stack ntHash on [lo_bp, hi_bp), borrowing packed 32-bit storage or
 /// allocating a copy. Add emitted_position_base to the reported coordinates.
 /// A rejected run throws exact_simd_index_runtime_error.
 ///
 /// @tparam p_collector Collector accepting batches or individual minimizer records.
-/// @tparam p_alphabet DNA4 or DNA5.
+/// @tparam p_alphabet Registered biological alphabet.
 template <class p_collector, sequence_alphabet p_alphabet>
 [[nodiscard]] inline exact_simd_index_execution_stats
 collect_exact_simd_index_range_or_throw(p_collector& collector,
@@ -615,7 +692,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                                         std::string_view operation) {
     static_assert(std::same_as<typename minimap_sketch_data::storage_type, std::uint64_t>);
 
-    if constexpr (!std::same_as<p_alphabet, seq::dna4> && !std::same_as<p_alphabet, seq::dna5>) {
+    if constexpr (!bioseq::minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
         throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_alphabet,
                                              operation};
     } else {
@@ -627,61 +704,31 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
         if (kernels == nullptr || kernels->two_stack_nthash == nullptr) {
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state, operation};
         }
-        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
-        const auto access = bioseq::storage::plan_sequence_access(
-            sequence,
-            bioseq::storage::sequence_access_requirement::contiguous_resident,
-            lo_bp,
-            hi_bp,
-            packed_width);
-        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
-        typename bioseq::storage::lazy_sequence_view<p_alphabet>::resident_packed_sequence
-            descriptor{};
-        if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
-            access.resident.has_value()) {
-            descriptor = *access.resident;
-        } else {
-            auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-                access.admission_bytes);
-            if (!permit) {
-                throw exact_simd_index_runtime_error{exact_simd_index_status::non_contiguous_range,
-                                                     operation};
+        using view_type = bioseq::storage::lazy_sequence_view<p_alphabet>;
+        using descriptor_type = typename view_type::resident_packed_sequence;
+        constexpr auto bits_per_symbol =
+            bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol;
+        const auto logical_length = static_cast<std::size_t>(hi_bp - lo_bp);
+        std::optional<descriptor_type> resident;
+        // Select an existing native word layout before considering any packing.
+        for (const std::uint8_t width : {sizeof(std::uint64_t), sizeof(std::uint32_t)}) {
+            auto candidate = sequence.try_resident_packed(lo_bp, hi_bp, width);
+            if (candidate && candidate->leading_symbol_offset == 0u) {
+                resident = *candidate;
+                break;
             }
-            owner.emplace(bioseq::storage::materialize_packed_sequence(
-                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
-            descriptor = owner->descriptor();
         }
-        if (descriptor.logical_length != static_cast<std::size_t>(hi_bp - lo_bp) ||
-            descriptor.storage_unit_width != packed_width ||
-            descriptor.bits_per_symbol !=
-                bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol ||
-            descriptor.leading_symbol_offset != 0u ||
-            descriptor.bit_order !=
-                bioseq::storage::lazy_sequence_view<
-                    p_alphabet>::packed_symbol_order::least_significant_symbol_first ||
-            (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
-            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range, operation};
-        }
-
-        /// Packed storage kept alive while the synchronous bridge borrows it.
-        struct sequence_context {
-            const void* data{};
-            std::size_t unit_count{};
-        } sequence_state{descriptor.units, descriptor.unit_count};
-
-        // Present the contiguous input as a single bridge fragment.
-        const auto read_fragment = +[](void* opaque, std::size_t fragment_no) {
-            const auto& context = *static_cast<sequence_context*>(opaque);
-            if (fragment_no != 0u || context.unit_count == 0u) {
-                return exact_simd_index_packed_fragment{};
-            }
-            return exact_simd_index_packed_fragment{
-                .data = context.data,
-                .storage_units = context.unit_count,
-            };
-        };
-        // The borrowed or allocated owner stays alive until this call returns.
-        const auto release_fragment = +[](void*, std::size_t) noexcept {};
+        const std::uint8_t packed_width = resident
+            ? resident->storage_unit_width : sizeof(std::uint32_t);
+        const std::size_t letters_per_unit = packed_width * 8u / bits_per_symbol;
+        const std::size_t total_units = logical_length / letters_per_unit
+            + (logical_length % letters_per_unit != 0u);
+        using sequence_context = exact_simd_index_detail::admitted_fragment_source<p_alphabet>;
+        constexpr std::size_t fragment_units = sequence_context::fragment_units;
+        const std::size_t fragment_count = total_units / fragment_units
+            + (total_units % fragment_units != 0u);
+        sequence_context sequence_state{sequence, lo_bp, logical_length, total_units,
+            letters_per_unit, packed_width, resident, {}, operation};
         // Prefer batch append when supported, otherwise collect each record.
         const auto append_records =
             +[](void* opaque, const minimap_sketch_data* records, std::size_t count) {
@@ -743,23 +790,21 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
             collect_exact_simd_index_erased(exact_simd_index_bridge_request{
                 .kernels = kernels,
                 .sequence_context = &sequence_state,
-                .read_fragment = read_fragment,
-                .release_fragment = release_fragment,
+                .read_fragment = &sequence_context::read_fragment,
+                .release_fragment = &sequence_context::release_fragment,
                 .collector_context = &collector,
                 .append_records = append_records,
                 .append_raw = append_raw,
                 .alphabet_code = alphabet_code,
-                .bits_per_symbol = descriptor.bits_per_symbol,
+                .bits_per_symbol = bits_per_symbol,
                 .storage_unit_bytes = packed_width,
-                .letters_per_unit =
-                    packed_width * 8u /
-                    bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol,
-                .total_units = descriptor.unit_count,
+                .letters_per_unit = letters_per_unit,
+                .total_units = total_units,
                 .total_bp = static_cast<std::size_t>(hi_bp - lo_bp),
-                .fragment_units = std::max<std::size_t>(descriptor.unit_count, 1u),
-                .fragment_count = descriptor.unit_count == 0u ? 0u : 1u,
+                .fragment_units = fragment_units,
+                .fragment_count = fragment_count,
                 .lo_unit = 0u,
-                .hi_unit = descriptor.unit_count,
+                .hi_unit = total_units,
                 .window_size = runtime_w,
                 .kmer_size = runtime_k,
                 .emitted_position_base = emitted_position_base,
@@ -1088,12 +1133,6 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
             return rejected_packed_bounded_nthash_index_result(
                 packed_bounded_nthash_index_status::unsupported_storage);
         }
-        if (expected_packed_storage_bits == 0u &&
-            !std::same_as<p_alphabet, seq::dna4> &&
-            !std::same_as<p_alphabet, seq::dna5>) {
-            return rejected_packed_bounded_nthash_index_result(
-                packed_bounded_nthash_index_status::unsupported_storage);
-        }
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size() ||
             local_bp_size != static_cast<std::uint64_t>(hi_bp - lo_bp)) {
             return rejected_packed_bounded_nthash_index_result(
@@ -1133,9 +1172,6 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
                     (expected_packed_storage_bits != 0u &&
                      descriptor.storage_unit_width * 8u !=
                          expected_packed_storage_bits) ||
-                    (std::same_as<p_alphabet, seq::dna4> &&
-                     expected_packed_storage_bits == 0u &&
-                     descriptor.storage_unit_width != sizeof(std::uint32_t)) ||
                     descriptor.bits_per_symbol !=
                         bioseq::storage::lazy_sequence_traits<
                             p_alphabet>::k_logical_bits_per_symbol ||
@@ -1205,8 +1241,11 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
                     return rejected_packed_bounded_nthash_index_result(
                         packed_bounded_nthash_index_status::admission_denied);
                 }
-                owner.emplace(bioseq::storage::materialize_packed_sequence(
-                    sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+                auto materialized = bioseq::storage::materialize_packed_sequence(
+                    sequence, lo_bp, hi_bp, packed_width, std::move(*permit));
+                if (!materialized) return rejected_packed_bounded_nthash_index_result(
+                    packed_bounded_nthash_index_status::invalid_state);
+                owner.emplace(std::move(*materialized));
                 descriptor = owner->descriptor();
             }
             return invoke_descriptor(descriptor, owner.has_value());
@@ -1216,9 +1255,8 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
             return run_width_access(
                 static_cast<std::uint8_t>(expected_packed_storage_bits / 8u));
         }
-        if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-            if (auto resident = sequence.try_resident_packed(
-                    lo_bp, hi_bp, sizeof(std::uint64_t));
+        for (const std::uint8_t width : {sizeof(std::uint64_t), sizeof(std::uint32_t)}) {
+            if (auto resident = sequence.try_resident_packed(lo_bp, hi_bp, width);
                 resident.has_value() && resident->leading_symbol_offset == 0u) {
                 return invoke_descriptor(*resident, /*materialized=*/false);
             }

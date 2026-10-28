@@ -81,7 +81,7 @@ template <sequence_alphabet p_alphabet, class p_callable>
     using legacy_record = minimizers::minimap_sketch_data;
     constexpr auto algorithm =
         ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer;
-    if (kmer_size == 0u || kmer_size > 32u
+    if (kmer_size == 0u || kmer_size > 31u
         || !vulkan_minimizer_window_size_supported(window_size)
         || window_size > (std::numeric_limits<std::uint16_t>::max)()) {
         throw vulkan_runtime_error{
@@ -97,9 +97,7 @@ template <sequence_alphabet p_alphabet, class p_callable>
             minimizers::minimizer_profile_alphabet_id<p_alphabet>();
         constexpr auto legacy_id =
             minimizers::minimizer_physical_record_detail::record_id<legacy_record>();
-        const std::uint64_t required_hash_mask = kmer_size == 32u
-            ? (std::numeric_limits<std::uint64_t>::max)()
-            : (std::uint64_t{1u} << (2u * kmer_size)) - 1u;
+        constexpr std::uint64_t required_hash_mask = std::numeric_limits<std::uint32_t>::max();
         const auto* legacy_descriptor =
             minimizers::find_minimizer_physical_record(legacy_id);
         if (legacy_descriptor != nullptr

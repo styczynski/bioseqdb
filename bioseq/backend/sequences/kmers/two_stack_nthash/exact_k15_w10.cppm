@@ -122,8 +122,8 @@ process_exact_k15_w10_u32_group(
     constexpr std::uint64_t ordinal_sentinel =
         (std::numeric_limits<std::uint64_t>::max)();
     const std::uint32_t maximum_hash = static_cast<std::uint32_t>(
-        p_minimizer_type::maximum().kmer());
-    const std::uint64_t maximum_raw = p_minimizer_type::maximum().raw_value();
+        p_minimizer_type::k_hash_field_mask);
+    const std::uint64_t maximum_raw = static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask);
 
     if (state.status != two_stack_continuation_status::ok) return state.status;
     if (hn::Lanes(d32) != lanes32 || hn::Lanes(d64) != 2
@@ -619,8 +619,8 @@ process_exact_k15_w10_b8_candidate_block(
     constexpr std::size_t lanes = 4;
     constexpr std::uint32_t kmer_mask = (std::uint32_t{1} << 30) - 1;
     const std::uint32_t maximum_hash = static_cast<std::uint32_t>(
-        p_minimizer_type::maximum().kmer());
-    const std::uint64_t maximum_raw = p_minimizer_type::maximum().raw_value();
+        p_minimizer_type::k_hash_field_mask);
+    const std::uint64_t maximum_raw = static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask);
     const std::uint64_t ordinal_sentinel =
         (std::numeric_limits<std::uint64_t>::max)();
 
@@ -694,14 +694,14 @@ process_exact_k15_w10_b8_candidate_block(
             lane_indices(d64));
         hn::StoreU(
             hn::IfThenElse(
-                active_halves.lower,
+                valid_halves.lower,
                 ordinal_lower,
                 hn::Set(d64, ordinal_sentinel)),
             d64,
             candidate_ordinal.data() + group_offset);
         hn::StoreU(
             hn::IfThenElse(
-                active_halves.upper,
+                valid_halves.upper,
                 ordinal_upper,
                 hn::Set(d64, ordinal_sentinel)),
             d64,

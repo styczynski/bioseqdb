@@ -111,6 +111,10 @@ sketch_uploaded_window_result(
             decline_out->max_minimizers = max_minimizers;
         }
     };
+    if constexpr (minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
+        decline(vulkan_sketch_decline_reason::minimizer_layout_unsupported);
+        return std::nullopt;
+    }
     if (upload.bp_size > std::numeric_limits<std::uint32_t>::max()) {
         decline(vulkan_sketch_decline_reason::sequence_size_exceeds_u32);
         return std::nullopt;

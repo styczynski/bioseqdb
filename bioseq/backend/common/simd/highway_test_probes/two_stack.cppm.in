@@ -317,7 +317,7 @@ auto check_transpose(group_receipt& receipt) -> void {
  */
 [[nodiscard]] auto check_selector() -> group_receipt {
     group_receipt receipt;
-    using fast_minimizer = minimizer_representation<33U, 15U>;
+    using fast_minimizer = minimizer_representation<31u, 32u>;
     using fast_sequence =
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using fast_traits = compact_sequence_range<fast_sequence>::traits;

@@ -1061,6 +1061,11 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                                         range->ce_u,
                                                         &decline);
                                             if (!window) {
+                                                if (decline.reason == bioseq::gpu::vulkan::
+                                                        vulkan_sketch_decline_reason::source_read_failed) {
+                                                    bioseq::gpu::vulkan::throw_vulkan_strict_decline(
+                                                        "Vulkan spill batch source", decline);
+                                                }
                                                 break;
                                             }
                                             candidate_owner.emplace(std::move(*window));

@@ -52,8 +52,7 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
                            std::size_t kmer_length)
             : base_hasher_(simd_tag, kmer_length),
               mask_(hn::Set(simd_tag,
-                            (static_cast<typename traits::input_type>(1) << (2u * kmer_length)) -
-                                1u)) {}
+                            traits::exact_kmer_mask(kmer_length))) {}
 
         /** @brief Limits a requested bit shmft to one less than the lane width. */
         template <std::size_t p_offset>
@@ -62,14 +61,12 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
         /**
          * @brief Advances each lane's strand codes and hashes the smaller code.
          * @param incoming Rank appended to the forward  code.
-         * @param outgoing Rank whose complement is prepended to the reverse code.
          * @return Hashes limited to the configured k-mer bit width
          */
         HWY_INLINE typename traits::hasher_return_type
         next(const typename traits::input_simd_tag_type& simd_tag,
-             typename traits::input_vector_type incoming,
-             typename traits::input_vector_type outgoing) {
-            auto key = base_hasher_.next(simd_tag, std::move(incoming), std::move(outgoing));
+             typename traits::input_vector_type incoming) {
+            auto key = base_hasher_.next(simd_tag, std::move(incoming));
             key = hn::And(hn::Add(hn::Not(key), hn::ShiftLeft<k_shift<21>>(key)), mask_);
             key = hn::Xor(key, hn::ShiftRight<k_shift<24>>(key));
             key = hn::And(hn::Add(hn::Add(key, hn::ShiftLeft<k_shift<3>>(key)),
@@ -81,6 +78,11 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
                           mask_);
             key = hn::Xor(key, hn::ShiftRight<k_shift<28>>(key));
             return hn::And(hn::Add(key, hn::ShiftLeft<k_shift<31>>(key)), mask_);
+        }
+
+        /** Restart selected lanes through the shared exact rolling hasher. */
+        HWY_INLINE void reset(const p_simd_tag& simd_tag, hn::Mask<p_simd_tag> invalid) {
+            base_hasher_.reset(simd_tag, invalid);
         }
 
         /** @brief Marks lanes with equal forward and reverse-complement k-mer codes. */

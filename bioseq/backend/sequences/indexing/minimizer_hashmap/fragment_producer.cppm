@@ -874,6 +874,11 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                             static_cast<sequence_size_t>(geometry.collect_hi),
                             &decline);
                     if (!window) {
+                        if (decline.reason == bioseq::gpu::vulkan::
+                                vulkan_sketch_decline_reason::source_read_failed) {
+                            bioseq::gpu::vulkan::throw_vulkan_strict_decline(
+                                "Vulkan fragment batch source", decline);
+                        }
                         break;
                     }
                     candidate_owner.emplace(std::move(*window));

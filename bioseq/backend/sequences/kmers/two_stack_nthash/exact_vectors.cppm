@@ -34,7 +34,7 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
  * @brief Checks output layouts supported by the eight-candidate K15/W10 kernel.
  *
  * The kernel uses 32-bit hash lanes and 64-bit output records. It accepts
- * the field layouts of minimizer_representation<33, 15> for target postings
+ * the field layouts of minimizer_representation<31, 32> for target postings
  * and minimap_sketch_data for query sketches. These reserve 30 and 35 hash
  * bits respectively, while the K15 hash uses 30 bits.
  *
@@ -46,19 +46,15 @@ inline constexpr bool exact_k15_w10_b8_representation_v =
         if constexpr (!exact_simd_minimizer_representation<p_minimizer_type>) {
             return false;
         } else {
-            return std::same_as<
-                       typename p_minimizer_type::storage_type, std::uint64_t>
+            constexpr std::size_t exact_hash_bits =
+                15u * seqan3::detail::ceil_log2(seqan3::alphabet_size<seq::dna4>);
+            // This leaf's u32 scratch maximum lies strictly outside its 30-bit
+            // exact hash domain. No physical-record hash value is reserved.
+            return std::same_as<typename p_minimizer_type::storage_type, std::uint64_t>
                 && p_minimizer_type::k_position_shift == 1u
-                && ((static_cast<std::uint64_t>(
-                         p_minimizer_type::k_hash_field_mask) == 0x3fffffffull
-                     && static_cast<std::uint64_t>(
-                         p_minimizer_type::k_position_field_mask) == 0x1ffffffffull
-                     && p_minimizer_type::k_hash_shift == 34u)
-                    || (static_cast<std::uint64_t>(
-                            p_minimizer_type::k_hash_field_mask) == 0x7ffffffffull
-                        && static_cast<std::uint64_t>(
-                            p_minimizer_type::k_position_field_mask) == 0x0fffffffull
-                        && p_minimizer_type::k_hash_shift == 29u));
+                && p_minimizer_type::layout_type::k_hash_bits > exact_hash_bits
+                && p_minimizer_type::layout_type::k_hash_bits <=
+                    std::numeric_limits<std::uint32_t>::digits;
         }
     }();
 

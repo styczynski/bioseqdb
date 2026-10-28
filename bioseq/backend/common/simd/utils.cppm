@@ -5,6 +5,8 @@
 module;
 
 #include <array>
+#include <bit>
+#include <type_traits>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -17,8 +19,55 @@ module;
 export module bioseq.simd.utils;
 
 import bioseq.common.templating;
+import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::simd {
+
+/** Return the used low bits of a compact word without a full-width shift. */
+template<class Traits>
+[[nodiscard]] constexpr typename Traits::storage_unit packed_symbol_mask(std::size_t symbols) noexcept {
+    return *bioseq::common::checked_low_bits_mask<typename Traits::storage_unit>(symbols * Traits::bits_per_char);
+}
+
+/** Read only the one or two packed units intersecting a bounded symbol window. */
+template<class Traits>
+[[nodiscard]] inline typename Traits::storage_unit load_packed_symbol_window(
+    const typename Traits::storage_unit* units, std::size_t start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    constexpr std::size_t symbols_per_unit = Traits::letters_per_unit;
+    const std::size_t unit_index = start / symbols_per_unit;
+    const std::size_t symbol_offset = start % symbols_per_unit;
+    const std::size_t bit_offset = symbol_offset * Traits::bits_per_char;
+    unit_type packed = (units[unit_index] & Traits::used_storage_mask) >> bit_offset;
+    if (symbol_offset != 0 && symbol_offset + length > symbols_per_unit) {
+        packed |= (units[unit_index + 1] & Traits::used_storage_mask)
+            << (Traits::unit_used_bits - bit_offset);
+    }
+    return packed & packed_symbol_mask<Traits>(length);
+}
+
+/** Reverse symbol groups using a derived bit permutation where geometry permits it. */
+template<class Traits>
+[[nodiscard]] constexpr typename Traits::storage_unit reverse_packed_symbol_groups(
+    typename Traits::storage_unit packed) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    if constexpr (std::has_single_bit(Traits::bits_per_char) && Traits::unit_leftover_bits == 0) {
+        for (std::size_t step = Traits::bits_per_char; step < Traits::unit_width; step *= 2) {
+            unit_type low_groups = 0;
+            for (std::size_t offset = 0; offset < Traits::unit_width; offset += step * 2)
+                low_groups |= *bioseq::common::checked_low_bits_mask<unit_type>(step) << offset;
+            packed = ((packed & low_groups) << step) | ((packed >> step) & low_groups);
+        }
+        return packed;
+    } else {
+        unit_type reversed = 0;
+        for (std::size_t symbol = 0; symbol < Traits::letters_per_unit; ++symbol) {
+            reversed = (reversed << Traits::bits_per_char) | (packed & Traits::char_mask);
+            packed >>= Traits::bits_per_char;
+        }
+        return reversed;
+    }
+}
 
 /** Whether a bounded equality scan must reject ranks outside a supplied alphabet. */
 enum class sequence_rank_validation : std::uint8_t { none, upper_bound };
@@ -35,6 +84,19 @@ using sequence_rank_equality_kernel = sequence_symbol_equality (*)(
     const std::uint8_t*, const std::uint8_t*, std::size_t,
     sequence_rank_validation, std::size_t);
 
+/** Bounded reader I/O capacity, independent of a target's SIMD vector width. */
+inline constexpr std::size_t sequence_rank_io_chunk_capacity = 1024u;
+
+/** Native rank-table operations supplied by the selected Highway target. */
+enum class sequence_rank_transform : std::uint8_t { translate_triplets, synthesize_triplets };
+
+/** Scalar-only ABI; input/output are disjoint bounded native-rank tiles.
+ * Forward lookup uses one entry per source triplet; inverse entries pack three
+ * destination rank bytes. False reports a malformed shape or source rank. */
+using sequence_rank_transform_kernel = bool (*)(sequence_rank_transform,
+    std::span<const std::uint8_t>, std::size_t,
+    std::span<const std::uint32_t>, std::span<std::uint8_t>);
+
 /**
  * Count selected sequence windows through bounded byte readers and a selected
  * target-owned numeric kernel. No Highway tag/vector crosses this neutral API.
@@ -48,7 +110,7 @@ template<bool p_query_reversed,
         const QueryReader& query, const TargetReader& target,
         std::size_t query_start, std::size_t target_start, std::size_t length,
         sequence_rank_equality_kernel counter, std::size_t rank_limit = 0u) {
-    constexpr std::size_t chunk_capacity = 1024u;
+    constexpr std::size_t chunk_capacity = sequence_rank_io_chunk_capacity;
     std::array<std::uint8_t, chunk_capacity> query_chunk;
     std::array<std::uint8_t, chunk_capacity> target_chunk;
     sequence_symbol_equality result;
@@ -58,12 +120,17 @@ template<bool p_query_reversed,
     }
     for (std::size_t consumed = 0u; consumed < length;) {
         const std::size_t chunk_size = std::min(chunk_capacity, length - consumed);
-        query.template copy_ranks<p_query_reversed, false>(
-            std::span<std::uint8_t>{query_chunk.data(), chunk_size},
-            query_start + consumed, query_start + consumed + chunk_size);
-        target.template copy_ranks<false, false>(
-            std::span<std::uint8_t>{target_chunk.data(), chunk_size},
-            target_start + consumed, target_start + consumed + chunk_size);
+        const auto query_source = query.template borrow_rank_source<p_query_reversed>();
+        const auto target_source = target.template borrow_rank_source<false>();
+        const auto query_read = query_source.read_checked(query_start + consumed, chunk_size, query_chunk);
+        if (!query_read) { result.valid_ranks = false; return result; }
+        // Preserve the bounded query window before an aliased target reader may evict it.
+        if (query_read->data() != query_chunk.data())
+            std::copy(query_read->begin(), query_read->end(), query_chunk.begin());
+        const auto target_read = target_source.read_checked(target_start + consumed, chunk_size, target_chunk);
+        if (!target_read) { result.valid_ranks = false; return result; }
+        if (target_read->data() != target_chunk.data())
+            std::copy(target_read->begin(), target_read->end(), target_chunk.begin());
         const auto compared = counter(query_chunk.data(), target_chunk.data(),
             chunk_size, p_validation, rank_limit);
         result.equal_symbols += compared.equal_symbols;

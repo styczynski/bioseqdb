@@ -208,41 +208,44 @@ requires bounded_nthash_seeded_alphabet<
     using vector_stream_type =
         vector_stream<p_simd_tag, std::uint32_t, p_stream_count>;
 
+    using seed_policy = bounded_nthash_seed_policy<alphabet_type>;
+    static_assert(!p_complement || seed_policy::canonical_reverse_complement);
     if constexpr (std::same_as<alphabet_type, seq::dna4>) {
-        // DNA4 ranks fit in one vector table lookup.
         return lookup_table_stream(simd_tag, table, ranks);
-    } else {
-        // Look up ranks 0..3 with a vector permutation. Select seeds for any
-        // remaining alphabet ranks with SIMD comparisons.
+    } else if constexpr (std::same_as<alphabet_type, seq::dna5>) {
+        // Preserve the compact DNA5 permutation/select leaf.
+        constexpr std::size_t k_permutation_size = seqan3::alphabet_size<seq::dna4>;
         auto table_values = lookup_table_stream(
-            simd_tag,
-            table,
+            simd_tag, table,
             if_then_else(
-                less(ranks, vector_stream_type::splat(simd_tag, 4u)),
-                ranks,
-                vector_stream_type::splat_zero(simd_tag)));
-        [&]<std::size_t... p_rank>(std::index_sequence<p_rank...>) {
-            ([&] {
-                if constexpr (p_rank >= 4u) {
-                    constexpr std::size_t k_seed_rank = p_complement
-                        ? static_cast<std::size_t>(traits::letter_complement(
-                              static_cast<storage_unit>(p_rank)))
-                        : p_rank;
-                    constexpr std::uint32_t k_seed =
-                        bounded_nthash_seed_policy<alphabet_type>::
-                            forward_seeds[k_seed_rank];
-                    table_values = if_then_else(
-                        equal(
-                            ranks,
-                            vector_stream_type::splat(
-                                simd_tag,
-                                static_cast<std::uint32_t>(p_rank))),
-                        vector_stream_type::splat(simd_tag, k_seed),
-                        table_values);
-                }
-            }(), ...);
-        }(std::make_index_sequence<traits::alphabet_size>{});
-        return table_values;
+                less(ranks, vector_stream_type::splat(simd_tag, k_permutation_size)),
+                ranks, vector_stream_type::splat_zero(simd_tag)));
+        constexpr std::size_t k_extra_rank = k_permutation_size;
+        constexpr std::size_t k_seed_rank = [k_extra_rank]() constexpr {
+            if constexpr (p_complement) {
+                return static_cast<std::size_t>(seed_policy::complement_rank(k_extra_rank));
+            } else {
+                return k_extra_rank;
+            }
+        }();
+        return if_then_else(
+            equal(ranks, vector_stream_type::splat(simd_tag, k_extra_rank)),
+            vector_stream_type::splat(simd_tag, seed_policy::forward_seeds[k_seed_rank]),
+            table_values);
+    } else {
+        // Native rank gather scales with lane count, not alphabet cardinality.
+        return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
+            [&simd_tag, &ranks](auto stream_constant) [[gnu::always_inline]] {
+                constexpr std::size_t k_stream_index = decltype(stream_constant)::value;
+                const hn::Rebind<std::int32_t, p_simd_tag> signed_tag;
+                // Inactive padded lanes may contain unused rank bit patterns.
+                const auto indices = hn::IfThenElse(
+                    hn::Lt(ranks[k_stream_index], hn::Set(simd_tag,
+                        static_cast<std::uint32_t>(seed_policy::alphabet_size))),
+                    ranks[k_stream_index], hn::Zero(simd_tag));
+                return hn::GatherIndex(simd_tag, seed_policy::forward_seeds.data(),
+                    hn::BitCast(signed_tag, indices));
+            });
     }
 }
 
@@ -532,7 +535,9 @@ struct packed_iteration_state {
     };
 
     vector_stream_type forward_hash;
-    vector_stream_type reverse_hash;
+    [[no_unique_address]] std::array<vector_stream_type,
+        bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement ? 1u : 0u>
+        reverse_hash;
     // Fixed-size specializations need no runtime K and W fields.
     [[no_unique_address]] std::array<
         std::size_t,
@@ -555,7 +560,9 @@ struct packed_iteration_state {
     std::array<buffered_boundary_event, 8> first_boundary_event{};
 
     vector_type k_forward_table;
-    vector_type complement_table;
+    [[no_unique_address]] std::array<vector_type,
+        bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement ? 1u : 0u>
+        complement_table;
     p_collector_type& collector;
     runtime_evidence evidence{};
 
@@ -602,22 +609,19 @@ struct packed_iteration_state {
             const auto forward_value = lookup_alphabet_table_stream<
                 alphabet_traits, false>(
                 simd_tag, k_forward_table, incoming_rank);
-            const auto reverse_value = lookup_alphabet_table_stream<
-                alphabet_traits, true>(
-                simd_tag, complement_table, incoming_rank);
             const int forward_rotation = static_cast<int>(
                 ((active_kmer_size - 1 - symbols_seen) * 7) & 31u);
-            const int reverse_rotation = static_cast<int>(
-                (symbols_seen * 7) & 31u);
             // Build the first k-mer hash using a rotation for each symbol position.
             forward_hash = bit_xor(
                 forward_hash,
                 rotate_left_stream_runtime(
                     forward_value, forward_rotation));
-            reverse_hash = bit_xor(
-                reverse_hash,
-                rotate_left_stream_runtime(
-                    reverse_value, reverse_rotation));
+            if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+                const auto reverse_value = lookup_alphabet_table_stream<alphabet_traits, true>(
+                    simd_tag, complement_table[0], incoming_rank);
+                reverse_hash[0] = bit_xor(reverse_hash[0], rotate_left_stream_runtime(
+                    reverse_value, static_cast<int>((symbols_seen * 7u) & 31u)));
+            }
             ++symbols_seen;
             if (symbols_seen < active_kmer_size) return;
         } else {
@@ -632,12 +636,6 @@ struct packed_iteration_state {
             const auto forward_in = lookup_alphabet_table_stream<
                 alphabet_traits, false>(
                 simd_tag, k_forward_table, incoming_rank);
-            const auto reverse_out = lookup_alphabet_table_stream<
-                alphabet_traits, true>(
-                simd_tag, complement_table, outgoing_rank);
-            const auto reverse_in = lookup_alphabet_table_stream<
-                alphabet_traits, true>(
-                simd_tag, complement_table, incoming_rank);
             if constexpr (p_kmer_size != 0u) {
                 // A fixed k-mer size lets these rotation counts be compile-time constants.
                 forward_hash = bit_xor(
@@ -646,12 +644,16 @@ struct packed_iteration_state {
                         rotate_left_stream<static_cast<int>((p_kmer_size * 7) & 31u)>(
                             forward_out)),
                     forward_in);
-                reverse_hash = bit_xor(
-                    bit_xor(
-                        rotate_right_stream<7>(reverse_hash),
-                        rotate_right_stream<7>(reverse_out)),
-                    rotate_left_stream<
-                        static_cast<int>(((p_kmer_size - 1) * 7) & 31u)>(reverse_in));
+                if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+                    const auto reverse_out = lookup_alphabet_table_stream<alphabet_traits, true>(
+                        simd_tag, complement_table[0], outgoing_rank);
+                    const auto reverse_in = lookup_alphabet_table_stream<alphabet_traits, true>(
+                        simd_tag, complement_table[0], incoming_rank);
+                    reverse_hash[0] = bit_xor(
+                        bit_xor(rotate_right_stream<7>(reverse_hash[0]),
+                            rotate_right_stream<7>(reverse_out)),
+                        rotate_left_stream<static_cast<int>(((p_kmer_size - 1u) * 7u) & 31u)>(reverse_in));
+                }
             } else {
                 forward_hash = bit_xor(
                     bit_xor(
@@ -660,13 +662,17 @@ struct packed_iteration_state {
                             forward_out,
                             static_cast<int>((active_kmer_size * 7u) & 31u))),
                     forward_in);
-                reverse_hash = bit_xor(
-                    bit_xor(
-                        rotate_right_stream<7>(reverse_hash),
-                        rotate_right_stream<7>(reverse_out)),
-                    rotate_left_stream_runtime(
-                        reverse_in,
-                        static_cast<int>(((active_kmer_size - 1u) * 7u) & 31u)));
+                if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+                    const auto reverse_out = lookup_alphabet_table_stream<alphabet_traits, true>(
+                        simd_tag, complement_table[0], outgoing_rank);
+                    const auto reverse_in = lookup_alphabet_table_stream<alphabet_traits, true>(
+                        simd_tag, complement_table[0], incoming_rank);
+                    reverse_hash[0] = bit_xor(
+                        bit_xor(rotate_right_stream<7>(reverse_hash[0]),
+                            rotate_right_stream<7>(reverse_out)),
+                        rotate_left_stream_runtime(reverse_in,
+                            static_cast<int>(((active_kmer_size - 1u) * 7u) & 31u)));
+                }
             }
             ++symbols_seen;
         }
@@ -675,10 +681,20 @@ struct packed_iteration_state {
             static_cast<std::uint32_t>(symbols_seen - active_kmer_size);
         const vector_stream_type position = vector_stream_type::splat(
             simd_tag, local_kmer_position);
-        const vector_stream_type canonical_hash = add(
-            forward_hash, reverse_hash);
-        const mask_stream_type reverse_strand = less(
-            reverse_hash, forward_hash);
+        const vector_stream_type canonical_hash = [this]() [[gnu::always_inline]] {
+            if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+                return add(forward_hash, reverse_hash[0]);
+            } else {
+                return forward_hash;
+            }
+        }();
+        const mask_stream_type reverse_strand = [this, &simd_tag]() [[gnu::always_inline]] {
+            if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+                return less(reverse_hash[0], forward_hash);
+            } else {
+                return mask_stream_type::splat_false(simd_tag);
+            }
+        }();
         const vector_stream_type strand = if_then_else(
             reverse_strand,
             vector_stream_type::splat(simd_tag, 1u),
@@ -1185,17 +1201,12 @@ template<
     constexpr const auto& forward_seeds =
         bounded_nthash_seed_policy<alphabet_type>::forward_seeds;
     for (std::size_t lane = 0; lane < k_max_lanes; ++lane) {
-        if constexpr (std::same_as<alphabet_type, seq::dna4>) {
-            // Repeat DNA4 seeds in rank order and pair them with complement seeds.
-            const std::size_t rank = lane & 3u;
-            table_values[lane] = forward_seeds[rank];
-            complement_values[lane] = forward_seeds[3u - rank];
-        } else {
-            const std::size_t rank = lane % traits::alphabet_size;
-            const std::size_t complement_rank = static_cast<std::size_t>(
-                traits::letter_complement(static_cast<storage_unit>(rank)));
-            table_values[lane] = forward_seeds[rank];
-            complement_values[lane] = forward_seeds[complement_rank];
+        const std::size_t rank = lane % traits::alphabet_size;
+        table_values[lane] = forward_seeds[rank];
+        if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+            complement_values[lane] = forward_seeds[
+                bounded_nthash_seed_policy<alphabet_type>::complement_rank(
+                    static_cast<std::uint32_t>(rank))];
         }
     }
     const auto zero = vector_stream_type::splat_zero(simd_tag);
@@ -1210,7 +1221,7 @@ template<
     };
     state_type state{
         .forward_hash = zero,
-        .reverse_hash = zero,
+        .reverse_hash = {},
         .runtime_shape = {},
         .symbol_ring = {},
         .symbols_seen = 0,
@@ -1225,11 +1236,14 @@ template<
         .last_emit_strand = zero,
         .last_emit_valid = false_masks,
         .k_forward_table = hn::LoadU(simd_tag, table_values.data()),
-        .complement_table = hn::LoadU(
-            simd_tag, complement_values.data()),
+        .complement_table = {},
         .collector = collector,
         .evidence = {},
     };
+    if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
+        state.reverse_hash[0] = zero;
+        state.complement_table[0] = hn::LoadU(simd_tag, complement_values.data());
+    }
     if constexpr (p_kmer_size == 0u || p_window_size == 0u) {
         state.runtime_shape = {active_kmer_size, active_window_size};
     }
@@ -1653,45 +1667,6 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 
 } // namespace bounded_nthash_kernel_detail
 
-// Generated source files comuile each output format for its CPU target
-// and input word  size.
-/// @brief Uses 15-bit positions with packed DNA4 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_k15_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 15-bit positions with packed DNA4 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_k15_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 28-bit positions with packed DNA4 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_k15_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 28-bit positions with packed DNA4 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_k15_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 63-bit positions with packed DNA4 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_k15_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 63-bit positions with packed DNA4 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_k15_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 15-bit positions with packed DNA5 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_dna5_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 15-bit positions with packed DNA5 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_dna5_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 28-bit positions with packed DNA5 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_dna5_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 28-bit positions with packed DNA5 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_dna5_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 63-bit positions with packed DNA5 in 32-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_dna5_u32(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-/// @brief Uses 63-bit positions with packed DNA5 in 64-bit words.
-[[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_dna5_u64(
-    minimizer_kernel_invocation&, minimizer_kernel_result&);
-
 /**
  * @brief Checks a bounded ntHash request and selects its output-format implementation.
  *
@@ -1755,105 +1730,28 @@ requires (
 
         bool is_internally_consistent = false;
         switch (invocation.output_layout) {
-            case minimizer_output_layout::sequence_log2_15_kmer_15_uint64:
-                if constexpr (std::same_as<p_storage_unit, std::uint32_t>) {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l15_k15_u32(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l15_dna5_u32(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<15u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                } else {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l15_k15_u64(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l15_dna5_u64(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<15u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                }
+            case k_minimizer_output_layout<minimizer_representation<15u, 32u>>:
+                is_internally_consistent = bounded_nthash_kernel_detail::
+                    run_bounded_nthash<minimizer_representation<15u, 32u>,
+                        p_alphabet, p_storage_unit>(invocation, result);
                 break;
-            case minimizer_output_layout::sequence_log2_28_kmer_15_uint64:
-                if constexpr (std::same_as<p_storage_unit, std::uint32_t>) {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l28_k15_u32(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l28_dna5_u32(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<28u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                } else {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l28_k15_u64(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l28_dna5_u64(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<28u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                }
+            case k_minimizer_output_layout<minimizer_representation<28u, 32u>>:
+                is_internally_consistent = bounded_nthash_kernel_detail::
+                    run_bounded_nthash<minimizer_representation<28u, 32u>,
+                        p_alphabet, p_storage_unit>(invocation, result);
                 break;
-            case minimizer_output_layout::sequence_log2_63_kmer_15_uint128:
-                if constexpr (std::same_as<p_storage_unit, std::uint32_t>) {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l63_k15_u32(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l63_dna5_u32(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<63u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                } else {
-                    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l63_k15_u64(invocation, result);
-                    } else if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-                        is_internally_consistent =
-                            bounded_nthash_repr_l63_dna5_u64(invocation, result);
-                    } else {
-                        is_internally_consistent = bounded_nthash_kernel_detail::
-                            run_bounded_nthash<
-                                minimizer_representation<63u, 15u>,
-                                p_alphabet,
-                                p_storage_unit>(invocation, result);
-                    }
-                }
+            case k_minimizer_output_layout<minimizer_representation<31u, 32u>>:
+                is_internally_consistent = bounded_nthash_kernel_detail::
+                    run_bounded_nthash<minimizer_representation<31u, 32u>,
+                        p_alphabet, p_storage_unit>(invocation, result);
+                break;
+            case k_minimizer_output_layout<minimizer_representation<63u, 32u>>:
+                is_internally_consistent = bounded_nthash_kernel_detail::
+                    run_bounded_nthash<minimizer_representation<63u, 32u>,
+                        p_alphabet, p_storage_unit>(invocation, result);
                 break;
             default:
-                result.status = minimizer_kernel_status::invalid_configuration;
-                result.family_status = static_cast<std::uint32_t>(
-                    bounded_nthash_status::unsupported_representation);
-                result.stats.bounded_nthash.fail_closed_rejections = 1u;
-                break;
+                return reject(bounded_nthash_status::unsupported_representation);
         }
         if (!is_internally_consistent) {
             result.stats.bounded_nthash.fail_closed_rejections = 1u;

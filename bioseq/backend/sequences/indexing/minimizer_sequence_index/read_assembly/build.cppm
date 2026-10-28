@@ -770,8 +770,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 h.magic = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic;
                 h.layout_revision =
                     direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision;
-                h.flags = backend == minimizer_sketch_backend::vulkan_segment &&
-                                  !std::same_as<p_alphabet, ::seq::dna4>
+                h.flags = backend == minimizer_sketch_backend::vulkan_segment
                               ? direct_minimizer_bucket_directory::k_gpu_built
                               : 0u;
                 h.num_buckets = dir.size();

@@ -76,7 +76,7 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
     storage.validate_minimizer_directory_or_error(dblob, dbytes);
     direct_minimizer_bucket_directory_view dir{dblob, dbytes};
     const std::uint32_t max_occ_threshold =
-        detail::effective_max_occ_threshold(max_occ, dir.is_gpu_built());
+        detail::effective_max_occ_threshold(max_occ);
     // Collect unique query hashes and the bucket keys whose ranges contain thm.
     auto& qkmers = scratch.query_kmers;
     auto& wanted = scratch.wanted_sub_keys;
