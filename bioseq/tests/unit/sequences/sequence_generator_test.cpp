@@ -314,12 +314,13 @@ TEST_CASE("sequence generation preserves dna5 symbol frequencies",
     const auto sequence_view =
         bioseq::storage::make_lazy_sequence_view(lazy);
     auto counts = bioseq::indexing::tally_symbol_counts(sequence_view);
+    REQUIRE(counts.has_value());
     const double total = static_cast<double>(gp.reference_length);
     for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
         const double p = gen::alphabet_probability<seq::dna5>::probability()[rank];
         const double mu = total * p;
         const double sigma = std::sqrt(total * p * (1.0 - p));
-        ASSERT(std::abs(static_cast<double>(counts[rank]) - mu) <= 5.0 * sigma,
+        ASSERT(std::abs(static_cast<double>((*counts)[rank]) - mu) <= 5.0 * sigma,
                fmt::format("rank {} frequency out of 5 sigma band", rank), rank);
     }
 }
@@ -430,6 +431,7 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
         bioseq::storage::make_lazy_sequence_view(lazy);
     const auto counts =
         bioseq::indexing::tally_symbol_counts(reference_view);
+    REQUIRE(counts.has_value());
     const auto probs = gen::alphabet_probability<seq::dna5>::probability();
 
     for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
@@ -438,9 +440,9 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
             static_cast<double>(gp.reference_length)
             * probs[rank]
             * (1.0 - probs[rank]));
-        ASSERT(std::abs(static_cast<double>(counts[rank]) - mu) <= 6.0 * sigma,
+        ASSERT(std::abs(static_cast<double>((*counts)[rank]) - mu) <= 6.0 * sigma,
                fmt::format("rank {} count {} outside 6 sigma band around {}",
-                           rank, counts[rank], mu));
+                           rank, (*counts)[rank], mu));
     }
     report_validation(
         "symbol distribution",

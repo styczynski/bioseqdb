@@ -35,6 +35,8 @@ namespace bioseq::io::detail {
 /// Between them, `chunk` borrows packed words for the duration of the call
 /// If the sink provides `chunk_owned`, it takes the word vector instead.
 /// Only the final chunk can contain padding, and it has `end_of_record` set.
+/// Chunks are provisional: only `end_record` may publish a record. An error
+/// leaves its current record unfinished; the sink must discard that ownership.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           sequence_file_format p_file_format,
@@ -64,9 +66,9 @@ template <sequence_alphabet p_alphabet,
         aborted = true;
     };
 
-    // Sequence words are drained between parser calls. Headers stay in scratch
-    // until the  record finishes. FASTQ qualities are parsed but not sent to the
-    // sink, and their scratch space is cleared after a chunk or record is emitted.
+    // Sequence words are drained between parser calls. Headers and quality bytes
+    // remain until record validation completes; draining words cannot erase the
+    // quality count used by the shared FASTQ parser.
     std::vector<char> header_scratch;
     std::vector<p_storage_unit> seq_scratch;
     std::vector<std::uint8_t> quality_scratch; // FASTQ content is ignored here.
@@ -88,7 +90,7 @@ template <sequence_alphabet p_alphabet,
         };
 
     // Give the sink the packed words, then prepare empty scratch for further input.
-    auto emit_stream_chunk = [&options, &quality_scratch, &seq_scratch, &sink](
+    auto emit_stream_chunk = [&options, &seq_scratch, &sink](
                                  std::uint64_t chunk_bp, bool end_of_record) {
         if constexpr (requires(p_sink& sink_ref,
                                std::vector<p_storage_unit>&& owned_words,
@@ -107,7 +109,6 @@ template <sequence_alphabet p_alphabet,
                 end_of_record});
             seq_scratch.clear();
         }
-        quality_scratch.clear();
     };
 
     // Send completed words before refilling the input buffer. The header is
@@ -203,7 +204,7 @@ template <sequence_alphabet p_alphabet,
                     slab.fill_size,
                     slab.is_eof,
                     slab.parse_cursor,
-                    global_offset_base + slab.parse_cursor,
+                    global_offset_base,
                     emit_fasta,
                     failure_capture);
                 slab.parse_cursor = step.cursor;
@@ -212,8 +213,7 @@ template <sequence_alphabet p_alphabet,
                     continue;
                 }
                 if (step.outcome == parse_outcome::at_end_of_file) {
-                    if (record_open)
-                        complete_record();
+                    DEBUG_ASSERT(!record_open, "parser EOF must follow record completion");
                     if (aborted)
                         return std::unexpected(captured_error);
                     return records_emitted;
@@ -227,12 +227,11 @@ template <sequence_alphabet p_alphabet,
             }
             if (!need_refill)
                 continue;
-            if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
-                if (record_open)
-                    complete_record();
-                if (aborted)
-                    return std::unexpected(captured_error);
-                return records_emitted;
+            if (slab.is_eof) {
+                reset_record();
+                emit_failure(failure_capture, "truncated sequence record at file position {}",
+                             global_offset_base + slab.fill_size);
+                return std::unexpected(captured_error);
             }
             global_offset_base += slab.parse_cursor;
             (void)slab.make_room();
@@ -280,7 +279,7 @@ template <sequence_alphabet p_alphabet,
                     slab.fill_size,
                     slab.is_eof,
                     slab.parse_cursor,
-                    global_offset_base + slab.parse_cursor,
+                    global_offset_base,
                     options.encoder.strict_fastq,
                     emit_fastq,
                     failure_capture);
@@ -290,8 +289,7 @@ template <sequence_alphabet p_alphabet,
                     continue;
                 }
                 if (step.outcome == parse_outcome::at_end_of_file) {
-                    if (record_open)
-                        complete_record();
+                    DEBUG_ASSERT(!record_open, "parser EOF must follow record completion");
                     if (aborted)
                         return std::unexpected(captured_error);
                     return records_emitted;
@@ -305,12 +303,11 @@ template <sequence_alphabet p_alphabet,
             }
             if (!need_refill)
                 continue;
-            if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
-                if (record_open)
-                    complete_record();
-                if (aborted)
-                    return std::unexpected(captured_error);
-                return records_emitted;
+            if (slab.is_eof) {
+                reset_record();
+                emit_failure(failure_capture, "truncated sequence record at file position {}",
+                             global_offset_base + slab.fill_size);
+                return std::unexpected(captured_error);
             }
             global_offset_base += slab.parse_cursor;
             (void)slab.make_room();

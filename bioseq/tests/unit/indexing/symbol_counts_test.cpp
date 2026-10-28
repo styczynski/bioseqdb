@@ -79,9 +79,10 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
         const auto lazy_view =
             bioseq::storage::make_lazy_sequence_view(lazy);
         auto got = bioseq::indexing::tally_symbol_counts(lazy_view);
-        REQUIRE(got.size() == 4u);
+        REQUIRE(got.has_value());
+        REQUIRE(got->size() == 4u);
         std::int64_t total = 0;
-        for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
+        for (std::size_t r = 0; r < 4; ++r) { REQUIRE((*got)[r] == want[r]); total += (*got)[r]; }
         REQUIRE(total == static_cast<std::int64_t>(data.size()));
         REQUIRE(total == static_cast<std::int64_t>(lazy.bp_size()));
     }
@@ -91,9 +92,10 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
         const auto frag_view =
             bioseq::storage::make_lazy_sequence_view(frag);
         auto got = bioseq::indexing::tally_symbol_counts(frag_view);
-        REQUIRE(got.size() == 4u);
+        REQUIRE(got.has_value());
+        REQUIRE(got->size() == 4u);
         std::int64_t total = 0;
-        for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
+        for (std::size_t r = 0; r < 4; ++r) { REQUIRE((*got)[r] == want[r]); total += (*got)[r]; }
         REQUIRE(total == static_cast<std::int64_t>(data.size()));
     }
 }
@@ -119,10 +121,11 @@ TEST_CASE("symbol_counts_index build + read_count round-trips the tally",
     REQUIRE(storage.chunk_byte_size() == 4u * sizeof(std::int64_t));
 
     auto tally = bioseq::indexing::tally_symbol_counts(lazy_view);
+    REQUIRE(tally.has_value());
     for (std::size_t r = 0; r < 4; ++r) {
         auto v = bioseq::indexing::symbol_counts_index<fake_sequence_storage>::read_count(storage, r);
         REQUIRE(v.has_value());
-        REQUIRE(v.value() == tally[r]);
+        REQUIRE(v.value() == (*tally)[r]);
         REQUIRE(v.value() == want[r]);
     }
 }

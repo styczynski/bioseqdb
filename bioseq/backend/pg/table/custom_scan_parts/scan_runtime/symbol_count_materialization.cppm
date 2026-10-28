@@ -39,6 +39,7 @@ import bioseq.postgres.support.datums;
 import bioseq.postgres.table.io;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
+import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.layout;
 import bioseq.storage.size;
@@ -307,6 +308,7 @@ export {
 
                 /* Recompute when no stored count is available, even with index reads disabled. */
                 std::int64_t cnt = 0;
+                std::optional<bioseq::sequences::sequence_conversion_error> tally_failure;
                 if (pgseq_is_cigar_alphabet(alpha)) {
                     if (static_cast<std::size_t>(site.rank) >= seqan3::alphabet_size<bioseq::cigar_symbol>)
                         symbol_count_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
@@ -349,6 +351,7 @@ export {
                      caches = resources->caches,
                      scratch = resources->scratch,
                      &cnt,
+                     &tally_failure,
                      hdr]<class p_sequence>() {
                         if (stub) {
                             using source_binding_type =
@@ -364,20 +367,25 @@ export {
                                 caches,
                                 scratch};
                             bioseq::storage::with_postgres_lazy_sequence<p_sequence>(
-                                source_binding, [rank, &cnt](auto lazy_view) {
+                                source_binding, [rank, &cnt, &tally_failure](auto lazy_view) {
                                     auto counts = bioseq::indexing::tally_symbol_counts(lazy_view);
-                                    if (static_cast<std::size_t>(rank) < counts.size())
-                                        cnt = counts[rank];
+                                    if (!counts) { tally_failure = counts.error(); return; }
+                                    if (static_cast<std::size_t>(rank) < counts->size())
+                                        cnt = (*counts)[rank];
                                 });
                         } else {
                             compact_sequence_range<p_sequence> range{*hdr};
                             auto lazy = bioseq::storage::make_resident_lazy_sequence(range);
                             const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
                             auto counts = bioseq::indexing::tally_symbol_counts(lazy_view);
-                            if (static_cast<std::size_t>(rank) < counts.size())
-                                cnt = counts[rank];
+                            if (!counts) { tally_failure = counts.error(); return; }
+                            if (static_cast<std::size_t>(rank) < counts->size())
+                                cnt = (*counts)[rank];
                         }
                     });
+                if (tally_failure)
+                    bioseq::postgres::support::invoke_pg_as_cpp(
+                        [error = *tally_failure] { pg_raise_sequence_conversion_error(error); });
                 site.placeholder->constvalue = bioseq::postgres::support::pg_datum::from(cnt).raw();
                 site.placeholder->constisnull = false;
             }

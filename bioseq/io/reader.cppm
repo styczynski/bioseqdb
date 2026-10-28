@@ -145,6 +145,8 @@ read_sequences_file(p_path&& file_path,
 /// before a record ends, avoiding a whole-record sequence batch. Header and
 /// FASTQ quality parsing still  use scratch buffers. Returns the recrd count
 /// or the first input or parse error.
+/// Chunks remain provisional until `sink.end_record()`. On an error or exception,
+/// the sink must discard the unfinished record; no completion callback is sent.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           sequence_file_format p_file_format,

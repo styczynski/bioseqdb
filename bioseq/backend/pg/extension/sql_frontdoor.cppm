@@ -56,6 +56,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
+import bioseq.sequences.simd;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
@@ -392,10 +393,11 @@ std::int64_t symbol_count(
 	}
 
 	std::int64_t symbol_count_result = 0;
+	std::optional<bioseq::sequences::sequence_conversion_error> tally_failure;
 	pgseq_dispatch_biological_instance(
 		sequence_header->alphabet_code,
 		sequence_header->storage_unit_byte_width,
-		[sequence_header, symbol_rank, &symbol_count_result]
+		[sequence_header, symbol_rank, &symbol_count_result, &tally_failure]
 		<class sequence_type>() {
 			compact_sequence_range<sequence_type> sequence_range{
 				*sequence_header};
@@ -405,14 +407,21 @@ std::int64_t symbol_count(
 				bioseq::storage::make_lazy_sequence_view(resident_sequence);
 			const auto symbol_counts =
 				bioseq::indexing::tally_symbol_counts(sequence_view);
-			if (static_cast<std::size_t>(symbol_rank) < symbol_counts.size()) {
+			if (!symbol_counts) {
+				tally_failure = symbol_counts.error();
+				return;
+			}
+			if (static_cast<std::size_t>(symbol_rank) < symbol_counts->size()) {
 				symbol_count_result = static_cast<std::int64_t>(
-					symbol_counts[static_cast<std::size_t>(symbol_rank)]);
+					(*symbol_counts)[static_cast<std::size_t>(symbol_rank)]);
 			}
 		});
 
     bioseq::postgres::support::pfree_if_distinct_from(
         bioseq::postgres::support::pg_datum::from_raw(el), sequence_header);
+	if (tally_failure)
+		bioseq::postgres::support::invoke_pg_as_cpp(
+			[error = *tally_failure] { pg_raise_sequence_conversion_error(error); });
 	return symbol_count_result;
 }
 

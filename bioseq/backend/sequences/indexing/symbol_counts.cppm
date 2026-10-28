@@ -24,31 +24,56 @@ import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
+import bioseq.sequences.simd;
+import bioseq.simd.utils;
 import bioseq.common.checked_arithmetic;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
 
 /**
- * @brief Counts each symbol in a lazy sequence.
- * @return Array indexed by the alphabet's numeric symbol ranks.
+ * @brief Counts checked native ranks in bounded windows without publishing partial counts.
+ * @param sequence Source view retained by the caller through this synchronous traversal.
+ * @return Rank-indexed counts, or the first source/rank failure with its logical position.
  */
 template <sequence_alphabet p_alphabet>
     requires (!bioseq::cigar_operation_alphabet<p_alphabet>)
-auto tally_symbol_counts(
-        bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
+[[nodiscard]] auto tally_symbol_counts(
+        bioseq::storage::lazy_sequence_view<p_alphabet> sequence) {
     using traits = typename bioseq::storage::lazy_sequence_view<
         p_alphabet>::traits;
     constexpr std::size_t rank_count =
         std::size_t{1} << traits::k_logical_bits_per_symbol;
-    std::array<std::int64_t, rank_count> counts{};
-    for (auto logical_rank : seq.template iterable<iterator_mode::logical_rank>()) {
-        const std::size_t rank = static_cast<std::size_t>(logical_rank);
-        DEBUG_ASSERT(rank < seqan3::alphabet_size<p_alphabet>,
-                     "tally_symbol_counts: biological rank in range");
-        ++counts[rank];
+    using counts_type = std::array<std::int64_t, rank_count>;
+    using error_type = bioseq::sequences::sequence_conversion_error;
+    using error_code = bioseq::sequences::sequence_conversion_error_code;
+    using result_type = std::expected<counts_type, error_type>;
+    const auto source = sequence.template borrow_rank_source<false>();
+    if (source.symbol_count > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+        || source.symbol_count > (std::numeric_limits<std::size_t>::max)())
+        return result_type{std::unexpected(error_type{error_code::size_overflow})};
+    if (source.read_at == nullptr)
+        return result_type{std::unexpected(error_type{error_code::source_read_failed, 0u})};
+    counts_type counts{};
+    std::array<std::uint8_t, bioseq::simd::sequence_rank_io_chunk_capacity> scratch{};
+    const auto length = static_cast<std::size_t>(source.symbol_count);
+    for (std::size_t position = 0u; position < length;) {
+        const auto count = std::min(scratch.size(), length - position);
+        const auto ranks = source.read_checked(position, count, scratch);
+        if (!ranks)
+            return result_type{std::unexpected(error_type{error_code::source_read_failed, position})};
+        for (std::size_t offset = 0u; offset < count; ++offset) {
+            const auto rank = (*ranks)[offset];
+            if (rank >= seqan3::alphabet_size<p_alphabet>)
+                return result_type{std::unexpected(error_type{
+                    .code = error_code::invalid_source_rank,
+                    .input_position = position + offset,
+                    .source_rank = rank})};
+            ++counts[rank];
+        }
+        position += count;
     }
-    return counts;
+    return result_type{counts};
 }
 
 /** Counts selected by a canonical cursor use the existing lazy-rank slot dimensions. */
@@ -123,7 +148,12 @@ struct symbol_counts_index {
     template<sequence_alphabet Alphabet>
         requires (!bioseq::cigar_operation_alphabet<Alphabet>)
     static void build(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
-        write_counts(storage, tally_symbol_counts(sequence));
+        const auto counts = tally_symbol_counts(sequence);
+        if (!counts) {
+            storage.index_error("symbol_counts: native source read, rank, or length is invalid");
+            return;
+        }
+        write_counts(storage, *counts);
     }
 
     /** Build the same index from canonical weighted operations, propagating source failures. */
@@ -145,12 +175,17 @@ struct symbol_counts_index {
         return {};
     }
 
-    /** Rebuild ordinary sequences through their existing rank reader. */
+    /** Validate all native source counts before replacing the existing stored histogram. */
     template<sequence_alphabet Alphabet>
         requires (!bioseq::cigar_operation_alphabet<Alphabet>)
     static void rebuild(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
+        const auto counts = tally_symbol_counts(sequence);
+        if (!counts) {
+            storage.index_error("symbol_counts: native source read, rank, or length is invalid");
+            return;
+        }
         storage.clear_entity();
-        build(storage, sequence);
+        write_counts(storage, *counts);
     }
 
     /** Rebuild a weighted stream using the identical serialized histogram. */

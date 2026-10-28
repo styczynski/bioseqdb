@@ -186,7 +186,7 @@ run_async_pipeline(p_source source,
                     slab.fill_size,
                     slab.is_eof,
                     slab.parse_cursor,
-                    global_offset_base + slab.parse_cursor,
+                    global_offset_base,
                     emit_fasta_record,
                     failure_capture);
                 slab.parse_cursor = step.cursor;
@@ -275,7 +275,7 @@ run_async_pipeline(p_source source,
                     slab.fill_size,
                     slab.is_eof,
                     slab.parse_cursor,
-                    global_offset_base + slab.parse_cursor,
+                    global_offset_base,
                     options.encoder.strict_fastq,
                     emit_fastq_record,
                     failure_capture);

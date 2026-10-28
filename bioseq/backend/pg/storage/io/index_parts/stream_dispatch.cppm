@@ -114,6 +114,12 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     /// Writer that stores fragments as this record arrives.
     bioseq::storage::sequence_stream_writer writer;
 
+    /// Discard local provisional data on every exit. PostgreSQL error rollback
+    /// removes fragment rows; only end_record publishes a parent/source locator.
+    ~load_stream_sink() {
+        writer.abort();
+    }
+
     /// Copy the header and start storing a new sequence version.
     /// @param h Header bytes copied into this sink.
     /// @throws postgres_error If the header is too long or writer setup fails.

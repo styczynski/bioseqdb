@@ -449,7 +449,7 @@ void require_stream_transform(facade_t view,
                               std::size_t from,
                               std::size_t to) {
     collecting_rank_writer writer;
-    bioseq::storage::stream_transformed_ranks<p_transform>(view, from, to, writer);
+    REQUIRE(bioseq::storage::stream_transformed_ranks<p_transform>(view, from, to, writer).has_value());
 
     std::vector<std::uint8_t> expected(to - from);
     for (std::size_t index = 0u; index < expected.size(); ++index) {
@@ -480,8 +480,10 @@ void require_materialized_width(facade_t source,
     auto permit = admission.try_reserve(4096u);
     REQUIRE(permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             source, 3u, 3u + expected.size(), width, std::move(*permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(owner.test_admission_bytes() <=
                 bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(expected.size(), width));
         REQUIRE(admission.reserved_bytes() == before + owner.test_admission_bytes());
@@ -693,11 +695,13 @@ TEST_CASE("fragmented tally_symbol_counts matches the resident result",
 
     auto base = bioseq::indexing::tally_symbol_counts(baseline_view);
     auto got = bioseq::indexing::tally_symbol_counts(fragmented_view);
-    REQUIRE(got.size() == base.size());
+    REQUIRE(base.has_value());
+    REQUIRE(got.has_value());
+    REQUIRE(got->size() == base->size());
     std::int64_t total = 0;
-    for (std::size_t i = 0; i < base.size(); ++i) {
-        REQUIRE(got[i] == base[i]);
-        total += got[i];
+    for (std::size_t i = 0; i < base->size(); ++i) {
+        REQUIRE((*got)[i] == (*base)[i]);
+        total += (*got)[i];
     }
     REQUIRE(total == 128); // every base counted exactly once
 }
@@ -1090,8 +1094,10 @@ TEST_CASE("payload observer is bijective across copied views and failed admissio
     auto permit = admission.try_reserve(retained_bytes);
     REQUIRE(permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             moved, 0u, moved.bp_size(), 8u, std::move(*permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         const std::uint64_t payload_bytes =
             static_cast<std::uint64_t>(owner.descriptor().unit_count) *
             owner.descriptor().storage_unit_width;
@@ -1118,8 +1124,10 @@ TEST_CASE("payload observer is bijective across copied views and failed admissio
     auto second_permit = admission.try_reserve(retained_bytes);
     REQUIRE(second_permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             observed, 0u, observed.bp_size(), 8u, std::move(*second_permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(owner.descriptor().logical_length == observed.bp_size());
     }
     REQUIRE(probe.count == 2u);
@@ -1163,10 +1171,12 @@ TEST_CASE("admitted packed move construction holds a saturated budget and backin
     REQUIRE(failure.reserved_bytes == saturated_cap);
 
     {
-        owner_type initial = bioseq::storage::materialize_packed_sequence(
+        auto initial_attempt = bioseq::storage::materialize_packed_sequence(
             source, 0u, source.bp_size(), 8u, std::move(*permit),
             bioseq::storage::packed_materialization_policy::allow_rank_repack,
             /*no footprint reflection=*/nullptr);
+        REQUIRE(initial_attempt.has_value());
+        owner_type initial = std::move(*initial_attempt);
         const auto* const backing = initial.descriptor().units;
         REQUIRE(backing != nullptr);
         const auto exact_retained = initial.test_admission_bytes();
@@ -1365,8 +1375,8 @@ TEST_CASE("streaming consumers never probe poison resident storage",
     const auto view = make_mock_view(state);
 
     collecting_rank_writer streamed;
-    bioseq::storage::stream_transformed_ranks<bioseq::storage::sequence_transform::identity>(
-        view, 0u, view.bp_size(), streamed);
+    REQUIRE(bioseq::storage::stream_transformed_ranks<bioseq::storage::sequence_transform::identity>(
+        view, 0u, view.bp_size(), streamed).has_value());
     REQUIRE(streamed.ranks == state.ranks);
     REQUIRE(state.resident_probe_count == 0u);
     REQUIRE(state.callback_count == 4u);
@@ -1378,8 +1388,9 @@ TEST_CASE("streaming consumers never probe poison resident storage",
     REQUIRE(state.resident_probe_count == 0u);
 
     const auto counts = bioseq::indexing::tally_symbol_counts(view);
-    REQUIRE(counts.size() == 4u);
-    REQUIRE(counts[0] + counts[1] + counts[2] + counts[3] ==
+    REQUIRE(counts.has_value());
+    REQUIRE(counts->size() == 4u);
+    REQUIRE((*counts)[0] + (*counts)[1] + (*counts)[2] + (*counts)[3] ==
             static_cast<std::int64_t>(state.ranks.size()));
     REQUIRE(state.resident_probe_count == 0u);
 
@@ -1403,8 +1414,10 @@ TEST_CASE("streaming consumers never probe poison resident storage",
     auto permit = admission.try_reserve(resident.admission_bytes);
     REQUIRE(permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             view, 0u, view.bp_size(), 4u, std::move(*permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(owner.test_admission_bytes() <= resident.admission_bytes);
         REQUIRE(admission.reserved_bytes() == reserved_before + owner.test_admission_bytes());
         REQUIRE(owner.descriptor().logical_length == view.bp_size());
@@ -1460,10 +1473,12 @@ TEST_CASE("packed materialization retains its child through both physical footpr
         REQUIRE(permit.has_value());
         packed_transaction_probe probe{*permit, reflect};
         {
-            auto initial = bioseq::storage::materialize_packed_sequence(
+            auto initial_attempt = bioseq::storage::materialize_packed_sequence(
                 source, 0u, source.bp_size(), 8u, std::move(*permit),
                 bioseq::storage::packed_materialization_policy::allow_rank_repack,
                 &packed_transaction_probe::read);
+            REQUIRE(initial_attempt.has_value());
+            auto initial = std::move(*initial_attempt);
             REQUIRE(probe.calls == 2u);
             REQUIRE(probe.sampled_permit_live[0]);
             REQUIRE(probe.sampled_permit_live[1]);
@@ -1579,10 +1594,12 @@ TEST_CASE("packed materialization callback failure unwinds touched storage befor
         auto permit = admission.try_reserve(bound);
         REQUIRE(permit.has_value());
         packed_transaction_probe probe{*permit, false};
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             source, 0u, source.bp_size(), 8u, std::move(*permit),
             bioseq::storage::packed_materialization_policy::require_native_copy,
             &packed_transaction_probe::read);
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(owner.descriptor().logical_length == source.bp_size());
         REQUIRE(owner.test_admission_bytes() == admission.reserved_bytes());
         REQUIRE(state.bulk_copy_attempt_count == 2u);
@@ -1607,8 +1624,10 @@ TEST_CASE("full packed materialization uses one optional bulk copy",
     auto full_permit = admission.try_reserve(full_bytes);
     REQUIRE(full_permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             view, 0u, view.bp_size(), 8u, std::move(*full_permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(state.bulk_copy_attempt_count == 1u);
         REQUIRE(state.bulk_copy_success_count == 1u);
         REQUIRE(state.callback_count == 0u);
@@ -1624,8 +1643,10 @@ TEST_CASE("full packed materialization uses one optional bulk copy",
     auto partial_permit = admission.try_reserve(partial_bytes);
     REQUIRE(partial_permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             view, partial_from, partial_to, 8u, std::move(*partial_permit));
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         REQUIRE(state.bulk_copy_attempt_count == 1u);
         REQUIRE(state.bulk_copy_success_count == 1u);
         REQUIRE(state.callback_count > 0u);
