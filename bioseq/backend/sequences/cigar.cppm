@@ -191,7 +191,7 @@ struct native_cigar_codec {
 
 /** Append/split a native run without ever overflowing its 28-bit count field. */
 template<class Vector>
-[[nodiscard]] std::expected<void, cigar_error> push_native_cigar(
+[[nodiscard, gnu::always_inline]] inline std::expected<void, cigar_error> push_native_cigar(
         Vector& output, cigar_symbol operation, storage::sequence_size_t length) {
     if (length == 0u) return std::unexpected(cigar_error{cigar_error_code::zero_count});
     const auto opcode = native_cigar_codec::opcode(operation);
