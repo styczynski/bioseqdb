@@ -126,7 +126,7 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
 
 TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-position ABI",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
-    STATIC_REQUIRE(gv::k_gpu_grouped_soa_abi_revision == 3u);
+    STATIC_REQUIRE(gv::k_gpu_grouped_soa_abi_revision == 4u);
     STATIC_REQUIRE(gv::k_gpu_grouped_soa_partition_required_flags == 7u);
     STATIC_REQUIRE(sizeof(gv::gpu_grouped_soa_resident_partition_descriptor) == 104u);
     STATIC_REQUIRE(alignof(gv::gpu_grouped_soa_resident_partition_descriptor) == 8u);
@@ -320,6 +320,9 @@ make_grouped_soa_coordinate_hit_audit(const std::size_t problem_index,
     audit.direct_scan_dispatches = 3u;
     audit.direct_emit_dispatches = 1u;
     audit.anchor_count = 7u;
+    audit.seed_candidate_count = 9u;
+    audit.seed_verified_count = 7u;
+    audit.seed_emitted_count = 7u;
     audit.sort_operations = 1u;
     audit.range_build_dispatches = 1u;
     audit.range_count = 1u;
@@ -329,8 +332,11 @@ make_grouped_soa_coordinate_hit_audit(const std::size_t problem_index,
     const std::uint64_t receipt_base = 1'000u + problem_index * 10u;
     audit.count_submit_wait_identity = receipt_base + 1u;
     audit.emit_submit_wait_identity = receipt_base + 2u;
-    audit.sort_range_submit_wait_identity = receipt_base + 3u;
-    audit.chain_coordinate_submit_wait_identity = receipt_base + 4u;
+    audit.sort_submit_wait_identity = receipt_base + 3u;
+    audit.seed_verify_count_submit_wait_identity = receipt_base + 4u;
+    audit.seed_verify_emit_submit_wait_identity = receipt_base + 5u;
+    audit.range_submit_wait_identity = receipt_base + 6u;
+    audit.chain_coordinate_submit_wait_identity = receipt_base + 7u;
     audit.count_status_checks = 1u;
     audit.emit_status_checks = 1u;
     audit.result_readbacks = 1u;
@@ -546,7 +552,13 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
         audit.coordinate_dispatches = 0u;
         audit.count_submit_wait_identity = 0u;
         audit.emit_submit_wait_identity = 0u;
-        audit.sort_range_submit_wait_identity = 0u;
+        audit.sort_submit_wait_identity = 0u;
+        audit.seed_verify_count_submit_wait_identity = 0u;
+        audit.seed_verify_emit_submit_wait_identity = 0u;
+        audit.range_submit_wait_identity = 0u;
+        audit.seed_candidate_count = 0u;
+        audit.seed_verified_count = 0u;
+        audit.seed_emitted_count = 0u;
         audit.chain_coordinate_submit_wait_identity = 0u;
         audit.count_status_checks = 0u;
         audit.emit_status_checks = 0u;
@@ -699,7 +711,13 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
         no_anchor.chain_backtrack_dispatches = 0u;
         no_anchor.coordinate_dispatches = 0u;
         no_anchor.emit_submit_wait_identity = 0u;
-        no_anchor.sort_range_submit_wait_identity = 0u;
+        no_anchor.sort_submit_wait_identity = 0u;
+        no_anchor.seed_verify_count_submit_wait_identity = 0u;
+        no_anchor.seed_verify_emit_submit_wait_identity = 0u;
+        no_anchor.range_submit_wait_identity = 0u;
+        no_anchor.seed_candidate_count = 0u;
+        no_anchor.seed_verified_count = 0u;
+        no_anchor.seed_emitted_count = 0u;
         no_anchor.chain_coordinate_submit_wait_identity = 0u;
         no_anchor.emit_status_checks = 0u;
         no_anchor.result_readbacks = 0u;
@@ -855,16 +873,16 @@ TEST_CASE("SneakySnake rank batch has an exact provider ABI",
     STATIC_REQUIRE(static_cast<std::uint32_t>(pf::prefilter_status::conservative_unequal) == 1u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(pf::prefilter_status::unsupported_conservative) ==
                    2u);
-    STATIC_REQUIRE(sizeof(pf::prefilter_job) == 20u);
+    STATIC_REQUIRE(sizeof(pf::prefilter_job) == 32u);
     STATIC_REQUIRE(alignof(pf::prefilter_job) == 4u);
-    STATIC_REQUIRE(offsetof(pf::prefilter_job, max_edits) == 16u);
+    STATIC_REQUIRE(offsetof(pf::prefilter_job, max_edits) == 24u);
     STATIC_REQUIRE(sizeof(pf::prefilter_result) == 16u);
     STATIC_REQUIRE(alignof(pf::prefilter_result) == 4u);
     STATIC_REQUIRE(offsetof(pf::prefilter_result, is_accepted) == 8u);
     STATIC_REQUIRE(sizeof(gv::gpu_prefilter_push) == 16u);
     STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, mode) == 4u);
-    STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, query_rank_count) == 8u);
-    STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, target_rank_count) == 12u);
+    STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, query_record_count) == 8u);
+    STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, target_record_count) == 12u);
 
     const auto key = gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 512u);
     REQUIRE(gv::is_shader_variant_key_valid(key));
@@ -874,15 +892,15 @@ TEST_CASE("SneakySnake rank batch has an exact provider ABI",
         gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 511u)));
     REQUIRE(gv::checked_shader_kind(key.kind) == gv::shader_kind::sneaky_snake_rank_batch);
     REQUIRE(gv::descriptor_layout_for(key.to_request().kind) ==
-            gv::descriptor_layout_kind::align_extension);
-    REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 4u);
+            gv::descriptor_layout_kind::packed_prefilter);
+    REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 6u);
     REQUIRE(gv::push_constant_size(key.to_request().kind) == 16u);
     REQUIRE(gv::expected_shader_workgroup_size(key) == (gv::shader_workgroup_size{64u, 1u, 1u}));
 
     const std::string body = gv::shader_body_for_digest(gv::shader_kind::sneaky_snake_rank_batch);
     CHECK(body.find("k_maximum_supported_edits = 31u") != std::string::npos);
-    CHECK(body.find("uint query_rank_count;") != std::string::npos);
-    CHECK(body.find("uint target_rank_count;") != std::string::npos);
+    CHECK(body.find("uint query_record_count;") != std::string::npos);
+    CHECK(body.find("uint target_record_count;") != std::string::npos);
     CHECK(body.find("prefilter_job_is_in_bounds(job)") != std::string::npos);
     CHECK(body.find("subgroup") == std::string::npos);
     CHECK(body.find("atomic") == std::string::npos);
@@ -891,10 +909,10 @@ TEST_CASE("SneakySnake rank batch has an exact provider ABI",
     REQUIRE_FALSE(spirv.empty());
     const auto scan = gv::scan_spirv_layout(spirv);
     CHECK(scan.has_binding_array_stride(0u, 0u, 4u));
-    CHECK(scan.has_binding_array_stride(0u, 1u, 4u));
-    CHECK(scan.has_binding_array_stride(0u, 2u, 20u));
+    CHECK(scan.has_binding_array_stride(0u, 1u, 88u));
+    CHECK(scan.has_binding_array_stride(0u, 2u, 32u));
     CHECK(scan.has_binding_struct_offsets(
-        0u, 2u, std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}));
+        0u, 2u, std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}));
     CHECK(scan.has_binding_array_stride(0u, 3u, 16u));
     CHECK(scan.has_binding_struct_offsets(0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
     CHECK(scan.has_push_constant_offsets(std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
@@ -911,7 +929,7 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
     STATIC_REQUIRE(gv::k_gpu_gatekeeper_max_length == 128u);
     STATIC_REQUIRE(gv::k_gpu_gatekeeper_max_edits == 8u);
-    STATIC_REQUIRE(sizeof(pf::prefilter_job) == 20u);
+    STATIC_REQUIRE(sizeof(pf::prefilter_job) == 32u);
     STATIC_REQUIRE(sizeof(pf::prefilter_result) == 16u);
     STATIC_REQUIRE(sizeof(gv::gpu_prefilter_push) == 16u);
 
@@ -925,8 +943,8 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
         gv::make_shader_key(gv::shader_kind::gatekeeper_rank_batch, 383u, 64u, 128u)));
     REQUIRE(gv::checked_shader_kind(key.kind) == gv::shader_kind::gatekeeper_rank_batch);
     REQUIRE(gv::descriptor_layout_for(key.to_request().kind) ==
-            gv::descriptor_layout_kind::align_extension);
-    REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 4u);
+            gv::descriptor_layout_kind::packed_prefilter);
+    REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 6u);
     REQUIRE(gv::push_constant_size(key.to_request().kind) == 16u);
     REQUIRE(gv::expected_shader_workgroup_size(key) == (gv::shader_workgroup_size{64u, 1u, 1u}));
 
@@ -976,21 +994,21 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
         rank_prefilter_cache_stems.push_back(production_cache_stem);
         REQUIRE(gv::is_shader_variant_key_valid(production_key));
         REQUIRE(gv::descriptor_layout_for(production_kind) ==
-                gv::descriptor_layout_kind::align_extension);
+                gv::descriptor_layout_kind::packed_prefilter);
         REQUIRE(gv::push_constant_size(production_kind) == 16u);
         check_replay_route(production_kind, 0u, production_route.replay_index);
 
         const std::array production_jobs{
             pf::prefilter_job{
-                .query_offset = 0u,
-                .target_offset = 0u,
+                .query_start = 0u,
+                .target_start = 0u,
                 .query_length = production_route.length,
                 .target_length = production_route.length,
                 .max_edits = production_route.max_edits,
             },
             pf::prefilter_job{
-                .query_offset = production_route.length,
-                .target_offset = production_route.length,
+                .query_start = production_route.length,
+                .target_start = production_route.length,
                 .query_length = production_route.length,
                 .target_length = production_route.length,
                 .max_edits = production_route.max_edits,
@@ -1012,10 +1030,10 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
         REQUIRE_FALSE(production_spirv.empty());
         const auto production_scan = gv::scan_spirv_layout(production_spirv);
         CHECK(production_scan.has_binding_array_stride(0u, 0u, 4u));
-        CHECK(production_scan.has_binding_array_stride(0u, 1u, 4u));
-        CHECK(production_scan.has_binding_array_stride(0u, 2u, 20u));
+        CHECK(production_scan.has_binding_array_stride(0u, 1u, 88u));
+        CHECK(production_scan.has_binding_array_stride(0u, 2u, 32u));
         CHECK(production_scan.has_binding_struct_offsets(
-            0u, 2u, std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}));
+            0u, 2u, std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}));
         CHECK(production_scan.has_binding_array_stride(0u, 3u, 16u));
         CHECK(production_scan.has_binding_struct_offsets(
             0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
@@ -1038,15 +1056,15 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
 
     const std::array mixed_production_jobs{
         pf::prefilter_job{
-            .query_offset = 0u,
-            .target_offset = 0u,
+            .query_start = 0u,
+            .target_start = 0u,
             .query_length = 32u,
             .target_length = 32u,
             .max_edits = 2u,
         },
         pf::prefilter_job{
-            .query_offset = 32u,
-            .target_offset = 32u,
+            .query_start = 32u,
+            .target_start = 32u,
             .query_length = 64u,
             .target_length = 64u,
             .max_edits = 2u,
@@ -1059,8 +1077,8 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
 
     const std::array unaligned_production_job{
         pf::prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 0u,
+            .query_start = 1u,
+            .target_start = 0u,
             .query_length = 32u,
             .target_length = 32u,
             .max_edits = 2u,
@@ -1086,10 +1104,10 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
     REQUIRE_FALSE(spirv.empty());
     const auto scan = gv::scan_spirv_layout(spirv);
     CHECK(scan.has_binding_array_stride(0u, 0u, 4u));
-    CHECK(scan.has_binding_array_stride(0u, 1u, 4u));
-    CHECK(scan.has_binding_array_stride(0u, 2u, 20u));
+    CHECK(scan.has_binding_array_stride(0u, 1u, 88u));
+    CHECK(scan.has_binding_array_stride(0u, 2u, 32u));
     CHECK(scan.has_binding_struct_offsets(
-        0u, 2u, std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}));
+        0u, 2u, std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}));
     CHECK(scan.has_binding_array_stride(0u, 3u, 16u));
     CHECK(scan.has_binding_struct_offsets(0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
     CHECK(scan.has_push_constant_offsets(std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));

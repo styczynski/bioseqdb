@@ -8,8 +8,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
-import bioseq.common.seqan_adapter;
+import bioseq.storage.lazy_sequence;
 import bioseq.sequences;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.prefilter.gatekeeper;
 import bioseq.prefilter.types;
@@ -18,6 +19,35 @@ using namespace seq::literals;
 using namespace bioseq::prefilter;
 
 namespace {
+/** Keeps borrowed byte-fixture descriptor state alive for one synchronous batch. */
+struct rank_batch {
+    std::span<const std::uint8_t> query_ranks;
+    std::span<const std::uint8_t> target_ranks;
+    std::span<const prefilter_job> jobs;
+    /** Test-only native aa27 rank source; poison outside selected intervals remains unread. */
+    static const std::uint8_t* read(const void* state, bioseq::storage::sequence_size_t from,
+                                  std::size_t, std::span<std::uint8_t>) {
+        return static_cast<const std::span<const std::uint8_t>*>(state)->data() + from;
+    }
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> queries{{{
+        .context = &query_ranks, .read_at = &read, .symbol_count = query_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> targets{{{
+        .context = &target_ranks, .read_at = &read, .symbol_count = target_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    /** Borrows descriptor arrays, preserving the fixture's original job order. */
+    operator prefilter_batch_input() const { return {queries, targets, jobs}; }
+};
+
+/** Requires successful checked input before comparing numerical results. */
+template <class Value, class Error>
+[[nodiscard]] Value checked_value(std::expected<Value, Error> result) {
+    REQUIRE(result.has_value());
+    return std::move(*result);
+}
+
 
 /** One byte per mismatch bit for the test's mask calculations. */
 using bit_vector = std::vector<std::uint8_t>;
@@ -737,76 +767,76 @@ TEST_CASE(
     const std::vector<std::uint8_t> target_ranks(132u, 7u);
     const std::array<prefilter_job, 5u> jobs{
         prefilter_job{
-            .query_offset = (std::numeric_limits<std::uint32_t>::max)(),
-            .target_offset = 0u,
+            .query_start = (std::numeric_limits<std::uint32_t>::max)(),
+            .target_start = 0u,
             .query_length = 1u,
             .target_length = 1u,
             .max_edits = 0u,
         },
         prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 1u,
+            .query_start = 1u,
+            .target_start = 1u,
             .query_length = 129u,
             .target_length = 128u,
             .max_edits = 0u,
         },
         prefilter_job{
-            .query_offset = 132u,
-            .target_offset = 132u,
+            .query_start = 132u,
+            .target_start = 132u,
             .query_length = 0u,
             .target_length = 0u,
             .max_edits = 9u,
         },
         prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 1u,
+            .query_start = 1u,
+            .target_start = 1u,
             .query_length = 129u,
             .target_length = 129u,
             .max_edits = 2u,
         },
         prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 1u,
+            .query_start = 1u,
+            .target_start = 1u,
             .query_length = 32u,
             .target_length = 32u,
             .max_edits = 0u,
         },
     };
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query_ranks,
         .target_ranks = target_ranks,
         .jobs = jobs,
     };
-    const auto results = gatekeeper_scalar_batch(input);
-    REQUIRE(results.size() == jobs.size());
+    const auto malformed = gatekeeper_scalar_batch(input);
+    REQUIRE_FALSE(malformed.has_value());
+    REQUIRE(malformed.error().code == prefilter_input_failure_code::invalid_descriptor);
+    const rank_batch valid_input{
+        .query_ranks = query_ranks, .target_ranks = target_ranks,
+        .jobs = std::span{jobs}.subspan(1u)};
+    const auto results = checked_value(gatekeeper_scalar_batch(valid_input));
+    REQUIRE(results.size() == jobs.size() - 1u);
 
     REQUIRE(results[0].status == static_cast<std::uint32_t>(
-        prefilter_status::unsupported_conservative));
-    REQUIRE(is_prefilter_accepted(results[0]));
-    REQUIRE(results[0].lower_bound == 0u);
+        prefilter_status::conservative_unequal));
+    REQUIRE_FALSE(is_prefilter_accepted(results[0]));
+    REQUIRE(results[0].lower_bound == 1u);
     REQUIRE(results[0].diagnostics == 0u);
 
     REQUIRE(results[1].status == static_cast<std::uint32_t>(
-        prefilter_status::conservative_unequal));
-    REQUIRE_FALSE(is_prefilter_accepted(results[1]));
-    REQUIRE(results[1].lower_bound == 1u);
+        prefilter_status::success));
+    REQUIRE(is_prefilter_accepted(results[1]));
     REQUIRE(results[1].diagnostics == 0u);
 
     REQUIRE(results[2].status == static_cast<std::uint32_t>(
-        prefilter_status::success));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(results[2]));
     REQUIRE(results[2].diagnostics == 0u);
-
-    REQUIRE(results[3].status == static_cast<std::uint32_t>(
-        prefilter_status::unsupported_conservative));
-    REQUIRE(is_prefilter_accepted(results[3]));
-    REQUIRE(results[3].diagnostics == 0u);
 
     const prefilter_result direct = gatekeeper_scalar(
         std::span<const std::uint8_t>{query_ranks}.subspan(1u, 32u),
         std::span<const std::uint8_t>{target_ranks}.subspan(1u, 32u),
         0u);
-    REQUIRE(same_result(results[4], direct));
+    REQUIRE(same_result(results[3], direct));
 }
 
 TEST_CASE(
@@ -819,8 +849,8 @@ TEST_CASE(
         dna4_query_data};
     compact_sequence_range<std::vector<seq::dna4>> dna4_target{
         dna4_target_data};
-    const prefilter_result dna4_result = gatekeeper_scalar_compact(
-        dna4_query, dna4_target, 1u);
+    const prefilter_result dna4_result = checked_value(gatekeeper_scalar_compact(
+        dna4_query, dna4_target, 1u));
     REQUIRE(is_prefilter_accepted(dna4_result));
     REQUIRE(gatekeeper_diagnostic_estimate(dna4_result) == 1u);
 
@@ -830,8 +860,8 @@ TEST_CASE(
         dna5_query_data};
     compact_sequence_range<std::vector<seq::dna5>> dna5_target{
         dna5_target_data};
-    const prefilter_result dna5_result = gatekeeper_scalar_compact(
-        dna5_query, dna5_target, 1u);
+    const prefilter_result dna5_result = checked_value(gatekeeper_scalar_compact(
+        dna5_query, dna5_target, 1u));
     REQUIRE(is_prefilter_accepted(dna5_result));
     REQUIRE(gatekeeper_diagnostic_estimate(dna5_result) == 1u);
 
@@ -850,8 +880,8 @@ TEST_CASE(
     amino_target_data[17u].assign_rank(26u);
     compact_sequence_range<amino_storage> amino_query{amino_query_data};
     compact_sequence_range<amino_storage> amino_target{amino_target_data};
-    const prefilter_result amino_result = gatekeeper_scalar_compact(
-        amino_query, amino_target, 1u);
+    const prefilter_result amino_result = checked_value(gatekeeper_scalar_compact(
+        amino_query, amino_target, 1u));
     REQUIRE(is_prefilter_accepted(amino_result));
     REQUIRE(gatekeeper_diagnostic_estimate(amino_result) == 1u);
 
@@ -919,10 +949,10 @@ TEST_CASE(
                     REQUIRE(encoded_target == target_ranks);
 
                     const prefilter_result compact_result =
-                        gatekeeper_scalar_compact(
+                        checked_value(gatekeeper_scalar_compact(
                             query_compact,
                             target_compact,
-                            max_edits);
+                            max_edits));
                     const prefilter_result rank_result = gatekeeper_scalar(
                         encoded_query,
                         encoded_target,
@@ -977,11 +1007,11 @@ TEST_CASE(
                  variant < variants_per_cell;
                  ++variant) {
                 const std::vector<std::uint8_t> query =
-                    randomized_rank_sequence(length, 256u, ranks);
+                    randomized_rank_sequence(length, seqan3::alphabet_size<seq::aa27>, ranks);
                 const std::vector<std::uint8_t> target =
                     randomized_target_sequence(
                         query,
-                        256u,
+                        seqan3::alphabet_size<seq::aa27>,
                         max_edits,
                         variant,
                         ranks);
@@ -999,8 +1029,8 @@ TEST_CASE(
                     1u + ranks.next() % 3u;
                 const std::size_t target_prefix =
                     1u + ranks.next() % 3u;
-                const std::uint8_t query_poison = ranks.rank(256u);
-                const std::uint8_t target_poison = ranks.rank(256u);
+                const std::uint8_t query_poison = ranks.rank(seqan3::alphabet_size<seq::aa27>);
+                const std::uint8_t target_poison = ranks.rank(seqan3::alphabet_size<seq::aa27>);
                 query_ranks.insert(
                     query_ranks.end(), query_prefix, query_poison);
                 target_ranks.insert(
@@ -1013,11 +1043,11 @@ TEST_CASE(
                     query_ranks.end(), query.begin(), query.end());
                 target_ranks.insert(
                     target_ranks.end(), target.begin(), target.end());
-                query_ranks.push_back(ranks.rank(256u));
-                target_ranks.push_back(ranks.rank(256u));
+                query_ranks.push_back(ranks.rank(seqan3::alphabet_size<seq::aa27>));
+                target_ranks.push_back(ranks.rank(seqan3::alphabet_size<seq::aa27>));
                 jobs.push_back(prefilter_job{
-                    .query_offset = query_offset,
-                    .target_offset = target_offset,
+                    .query_start = query_offset,
+                    .target_start = target_offset,
                     .query_length = static_cast<std::uint32_t>(length),
                     .target_length = static_cast<std::uint32_t>(length),
                     .max_edits = max_edits,
@@ -1031,32 +1061,32 @@ TEST_CASE(
         }
     }
 
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query_ranks,
         .target_ranks = target_ranks,
         .jobs = jobs,
     };
     REQUIRE(jobs.size() == lengths.size() * 9u * variants_per_cell);
-    REQUIRE(observed_rank_outside_biological_alphabets);
+    REQUIRE_FALSE(observed_rank_outside_biological_alphabets);
     const std::vector<prefilter_result> results =
-        gatekeeper_scalar_batch(input);
+        checked_value(gatekeeper_scalar_batch(input));
     REQUIRE(results.size() == jobs.size());
     REQUIRE(cases.size() == jobs.size());
     for (std::size_t index = 0u; index < jobs.size(); ++index) {
         const prefilter_job& job = jobs[index];
         const std::span<const std::uint8_t> query =
             std::span<const std::uint8_t>{query_ranks}.subspan(
-                job.query_offset, job.query_length);
+                job.query_start, job.query_length);
         const std::span<const std::uint8_t> target =
             std::span<const std::uint8_t>{target_ranks}.subspan(
-                job.target_offset, job.target_length);
+                job.target_start, job.target_length);
         CAPTURE(
             index,
             cases[index].length,
             cases[index].max_edits,
             cases[index].variant,
-            job.query_offset,
-            job.target_offset);
+            job.query_start,
+            job.target_start);
         REQUIRE(prefilter_job_in_bounds(input, job));
         REQUIRE(same_result(
             results[index],

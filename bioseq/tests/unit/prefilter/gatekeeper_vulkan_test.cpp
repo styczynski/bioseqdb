@@ -12,10 +12,57 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.prefilter.gatekeeper;
 import bioseq.prefilter.gatekeeper.vulkan;
 import bioseq.prefilter.types;
+import bioseq.sequences;
+import bioseq.storage.lazy_sequence;
+import bioseq.common.seqan_adapter;
 
 using namespace bioseq::prefilter;
 
 namespace {
+
+/** Borrows native aa27 fixture ranks for the checked CPU batch interface. */
+struct rank_batch {
+    std::span<const std::uint8_t> query_ranks;
+    std::span<const std::uint8_t> target_ranks;
+    std::span<const prefilter_job> jobs;
+    static const std::uint8_t* read(const void* state, bioseq::storage::sequence_size_t from,
+                                  std::size_t, std::span<std::uint8_t>) {
+        return static_cast<const std::span<const std::uint8_t>*>(state)->data() + from;
+    }
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> queries{{{
+        .context = &query_ranks, .read_at = &read, .symbol_count = query_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> targets{{{
+        .context = &target_ranks, .read_at = &read, .symbol_count = target_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    operator prefilter_batch_input() const { return {queries, targets, jobs}; }
+};
+
+/** Requires checked CPU input before comparing numerical results. */
+template <class Value, class Error>
+[[nodiscard]] Value checked_value(std::expected<Value, Error> result) {
+    REQUIRE(result.has_value());
+    return std::move(*result);
+}
+
+/** Presents existing byte fixtures as native aa27 values to the packed GPU adapter. */
+[[nodiscard]] std::vector<prefilter_result> run_fixture_gpu(
+    std::span<const std::uint8_t> query_ranks,
+    std::span<const std::uint8_t> target_ranks,
+    std::span<const prefilter_job> jobs) {
+    std::vector<seq::aa27> query_letters(query_ranks.size());
+    std::vector<seq::aa27> target_letters(target_ranks.size());
+    for (std::size_t index = 0; index < query_ranks.size(); ++index)
+        seqan3::assign_rank_to(query_ranks[index] % seqan3::alphabet_size<seq::aa27>, query_letters[index]);
+    for (std::size_t index = 0; index < target_ranks.size(); ++index)
+        seqan3::assign_rank_to(target_ranks[index] % seqan3::alphabet_size<seq::aa27>, target_letters[index]);
+    const compact_sequence_range query{query_letters};
+    const compact_sequence_range target{target_letters};
+    return run_gatekeeper_vulkan_batch(bioseq::storage::make_lazy_sequence_view(query),
+                                       bioseq::storage::make_lazy_sequence_view(target), jobs);
+}
 
 /**
  * @brief Compute an independent exact edit distance for the GPU tests.
@@ -114,10 +161,10 @@ TEST_CASE(
         // shaders read only the requested range when it starts within a word.
         query_ranks.insert(
             query_ranks.end(), 1u + variant % 3u,
-            static_cast<std::uint8_t>(0xD0u + variant));
+            static_cast<std::uint8_t>((0xD0u + variant) % seqan3::alphabet_size<seq::aa27>));
         target_ranks.insert(
             target_ranks.end(), 2u + variant % 2u,
-            static_cast<std::uint8_t>(0x70u + variant));
+            static_cast<std::uint8_t>((0x70u + variant) % seqan3::alphabet_size<seq::aa27>));
         const std::uint32_t query_offset = static_cast<std::uint32_t>(
             query_ranks.size());
         const std::uint32_t target_offset = static_cast<std::uint32_t>(
@@ -126,8 +173,8 @@ TEST_CASE(
         std::vector<std::uint8_t> query(length);
         std::vector<std::uint8_t> target(length);
         for (std::uint32_t position = 0u; position < length; ++position) {
-            query[position] = static_cast<std::uint8_t>(
-                (position * 73u + variant * 41u + length) & 0xffu);
+            query[position] = static_cast<std::uint8_t>((
+                (position * 73u + variant * 41u + length) & 0xffu) % seqan3::alphabet_size<seq::aa27>);
         }
         target = query;
         const std::uint32_t scenario = variant % 4u;
@@ -136,18 +183,18 @@ TEST_CASE(
             for (std::uint32_t edit = 0u; edit < max_edits; ++edit) {
                 const std::uint32_t position =
                     (edit * 11u + 3u) % length;
-                target[position] = static_cast<std::uint8_t>(
-                    query[position] ^ 0xffu);
+                target[position] = static_cast<std::uint8_t>((
+                    query[position] ^ 0xffu) % seqan3::alphabet_size<seq::aa27>);
             }
         } else if (scenario == 2u) {
             // Change every ank to trigger a mask rejection and its exact check.
             for (std::uint32_t position = 0u; position < length; ++position) {
-                target[position] = static_cast<std::uint8_t>(
-                    query[position] ^ 0xffu);
+                target[position] = static_cast<std::uint8_t>((
+                    query[position] ^ 0xffu) % seqan3::alphabet_size<seq::aa27>);
             }
         } else if (scenario == 3u) {
             // Shift by one rank. One insertion and one deletion fit both edit limits.
-            target[0] = static_cast<std::uint8_t>(query[0] ^ 0x5au);
+            target[0] = static_cast<std::uint8_t>((query[0] ^ 0x5au) % seqan3::alphabet_size<seq::aa27>);
             std::copy_n(query.begin(), length - 1u, target.begin() + 1u);
         }
 
@@ -155,11 +202,11 @@ TEST_CASE(
             query_ranks.end(), query.begin(), query.end());
         target_ranks.insert(
             target_ranks.end(), target.begin(), target.end());
-        query_ranks.push_back(static_cast<std::uint8_t>(0xE0u + variant));
-        target_ranks.push_back(static_cast<std::uint8_t>(0x60u + variant));
+        query_ranks.push_back(static_cast<std::uint8_t>((0xE0u + variant) % seqan3::alphabet_size<seq::aa27>));
+        target_ranks.push_back(static_cast<std::uint8_t>((0x60u + variant) % seqan3::alphabet_size<seq::aa27>));
         jobs.push_back(prefilter_job{
-            .query_offset = query_offset,
-            .target_offset = target_offset,
+            .query_start = query_offset,
+            .target_start = target_offset,
             .query_length = length,
             .target_length = length,
             .max_edits = max_edits,
@@ -174,16 +221,16 @@ TEST_CASE(
         }
     }
 
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query_ranks,
         .target_ranks = target_ranks,
         .jobs = jobs,
     };
-    const auto scalar = gatekeeper_scalar_batch(input);
+    const auto scalar = checked_value(gatekeeper_scalar_batch(input));
     auto& runtime = gv::runtime::instance();
     const std::uint64_t dispatches_before =
         runtime.gatekeeper_dispatch_count();
-    const auto gpu = run_gatekeeper_vulkan_batch(
+    const auto gpu = run_fixture_gpu(
         query_ranks, target_ranks, jobs);
 
     REQUIRE(gpu.size() == scalar.size());
@@ -205,17 +252,17 @@ TEST_CASE(
     std::vector<std::uint8_t> replay_targets = target_ranks;
     for (const prefilter_job& job : jobs) {
         std::copy_n(
-            query_ranks.begin() + job.query_offset,
+            query_ranks.begin() + job.query_start,
             job.query_length,
-            replay_targets.begin() + job.target_offset);
+            replay_targets.begin() + job.target_start);
     }
-    const prefilter_batch_input replay_input{
+    const rank_batch replay_input{
         .query_ranks = query_ranks,
         .target_ranks = replay_targets,
         .jobs = jobs,
     };
-    const auto replay_scalar = gatekeeper_scalar_batch(replay_input);
-    const auto replayed = run_gatekeeper_vulkan_batch(
+    const auto replay_scalar = checked_value(gatekeeper_scalar_batch(replay_input));
+    const auto replayed = run_fixture_gpu(
         query_ranks, replay_targets, jobs);
 
     REQUIRE(replayed.size() == replay_scalar.size());
@@ -234,7 +281,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "GateKeeper hardware Vulkan fails open before poisoned invalid slice loads",
+    "GateKeeper hardware Vulkan rejects invalid coordinates before dispatch",
     "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
 {
     namespace gv = bioseq::gpu::vulkan;
@@ -248,54 +295,54 @@ TEST_CASE(
     std::vector<std::uint8_t> query_ranks(13u, 0xA5u);
     std::vector<std::uint8_t> target_ranks(13u, 0x5Au);
     for (std::size_t index = 0u; index < 9u; ++index) {
-        query_ranks[index] = static_cast<std::uint8_t>(index * 17u + 3u);
+        query_ranks[index] = static_cast<std::uint8_t>((index * 17u + 3u) % seqan3::alphabet_size<seq::aa27>);
         target_ranks[index] = query_ranks[index];
     }
     const std::array<prefilter_job, 6u> jobs{
         prefilter_job{
-            .query_offset = 10u,
-            .target_offset = 9u,
+            .query_start = 10u,
+            .target_start = 9u,
             .query_length = 4u,
             .target_length = 4u,
             .max_edits = 2u,
         },
         prefilter_job{
-            .query_offset = 9u,
-            .target_offset = 10u,
+            .query_start = 9u,
+            .target_start = 10u,
             .query_length = 4u,
             .target_length = 4u,
             .max_edits = 4u,
         },
         prefilter_job{
-            .query_offset = (std::numeric_limits<std::uint32_t>::max)(),
-            .target_offset = 0u,
+            .query_start = (std::numeric_limits<std::uint32_t>::max)(),
+            .target_start = 0u,
             .query_length = 4u,
             .target_length = 4u,
             .max_edits = 2u,
         },
         prefilter_job{
-            .query_offset = 13u,
-            .target_offset = 0u,
+            .query_start = 13u,
+            .target_start = 0u,
             .query_length = 1u,
             .target_length = 1u,
             .max_edits = 4u,
         },
         prefilter_job{
-            .query_offset = 10u,
-            .target_offset = 0u,
+            .query_start = 10u,
+            .target_start = 0u,
             .query_length = 4u,
             .target_length = 3u,
             .max_edits = 9u,
         },
         prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 1u,
+            .query_start = 1u,
+            .target_start = 1u,
             .query_length = 8u,
             .target_length = 8u,
             .max_edits = 2u,
         },
     };
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query_ranks,
         .target_ranks = target_ranks,
         .jobs = jobs,
@@ -305,26 +352,12 @@ TEST_CASE(
     }
     REQUIRE(prefilter_job_in_bounds(input, jobs.back()));
     const auto scalar = gatekeeper_scalar_batch(input);
+    REQUIRE_FALSE(scalar.has_value());
     auto& runtime = gv::runtime::instance();
-    const std::uint64_t dispatches_before =
-        runtime.gatekeeper_dispatch_count();
-    const auto gpu = run_gatekeeper_vulkan_batch(
-        query_ranks, target_ranks, jobs);
+    const std::uint64_t dispatches_before = runtime.gatekeeper_dispatch_count();
+    CHECK_THROWS(run_fixture_gpu(query_ranks, target_ranks, jobs));
+    CHECK(runtime.gatekeeper_dispatch_count() == dispatches_before);
 
-    REQUIRE(gpu.size() == jobs.size());
-    REQUIRE(scalar.size() == jobs.size());
-    for (std::size_t index = 0u; index < jobs.size(); ++index) {
-        CAPTURE(index, gpu[index].status, gpu[index].diagnostics);
-        CHECK(same_result(gpu[index], scalar[index]));
-    }
-    for (std::size_t index = 0u; index < jobs.size() - 1u; ++index) {
-        CHECK(gpu[index].status == static_cast<std::uint32_t>(
-            prefilter_status::unsupported_conservative));
-        CHECK(is_prefilter_accepted(gpu[index]));
-        CHECK(gpu[index].lower_bound == 0u);
-        CHECK(gpu[index].diagnostics == 0u);
-    }
-    CHECK(runtime.gatekeeper_dispatch_count() == dispatches_before + 1u);
 }
 
 TEST_CASE(
@@ -362,12 +395,12 @@ TEST_CASE(
                     bool expect_guard_rejection) {
                 REQUIRE(query.size() == target.size());
                 while ((query_ranks.size() & 3u) != 0u) {
-                    query_ranks.push_back(static_cast<std::uint8_t>(
-                        0xD0u + jobs.size()));
+                    query_ranks.push_back(static_cast<std::uint8_t>((
+                        0xD0u + jobs.size()) % seqan3::alphabet_size<seq::aa27>));
                 }
                 while ((target_ranks.size() & 3u) != 0u) {
-                    target_ranks.push_back(static_cast<std::uint8_t>(
-                        0x70u + jobs.size()));
+                    target_ranks.push_back(static_cast<std::uint8_t>((
+                        0x70u + jobs.size()) % seqan3::alphabet_size<seq::aa27>));
                 }
                 const std::uint32_t query_offset =
                     static_cast<std::uint32_t>(query_ranks.size());
@@ -382,13 +415,13 @@ TEST_CASE(
                     target_ranks.end(), target.begin(), target.end());
                 // Add an  extra byte after the slice to catch reads past its end.
                 // The next job pads its start to a packed-word boundary
-                query_ranks.push_back(static_cast<std::uint8_t>(
-                    0xE0u + jobs.size()));
-                target_ranks.push_back(static_cast<std::uint8_t>(
-                    0x60u + jobs.size()));
+                query_ranks.push_back(static_cast<std::uint8_t>((
+                    0xE0u + jobs.size()) % seqan3::alphabet_size<seq::aa27>));
+                target_ranks.push_back(static_cast<std::uint8_t>((
+                    0x60u + jobs.size()) % seqan3::alphabet_size<seq::aa27>));
                 jobs.push_back(prefilter_job{
-                    .query_offset = query_offset,
-                    .target_offset = target_offset,
+                    .query_start = query_offset,
+                    .target_start = target_offset,
                     .query_length = static_cast<std::uint32_t>(query.size()),
                     .target_length = static_cast<std::uint32_t>(target.size()),
                     .max_edits = max_edits,
@@ -410,8 +443,8 @@ TEST_CASE(
             // mismatches. It forces the test past the Hamming-distance shortcut.
             std::vector<std::uint8_t> repeated_query(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
-                repeated_query[position] = static_cast<std::uint8_t>(
-                    (position / 3u) % 11u);
+                repeated_query[position] = static_cast<std::uint8_t>((
+                    (position / 3u) % 11u) % seqan3::alphabet_size<seq::aa27>);
             }
             std::vector<std::uint8_t> terminal_rotation(length);
             terminal_rotation[0] = repeated_query.back();
@@ -428,8 +461,8 @@ TEST_CASE(
             // crosses a 32-bit mask word, and, at length 32 it crosses a four-bit group.
             std::vector<std::uint8_t> boundary_query(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
-                boundary_query[position] = static_cast<std::uint8_t>(
-                    position * 73u + 19u);
+                boundary_query[position] = static_cast<std::uint8_t>((
+                    position * 73u + 19u) % seqan3::alphabet_size<seq::aa27>);
             }
             std::vector<std::uint8_t> boundary_move = boundary_query;
             const std::uint32_t move_from = boundary - 5u;
@@ -452,8 +485,8 @@ TEST_CASE(
             // word boundary before the exact check rejects the pair.
             std::vector<std::uint8_t> boundary_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
-                boundary_rejection[position] = static_cast<std::uint8_t>(
-                    boundary_query[position] ^ 0xffu);
+                boundary_rejection[position] = static_cast<std::uint8_t>((
+                    boundary_query[position] ^ 0xffu) % seqan3::alphabet_size<seq::aa27>);
             }
             boundary_rejection[boundary - 1u] =
                 boundary_query[boundary - 1u];
@@ -467,8 +500,8 @@ TEST_CASE(
             // run intact, while the other mismatches still cause exact rejection.
             std::vector<std::uint8_t> terminal_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
-                terminal_rejection[position] = static_cast<std::uint8_t>(
-                    repeated_query[position] + 127u);
+                terminal_rejection[position] = static_cast<std::uint8_t>((
+                    repeated_query[position] + 127u) % seqan3::alphabet_size<seq::aa27>);
             }
             terminal_rejection[length - 2u] = repeated_query[length - 2u];
             terminal_rejection[length - 1u] = repeated_query[length - 1u];
@@ -482,15 +515,15 @@ TEST_CASE(
                 REQUIRE(job.query_length == length);
                 REQUIRE(job.target_length == length);
                 REQUIRE(job.max_edits == max_edits);
-                REQUIRE((job.query_offset & 3u) == 0u);
-                REQUIRE((job.target_offset & 3u) == 0u);
+                REQUIRE((job.query_start & 3u) == 0u);
+                REQUIRE((job.target_start & 3u) == 0u);
             }
-            const prefilter_batch_input input{
+            const rank_batch input{
                 .query_ranks = query_ranks,
                 .target_ranks = target_ranks,
                 .jobs = jobs,
             };
-            const auto scalar = gatekeeper_scalar_batch(input);
+            const auto scalar = checked_value(gatekeeper_scalar_batch(input));
             REQUIRE(scalar.size() == jobs.size());
             for (std::size_t index = 0u; index < scalar.size(); ++index) {
                 CAPTURE(
@@ -514,7 +547,7 @@ TEST_CASE(
                 }
             }
 
-            const auto gpu = run_gatekeeper_vulkan_batch(
+            const auto gpu = run_fixture_gpu(
                 query_ranks, target_ranks, jobs);
             ++expected_dispatches;
             REQUIRE(gpu.size() == scalar.size());
@@ -534,17 +567,17 @@ TEST_CASE(
             std::vector<std::uint8_t> replay_targets = target_ranks;
             for (const prefilter_job& job : jobs) {
                 std::copy_n(
-                    query_ranks.begin() + job.query_offset,
+                    query_ranks.begin() + job.query_start,
                     job.query_length,
-                    replay_targets.begin() + job.target_offset);
+                    replay_targets.begin() + job.target_start);
             }
-            const prefilter_batch_input replay_input{
+            const rank_batch replay_input{
                 .query_ranks = query_ranks,
                 .target_ranks = replay_targets,
                 .jobs = jobs,
             };
-            const auto replay_scalar = gatekeeper_scalar_batch(replay_input);
-            const auto replayed = run_gatekeeper_vulkan_batch(
+            const auto replay_scalar = checked_value(gatekeeper_scalar_batch(replay_input));
+            const auto replayed = run_fixture_gpu(
                 query_ranks, replay_targets, jobs);
             ++expected_dispatches;
 

@@ -84,7 +84,7 @@ using range_t = compact_sequence_range<dna4_u64>;
     params.z_drop = -1;
     params.end_bonus = 0;
     return fixed_alignment_kernels().align_ksw2_single_affine(
-        false, query, target, 0u, query_length, 0u, target_length, scoring, params);
+        false, query, target, 0u, query_length, 0u, target_length, scoring, params).value();
 }
 
 } // namespace
@@ -94,7 +94,7 @@ TEST_CASE("KSW2 alignment is bit-identical under fragmentation",
     context::context ctx;
     context::installed_context_scope scope(ctx);
 
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
 
     /// Query and target lengths, plus a seed for the input bases.
     struct parity_case {

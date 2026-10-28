@@ -9,10 +9,12 @@
  */
 module;
 
+#include <array>
 #include <bitset>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <limits>
 #include <span>
 #include <vector>

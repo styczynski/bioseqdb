@@ -583,7 +583,7 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
                                               exact_host_capacity_bytes);
 
     const auto scalar = cpu_sketch<minimizer_type>(test_data, window_size, kmer_size);
-    require_gpu_minimizer_superset_with_bounded_tile_extras(
+    require_gpu_minimizer_parity(
         scalar,
         result->host_minimizers,
         vk::make_sketch_tile_plan(test_data.size(),

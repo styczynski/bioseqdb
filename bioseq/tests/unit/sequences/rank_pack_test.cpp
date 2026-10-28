@@ -17,29 +17,6 @@ import bioseq.storage.lazy_sequence;
 
 namespace {
 
-/** Select the packed-sequence alphabet entry used by a test. */
-template <class p_alphabet> struct alphabet_stdc_entry;
-
-/** DNA4 entry for the test sequence type. */
-template <> struct alphabet_stdc_entry<seq::dna4> {
-    using type = alphabet_entry<seq::dna4, "dna4">;
-};
-
-/** DNA5 entry for the test sequence type. */
-template <> struct alphabet_stdc_entry<seq::dna5> {
-    using type = alphabet_entry<seq::dna5, "dna5">;
-};
-
-/** Entry for the 20-letter amino-acid alphabet. */
-template <> struct alphabet_stdc_entry<seq::aa20> {
-    using type = alphabet_entry<seq::aa20, "aa20">;
-};
-
-/** Entry for the 27-letter amino-acid alphabet. */
-template <> struct alphabet_stdc_entry<seq::aa27> {
-    using type = alphabet_entry<seq::aa27, "aa27">;
-};
-
 /**
  * @brief Restrict a test sequence type to one alphabet and packed-word width.
  * @tparam p_alphabet Sequence  alphabt.
@@ -47,7 +24,8 @@ template <> struct alphabet_stdc_entry<seq::aa27> {
  */
 template <class p_alphabet, class p_unit>
 using profile_stdc =
-    compact_sequence_stdc<supported_alphabets<typename alphabet_stdc_entry<p_alphabet>::type>,
+    compact_sequence_stdc<supported_alphabets<
+                              supported_biological_alphabets::entry_for<p_alphabet>>,
                           std::uint32_t,
                           std::int32_t,
                           supported_storage_unit_byte_widths<sizeof(p_unit)>>;
@@ -255,7 +233,7 @@ void require_admitted_oracle(std::span<const std::uint8_t> ranks,
     auto permit = admission.try_reserve(admission_bytes);
     REQUIRE(permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_sequence(
+        auto owner_attempt = bioseq::storage::materialize_packed_sequence(
             source,
             1u,
             1u + ranks.size(),
@@ -263,6 +241,8 @@ void require_admitted_oracle(std::span<const std::uint8_t> ranks,
             std::move(*permit),
             bioseq::storage::packed_materialization_policy::allow_rank_repack,
             /*no footprint reflection=*/nullptr);
+        REQUIRE(owner_attempt.has_value());
+        auto owner = std::move(*owner_attempt);
         const auto& descriptor = owner.descriptor();
         const auto payload_allocation = owner.test_payload_allocation_bytes();
         const auto control_allocation = owner.test_control_allocation_bytes();
@@ -544,28 +524,25 @@ void require_exhaustive_profile(std::string_view profile) {
 
 TEST_CASE("rank packing covers all configured profiles independently of PostgreSQL",
           "[component:bioseq][layer:unit][feature:sequence][resource:highway]") {
-    // Always test DNA4 in 64-bit words. The expanded build also checks the
-    // other alphabets and all four word widths.
-    require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");
-
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    require_exhaustive_profile<seq::dna4, std::uint8_t>("dna4/u8");
-    require_exhaustive_profile<seq::dna4, std::uint16_t>("dna4/u16");
-    require_exhaustive_profile<seq::dna4, std::uint32_t>("dna4/u32");
-
-    require_exhaustive_profile<seq::dna5, std::uint8_t>("dna5/u8");
-    require_exhaustive_profile<seq::dna5, std::uint16_t>("dna5/u16");
-    require_exhaustive_profile<seq::dna5, std::uint32_t>("dna5/u32");
-    require_exhaustive_profile<seq::dna5, std::uint64_t>("dna5/u64");
-
-    require_exhaustive_profile<seq::aa20, std::uint8_t>("aa20/u8");
-    require_exhaustive_profile<seq::aa20, std::uint16_t>("aa20/u16");
-    require_exhaustive_profile<seq::aa20, std::uint32_t>("aa20/u32");
-    require_exhaustive_profile<seq::aa20, std::uint64_t>("aa20/u64");
-
-    require_exhaustive_profile<seq::aa27, std::uint8_t>("aa27/u8");
-    require_exhaustive_profile<seq::aa27, std::uint16_t>("aa27/u16");
-    require_exhaustive_profile<seq::aa27, std::uint32_t>("aa27/u32");
-    require_exhaustive_profile<seq::aa27, std::uint64_t>("aa27/u64");
+    // Derive both axes from the production registries so newly supported
+    // biological alphabets participate in the existing byte-level oracle.
+    []<class... p_entries>(std::tuple<p_entries...>) {
+        const auto visit_entry = []<class p_entry>() {
+            []<std::size_t... p_widths>(supported_storage_unit_byte_widths<p_widths...>) {
+                using alphabet = typename p_entry::alphabet_type;
+                using header = compact_sequence_stdc<supported_alphabets<p_entry>>;
+                (require_exhaustive_profile<
+                     alphabet,
+                     typename compact_sequence_stdc_instance<header, alphabet, p_widths>::storage_unit>(
+                     std::string(p_entry::alphabet_name_sv) + "/" + std::to_string(p_widths) + "B"),
+                 ...);
+            }(all_storage_unit_byte_widths{});
+        };
+        (visit_entry.template operator()<p_entries>(), ...);
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+#else
+    // The reduced build retains its original DNA4/u64 profile.
+    require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");
 #endif
 }

@@ -245,7 +245,7 @@ TEST_CASE("reference fragment and sequence producers execute the generated K20 o
         k_minimizer_fragment_algorithm_position_extent_bp,
         20u,
         15u);
-    REQUIRE(fragment_options.algorithm_identity.physical_kmer_size == 20u);
+    REQUIRE(fragment_options.algorithm_identity.hash_bits == 40u);
     REQUIRE(fragment_options.algorithm_identity.hash_width == minimizer_scalar_width::u64);
     REQUIRE(fragment_options.algorithm_identity.effective_algorithm ==
             bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
@@ -499,9 +499,9 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
             REQUIRE_FALSE(execution.is_internally_consistent());
         };
 
-    SECTION("noncanonical DNA4 cardinality cannot masquerade as pack code") {
+    SECTION("unregistered alphabet identity cannot masquerade as pack code") {
         auto options = test_grouped_soa_generation_options(range.bp_size());
-        options.alphabet_code = 4u;
+        options.alphabet_code = supported_biological_alphabets::alphabet_count;
         require_profile_rejection(options);
     }
 

@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
+import bioseq.common.context;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.bench.prefilter_pipeline_metrics;
 
@@ -24,6 +25,8 @@ namespace {
 
 TEST_CASE("edit-distance threshold accepts fixed and dynamic bands exactly",
           "[component:bioseq][layer:unit][feature:prefilter]") {
+    bioseq::parallelism::admitted_context workspace;
+    context::installed_context_scope installation(workspace.memory);
     using bioseq::sequences::edit_distance_within_threshold;
 
     CHECK(edit_distance_within_threshold(chars("ACGT"), chars("ACGT"), 0u));

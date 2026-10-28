@@ -227,6 +227,8 @@ TEST_CASE("prefilter_stage composes reverse, unequal, aggregate, and stable rout
         minimap2_parameters params;
         bind_fixed_highway(params);
         params.prefilter_enabled = true;
+        params.exact_edit_filter_enabled = true;
+        params.exact_edit_filter_exclusive_upper_bound = 2;
         params.compute_edit_distance = true;
         params.prefilter_backend = backend;
         params.prefilter_max_edits = 1u;
@@ -365,7 +367,7 @@ TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using range_type = compact_sequence_range<sequence_type>;
-    using output_type = minimizer_representation<33u, 15u>;
+    using output_type = minimizer_representation<31u, 32u>;
     using collector_type = basic_sketch_collector<output_type>;
     using pipe::minimizer_kernel_kind;
 
@@ -420,7 +422,7 @@ TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation
 TEST_CASE("neutral minimizer batches retain the caller's exact wide representation",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     using namespace ::bioseq::simd;
-    using output_type = minimizer_representation<63u, 15u>;
+    using output_type = minimizer_representation<63u, 64u>;
     using collector_type = basic_sketch_collector<output_type>;
 
     STATIC_REQUIRE(sizeof(output_type) == 2u * sizeof(std::uint64_t));
@@ -485,7 +487,7 @@ TEST_CASE("neutral minimizer batches retain the caller's exact wide representati
         REQUIRE(records[index].kmer() == expected[index].kmer());
         REQUIRE(records[index].last_pos() == expected[index].last_pos());
         REQUIRE(records[index].strand() == expected[index].strand());
-        REQUIRE(records[index].span() == 15u);
+        REQUIRE(records[index].raw_value() == expected[index].raw_value());
     }
 }
 
@@ -598,7 +600,7 @@ TEST_CASE("source-owned two-stack topology closes DNA4/DNA5 by four widths",
     check_two_stack_minimizer_topology_case<seq::dna5, std::uint64_t>();
 }
 
-TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_stream",
+TEST_CASE("exact SIMD pipe borrows whole native-width ranges for resident vector_stream",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
@@ -607,7 +609,7 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using non_u32_range_type = compact_sequence_range<non_u32_sequence_type>;
     using minimizer_type =
-        ::bioseq::simd::minimizer_representation<33u, 15u>;
+        ::bioseq::simd::minimizer_representation<31u, 32u>;
     using collector_type =
         ::bioseq::simd::basic_sketch_collector<minimizer_type>;
     using ::bioseq::simd::minimizer_sketch_backend;
@@ -670,8 +672,8 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
         /*require_nonempty_vector_work=*/true,
         exact_simd_range_route::require_resident_vector_stream));
 
-    // Resident vector_stream needs 32-bit packed words. Reserve memory and
-    // copy a sequence stored in wider words into that layout before running it.
+    // Resident vector_stream reads the source packed width directly, without
+    // a whole-sequence u64-to-u32 repack or a memory admission reservation.
     non_u32_range_type non_u32_resident(data);
     auto lazy_non_u32 = bioseq::storage::make_resident_lazy_sequence(non_u32_resident);
     const auto non_u32_view =
@@ -681,10 +683,10 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
         bioseq::storage::sequence_access_requirement::contiguous_resident,
         0u,
         non_u32_view.bp_size(),
-        sizeof(std::uint32_t));
+        sizeof(std::uint64_t));
     REQUIRE(non_u32_access.route
-        == bioseq::storage::sequence_access_route::materialize_admitted);
-    REQUIRE_FALSE(non_u32_access.resident.has_value());
+        == bioseq::storage::sequence_access_route::borrow_resident);
+    REQUIRE(non_u32_access.resident.has_value());
     auto& admission =
         bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t admission_before = admission.reserved_bytes();
@@ -838,12 +840,14 @@ TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with 
         {
             auto permit = admission.try_reserve(access.admission_bytes);
             REQUIRE(permit.has_value());
-            auto typed_owner = bioseq::storage::materialize_packed_sequence(
+            auto typed_owner_attempt = bioseq::storage::materialize_packed_sequence(
                 query_view,
                 0u,
                 query_view.bp_size(),
                 sizeof(std::uint32_t),
                 std::move(*permit));
+            REQUIRE(typed_owner_attempt.has_value());
+            auto typed_owner = std::move(*typed_owner_attempt);
             const auto retained = typed_owner.test_admission_bytes();
             REQUIRE(retained <= access.admission_bytes);
             REQUIRE(admission.reserved_bytes()

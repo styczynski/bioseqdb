@@ -523,7 +523,7 @@ TEST_CASE("two_stack_nthash checked table — DNA4 packed widths preserve raw or
 
 TEST_CASE("two_stack_nthash checked table — K15/W10 every partial B8 tail",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     constexpr std::size_t initial_codes = 14u;
     constexpr std::size_t full_block = 8u;
     bool saw_masked_tail = false;
@@ -543,7 +543,7 @@ TEST_CASE("two_stack_nthash checked table — K15/W10 every partial B8 tail",
 
 TEST_CASE("two_stack_nthash checked table — packed22 adversarial cuts preserve chronology",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     const auto data = fixture(257u);
     const auto expected = dna4_oracle<representation>(data, 10u, 15u);
     const std::array cut_sets{
@@ -613,7 +613,7 @@ TEST_CASE("two_stack_nthash checked table — resident vector-stream fingerprint
 
 TEST_CASE("two_stack_nthash checked table — K15/W10 tie chronology is exact",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     std::vector<seq::dna4> data(160u);
     for (auto& symbol : data) symbol.assign_rank(0u);
     const auto result = run_resident<
@@ -629,7 +629,7 @@ TEST_CASE("two_stack_nthash checked table — K15/W10 tie chronology is exact",
 
 TEST_CASE("two_stack_nthash checked table — reachable K15 hash sentinel is not emitted",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
     std::uint32_t forward = 0u;
     std::uint32_t reverse = 0u;
@@ -665,7 +665,7 @@ TEST_CASE("two_stack_nthash checked table — reachable K15 hash sentinel is not
 
 TEST_CASE("two_stack_nthash checked table — 33-bit emitted positions remain exact",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     constexpr std::size_t output_base = static_cast<std::size_t>(
         (std::numeric_limits<std::uint32_t>::max)()) + 8192u;
     const auto data = fixture(257u);
@@ -683,7 +683,7 @@ TEST_CASE("two_stack_nthash checked table — 33-bit emitted positions remain ex
 
 TEST_CASE("two_stack_nthash checked table — unaligned u32 ownership is exact",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     constexpr std::size_t begin = 13u;
     constexpr std::size_t end = 181u;
     const auto data = fixture(224u);
@@ -767,8 +767,10 @@ TEST_CASE("two_stack_nthash checked table — DNA5 T normalization and N resets"
     auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(admitted_bytes);
     REQUIRE(permit.has_value());
-    auto canonical = bioseq::storage::materialize_packed_sequence(
+    auto canonical_attempt = bioseq::storage::materialize_packed_sequence(
         scanner_view, 0u, scanner_view.bp_size(), 4u, std::move(*permit));
+    REQUIRE(canonical_attempt.has_value());
+    auto canonical = std::move(*canonical_attempt);
     const auto scanner_result = invoke<minimap_sketch_data>(
         descriptor_view(canonical.descriptor()), {}, window, kmer);
     require_success(scanner_result, expected);
@@ -795,8 +797,10 @@ TEST_CASE("two_stack_nthash checked table — scanner bounded materialization pr
     auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(admitted_bytes);
     REQUIRE(permit.has_value());
-    auto canonical = bioseq::storage::materialize_packed_sequence(
+    auto canonical_attempt = bioseq::storage::materialize_packed_sequence(
         view, begin, end, 4u, std::move(*permit));
+    REQUIRE(canonical_attempt.has_value());
+    auto canonical = std::move(*canonical_attempt);
     const auto& descriptor = canonical.descriptor();
     REQUIRE(descriptor.leading_symbol_offset == 0u);
     const packed_sequence_kernel_view kernel_view{
@@ -863,7 +867,7 @@ TEST_CASE("two_stack_nthash checked table — shape and wide-record admission ar
         two_stack_continuation_status::unsupported_representation));
     REQUIRE(bad_mask.kernel.stats.two_stack.fail_closed_rejections == 1u);
 
-    using two_word_representation = minimizer_representation<63u, 15u>;
+    using two_word_representation = minimizer_representation<63u, 32u>;
     const auto two_word = invoke<two_word_representation>(
         view, {}, 10u, 15u);
     REQUIRE(two_word.kernel.status

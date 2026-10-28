@@ -128,7 +128,7 @@ TEST_CASE("vulkan source-direct preflight uses exact allocation requirements",
         idx_ns::materialize_sorted_dense_from_presorted_minimizers(
             runtime,
             std::span<const bioseq::minimizers::
-                minimizer_representation<28u, 30u>>{},
+                minimizer_representation<63u, 64u>>{},
             /*target_len=*/0u,
             idx_ns::gpu_source_direct_preflight{},
             idx_ns::gpu_minimizer_index_cache_key{},

@@ -1309,10 +1309,10 @@ TEST_CASE("transformed stream preserves subrange coordinates across chunks",
         fragmented_view, ranks, 409u, 409u);
 
     collecting_rank_writer writer;
-    REQUIRE_THROWS_AS(
-        bioseq::storage::stream_transformed_ranks<bioseq::storage::sequence_transform::identity>(
-            flat_view, 12u, 778u, writer),
-        std::invalid_argument);
+    const auto invalid_stream = bioseq::storage::stream_transformed_ranks<
+        bioseq::storage::sequence_transform::identity>(flat_view, 12u, 778u, writer);
+    REQUIRE_FALSE(invalid_stream.has_value());
+    REQUIRE(invalid_stream.error() == bioseq::storage::rank_window_read_failure::invalid_range);
 }
 
 TEST_CASE("access policy borrows only aligned exact residents",

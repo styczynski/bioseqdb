@@ -665,7 +665,7 @@ TEST_CASE("two_stack continuation — unaligned packed source range",
 
 TEST_CASE("two_stack continuation — real hash sentinel is never emitted",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<33u, 15u>;
+    using representation = minimizer_representation<31u, 32u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
     std::vector<seq::dna4> data;
     data.reserve(sentinel_kmer.size());

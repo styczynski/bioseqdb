@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
+import bioseq.seeding.vulkan;
 import bioseq.tests.unit.kmers.vulkan_minimizers_support;
 
 using namespace seq::literals;
@@ -226,7 +227,6 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(resident->positions.buffer_handle == positions_handle);
     REQUIRE(resident->slots.allocation_bytes == slots_allocation);
     REQUIRE(resident->positions.allocation_bytes == positions_allocation);
-    const std::uint64_t adopted_reservation = admission.reserved_bytes();
     const std::uint64_t cache_metadata_at_adoption =
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(cache_metadata_at_adoption >= cache_metadata_before);
@@ -236,7 +236,14 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     // and position allocations for the next call.
     const auto query = cpu_sketch<minimap_sketch_data>(dna4_fixture, 10u, 15u);
     REQUIRE_FALSE(query.empty());
+    auto native_windows = std::optional{bioseq::seeding::prepare_native_query_seed_windows(
+        sequence_view, std::span<const minimap_sketch_data>{query}, 15u)};
+    const auto native_rank_policy = vk::make_vulkan_rank_lut<decltype(sequence)>();
+    const std::uint64_t adopted_reservation = admission.reserved_bytes();
     const vk::gpu_seed_inputs inputs{
+        .native_query = native_windows->view(),
+        .native_target = native_windows->view(),
+        .native_rank_policy = &native_rank_policy,
         .host_minimizer_bytes =
             std::as_bytes(std::span<const minimap_sketch_data>{query.data(), query.size()}),
         .device_minimizer_words = nullptr,
@@ -280,6 +287,7 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes() == steady_cache_metadata);
     REQUIRE(admission.reserved_bytes() == steady_adopted_reservation);
 
+    native_windows.reset();
     resident.reset();
     REQUIRE(
         admission.reserved_bytes() ==

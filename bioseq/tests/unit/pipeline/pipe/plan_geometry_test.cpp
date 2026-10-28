@@ -981,7 +981,7 @@ TEST_CASE("ordered sketch batch target-build stats is not inflated by query coun
 TEST_CASE("ordered sketch query gate becomes immutable after publication",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using minimizer_type =
-        ::bioseq::simd::minimizer_representation<15u, 15u>;
+        ::bioseq::simd::minimizer_representation<15u, 32u>;
     using storage_type = ::bioseq::simd::pipe::
         ordered_sketch_query_gate_storage;
 

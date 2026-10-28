@@ -16,6 +16,10 @@ namespace bioseq::simd::pipe {
 
 using namespace ::bioseq::tests::pipeline::pipe_support;
 
+/// Reuse the existing probe with hash selection preceding its dependent position bucket.
+template <auto HashBits, auto PositionBits, auto Alignment>
+using hash_position_probe = dispatch_test_support::lkb_probe_leaf<PositionBits, HashBits, Alignment>;
+
 template <class p_query_minimizers>
 concept accepts_owned_prebuilt_query = requires(
     ::bioseq::storage::lazy_sequence_view<::seq::dna4> sequence,
@@ -23,7 +27,7 @@ concept accepts_owned_prebuilt_query = requires(
     const ::bioseq::indexing::minimizer_hashmap_fragment_index& index,
     statement_execution_plan_owner plan) {
     ::bioseq::simd::minimap2_port_with_index<
-        ::bioseq::minimizers::minimizer_representation<28u, 15u>, ::seq::dna4>(
+        ::bioseq::minimizers::minimizer_representation<28u, 32u>, ::seq::dna4>(
         sequence, sequence, std::forward<p_query_minimizers>(query_minimizers),
         index, plan);
 };
@@ -31,7 +35,7 @@ concept accepts_owned_prebuilt_query = requires(
 TEST_CASE("minimizer batch retains its checked host subrange without copying records",
           "[component:bioseq][layer:unit][feature:planner]")
 {
-    using record = ::bioseq::minimizers::minimizer_representation<28u, 15u>;
+    using record = ::bioseq::minimizers::minimizer_representation<28u, 32u>;
     using batch = minimizer_batch_view<record>;
     static_assert(!std::is_constructible_v<batch, std::span<const record>>);
     static_assert(!std::is_constructible_v<batch, const std::vector<record>&>);
@@ -301,62 +305,40 @@ TEST_CASE("dispatch_exact_value_or_default falls back to DefaultValue",
 TEST_CASE("dispatch_smallest_not_less picks the right bucket",
           "[component:bioseq][layer:unit][feature:planner]")
 {
-    // Available length buckets combine the breakpoints for every compiled
-    // k-mer size. Check the extended set when K=7 and K=27 are enabled.
-    if constexpr (kmer_size_buckets.size() >= 3u) {
-        static constexpr std::array<std::pair<std::size_t, std::size_t>, 15u> cases{{
-            { 1u,   7u}, { 7u,   7u}, { 8u,  15u}, {15u, 15u}, {16u, 17u},
-            {17u,  17u}, {18u,  27u}, {27u,  27u}, {28u, 33u}, {33u, 33u},
-            {34u,  49u}, {49u,  49u}, {50u,  63u}, {63u, 63u}, {64u, 63u},
-        }};
-        for (const auto& [want, expected] : cases) {
-            std::size_t captured = 0u;
-            dispatch_test_support::value_capture_callable<std::size_t> cb{&captured};
-            dispatch_smallest_not_less<std::size_t, std::size_t>(
-                detail::seq_len_log2_buckets_seq{}, want, cb);
-            REQUIRE(captured == expected);
+    // Exercise every requested position width against the generated union of
+    // physical capacities, including the helper's documented final-bucket fallback.
+    for (std::size_t requested = 1u; requested <= 64u; ++requested) {
+        std::size_t expected = seq_len_log2_buckets[seq_len_log2_buckets_n - 1u];
+        for (std::size_t index = 0u; index < seq_len_log2_buckets_n; ++index) {
+            if (seq_len_log2_buckets[index] >= requested) {
+                expected = seq_len_log2_buckets[index];
+                break;
+            }
         }
-    } else {
-        // With only K=15 compiled, check each of its breakpoints against the
-        // selected length bucket.
-        constexpr auto bp = detail::compute_breakpoints_for<15u>();
-        REQUIRE(bp.second > 0u);
-        for (std::size_t i = 0u; i < bp.second; ++i) {
-            const std::size_t want = bp.first[i];
-            std::size_t captured = 0u;
-            dispatch_test_support::value_capture_callable<std::size_t> cb{&captured};
-            dispatch_smallest_not_less<std::size_t, std::size_t>(
-                detail::seq_len_log2_buckets_seq{}, want, cb);
-            REQUIRE(captured >= want);
-        }
+        std::size_t captured = 0u;
+        dispatch_test_support::value_capture_callable<std::size_t> callback{&captured};
+        dispatch_smallest_not_less<std::size_t, std::size_t>(
+            detail::seq_len_log2_buckets_seq{}, requested, callback);
+        REQUIRE(captured == expected);
     }
 }
 
-TEST_CASE("round_up_seq_len_log2 produces canonical L",
+TEST_CASE("round_up_seq_len_log2 measures positions independently of k",
           "[component:bioseq][layer:unit][feature:planner]")
 {
-    SECTION("Compile-time properties") {
-        static_assert(round_up_seq_len_log2(0u,            15u) == 15u);
-        static_assert(round_up_seq_len_log2(1u,            15u) == 15u);
-        static_assert(round_up_seq_len_log2(std::size_t{1} << 28, 15u) == 28u);
-        static_assert(round_up_seq_len_log2((std::size_t{1} << 48) + 1u, 15u) == 49u);
-        static_assert(round_up_seq_len_log2(std::size_t{1} << 62, 15u) == 62u);
-        SUCCEED();
-    }
-    SECTION("Clamps below K") {
-        REQUIRE(round_up_seq_len_log2(1u, 27u) == 27u);
-        REQUIRE(round_up_seq_len_log2(1u, 7u)  == 7u);
-    }
-    SECTION("Clamps above 63") {
-        REQUIRE(round_up_seq_len_log2(~std::size_t{0}, 15u) == 63u);
-    }
+    static_assert(round_up_seq_len_log2(0u) == 1u);
+    static_assert(round_up_seq_len_log2(1u) == 1u);
+    static_assert(round_up_seq_len_log2(std::size_t{1} << 28u) == 28u);
+    static_assert(round_up_seq_len_log2((std::size_t{1} << 48u) + 1u) == 49u);
+    static_assert(round_up_seq_len_log2(std::size_t{1} << 62u) == 62u);
+    REQUIRE_THROWS_AS(round_up_seq_len_log2(~std::size_t{0}), std::length_error);
 }
 
-TEST_CASE("kmer_size_default matches buckets[0]",
+TEST_CASE("native hash width is the first generated hash bucket",
           "[component:bioseq][layer:unit][feature:planner]")
 {
-    static_assert(kmer_size_default == 15u);
-    static_assert(kmer_size_default == kmer_size_buckets[0]);
+    static_assert(hash_bits_default == std::numeric_limits<std::uint32_t>::digits);
+    static_assert(hash_bits_default == hash_bits_buckets[0]);
     SUCCEED();
 }
 
@@ -416,59 +398,30 @@ TEST_CASE("dispatch_chain pins NTTPs in chain order",
     }
 }
 
-TEST_CASE("dispatch_chain heterogeneous NTTPs (L, K, BAA)",
+TEST_CASE("dispatch_chain selects dependent hash and position dimensions",
           "[component:bioseq][layer:unit][feature:planner]")
 {
     using dispatch_test_support::base_alignment_algorithm_type;
-    using dispatch_test_support::lkb_probe_traits;
-
     ::bioseq::simd::minimap2_parameters params;
-    // Use different query and target lengths to check selection from the
-    // longer sequence.
-    std::vector<seq::dna4> q_data(1u << 10);
-    std::vector<seq::dna4> t_data(1u << 14);
-    compact_sequence_range<std::vector<seq::dna4>> q{q_data};
-    compact_sequence_range<std::vector<seq::dna4>> t{t_data};
-
-    SECTION("K=15, BAA=KSW2 — picks the L bucket from max_bp") {
-        params.kmer_size                = 15;
-        params.base_alignment_algorithm = base_alignment_algorithm_type::ksw2;
-        std::size_t l_out = 0u, k_out = 0u;
-        base_alignment_algorithm_type baa_out = static_cast<base_alignment_algorithm_type>(0xFF);
-        const int r = detail::dispatch_chain<
-            int,
-            lkb_probe_traits::template leaf,
-            detail::seq_len_log2_step,
-            detail::kmer_size_step,
-            detail::baa_step
-        >::template run<>(params, q, t, l_out, k_out, baa_out);
-        REQUIRE(r == 1);
-        REQUIRE(k_out == 15u);
-        REQUIRE(l_out == 15u);  // K=15 sets the minimum length bucket.
-        REQUIRE(baa_out == base_alignment_algorithm_type::ksw2);
-    }
-    // The K=7 case needs the extended set of compiled k-mer sizes.
-    if constexpr (kmer_size_buckets.size() >= 3u) {
-        SECTION("K=7 — picks the K=7 bucket and L=7 from short sequences") {
-            std::vector<seq::dna4> q_small(64);
-            std::vector<seq::dna4> t_small(64);
-            compact_sequence_range<std::vector<seq::dna4>> q_sm{q_small};
-            compact_sequence_range<std::vector<seq::dna4>> t_sm{t_small};
-            params.kmer_size                = 7;
-            params.base_alignment_algorithm = base_alignment_algorithm_type::block_aligner;
-            std::size_t l_out = 0u, k_out = 0u;
-            base_alignment_algorithm_type baa_out = static_cast<base_alignment_algorithm_type>(0xFF);
-            detail::dispatch_chain<
-                int,
-                lkb_probe_traits::template leaf,
-                detail::seq_len_log2_step,
-                detail::kmer_size_step,
-                detail::baa_step
-            >::template run<>(params, q_sm, t_sm, l_out, k_out, baa_out);
-            REQUIRE(k_out == 7u);
-            REQUIRE(l_out == 7u);
-            REQUIRE(baa_out == base_alignment_algorithm_type::block_aligner);
-        }
+    params.minimizer_algorithm = ::bioseq::simd::minimizer_algorithm::scalar;
+    params.window_size = 10;
+    params.base_alignment_algorithm = base_alignment_algorithm_type::ksw2;
+    std::vector<seq::dna4> query_data(1u << 10u);
+    std::vector<seq::dna4> target_data(1u << 14u);
+    compact_sequence_range<std::vector<seq::dna4>> query{query_data};
+    compact_sequence_range<std::vector<seq::dna4>> target{target_data};
+    for (const auto kmer_size : {7, 15}) {
+        params.kmer_size = kmer_size;
+        std::size_t position_bits = 0u, hash_bits = 0u;
+        auto alignment = static_cast<base_alignment_algorithm_type>(0xFF);
+        const auto result = detail::dispatch_chain<
+            int, hash_position_probe, detail::hash_bits_step,
+            detail::seq_len_log2_step_per_hash, detail::baa_step
+        >::template run<>(params, query, target, position_bits, hash_bits, alignment);
+        REQUIRE(result == 1);
+        REQUIRE(hash_bits == (kmer_size == 7 ? 14u : 32u));
+        REQUIRE(position_bits == (kmer_size == 7 ? 17u : 15u));
+        REQUIRE(alignment == base_alignment_algorithm_type::ksw2);
     }
 }
 
@@ -548,7 +501,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
         const auto q_view = bioseq::storage::make_lazy_sequence_view(q_owner);
         const auto t_view = bioseq::storage::make_lazy_sequence_view(t_owner);
         using minimizer_type =
-            ::bioseq::simd::minimizer_representation<15u, 15u>;
+            ::bioseq::simd::minimizer_representation<15u, 32u>;
         const auto minimizers_owner =
             std::make_shared<const std::vector<minimizer_type>>();
         const auto mins = minimizer_batch_view<minimizer_type>::from_shared_host(
@@ -561,7 +514,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
             pipeline_entry_point::with_prebuilt_minimizers,
             seq::dna4,
             minimizer_type, ::bioseq::indexing::minimizer_hashmap_fragment_index,
-            15u, 15u,
+            15u, 32u,
             base_alignment_algorithm_type::block_aligner, chaining_algorithm_type::scalar_minimap2, minimizer_algorithm_type::scalar>::call(
                 plan->frozen_parameters, q_view, t_view, mins, idx, plan,
                 nullptr, ::bioseq::indexing::gpu_index_cache_identity{}, false);
@@ -584,7 +537,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
         const auto q_view = bioseq::storage::make_lazy_sequence_view(q_owner);
         const auto t_view = bioseq::storage::make_lazy_sequence_view(t_owner);
         using minimizer_type =
-            ::bioseq::simd::minimizer_representation<15u, 15u>;
+            ::bioseq::simd::minimizer_representation<15u, 32u>;
         const auto minimizers_owner =
             std::make_shared<const std::vector<minimizer_type>>();
         const auto mins = minimizer_batch_view<minimizer_type>::from_shared_host(
@@ -596,7 +549,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
             pipeline_entry_point::with_prebuilt_minimizers,
             seq::dna4,
             minimizer_type, ::bioseq::indexing::minimizer_hashmap_fragment_index,
-            15u, 15u,
+            15u, 32u,
             base_alignment_algorithm_type::block_aligner, chaining_algorithm_type::scalar_minimap2, minimizer_algorithm_type::scalar>::call(
                 plan->frozen_parameters, q_view, t_view, mins, idx, plan,
                 nullptr, ::bioseq::indexing::gpu_index_cache_identity{}, false);
@@ -604,65 +557,32 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
     }
 }
 
-TEST_CASE("non-canonical kmer_size resolves to the right L bucket",
+TEST_CASE("runtime k selects hash capacity without becoming a template axis",
           "[component:bioseq][layer:unit][feature:planner]")
 {
     using dispatch_test_support::base_alignment_algorithm_type;
-    using dispatch_test_support::lkb_probe_traits;
-
     ::bioseq::simd::minimap2_parameters params;
+    params.minimizer_algorithm = ::bioseq::simd::minimizer_algorithm::scalar;
+    params.window_size = 10;
     params.base_alignment_algorithm = base_alignment_algorithm_type::block_aligner;
-
-    for (int32_t k : {int32_t{11}, int32_t{21}}) {
-        params.kmer_size = k;
-        SECTION("max_bp = 1<<10") {
-            std::vector<seq::dna4> qd(1u << 10);
-            std::vector<seq::dna4> td(1u << 10);
-            compact_sequence_range<std::vector<seq::dna4>> q{qd};
-            compact_sequence_range<std::vector<seq::dna4>> t{td};
-            std::size_t l_out = 0u, k_out = 0u;
-            base_alignment_algorithm_type baa_out = static_cast<base_alignment_algorithm_type>(0xFF);
+    for (const auto kmer_size : {11, 21}) {
+        params.kmer_size = kmer_size;
+        for (const auto sequence_size : {std::size_t{1u} << 10u, std::size_t{1u} << 20u}) {
+            std::vector<seq::dna4> query_data(sequence_size);
+            std::vector<seq::dna4> target_data(sequence_size);
+            compact_sequence_range<std::vector<seq::dna4>> query{query_data};
+            compact_sequence_range<std::vector<seq::dna4>> target{target_data};
+            std::size_t position_bits = 0u, hash_bits = 0u;
+            auto alignment = static_cast<base_alignment_algorithm_type>(0xFF);
             detail::dispatch_chain<
-                int,
-                lkb_probe_traits::template leaf,
-                detail::seq_len_log2_step,
-                detail::kmer_size_step,
-                detail::baa_step
-            >::template run<>(params, q, t, l_out, k_out, baa_out);
-            REQUIRE(k_out == kmer_size_default);
-            // For these shorc sequences, k determines the required position width.
-            // Round up to an available length bucket. The K=15-only build has fewer
-            // buckets, so k=21 reaches L=33 there.
-            if constexpr (kmer_size_buckets.size() >= 3u) {
-                if (k == 11) REQUIRE(l_out == 15u);
-                if (k == 21) REQUIRE(l_out == 27u);
-            } else {
-                if (k == 11) REQUIRE(l_out == 15u);
-                if (k == 21) REQUIRE(l_out == 33u);
-            }
-        }
-        SECTION("max_bp = 1<<20") {
-            std::vector<seq::dna4> qd(1u << 20);
-            std::vector<seq::dna4> td(1u << 20);
-            compact_sequence_range<std::vector<seq::dna4>> q{qd};
-            compact_sequence_range<std::vector<seq::dna4>> t{td};
-            std::size_t l_out = 0u, k_out = 0u;
-            base_alignment_algorithm_type baa_out = static_cast<base_alignment_algorithm_type>(0xFF);
-            detail::dispatch_chain<
-                int,
-                lkb_probe_traits::template leaf,
-                detail::seq_len_log2_step,
-                detail::kmer_size_step,
-                detail::baa_step
-            >::template run<>(params, q, t, l_out, k_out, baa_out);
-            REQUIRE(k_out == kmer_size_default);
-            // The larger sequence needs at least 20 position bits. Both tested k-mer
-            // sizes select L=27 in the extended build or L=33 in the K=15-only build.
-            if constexpr (kmer_size_buckets.size() >= 3u) {
-                REQUIRE(l_out == 27u);
-            } else {
-                REQUIRE(l_out == 33u);
-            }
+                int, hash_position_probe, detail::hash_bits_step,
+                detail::seq_len_log2_step_per_hash, detail::baa_step
+            >::template run<>(params, query, target, position_bits, hash_bits, alignment);
+            REQUIRE(hash_bits == (kmer_size == 11 ? 32u : 64u));
+            const auto expected_position_bits = kmer_size == 21 ? 63u
+                : sequence_size <= (std::size_t{1u} << 15u) ? 15u : 28u;
+            REQUIRE(position_bits == expected_position_bits);
+            REQUIRE(alignment == base_alignment_algorithm_type::block_aligner);
         }
     }
 }
@@ -684,36 +604,37 @@ TEST_CASE("dispatch_chain rejects rvalue args at compile time",
     SUCCEED();
 }
 
-TEST_CASE("algorithm-aware k20 layout separates physical K from runtime biological k w",
+TEST_CASE("algorithm-aware k20 layout separates hash width from runtime biological k w",
           "[component:bioseq][layer:unit][feature:planner]") {
     using namespace ::bioseq::minimizers;
     using algorithm = ::bioseq::simd::minimizer_algorithm;
     for (const auto selected : {algorithm::bounded_nthash_simd, algorithm::two_stack_nthash}) {
         // Bounded ntHash keeps 32-bit hashes at runtime k=20. Two-stack ntHash
         // uses a wider record so query and index hashes use the same mask.
-        const auto expected_physical_k =
-            selected == algorithm::bounded_nthash_simd ? 15u : 20u;
+        const auto expected_hash_bits =
+            selected == algorithm::bounded_nthash_simd ? 32u : 40u;
         const auto expected_position_log2 =
             selected == algorithm::bounded_nthash_simd ? 28u : 63u;
         const auto layout = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
             selected, std::uint64_t{1u} << 28u, 20u, 15u);
-        REQUIRE(layout.physical_kmer_size == expected_physical_k);
+        REQUIRE(layout.hash_bits == expected_hash_bits);
         REQUIRE(layout.record_position_log2 == expected_position_log2);
         REQUIRE(layout.runtime_kmer_size == 20u);
         REQUIRE(layout.runtime_window_size == 15u);
         REQUIRE(layout.effective_algorithm == selected);
-        const auto physical_k = visit_minimizer_physical_layout(
-            layout, []<class record>() { return record::layout_type::k_physical_kmer_size; });
-        REQUIRE(physical_k == expected_physical_k);
+        const auto hash_bits = visit_minimizer_physical_layout(
+            layout, []<class record>() { return record::layout_type::k_hash_bits; });
+        REQUIRE(hash_bits == expected_hash_bits);
         const auto wide = select_minimizer_physical_layout<seq::dna5, std::uint64_t>(
             selected, (std::uint64_t{1u} << 28u) + 1u, 20u, 15u);
-        REQUIRE(wide.record_position_log2 == 63u);
-        REQUIRE(wide.physical_kmer_size == expected_physical_k);
+        REQUIRE(wide.record_position_log2
+                == (selected == algorithm::bounded_nthash_simd ? 31u : 63u));
+        REQUIRE(wide.hash_bits == expected_hash_bits);
     }
     const auto reference = select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
         algorithm::simd_minimap2_reference, (std::uint64_t{1u} << 20u) + 1u, 20u, 15u);
     REQUIRE(reference.record_position_log2 == 23u);
-    REQUIRE(reference.physical_kmer_size == 20u);
+    REQUIRE(reference.hash_bits == 40u);
     REQUIRE(reference.hash_width == minimizer_scalar_width::u64);
     auto mismatched = reference;
     mismatched.hash_width = minimizer_scalar_width::u32;
@@ -723,15 +644,18 @@ TEST_CASE("algorithm-aware k20 layout separates physical K from runtime biologic
         algorithm::vulkan_minimap_integer, 4'000'000'000u, 20u, 15u);
     REQUIRE(vulkan.requested_algorithm == algorithm::vulkan_minimap_integer);
     REQUIRE(vulkan.effective_algorithm == algorithm::vulkan_minimap_integer);
-    REQUIRE(vulkan.physical_kmer_size == 20u);
+    REQUIRE(vulkan.hash_bits == 32u);
     REQUIRE(vulkan.record_position_log2 == 63u);
-    REQUIRE_THROWS_AS((select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
-        algorithm::simd_minimap2_reference, 1024u, 20u, 15u)), std::invalid_argument);
+    const auto promoted = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+        algorithm::simd_minimap2_reference, 1024u, 20u, 15u);
+    REQUIRE(promoted.hash_bits == 40u);
+    REQUIRE(promoted.hash_width == minimizer_scalar_width::u64);
+    REQUIRE(promoted.record_position_log2 == 23u);
     const auto dna5 = select_minimizer_physical_layout<seq::dna5, std::uint32_t>(
         algorithm::simd_minimap2_reference, 1024u, 20u, 15u);
     REQUIRE(dna5.requested_algorithm == algorithm::simd_minimap2_reference);
     REQUIRE(dna5.effective_algorithm == algorithm::simd_minimap2_reference);
-    REQUIRE(dna5.physical_kmer_size == 20u);
+    REQUIRE(dna5.hash_bits == 40u);
     REQUIRE_THROWS_AS((select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
         algorithm::bounded_nthash_simd, (std::uint64_t{1u} << 63u) + 1u, 20u, 15u)),
         std::length_error);

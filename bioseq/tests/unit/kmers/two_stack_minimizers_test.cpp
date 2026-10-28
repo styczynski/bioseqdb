@@ -576,7 +576,7 @@ TEST_CASE(
     "generated fixed table bounded ntHash rejects a sub-u32 hash representation",
     "[component:bioseq][layer:unit][feature:minimizer][resource:highway]")
 {
-    using output_type = bioseq::minimizers::minimizer_representation<33u, 15u>;
+    using output_type = bioseq::minimizers::minimizer_representation<31u, 31u>;
     STATIC_REQUIRE(output_type::k_hash_field_mask < 0xFFFFFFFFull);
 
     auto data = deterministic_dna4(32u);

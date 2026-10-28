@@ -15,6 +15,7 @@ extern "C" {
 #undef vsnprintf
 
 #include <new>
+#include <libassert/assert.hpp>
 
 module bioseq.postgres.scheduler.dispatch_processor:cpu_preparation;
 

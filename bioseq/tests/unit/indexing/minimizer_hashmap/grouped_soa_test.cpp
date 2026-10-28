@@ -81,7 +81,7 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
                        k_minimizer_persisted_dna5_alphabet_code,
                        20u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u32);
     STATIC_REQUIRE_FALSE(
-        derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity, 4u, 15u, 32'768u, 65'534u)
+        derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity, supported_biological_alphabets::alphabet_count, 15u, 32'768u, 65'534u)
             .has_value());
     STATIC_REQUIRE(derive_grouped_soa_minimizer_profile(k_bounded_nthash_u32_r7_sum_scheme_identity,
                                                         k_minimizer_persisted_dna4_alphabet_code,
@@ -103,6 +103,11 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
                                              32'768u,
                                              65'534u)
             .has_value());
+
+    STATIC_REQUIRE(derive_grouped_soa_minimizer_profile(
+        k_bounded_nthash_u32_r7_sum_scheme_identity,
+        supported_biological_alphabets::index_of<seq::aa27>(), 31u, 32'768u, 65'534u)
+        ->hash_width == minimizer_scalar_width::u32);
 
     constexpr auto scalar_layout =
         bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
@@ -290,12 +295,13 @@ TEST_CASE("READY identity uses generated fragment and sequence position classes"
     STATIC_REQUIRE(fragment_identity.has_value());
     STATIC_REQUIRE(sequence_identity.has_value());
     STATIC_REQUIRE(fragment_identity->physical_record_id ==
-                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l15_k15);
+                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l15_h32);
     STATIC_REQUIRE(fragment_identity->record_position_log2 == 15u);
     STATIC_REQUIRE(sequence_identity->physical_record_id ==
-                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l28_k15);
+                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l28_h32);
     STATIC_REQUIRE(sequence_identity->record_position_log2 == 28u);
-    STATIC_REQUIRE(fragment_identity->payload_layout_abi_revision == 1u);
+    STATIC_REQUIRE(fragment_identity->payload_layout_abi_revision
+                   == k_grouped_soa_payload_layout_abi_revision);
 
     constexpr auto dna5_reference_layout =
         bioseq::minimizers::select_minimizer_physical_layout<seq::dna5, std::uint64_t>(
@@ -396,8 +402,8 @@ TEST_CASE("K20 query owner preserves its generated record width and position ide
     const auto layout = select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
         minimizer_algorithm::simd_minimap2_reference, 100'000u, 20u, 15u);
     REQUIRE(layout.hash_width == minimizer_scalar_width::u64);
-    REQUIRE(layout.physical_kmer_size == 20u);
-    REQUIRE(layout.record_position_log2 == 20u);
+    REQUIRE(layout.hash_bits == 40u);
+    REQUIRE(layout.record_position_log2 == 23u);
 
     const bool checked = visit_minimizer_physical_layout(
         layout,

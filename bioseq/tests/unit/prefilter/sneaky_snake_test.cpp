@@ -10,6 +10,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
+import bioseq.storage.lazy_sequence;
+import bioseq.sequences;
+import bioseq.common.seqan_adapter;
 import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.prefilter.sneaky_snake.vulkan;
@@ -23,6 +26,47 @@ namespace hn = hwy::HWY_NAMESPACE;
 using namespace bioseq::prefilter;
 
 namespace {
+/** Keeps borrowed byte-fixture descriptor state alive for one synchronous batch. */
+struct rank_batch {
+    std::span<const std::uint8_t> query_ranks;
+    std::span<const std::uint8_t> target_ranks;
+    std::span<const prefilter_job> jobs;
+    /** Test-only native aa27 rank source; poison outside selected intervals remains unread. */
+    static const std::uint8_t* read(const void* state, bioseq::storage::sequence_size_t from,
+                                  std::size_t, std::span<std::uint8_t>) {
+        return static_cast<const std::span<const std::uint8_t>*>(state)->data() + from;
+    }
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> queries{{{
+        .context = &query_ranks, .read_at = &read, .symbol_count = query_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    std::array<bioseq::storage::borrowed_rank_window_source, 1> targets{{{
+        .context = &target_ranks, .read_at = &read, .symbol_count = target_ranks.size(),
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .worker_shareable = true}}};
+    /** Borrows descriptor arrays, preserving the fixture's original job order. */
+    operator prefilter_batch_input() const { return {queries, targets, jobs}; }
+};
+
+/** Requires successful checked input before comparing numerical results. */
+template <class Value, class Error>
+[[nodiscard]] Value checked_value(std::expected<Value, Error> result) {
+    REQUIRE(result.has_value());
+    return std::move(*result);
+}
+
+
+/** Prepares native packed aa27 input outside the device call, including fixture guard symbols. */
+[[nodiscard]] compact_sequence_range<seq::aa27> packed_ranks(std::span<const std::uint8_t> ranks) {
+    std::vector<seq::aa27> letters;
+    letters.reserve(ranks.size());
+    for (const auto rank : ranks) {
+        seq::aa27 letter{};
+        letter.assign_rank(rank % seqan3::alphabet_size<seq::aa27>);
+        letters.push_back(letter);
+    }
+    return compact_sequence_range<seq::aa27>{letters};
+}
 
 /**
  * @brief Get the SneakySnake kernel for this test's Highway target.
@@ -173,7 +217,7 @@ struct batch_fixture {
         const std::uint32_t target_length = equal_length
             ? query_length
             : random.next() % 81u;
-        const std::uint32_t alphabet_size = 2u + random.next() % 249u;
+        const std::uint32_t alphabet_size = 2u + random.next() % (seqan3::alphabet_size<seq::aa27> - 1u);
 
         std::vector<std::uint8_t> query(query_length);
         std::vector<std::uint8_t> target(target_length);
@@ -200,8 +244,8 @@ struct batch_fixture {
         fixture.target_ranks.push_back(252u);
 
         fixture.jobs.push_back(prefilter_job{
-            .query_offset = query_offset,
-            .target_offset = target_offset,
+            .query_start = query_offset,
+            .target_start = target_offset,
             .query_length = query_length,
             .target_length = target_length,
             .max_edits = random.next() % 17u,
@@ -223,7 +267,7 @@ TEST_CASE(
         prefilter_status::conservative_unequal) == 1u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(
         prefilter_status::unsupported_conservative) == 2u);
-    STATIC_REQUIRE(sizeof(prefilter_job) == 20u);
+    STATIC_REQUIRE(sizeof(prefilter_job) == 32u);
     STATIC_REQUIRE(sizeof(prefilter_result) == 16u);
 
     const std::array<std::uint8_t, 8u> identical{
@@ -342,7 +386,7 @@ TEST_CASE(
         97u,
         hn::Lanes(d) * 3u + 5u);
     batch_fixture fixture = random_batch(job_count);
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = fixture.query_ranks,
         .target_ranks = fixture.target_ranks,
         .jobs = fixture.jobs,
@@ -365,8 +409,8 @@ TEST_CASE(
     };
 
     for (const sneaky_snake_options options : option_sets) {
-        const auto scalar = sneaky_snake_scalar_batch(input, options);
-        const auto simd = fixed_sneaky_snake_kernel()(input, options);
+        const auto scalar = checked_value(sneaky_snake_scalar_batch(input, options));
+        const auto simd = checked_value(fixed_sneaky_snake_kernel()(input, options));
         REQUIRE(scalar.size() == fixture.jobs.size());
         REQUIRE(simd.size() == scalar.size());
 
@@ -423,8 +467,8 @@ TEST_CASE(
             query_ranks.size());
         const std::uint32_t target_offset = static_cast<std::uint32_t>(
             target_ranks.size());
-        query_ranks.insert(query_ranks.end(), length, 255u);
-        target_ranks.insert(target_ranks.end(), length, 255u);
+        query_ranks.insert(query_ranks.end(), length, 26u);
+        target_ranks.insert(target_ranks.end(), length, 26u);
         if (mismatch < length) {
             target_ranks[static_cast<std::size_t>(target_offset) + mismatch]
                 = 0u;
@@ -432,21 +476,21 @@ TEST_CASE(
         query_ranks.push_back(23u);
         target_ranks.push_back(29u);
         jobs.push_back(prefilter_job{
-            .query_offset = query_offset,
-            .target_offset = target_offset,
+            .query_start = query_offset,
+            .target_start = target_offset,
             .query_length = length,
             .target_length = length,
             .max_edits = 0u,
         });
     }
 
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query_ranks,
         .target_ranks = target_ranks,
         .jobs = jobs,
     };
-    const auto scalar = sneaky_snake_scalar_batch(input);
-    const auto simd = fixed_sneaky_snake_kernel()(input, {});
+    const auto scalar = checked_value(sneaky_snake_scalar_batch(input));
+    const auto simd = checked_value(fixed_sneaky_snake_kernel()(input, {}));
     REQUIRE(simd.size() == scalar.size());
     for (std::size_t index = 0u; index < scalar.size(); ++index) {
         CAPTURE(index, mismatch_positions[index], lanes, length);
@@ -491,7 +535,7 @@ TEST_CASE(
          index < length;
          ++index) {
         target[index] = static_cast<std::uint8_t>(
-            3u + index % 251u);
+            3u + index % (seqan3::alphabet_size<seq::aa27> - 3u));
     }
 
     std::vector<std::uint8_t> query = target;
@@ -501,13 +545,13 @@ TEST_CASE(
         query.begin() + winning_start);
 
     const std::array<prefilter_job, 1u> jobs{prefilter_job{
-        .query_offset = 0u,
-        .target_offset = 0u,
+        .query_start = 0u,
+        .target_start = 0u,
         .query_length = length,
         .target_length = length,
         .max_edits = max_edits,
     }};
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query,
         .target_ranks = target,
         .jobs = jobs,
@@ -517,8 +561,8 @@ TEST_CASE(
         .max_escape_segments = submaze_width,
     };
 
-    const auto scalar = sneaky_snake_scalar_batch(input, options);
-    const auto fixed = fixed_sneaky_snake_kernel()(input, options);
+    const auto scalar = checked_value(sneaky_snake_scalar_batch(input, options));
+    const auto fixed = checked_value(fixed_sneaky_snake_kernel()(input, options));
     REQUIRE(scalar.size() == 1u);
     REQUIRE(fixed.size() == scalar.size());
     REQUIRE(scalar.front().lower_bound == 0u);
@@ -537,14 +581,17 @@ TEST_CASE(
     }
 
     const auto require_gpu_parity = [](const batch_fixture& fixture) {
-        const prefilter_batch_input input{
+        const rank_batch input{
             .query_ranks = fixture.query_ranks,
             .target_ranks = fixture.target_ranks,
             .jobs = fixture.jobs,
         };
-        const auto scalar = sneaky_snake_scalar_batch(input);
+        const auto scalar = checked_value(sneaky_snake_scalar_batch(input));
+        const auto packed_query = packed_ranks(fixture.query_ranks);
+        const auto packed_target = packed_ranks(fixture.target_ranks);
         const auto gpu = vp::run_sneaky_snake_vulkan_batch(
-            fixture.query_ranks, fixture.target_ranks, fixture.jobs);
+            bioseq::storage::make_lazy_sequence_view(packed_query),
+            bioseq::storage::make_lazy_sequence_view(packed_target), fixture.jobs);
 
         // Reuse the command shape with new target bytes. Supported equal-length
         // pairs become exact matches, so changed results confirm that replay reads
@@ -555,19 +602,21 @@ TEST_CASE(
                 && job.query_length != 0u
                 && job.max_edits <= gv::k_gpu_sneaky_snake_max_edits) {
                 std::copy_n(
-                    fixture.query_ranks.begin() + job.query_offset,
+                    fixture.query_ranks.begin() + job.query_start,
                     job.query_length,
-                    replay_targets.begin() + job.target_offset);
+                    replay_targets.begin() + job.target_start);
             }
         }
-        const prefilter_batch_input replay_input{
+        const rank_batch replay_input{
             .query_ranks = fixture.query_ranks,
             .target_ranks = replay_targets,
             .jobs = fixture.jobs,
         };
-        const auto replay_scalar = sneaky_snake_scalar_batch(replay_input);
+        const auto replay_scalar = checked_value(sneaky_snake_scalar_batch(replay_input));
+        const auto packed_replay = packed_ranks(replay_targets);
         const auto replayed = vp::run_sneaky_snake_vulkan_batch(
-            fixture.query_ranks, replay_targets, fixture.jobs);
+            bioseq::storage::make_lazy_sequence_view(packed_query),
+            bioseq::storage::make_lazy_sequence_view(packed_replay), fixture.jobs);
         REQUIRE(gpu.size() == scalar.size());
         REQUIRE(replayed.size() == gpu.size());
         bool observed_changed_result = false;
@@ -636,8 +685,8 @@ TEST_CASE(
         high_edit_fixture.target_ranks.push_back(252u);
 
         high_edit_fixture.jobs.push_back(prefilter_job{
-            .query_offset = query_offset,
-            .target_offset = target_offset,
+            .query_start = query_offset,
+            .target_start = target_offset,
             .query_length = static_cast<std::uint32_t>(query.size()),
             .target_length = static_cast<std::uint32_t>(target.size()),
             .max_edits = max_edits,
@@ -645,10 +694,10 @@ TEST_CASE(
     };
 
     std::vector<std::uint8_t> shifted_query(600u);
-    std::vector<std::uint8_t> shifted_target(600u, 251u);
+    std::vector<std::uint8_t> shifted_target(600u, 26u);
     for (std::size_t index = 0u; index < shifted_query.size(); ++index) {
         shifted_query[index] = static_cast<std::uint8_t>(
-            (index * 37u + index / 7u * 11u) % 251u);
+            (index * 37u + index / 7u * 11u) % seqan3::alphabet_size<seq::aa27>);
     }
     constexpr std::size_t k_winning_shift = 17u;
     for (std::size_t index = k_winning_shift;
@@ -664,19 +713,19 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "SneakySnake malformed batch slices fail open without reading buffers",
+    "SneakySnake malformed batch slices return typed failures without reading buffers",
     "[component:bioseq][layer:unit][feature:prefilter]")
 {
     const std::array<std::uint8_t, 2u> query{1u, 2u};
     const std::array<std::uint8_t, 2u> target{1u, 2u};
     const std::array<prefilter_job, 1u> jobs{prefilter_job{
-        .query_offset = 2u,
-        .target_offset = 0u,
+        .query_start = 2u,
+        .target_start = 0u,
         .query_length = 1u,
         .target_length = 1u,
         .max_edits = 0u,
     }};
-    const prefilter_batch_input input{
+    const rank_batch input{
         .query_ranks = query,
         .target_ranks = target,
         .jobs = jobs,
@@ -685,11 +734,11 @@ TEST_CASE(
     REQUIRE_FALSE(prefilter_job_in_bounds(input, jobs.front()));
     const auto scalar = sneaky_snake_scalar_batch(input);
     const auto simd = fixed_sneaky_snake_kernel()(input, {});
-    REQUIRE(scalar.size() == 1u);
-    REQUIRE(same_result(scalar.front(), simd.front()));
-    REQUIRE(scalar.front().status == static_cast<std::uint32_t>(
-        prefilter_status::unsupported_conservative));
-    REQUIRE(is_prefilter_accepted(scalar.front()));
+    REQUIRE_FALSE(scalar.has_value());
+    REQUIRE_FALSE(simd.has_value());
+    REQUIRE(scalar.error().code == prefilter_input_failure_code::invalid_descriptor);
+    REQUIRE(simd.error().code == scalar.error().code);
+
 }
 
 } // namespace

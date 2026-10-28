@@ -7,6 +7,7 @@ module;
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +19,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 
 #include <bioseq/pg_compat.h>

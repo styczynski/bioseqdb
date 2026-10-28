@@ -258,14 +258,14 @@ TEST_CASE("minimizer_hashmap_fragment_index build(vector) + lookup",
     REQUIRE(idx.lookup(/*absent*/ 999).empty());
 }
 
-TEST_CASE("transient minimizer index preserves the XXL 30-bit radix-key domain",
+TEST_CASE("transient minimizer index preserves the XXL 32-bit radix-key domain",
           "[component:bioseq][layer:unit][feature:index]") {
-    using xxl_minimizer_type = minimizer_representation<33u, 15u>;
-    static_assert(xxl_minimizer_type::layout_type::k_hash_bits == 30u);
+    using xxl_minimizer_type = minimizer_representation<31u, 32u>;
+    static_assert(xxl_minimizer_type::layout_type::k_hash_bits == 32u);
     static_assert(sizeof(xxl_minimizer_type) == sizeof(std::uint64_t));
 
     constexpr std::uint64_t low_key = 0x0000'0021u;
-    constexpr std::uint64_t high_key = (std::uint64_t{1} << 30u) - 2u;
+    constexpr std::uint64_t high_key = (std::uint64_t{1} << 32u) - 1u;
     std::vector<xxl_minimizer_type> sketches{
         xxl_minimizer_type{/*kmer*/ high_key, /*pos*/ 499'999'991u, /*strand*/ 1u},
         xxl_minimizer_type{/*kmer*/ low_key, /*pos*/ 17u, /*strand*/ 0u},
@@ -290,29 +290,26 @@ TEST_CASE("transient minimizer index preserves the XXL 30-bit radix-key domain",
 
 TEST_CASE("transient minimizer index preserves the 128-bit representation kmer domain",
           "[component:bioseq][layer:unit][feature:index]") {
-    using wide_minimizer_type = minimizer_representation<28u, 30u>;
-    static_assert(wide_minimizer_type::layout_type::k_hash_bits > 64u);
+    using wide_minimizer_type = minimizer_representation<63u, 64u>;
+    static_assert(wide_minimizer_type::layout_type::k_hash_bits ==
+                  std::numeric_limits<std::uint64_t>::digits);
     static_assert(sizeof(wide_minimizer_type) == 2u * sizeof(std::uint64_t));
     static_assert(
         std::is_same_v<decltype(std::declval<const wide_minimizer_type&>().kmer()), std::uint64_t>);
 
-    // Use hashes above 32 bits to catch narrowing during radix sorting.
-    // This record exposes 56 hash bits beside its eight-bit span.
+    // Exercise the complete 64-bit hash domain to catch narrowing during radix sorting.
     constexpr std::uint64_t low_key = 0x0000'0001'2345'6789ULL;
-    constexpr std::uint64_t high_key = 0x00FE'DCBA'9876'5432ULL;
+    constexpr std::uint64_t high_key = (std::numeric_limits<std::uint64_t>::max)();
     std::vector<wide_minimizer_type> sketches{
         wide_minimizer_type{/*kmer*/ high_key,
                             /*pos*/ 200'000'003u,
-                            /*strand*/ 1u,
-                            /*span*/ 30u},
+                            /*strand*/ 1u},
         wide_minimizer_type{/*kmer*/ low_key,
                             /*pos*/ 19u,
-                            /*strand*/ 0u,
-                            /*span*/ 30u},
+                            /*strand*/ 0u},
         wide_minimizer_type{/*kmer*/ high_key,
                             /*pos*/ 123'456'789u,
-                            /*strand*/ 0u,
-                            /*span*/ 30u},
+                            /*strand*/ 0u},
     };
 
     bioseq::indexing::minimizer_hashmap_fragment_index index;

@@ -262,7 +262,7 @@ triples(const std::vector<p_minimizer_type>& minimizers) {
  * @param biological_position_offset Unused.
  */
 inline void
-require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type> scalar_tuples,
+require_gpu_triple_parity(std::vector<minimizer_tuple_type> scalar_tuples,
                                                 std::vector<minimizer_tuple_type> vulkan_tuples,
                                                 vk::gpu_sketch_tile_plan tile_plan,
                                                 std::uint32_t kmer_size,
@@ -299,14 +299,11 @@ require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type
     INFO("missing examples: " << tuple_examples(missing));
     REQUIRE(missing.empty());
 
-    const std::uint64_t radius =
-        static_cast<std::uint64_t>(kmer_size) + static_cast<std::uint64_t>(window_size) + 1u;
-    const std::uint64_t max_extras = static_cast<std::uint64_t>(tile_plan.tile_count) * 2u * radius;
     INFO("extra examples: " << tuple_examples(extras));
     INFO("scalar=" << scalar_tuples.size() << " gpu=" << vulkan_tuples.size()
-                   << " extras=" << extras.size() << " max_extras=" << max_extras);
+                   << " tiles=" << tile_plan.tile_count << " k=" << kmer_size << " w=" << window_size);
     (void)biological_position_offset;
-    REQUIRE(extras.size() <= max_extras);
+    REQUIRE(extras.empty());
 }
 
 /**
@@ -320,14 +317,14 @@ require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type
  * @param biological_position_offset Forwarded but  unused by the comparison.
  */
 template <class p_minimizer_type>
-inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
+inline void require_gpu_minimizer_parity(
     const std::vector<p_minimizer_type>& scalar_minimizers,
     const std::vector<p_minimizer_type>& vulkan_minimizers,
     vk::gpu_sketch_tile_plan tile_plan,
     std::uint32_t kmer_size,
     std::uint32_t window_size,
     std::uint64_t biological_position_offset = 0) {
-    require_gpu_triple_superset_with_bounded_extras(triples(scalar_minimizers),
+    require_gpu_triple_parity(triples(scalar_minimizers),
                                                     triples(vulkan_minimizers),
                                                     tile_plan,
                                                     kmer_size,
@@ -344,7 +341,7 @@ inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
  * @param window_size Minimizer window length.
  * @param biological_position_offset Forwarded but unused by the comparison.
  */
-inline void require_gpu_pair_superset_with_bounded_tile_extras(
+inline void require_gpu_pair_parity(
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& scalar_pairs,
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& vulkan_pairs,
     vk::gpu_sketch_tile_plan tile_plan,
@@ -359,12 +356,22 @@ inline void require_gpu_pair_superset_with_bounded_tile_extras(
         }
         return tuples;
     };
-    require_gpu_triple_superset_with_bounded_extras(to_minimizer_tuples(scalar_pairs),
+    require_gpu_triple_parity(to_minimizer_tuples(scalar_pairs),
                                                     to_minimizer_tuples(vulkan_pairs),
                                                     tile_plan,
                                                     kmer_size,
                                                     window_size,
                                                     biological_position_offset);
+}
+
+/** Run the common native32 scalar scheme directly on a packed or lazy source view. */
+template<class p_record, class p_collector, class p_view, class p_iterator>
+inline void collect_native_scalar_view(p_collector& collector, const p_view& view,
+    const p_iterator& begin, const p_iterator& end, const std::size_t window,
+    const std::size_t kmer) {
+    collect_minimizers_view<minimap_int_hasher, p_record, p_view, p_iterator,
+        std::uint32_t, p_collector, ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
+            collector, view, begin, end, window, kmer);
 }
 
 /**
@@ -382,12 +389,8 @@ cpu_sketch(std::vector<p_alphabet>& sequence_data, std::size_t window_size, std:
     using sequence_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     auto sequence = compact_sequence_range<sequence_type>(sequence_data);
     basic_sketch_collector<p_minimizer_type> collector;
-    collect_minimizers<minimap_int_hasher,
-                       p_minimizer_type,
-                       sequence_type,
-                       decltype(sequence.begin()),
-                       std::uint64_t>(
-        collector, sequence, sequence.begin(), sequence.end(), window_size, kmer_size);
+    collect_native_scalar_view<p_minimizer_type>(collector, sequence,
+        sequence.begin(), sequence.end(), window_size, kmer_size);
     return std::move(collector).extract_sketches_data();
 }
 

@@ -64,50 +64,26 @@ template <class p_record>
 
 TEST_CASE("physical batch type authentication follows every generated record coordinate",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    // Record types included in every generated profile.
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<15u, 15u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<28u, 15u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<33u, 15u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<63u, 15u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<20u, 20u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<23u, 20u>>);
-    STATIC_REQUIRE(generated_minimizer_physical_record<
-                   minimizer_representation<63u, 20u>>);
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<15u, 15u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<28u, 15u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<33u, 15u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<63u, 15u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<20u, 20u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<23u, 20u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<63u, 20u>>());
-
-    // These extra record types are accepted only when the generated profile
-    // includes them.
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<7u, 7u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<17u, 7u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<49u, 7u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<63u, 7u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<27u, 27u>>());
-    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
-                   minimizer_representation<63u, 27u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<15u, 16u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<15u, 16u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<47u, 16u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<47u, 16u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 16u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 16u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<15u, 32u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<15u, 32u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<28u, 32u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<28u, 32u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<31u, 32u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<31u, 32u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 32u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 32u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<23u, 40u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<23u, 40u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 40u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 40u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 64u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 64u>>());
 }
 
 TEST_CASE("same-layout impostors cannot enter or reopen physical record storage",

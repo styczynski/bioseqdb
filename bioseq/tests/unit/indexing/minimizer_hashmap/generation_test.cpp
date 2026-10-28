@@ -335,7 +335,7 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
     STATIC_REQUIRE(minimizer_scheme_identity_for_backend(minimizer_sketch_backend::exact_simd) ==
                    k_minimap_scheme_identity);
     STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
-                       minimizer_sketch_backend::vulkan_segment) == k_minimap_scheme_identity);
+                       minimizer_sketch_backend::vulkan_segment) == k_bounded_nthash_u32_r7_sum_scheme_identity);
     STATIC_REQUIRE(
         minimizer_scheme_identity_for_backend(minimizer_sketch_backend::bounded_nthash_simd) ==
         k_bounded_nthash_u32_r7_sum_scheme_identity);
@@ -520,7 +520,7 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
          {minimizer_sketch_backend::exact_simd, minimizer_sketch_backend::vulkan_segment}) {
         const auto backend_identity = minimizer_producer_backend_identity_for_backend(backend);
         vector_replay_minimizer_producer physical_producer{
-            minimizers, k_minimap_scheme_identity, backend_identity};
+            minimizers, minimizer_scheme_identity_for_backend(backend), backend_identity};
         collecting_minimizer_row_sink physical_sink;
         const auto requested_algorithm = minimizer_algorithm_for_explicit_sketch_backend(backend);
         REQUIRE(requested_algorithm.has_value());

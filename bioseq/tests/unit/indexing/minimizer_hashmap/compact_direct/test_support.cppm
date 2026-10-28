@@ -301,14 +301,30 @@ ordinary_seed_anchors(std::span<const std::pair<std::uint64_t, std::uint64_t>> p
     bioseq::indexing::minimizer_hashmap_fragment_index index;
     index.build_from_pairs(owned_pairs, target_length);
 
-    context::context ctx;
-    context::installed_context_scope installed{ctx};
-    auto scope = ctx.push<context::arena::chain>();
-    auto anchors = bioseq::chaining::make_arena_slab<bioseq::chaining::anchor>();
-    collect_seed_hits(query_minimizers, index, query_length, max_occ, kmer_size, anchors);
-    if (anchors.size() == 0u)
-        return {};
-    return std::vector<bioseq::chaining::anchor>{anchors.data(), anchors.data() + anchors.size()};
+    // This is an index-candidate oracle, not a biological seed verifier. These
+    // fixtures intentionally include arbitrary hashes, large coordinates, and
+    // spans outside biological inputs; native verification is tested in pipeline fixtures.
+    std::vector<bioseq::chaining::anchor> anchors;
+    for (const auto& query_minimizer : query_minimizers) {
+        const auto hits = bioseq::indexing::lookup_minimizer_spans(index, query_minimizer.kmer());
+        if (max_occ < 0 || hits.global_occurrence_count() > static_cast<std::uint64_t>(max_occ)) continue;
+        const auto query_position = query_minimizer.last_pos();
+        for (const auto encoded : hits.contiguous_positions()) {
+            const auto reverse = static_cast<std::uint32_t>((encoded & 1u) ^ query_minimizer.strand());
+            anchors.push_back({
+                .ref_position = encoded >> 1u,
+                .query_position = reverse
+                    ? query_length - query_position + static_cast<std::uint64_t>(kmer_size) - 2u
+                    : query_position,
+                .is_reverse = reverse,
+                .query_span = static_cast<std::uint8_t>(kmer_size),
+                .flags = 0u,
+                .segment_id = 0u,
+            });
+        }
+    }
+    std::ranges::sort(anchors, bioseq::chaining::canonical_anchor_less{});
+    return anchors;
 }
 
 /// Check that anchor bytes match and the result is in canonical order.

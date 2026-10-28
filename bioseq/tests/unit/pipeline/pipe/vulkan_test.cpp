@@ -139,7 +139,7 @@ TEST_CASE("canonical seed jobs include empty jobs and prohibit cross-job chains"
     using ::bioseq::simd::chaining_algorithm;
     using ::bioseq::simd::minimap2_parameters;
     using ::bioseq::simd::minimizer_algorithm;
-    using minimizer_type = ::bioseq::simd::minimizer_representation<15u, 15u>;
+    using minimizer_type = ::bioseq::simd::minimizer_representation<15u, 32u>;
 
     context::context seed_storage_context;
     context::installed_context_scope seed_storage_install{seed_storage_context};
@@ -443,7 +443,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
     using ::bioseq::simd::match_result_collection;
     using ::bioseq::simd::minimap2_parameters;
     using ::bioseq::simd::minimizer_algorithm;
-    using direct_minimizer_type = ::bioseq::simd::minimizer_representation<33u, 15u>;
+    using direct_minimizer_type = ::bioseq::simd::minimizer_representation<31u, 32u>;
 
     auto& runtime = vk::runtime::instance();
     if (!vk::hardware_device_available(runtime)) {
@@ -742,8 +742,20 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
     STATIC_REQUIRE(::bioseq::indexing::minimizer_lookup_index<segmented_seed_index>);
 
     const std::array<sketch_type, 1> query{
-        sketch_type{/*kmer=*/7, /*pos=*/10, /*strand=*/0},
+        sketch_type{/*kmer=*/7, /*pos=*/20, /*strand=*/0},
     };
+
+    std::vector<seq::dna4> query_bases(100u, seq::dna4{}.assign_char('A'));
+    std::vector<seq::dna4> target_bases(1000u, seq::dna4{}.assign_char('A'));
+    std::fill(target_bases.begin() + 186u, target_bases.begin() + 201u,
+              seq::dna4{}.assign_char('T'));
+    compact_sequence_range<std::vector<seq::dna4>> query_sequence{query_bases};
+    compact_sequence_range<std::vector<seq::dna4>> target_sequence{target_bases};
+    auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_sequence);
+    auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_sequence);
+    const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
+    const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
+    const auto counter = fixed_highway_kernels()->common.count_equal_rank_chunk;
 
     SECTION("all spans emit when their global count is admitted") {
         context::context ctx;
@@ -751,12 +763,12 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto scope = ctx.push<context::arena::chain>();
         auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
         segmented_seed_index index;
-        ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          /*query_length=*/100,
+                                          query_view, target_view, counter,
                                           /*max_occ=*/3,
                                           /*kmer_size=*/15,
-                                          anchors);
+                                          anchors));
         REQUIRE(anchors.size() == 3);
         REQUIRE(anchors.data()[0].ref_position == 100);
         REQUIRE(anchors.data()[1].ref_position == 300);
@@ -770,12 +782,12 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto scope = ctx.push<context::arena::chain>();
         auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
         segmented_seed_index index;
-        ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          /*query_length=*/100,
+                                          query_view, target_view, counter,
                                           /*max_occ=*/2,
                                           /*kmer_size=*/15,
-                                          anchors);
+                                          anchors));
         REQUIRE(anchors.size() == 0);
     }
 
@@ -786,12 +798,12 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
         segmented_seed_index index;
         index.positions_available = false;
-        ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          /*query_length=*/100,
+                                          query_view, target_view, counter,
                                           /*max_occ=*/2,
                                           /*kmer_size=*/15,
-                                          anchors);
+                                          anchors));
         REQUIRE(anchors.size() == 0);
     }
 
@@ -804,7 +816,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         index.positions_available = false;
         REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                                             index,
-                                                            /*query_length=*/100,
+                                                            query_view, target_view, counter,
                                                             /*max_occ=*/3,
                                                             /*kmer_size=*/15,
                                                             anchors),
@@ -820,12 +832,44 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         index.reported_count = 2;
         REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                                             index,
-                                                            /*query_length=*/100,
+                                                            query_view, target_view, counter,
                                                             /*max_occ=*/2,
                                                             /*kmer_size=*/15,
                                                             anchors),
                           ::bioseq::indexing::persisted_minimizer_lookup_error);
         REQUIRE(anchors.size() == 0);
+    }
+
+    SECTION("native rank disagreement removes a colliding hash before chaining") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::arena::chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+        segmented_seed_index index;
+        auto colliding_bases = target_bases;
+        colliding_bases[98u].assign_char('C');
+        compact_sequence_range<std::vector<seq::dna4>> colliding_sequence{colliding_bases};
+        auto colliding_owner = bioseq::storage::make_resident_lazy_sequence(colliding_sequence);
+        const auto colliding_view = bioseq::storage::make_lazy_sequence_view(colliding_owner);
+        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
+            query_view, colliding_view, counter, 3, 15, anchors));
+        REQUIRE(anchors.size() == 2u);
+        CHECK(anchors.data()[0].ref_position == 300u);
+        CHECK(anchors.data()[1].ref_position == 200u);
+    }
+
+    SECTION("invalid native spans clear previously collected output") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::arena::chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+        anchors.push_back({});
+        segmented_seed_index index;
+        const auto result = ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
+            query_view, target_view, counter, 3, 0, anchors);
+        REQUIRE_FALSE(result);
+        CHECK(result.error() == ::bioseq::simd::alignment_contract_error::coordinates);
+        CHECK(anchors.empty());
     }
 }
 

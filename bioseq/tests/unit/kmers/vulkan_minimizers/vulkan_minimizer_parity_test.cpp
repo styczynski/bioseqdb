@@ -61,7 +61,7 @@ TEST_CASE("vulkan minimizer: dna5 with T parity (T is nt4 code 3)",
     const auto gpu = gpu_sketch<minimap_sketch_data>(dna5_with_t, w, k);
     ASSERT(!gpu.empty(), "GPU produced no dna5+T minimizers", gpu.size());
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    require_gpu_minimizer_superset_with_bounded_tile_extras(
+    require_gpu_minimizer_parity(
         cpu,
         gpu,
         vk::make_sketch_tile_plan(
@@ -70,7 +70,7 @@ TEST_CASE("vulkan minimizer: dna5 with T parity (T is nt4 code 3)",
         w);
 }
 
-TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
+TEST_CASE("vulkan minimizer: dna5 with N parity (N is a native seedable rank)",
           "[component:bioseq][layer:unit][feature:seeding][resource:gpu]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
@@ -81,7 +81,7 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
     const auto cpu_values = cpu_sketch<minimap_sketch_data>(dna5_with_n, w, k);
     const auto gpu_values = gpu_sketch<minimap_sketch_data>(dna5_with_n, w, k);
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    require_gpu_minimizer_superset_with_bounded_tile_extras(
+    require_gpu_minimizer_parity(
         cpu_values,
         gpu_values,
         vk::make_sketch_tile_plan(
@@ -133,7 +133,7 @@ TEST_CASE("vulkan minimizer: dna5 tile-boundary extras are bounded",
     const auto gpu = gpu_sketch<minimap_sketch_data>(data, w, k);
     ASSERT(!gpu.empty(), "fused dna5 sketch produced no minimizers", gpu.size());
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    require_gpu_minimizer_superset_with_bounded_tile_extras(
+    require_gpu_minimizer_parity(
         cpu,
         gpu,
         vk::make_sketch_tile_plan(
@@ -158,7 +158,7 @@ TEST_CASE("vulkan minimizer: generic alphabet functional superset",
     auto result = vk::collect_minimizers_vulkan_result<minimap_sketch_data>(sequence_view, w, k);
     REQUIRE(result.has_value());
     auto cpu = cpu_sketch<minimap_sketch_data>(data, w, k);
-    require_gpu_minimizer_superset_with_bounded_tile_extras(
+    require_gpu_minimizer_parity(
         cpu,
         result->host_minimizers,
         vk::make_sketch_tile_plan(

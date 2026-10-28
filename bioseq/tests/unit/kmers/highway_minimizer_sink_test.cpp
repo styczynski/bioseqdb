@@ -249,10 +249,10 @@ void require_typed_transport(const std::size_t count) {
 
 TEST_CASE("native minimizer collectors append exact 2/4/8/16-byte objects",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using repr_u16 = minimizer_representation<2u, 2u>;
-    using repr_u32 = minimizer_representation<7u, 7u>;
+    using repr_u16 = minimizer_representation<3u, 3u>;
+    using repr_u32 = minimizer_representation<15u, 16u>;
     using repr_u64 = minimap_sketch_data;
-    using repr_u128 = minimizer_representation<63u, 15u>;
+    using repr_u128 = minimizer_representation<63u, 32u>;
     STATIC_REQUIRE(sizeof(repr_u16) == 2u);
     STATIC_REQUIRE(sizeof(repr_u32) == 4u);
     STATIC_REQUIRE(sizeof(repr_u64) == 8u);
@@ -269,32 +269,29 @@ TEST_CASE("generated sink transport is exact at batch boundaries",
     for (const std::size_t count :
          std::array<std::size_t, 5u>{0u, 1u, 255u, 256u, 257u}) {
         CAPTURE(count);
-        require_typed_transport<minimizer_representation<7u, 7u>>(count);
+        require_typed_transport<minimizer_representation<15u, 16u>>(count);
         require_typed_transport<minimap_sketch_data>(count);
-        require_typed_transport<minimizer_representation<63u, 15u>>(count);
+        require_typed_transport<minimizer_representation<63u, 32u>>(count);
     }
 }
 
-TEST_CASE("split minimizer transport preserves low/high words and span",
+TEST_CASE("split minimizer transport preserves complete hash and position words",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using repr = minimizer_representation<63u, 15u>;
+    using repr = minimizer_representation<63u, 64u>;
     constexpr std::uint64_t hash = 0x00123456789ABCDEull;
     constexpr std::uint64_t position = 0x123456789ABCDEFull;
-    constexpr std::uint64_t span = 37u;
-    const repr expected{hash, position, 1u, span};
+    const repr expected{hash, position, 1u};
     REQUIRE(expected.data_low_64() == (position << 1u | 1u));
-    REQUIRE(expected.data_high_64() == (hash << 8u | span));
+    REQUIRE(expected.data_high_64() == hash);
     REQUIRE(expected.kmer() == hash);
     REQUIRE(expected.last_pos() == position);
     REQUIRE(expected.strand() == 1u);
-    REQUIRE(expected.span() == span);
 
-    constexpr std::uint64_t maximal_hash = 0x00FFFFFFFFFFFFFFull;
+    constexpr std::uint64_t maximal_hash = (std::numeric_limits<std::uint64_t>::max)();
     const repr maximal{
         maximal_hash,
         repr::k_position_field_mask,
-        1u,
-        0xFFu};
+        1u};
     REQUIRE(maximal.data_low_64()
         == (std::numeric_limits<std::uint64_t>::max)());
     REQUIRE(maximal.data_high_64()
@@ -302,7 +299,6 @@ TEST_CASE("split minimizer transport preserves low/high words and span",
     REQUIRE(maximal.kmer() == maximal_hash);
     REQUIRE(maximal.last_pos() == repr::k_position_field_mask);
     REQUIRE(maximal.strand() == 1u);
-    REQUIRE(maximal.span() == 0xFFu);
 
     exact_sink_state<repr> state;
     minimizer_sink_collector<repr> collector{state.sink(false)};
@@ -350,7 +346,7 @@ TEST_CASE("genuine u64 raw append preserves exact object bits without staging",
 
 TEST_CASE("narrow raw storage never crosses the u64 callback",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using repr = minimizer_representation<7u, 7u>;
+    using repr = minimizer_representation<15u, 16u>;
     const auto expected = exact_records<repr>(257u);
     std::vector<repr::storage_type> raw;
     raw.reserve(expected.size());

@@ -1282,9 +1282,9 @@ TEST_CASE("Vulkan staging dispatches a sliced composite source range only",
     auto selected_owner = bioseq::storage::make_resident_lazy_sequence(selected_range);
     const auto selected_view =
         bioseq::storage::make_lazy_sequence_view(selected_owner);
-    const auto scalar = run_dispatch(
+    const auto native_cpu = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        minimizer_sketch_backend::scalar);
+        minimizer_sketch_backend::bounded_nthash_simd);
 
     reset_source_observation(fixture.source);
     sketch_collector gpu_collector;
@@ -1295,7 +1295,7 @@ TEST_CASE("Vulkan staging dispatches a sliced composite source range only",
         fixture.selected_to,
         10u,
         15u);
-    REQUIRE(canonical_records(gpu_collector) == scalar.records);
+    REQUIRE(canonical_records(gpu_collector) == native_cpu.records);
     REQUIRE(fixture.source.requested_bp
             == fixture.selected_to - fixture.selected_from);
     require_partial_source_read(

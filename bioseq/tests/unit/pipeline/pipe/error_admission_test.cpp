@@ -488,7 +488,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
 TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using wide_sketch_type =
-        ::bioseq::simd::minimizer_representation<40u, 15u>;
+        ::bioseq::simd::minimizer_representation<63u, 32u>;
     using source_type = bioseq::gpu::vulkan::vulkan_sketch_result<wide_sketch_type>;
     using device_type =
         bioseq::gpu::vulkan::vulkan_device_minimizer_storage<wide_sketch_type>;

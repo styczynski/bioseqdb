@@ -24,39 +24,25 @@ namespace idx = ::bioseq::indexing;
 
 using namespace vulkan_minimizers_test_support;
 
-TEST_CASE("vulkan minimizer: minimizer_representation 16/32/64/128-bit layouts round-trip",
+TEST_CASE("vulkan minimizer: native32 rejects narrow hash fields and preserves 64/128-bit records",
           "[component:bioseq][layer:unit][feature:seeding][resource:gpu]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
         return;
     }
     // Compare every supported minimizer record width with scalar output.
-    using representation_16 = minimizer_representation<10u, 2u>;
+    using representation_16 = minimizer_representation<10u, 5u>;
     using representation_32 =
-        minimizer_representation<10u, 9u>;
+        minimizer_representation<10u, 21u>;
     using representation_64 = minimap_sketch_data;
-    using representation_128 = minimizer_representation<28u, 30u>;
+    using representation_128 = minimizer_representation<63u, 64u>;
     static_assert(sizeof(representation_16) == 2);
     static_assert(sizeof(representation_32) == 4);
     static_assert(sizeof(representation_64) == 8);
     static_assert(sizeof(representation_128) == 16);
 
-    {
-        const auto cpu = triples(cpu_sketch<representation_16>(dna4_fixture, 10, 2));
-        const auto gpu = triples(gpu_sketch<representation_16>(dna4_fixture, 10, 2));
-        ASSERT(cpu == gpu,
-               fmt::format("u16 repr parity failed (cpu={} gpu={})", cpu.size(), gpu.size()),
-               cpu.size(),
-               gpu.size());
-    }
-    {
-        const auto cpu = triples(cpu_sketch<representation_32>(dna4_fixture, 10, 9));
-        const auto gpu = triples(gpu_sketch<representation_32>(dna4_fixture, 10, 9));
-        ASSERT(cpu == gpu,
-               fmt::format("u32 repr parity failed (cpu={} gpu={})", cpu.size(), gpu.size()),
-               cpu.size(),
-               gpu.size());
-    }
+    REQUIRE(gpu_sketch<representation_16>(dna4_fixture, 10, 2).empty());
+    REQUIRE(gpu_sketch<representation_32>(dna4_fixture, 10, 9).empty());
     {
         const auto cpu = triples(cpu_sketch<representation_64>(dna4_fixture, 10, 15));
         const auto gpu = triples(gpu_sketch<representation_64>(dna4_fixture, 10, 15));
@@ -96,13 +82,8 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
 
         constexpr std::size_t w = 10;
         constexpr std::size_t k = 15;
-        // Generate varied input and use whole packed words so final padding cannot
-        // affect the scalar comparison. Check exact dna4 output. For dna5, require
-        // every scalar minimizer and limit the number of extra GPU records.
-        constexpr std::uint8_t k_non_ambiguous_rank_count =
-            range_type::traits::alphabet_size < 4u
-                ? static_cast<std::uint8_t>(range_type::traits::alphabet_size)
-                : 4u;
+        // Native32 admits every rank, including ambiguity and stop symbols.
+        constexpr std::size_t k_native_rank_count = seqan3::alphabet_size<p_alphabet_type>;
         const std::size_t letter_count = range_type::traits::letters_per_unit * 50000u;
         std::vector<typename configuration_type::alphabet_type> letters;
         letters.reserve(letter_count);
@@ -110,7 +91,7 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
         for (std::size_t i = 0; i < letter_count; ++i) {
             lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
             typename configuration_type::alphabet_type value{};
-            value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % k_non_ambiguous_rank_count));
+            value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % k_native_rank_count));
             letters.push_back(value);
         }
         range_type range(letters);
@@ -136,7 +117,7 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
             begin_iter += static_cast<bioseq::storage::sequence_size_t>(lo_unit);
             auto end_iter = fragmented.cbegin();
             end_iter += static_cast<bioseq::storage::sequence_size_t>(hi_unit);
-            collect_minimizers_view<minimap_int_hasher, minimizer_type>(
+            collect_native_scalar_view<minimizer_type>(
                 scalar, fragmented, begin_iter, end_iter, w, k);
 
             vk::collect_minimizers_vulkan_segment_or_throw<minimizer_type>(
@@ -174,7 +155,7 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
                 const std::uint64_t bp_count =
                     static_cast<std::uint64_t>(hi_unit - lo_unit) *
                     static_cast<std::uint64_t>(range_type::traits::letters_per_unit);
-                require_gpu_minimizer_superset_with_bounded_tile_extras(
+                require_gpu_minimizer_parity(
                     scalar_values,
                     gpu_values,
                     vk::make_sketch_tile_plan(bp_count,
@@ -187,8 +168,9 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
         }
     };
 
-    run_case.template operator()<seq::dna4>();
-    run_case.template operator()<seq::dna5>();
+    std::apply([&run_case](auto... entry) {
+        (run_case.template operator()<typename decltype(entry)::alphabet_type>(), ...);
+    }, supported_biological_alphabets::alphabet_entries_tuple{});
 }
 
 TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position",
@@ -221,7 +203,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         const auto fragmented_view = bioseq::storage::make_lazy_sequence_view(fragmented);
 
         basic_sketch_collector<minimap_sketch_data> scalar;
-        collect_minimizers_view<minimap_int_hasher, minimap_sketch_data>(
+        collect_native_scalar_view<minimap_sketch_data>(
             scalar, fragmented, fragmented.cbegin(), fragmented.cend(), 10, 15);
         std::vector<std::pair<std::uint64_t, std::uint64_t>> expected;
         for (const minimap_sketch_data& minimizer : scalar.extract_sketches_data()) {
@@ -273,7 +255,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     const auto fragmented_view = bioseq::storage::make_lazy_sequence_view(fragmented);
 
     basic_sketch_collector<minimap_sketch_data> scalar;
-    collect_minimizers_view<minimap_int_hasher, minimap_sketch_data>(
+    collect_native_scalar_view<minimap_sketch_data>(
         scalar, fragmented, fragmented.cbegin(), fragmented.cend(), 10, 15);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> expected;
     for (const minimap_sketch_data& minimizer : scalar.extract_sketches_data()) {
@@ -293,7 +275,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         10,
         15);
     REQUIRE(!pairs.empty());
-    require_gpu_pair_superset_with_bounded_tile_extras(
+    require_gpu_pair_parity(
         expected,
         pairs,
         vk::make_sketch_tile_plan(
