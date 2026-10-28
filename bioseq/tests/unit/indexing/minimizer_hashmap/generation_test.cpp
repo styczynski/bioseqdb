@@ -454,8 +454,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
             minimizer_algorithm::two_stack_nthash);
         return value;
     }();
-    constexpr auto canonical_vulkan = [canonical_minimap] {
-        auto value = canonical_minimap;
+    constexpr auto canonical_vulkan = [canonical_bounded] {
+        auto value = canonical_bounded;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
         value.algorithm_identity = test_generation_algorithm_identity(
             minimizer_algorithm::vulkan_minimap_integer);
@@ -468,8 +468,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
             minimizer_algorithm::two_stack_nthash);
         return value;
     }();
-    constexpr auto vulkan_reader = [minimap_reader] {
-        auto value = minimap_reader;
+    constexpr auto vulkan_reader = [bounded_reader] {
+        auto value = bounded_reader;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
         value.algorithm_identity = test_generation_algorithm_identity(
             minimizer_algorithm::vulkan_minimap_integer);

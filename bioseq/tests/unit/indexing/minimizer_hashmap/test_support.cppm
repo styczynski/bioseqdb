@@ -316,9 +316,15 @@ test_generation_options(
     std::uint16_t window_size = 10u) noexcept {
     constexpr auto alphabet_id =
         bioseq::minimizers::minimizer_profile_alphabet_id<p_alphabet>();
-    const auto scheme = algorithm == bioseq::simd::minimizer_algorithm::bounded_nthash_simd
-        ? bioseq::indexing::k_bounded_nthash_u32_r7_sum_scheme_identity
-        : bioseq::indexing::k_minimap_scheme_identity;
+    const auto algorithm_identity =
+        test_generation_algorithm_identity<p_alphabet, p_storage_unit>(
+            algorithm, maximum_position_extent_bp, kmer_size, window_size);
+    const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_producer_backend(
+        bioseq::indexing::minimizer_producer_identity{
+            .id = bioseq::indexing::minimizer_producer_backend_for_effective_algorithm(
+                algorithm_identity.effective_algorithm),
+            .revision = bioseq::indexing::k_minimizer_producer_identity_revision,
+        });
     return {
         .layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
         .generation_id = 37,
@@ -331,8 +337,7 @@ test_generation_options(
         .window_size = window_size,
         .minimizer_scheme_id = scheme.id,
         .minimizer_scheme_revision = scheme.revision,
-        .algorithm_identity = test_generation_algorithm_identity<p_alphabet, p_storage_unit>(
-            algorithm, maximum_position_extent_bp, kmer_size, window_size),
+        .algorithm_identity = algorithm_identity,
     };
 }
 
