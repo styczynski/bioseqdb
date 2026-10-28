@@ -845,13 +845,24 @@ export inline std::vector<seq_row> hoe_seed_rows() {
     };
 }
 
+/** @brief Publish the default indexes after a fixture's source INSERT has committed. */
+export inline void publish_default_fixture_indexes(
+    const connection_test_context& ctx, std::string_view name) {
+    exec_sqlf(ctx,
+        "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_fragment');",
+        name);
+    exec_sqlf(ctx,
+        "SELECT bioseq.update_index('{}'::regclass, 'symbol_counts');",
+        name);
+}
+
 // Create the alignment fixture with the Bioseq table access method. Return
 // its type parameters for formatting query literals.
 /** @return The sequence type parameters used for the recreated alignment fixture. */
 export inline seq_typmod seed_hoe_fixture(
     const connection_test_context& ctx, std::string_view name) {
     constexpr seq_typmod typmod{.alphabet = "dna4", .width = 32};
-    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     exec_sqlf(ctx, "SET bioseq.vectorization.enabled = on;");
     // A short probe may have only one  seed. Allow that chain by lowering the
     // minimum score and seed count used by this fixture.
@@ -867,6 +878,7 @@ export inline seq_typmod seed_hoe_fixture(
             .using_bioseq = true,
         },
         hoe_seed_rows());
+    publish_default_fixture_indexes(ctx, name);
     return typmod;
 }
 
@@ -882,12 +894,12 @@ export [[nodiscard]] inline std::string hoe_probe_literal() {
                           seq_typmod{.alphabet = "dna4", .width = 32});
 }
 
-// Populate a Bioseq table and its indexes with three fixed 16 bp sequences.
+// Populate a Bioseq table with three fixed 16 bp sequences, then publish its indexes.
 // Tests use this fixture when they need stored data without a specific match set.
 /** @brief Recreate  a small DNA4 fixture using the Bioseq table access method. */
 export inline void seed_small_bioseq_column(
     const connection_test_context& ctx, std::string_view name) {
-    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     exec_sqlf(ctx, "SET bioseq.vectorization.enabled = on;");
     create_seq_table(
         ctx,
@@ -902,6 +914,7 @@ export inline void seed_small_bioseq_column(
             seq_row{.pk = 2, .sequences = {"TTTTAAAAGGGGCCCC"}},
             seq_row{.pk = 3, .sequences = {"AAAAAAAAAAAAAAAA"}},
         });
+    publish_default_fixture_indexes(ctx, name);
 }
 
 // Require non-NULL cells and parse the single result column as integers.

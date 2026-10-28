@@ -390,8 +390,12 @@ TEST_CASE("Base-local sliced mmsearch matches a flat logical oracle",
     const std::string query_literal = format_literal(
         query, seq_typmod{.alphabet = "dna4", .width = 32});
 
+    // This raw control exercises the optional fragment-directory reader.
+    // Select its compatible exact algorithm and storage layout before rebuilding.
     exec_sql(ctx,
         "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.aligner.minimizer.algorithm='two_stack_nthash';"
+        "SET bioseq.aligner.grouped_soa_generation.enabled=off;"
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "SET bioseq.index.sequence_read.enabled=on;"
         "SET bioseq.aligner.chaining.minimum_score=20;");

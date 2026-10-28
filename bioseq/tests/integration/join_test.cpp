@@ -491,6 +491,7 @@ TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
                          "pk INT PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
                          "INSERT INTO hoe_64 SELECT pk, seq0 FROM {};",
                          k_hoe_join));
+    publish_default_fixture_indexes(ctx, "hoe_64");
 
     const auto same_width =
         query_rows(ctx,

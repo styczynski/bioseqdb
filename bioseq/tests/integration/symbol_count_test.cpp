@@ -109,9 +109,9 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_bioseq_column});
 
-    SECTION("stored read path (bioseq.index.insert_maintenance.enabled = on)") {
+    SECTION("stored read path after explicit index rebuild") {
         // The fixture stores A counts of 4, 4, and 16 for its three rows.
-        // Insert maintenance builds the inline bymbol-count index.
+        // The fixture explicitly publishes the inline symbol-count index.
         seed_small_bioseq_column(ctx, k_bioseq_column);
 
         // pk=1 'ACGTACGTACGTACGT' -> A=4.

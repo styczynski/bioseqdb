@@ -213,6 +213,7 @@ TEST_CASE("Same-alphabet PARAM_EXTERN queries rewidth in both target-width "
         "pk integer PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
         "INSERT INTO typmod_coalesce_wide SELECT pk, seq0 FROM typmod_coalesce; "
         "SET plan_cache_mode = force_generic_plan;");
+    publish_default_fixture_indexes(ctx, "typmod_coalesce_wide");
 
     const auto narrow_flat = query_rows(
         ctx,
@@ -258,7 +259,7 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({"typmod_join_narrow", "typmod_join_wide"});
     exec_sql(ctx,
-        "SET bioseq.index.insert_maintenance.enabled = on;"
+        "SET bioseq.index.insert_maintenance.enabled = off;"
         "SET bioseq.vectorization.enabled = on;"
         "SET bioseq.aligner.chaining.minimum_score = 10;"
         "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
@@ -284,6 +285,8 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
             .using_bioseq = true,
         },
         canonical_rows);
+    publish_default_fixture_indexes(ctx, "typmod_join_narrow");
+    publish_default_fixture_indexes(ctx, "typmod_join_wide");
 
     const std::string narrow_raw_oracle_sql =
         "SELECT target.pk, query.pk "

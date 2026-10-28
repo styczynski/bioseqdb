@@ -19,8 +19,8 @@ TEST_CASE(
     "update_index('minimizers_per_fragment') builds the per-fragment index",
     "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
   auto ctx = fresh_context({k_table});
-  // The seed helper enables insert maintenance. Fragment minimizers and
-  // symbol counts should therefore, exist before the explicit rebuild.
+  // The seed helper publishes indexes after the source INSERT commits.
+  // Fragment minimizers and symbol counts must exist before this rebuild.
   seed_small_bioseq_column(ctx, k_table);
 
   REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", k_table) > 0);

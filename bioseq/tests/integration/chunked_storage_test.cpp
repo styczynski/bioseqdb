@@ -41,11 +41,11 @@ mmsearch_set(const connection_test_context& ctx, std::string_view table_name) {
 }
 } // namespace
 
-TEST_CASE("per-fragment storage is created on insert with the right query_keys",
+TEST_CASE("per-fragment storage has the right query_keys after explicit rebuild",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({"chunked_storage_insert"});
     seed_small_bioseq_column(ctx,
-                             "chunked_storage_insert"); // Three DNA4/32 rows with maintenance on.
+                             "chunked_storage_insert"); // Three committed and indexed DNA4/32 rows.
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_insert") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_insert") == 3);
 
@@ -101,15 +101,30 @@ TEST_CASE("index rows do not survive a ROLLBACK",
     seed_small_bioseq_column(ctx, "chunked_storage_rollback");
     const long long row_count_before =
         index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_rollback");
+    const long long symbol_count_rows_before =
+        index_table_row_count(ctx, "symbol_counts", "chunked_storage_rollback");
+    // Grouped-SoA minimizers require committed source rows. Exercise real
+    // INSERT-time index rollback through the supported symbol-count index.
+    exec_sql(ctx,
+             "SELECT bioseq.set_index_policy('chunked_storage_rollback'::regclass, "
+             "'minimizers_per_fragment', 'UPDATE_MANUALLY');"
+             "SELECT bioseq.set_index_policy('chunked_storage_rollback'::regclass, "
+             "'minimizers_per_sequence', 'UPDATE_MANUALLY');");
+    guc_scope maintain_symbol_counts(
+        ctx, "bioseq.index.insert_maintenance.enabled", "on");
     exec_sql(ctx, "BEGIN;");
     exec_sql(ctx,
              "INSERT INTO chunked_storage_rollback VALUES (99, "
              "'GGGGCCCCAAAATTTT'::bioseq.seq('dna4',32));");
+    REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_rollback") ==
+            symbol_count_rows_before + 1);
     exec_sql(ctx, "ROLLBACK;");
     REQUIRE(query_scalar_int(ctx, "SELECT count(*) FROM chunked_storage_rollback WHERE pk=99") ==
             0);
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_rollback") ==
             row_count_before);
+    REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_rollback") ==
+            symbol_count_rows_before);
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
