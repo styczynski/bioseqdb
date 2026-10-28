@@ -41,6 +41,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.layout;
+import bioseq.storage.size;
 
 import :custom_scan_runtime_placeholder_contracts;
 

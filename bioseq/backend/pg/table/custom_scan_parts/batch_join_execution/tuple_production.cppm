@@ -36,6 +36,7 @@ export module bioseq.postgres.table:custom_scan_batch_join_execution_tuple_produ
 import bioseq.postgres.scheduler.dispatch_buffer.api;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.sequences.cigar;
 import bioseq.postgres.types.compact_sequence;
 
