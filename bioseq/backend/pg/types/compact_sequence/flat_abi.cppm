@@ -35,13 +35,7 @@ import bioseq.storage.layout;
 
 /// Rank-packed alphabets enabled for biological algorithms in this build.
 export using pgseq_supported_biological_alphabets =
-#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    supported_alphabets<alphabet_entry<seq::dna4, "dna4">>;
-#else
-    supported_alphabets<
-        alphabet_entry<seq::dna4, "dna4">,
-        alphabet_entry<seq::dna5, "dna5">>;
-#endif
+    supported_biological_alphabets;
 
 /// Storage alphabets, derived from the biological registry without duplicating it.
 export using pgseq_supported_alphabets = typename decltype(
@@ -108,9 +102,11 @@ using seq [[bioseq_sql::type({
     pgseq_supported_storage_unit_byte_widths>;
 
 static_assert(seq::header_bytes() == 16u);
-static_assert(seqan3::alphabet_size<bioseq::cigar_symbol>
-              <= std::size_t{1u} << std::numeric_limits<std::uint8_t>::digits,
-              "the PostgreSQL letter and lazy-rank facade require byte-sized ranks");
+static_assert([]<class... Entries>(std::tuple<Entries...>) consteval {
+    return ((Entries::cardinality <= (std::size_t{1u}
+        << std::numeric_limits<std::uint8_t>::digits)) && ...);
+}(pgseq_supported_alphabets::alphabet_entries_tuple{}),
+    "the PostgreSQL letter and lazy-rank facade require byte-sized ranks");
 static_assert(pgseq_supported_storage_unit_byte_widths::contains<sizeof(bioseq::cigar_run)>);
 
 }  // namespace bioseq::pg_types
@@ -176,22 +172,6 @@ static_assert((bioseq::storage::sequence_locator_stub_width_marker
 static_assert(pgseq_unbound_alphabet_code
               >= pgseq_supported_alphabets::alphabet_count);
 
-static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
-#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-              == std::string_view{"'dna4', 'cigar'"},
-#else
-              == std::string_view{"'dna4', 'dna5', 'cigar'"},
-#endif
-              "supported-alphabet display names drifted");
-static_assert(
-    pgseq_supported_alphabets::entry_for<seq::dna4>::alphabet_name_sv
-        == std::string_view{"dna4"});
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-static_assert(
-    pgseq_supported_alphabets::entry_for<seq::dna5>::alphabet_name_sv
-        == std::string_view{"dna5"});
-#endif
-
 /// @brief Check whether this build supports an alphabet code.
 /// @param[in] code Alphabet code to check.
 /// @return true when the code is in the compiled alphabet list.
@@ -203,16 +183,11 @@ is_supported_alphabet_code(std::uint8_t code) noexcept
 
 /// @brief Choose the storage width used by this build.
 /// @param[in] requested Storage-unit width in bytes.
-/// @return Eight bytes in a build limited to uint64 storage, otherwise requested.
+/// @return Requested width; admission rejects widths unavailable in this build.
 export [[nodiscard]] constexpr std::uint8_t
 pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 {
-#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
-    (void) requested;
-    return 8u;
-#else
     return requested;
-#endif
 }
 
 /// @brief Adjust the packing width to the widths enabled in this build.
@@ -345,7 +320,7 @@ pgseq_canonical_symbol_for_alphabet(
         alphabet_code,
         [&result, input]<class p_alphabet>() {
             const char symbol = static_cast<char>(input);
-            if (!seqan3::char_is_valid_for<p_alphabet>(symbol)) {
+            if (!bioseq::sequences::source_character_is_valid<p_alphabet>(symbol)) {
                 return;
             }
             p_alphabet value{};
@@ -355,30 +330,14 @@ pgseq_canonical_symbol_for_alphabet(
     return result;
 }
 
-/// @brief Normalize a symbol using the alphabets that accept it.
+/// @brief Preserve unbound lexical identity until an alphabet is selected.
 /// @param[in] input ASCII symbol.
-/// @return Their agreed spelling, or invalid if none accept it or they  disagree.
+/// @return Uppercase amino-acid lexical input, or invalid.
 export [[nodiscard]] inline pgseq_canonical_symbol
 pgseq_canonical_unbound_symbol(unsigned char input) noexcept
 {
-    pgseq_canonical_symbol result{false, '\0'};
-    for (std::uint8_t code = 0;
-         code < pgseq_supported_alphabets::alphabet_count;
-         ++code) {
-        if (pgseq_is_cigar_alphabet(code)) {
-            continue;
-        }
-        const auto candidate =
-            pgseq_canonical_symbol_for_alphabet(code, input);
-        if (!candidate.valid) {
-            continue;
-        }
-        if (result.valid && result.value != candidate.value) {
-            return {false, '\0'};
-        }
-        result = candidate;
-    }
-    return result;
+    const auto character = bioseq::sequences::canonical_unbound_character(input);
+    return {character.valid, character.value};
 }
 
 /// @brief Convert a valid symbol to its alphabet rank.
@@ -401,7 +360,7 @@ export [[nodiscard]] inline bool pgseq_rank_for_symbol(
         alphabet_code,
         [input, canonical, &rank, &valid]<class p_alphabet>() {
             const char symbol = static_cast<char>(input);
-            if (!seqan3::char_is_valid_for<p_alphabet>(symbol)) {
+            if (!bioseq::sequences::source_character_is_valid<p_alphabet>(symbol)) {
                 return;
             }
             p_alphabet value{};

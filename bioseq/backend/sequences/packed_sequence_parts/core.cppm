@@ -7,6 +7,7 @@ module;
 #include <libassert/assert.hpp>
 
 #include <array>
+#include <bit>
 #include <compare>
 #include <concepts>
 #include <cstddef>
@@ -63,6 +64,31 @@ concept sequence_alphabet =
         { seqan3::to_rank(symbol) };
         { seqan3::alphabet_size<p_alphabet_type> };
     };
+
+namespace bioseq::sequences {
+
+/** A lexical character awaiting a concrete alphabet binding. */
+struct canonical_sequence_character { bool valid{}; char value{}; };
+
+/** Preserve uppercase lexical identity; alphabet reduction occurs only on binding. */
+[[nodiscard]] constexpr canonical_sequence_character
+canonical_unbound_character(unsigned char input) {
+    const auto upper = input >= 'a' && input <= 'z'
+        ? static_cast<unsigned char>(input - 'a' + 'A') : input;
+    return seqan3::char_is_valid_for<seqan3::aa27>(static_cast<char>(upper))
+        ? canonical_sequence_character{true, static_cast<char>(upper)}
+        : canonical_sequence_character{};
+}
+
+/** Validate lexical input before native assignment applies any lossy reduction. */
+template<seqan3::alphabet Alphabet>
+[[nodiscard]] constexpr bool source_character_is_valid(char input) {
+    if constexpr (seqan3::aminoacid_alphabet<Alphabet>)
+        return seqan3::char_is_valid_for<seqan3::aa27>(input);
+    else return seqan3::char_is_valid_for<Alphabet>(input);
+}
+
+} // namespace bioseq::sequences
 
 /**
  * @brief Selects the alphabet, storage  word, and bits per packed symbol.
@@ -238,6 +264,12 @@ struct alphabet_entry {
     static constexpr auto alphabet_name = p_name;
     static constexpr std::size_t name_size = p_name.size();
     static constexpr std::string_view alphabet_name_sv = p_name.view();
+    static constexpr std::size_t cardinality = seqan3::alphabet_size<p_alphabet>;
+    static constexpr std::size_t rank_bits = std::bit_width(cardinality - 1u);
+    static constexpr bool is_amino_acid = seqan3::aminoacid_alphabet<p_alphabet>;
+    static constexpr bool is_complementable = requires(p_alphabet value) {
+        seqan3::complement(value);
+    };
     static constexpr bool is_valid_alphabet_entry = true;
 };
 
@@ -382,6 +414,15 @@ struct supported_alphabets {
     using alphabets_tuple = std::tuple<typename p_entries::alphabet_type...>;
 
     static constexpr std::size_t alphabet_count = sizeof...(p_entries);
+
+    /** Return native packed rank width for a registry code, or no value for invalid codes. */
+    [[nodiscard]] static constexpr std::optional<std::size_t> rank_bits_for_code(
+        std::size_t code) noexcept {
+        constexpr std::array widths{p_entries::rank_bits...};
+        if (code >= widths.size()) return std::nullopt;
+        return widths[code];
+    }
+
 
     /** @brief Smallest unsigned integer type representing every pack index. */
     using alphabet_code_t = typename boost::uint_t<
@@ -604,6 +645,22 @@ struct supported_alphabets {
             detail_supported_alphabets::valid_names_live_length_v<p_entries...>};
     }
 };
+
+/** Stable biological identities shared by storage, generated kernels and SQL. */
+using supported_biological_alphabets = supported_alphabets<
+    alphabet_entry<seq::dna4, "dna4">,
+    alphabet_entry<seq::dna5, "dna5">,
+    alphabet_entry<seq::aa10li, "aa10li">,
+    alphabet_entry<seq::aa10murphy, "aa10murphy">,
+    alphabet_entry<seq::aa20, "aa20">,
+    alphabet_entry<seq::aa27, "aa27">>;
+
+// Instantiate all registry metadata so compiler-backed generation sees resolved values.
+static_assert([]<class... Entries>(std::tuple<Entries...>) consteval {
+    return ((Entries::cardinality > 1u
+        && Entries::rank_bits == std::bit_width(Entries::cardinality - 1u)
+        && (Entries::is_amino_acid != Entries::is_complementable)) && ...);
+}(supported_biological_alphabets::alphabet_entries_tuple{}));
 
 /** Recognizes a type that lists supported alphabets and their numeric codes. */
 template<class p_candidate_type>
