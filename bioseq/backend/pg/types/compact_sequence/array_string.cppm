@@ -378,10 +378,15 @@ inline void validate_bridge_array_shape(
                  errmsg("bioseq CIGAR storage width must be %zu bits",
                         sizeof(bioseq::cigar_run) * 8u)));
     }
+    const auto byte_width = static_cast<std::uint8_t>(width_bits / 8);
+    if (!pgseq_supported_storage_unit_byte_widths::contains_runtime(byte_width)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("bioseq sequence width %d is not enabled in this build", width_bits)));
+    }
     return {
         .alphabet_code = alphabet,
-        .storage_unit_byte_width = pgseq_normalize_storage_unit_byte_width(
-            static_cast<std::uint8_t>(width_bits / 8)),
+        .storage_unit_byte_width = byte_width,
     };
 }
 

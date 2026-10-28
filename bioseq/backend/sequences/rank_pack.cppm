@@ -5,9 +5,13 @@
 module;
 
 #include <cstddef>
+#include <algorithm>
+#include <expected>
 #include <cstdint>
 #include <concepts>
 #include <limits>
+#include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -19,6 +23,8 @@ export module bioseq.sequences.rank_pack;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack_core;
 import bioseq.common.checked_arithmetic;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 
 export namespace bioseq::sequences {
 
@@ -68,6 +74,58 @@ struct rank_pack_result {
         return status == rank_pack_status::ok;
     }
 };
+
+/** Binary packed input is checked before any alphabet assignment or matrix indexing. */
+enum class packed_rank_validation_status : std::uint8_t {
+    invalid_unit_count, invalid_padding, invalid_rank, nonzero_unused_bits
+};
+
+/** Logical position and physical unit identify the first malformed packed value. */
+struct packed_rank_validation_error {
+    packed_rank_validation_status status{};
+    std::size_t unit_index{};
+    std::size_t logical_position{};
+};
+
+/** Validate exact payload geometry, active ranks, high spare bits and final padding. */
+template<supports_compact_sequence_range Instance>
+requires compact_sequence_range<Instance>::traits::is_bit_packed
+[[nodiscard]] inline std::expected<void, packed_rank_validation_error>
+validate_packed_rank_payload(
+        std::span<const typename compact_sequence_range<Instance>::traits::storage_unit> words,
+        std::size_t symbol_count, std::size_t padding) {
+    using traits = typename compact_sequence_range<Instance>::traits;
+    using storage_unit = typename traits::storage_unit;
+    constexpr auto letters = traits::letters_per_unit;
+    const auto expected_units = symbol_count / letters + static_cast<std::size_t>(symbol_count % letters != 0u);
+    if (words.size() != expected_units)
+        return std::unexpected(packed_rank_validation_error{packed_rank_validation_status::invalid_unit_count});
+    const auto expected_padding = symbol_count % letters == 0u ? 0u : letters - symbol_count % letters;
+    if (padding != expected_padding)
+        return std::unexpected(packed_rank_validation_error{packed_rank_validation_status::invalid_padding});
+    std::size_t logical_position{};
+    for (std::size_t index = 0; index < words.size(); ++index) {
+        const auto active = std::min(letters, symbol_count - logical_position);
+        const auto used_bits = active * traits::bits_per_char;
+        const storage_unit active_mask = used_bits == std::numeric_limits<storage_unit>::digits
+            ? (std::numeric_limits<storage_unit>::max)()
+            : static_cast<storage_unit>((storage_unit{1u} << used_bits) - 1u);
+        if ((words[index] & static_cast<storage_unit>(~active_mask)) != 0u)
+            return std::unexpected(packed_rank_validation_error{
+                packed_rank_validation_status::nonzero_unused_bits, index, logical_position});
+        auto remaining = words[index];
+        for (std::size_t slot = 0; slot < active; ++slot) {
+            if ((remaining & traits::char_mask) >= traits::alphabet_size)
+                return std::unexpected(packed_rank_validation_error{
+                    packed_rank_validation_status::invalid_rank, index, logical_position + slot});
+            if constexpr (traits::bits_per_char < std::numeric_limits<storage_unit>::digits)
+                remaining = static_cast<storage_unit>(remaining >> traits::bits_per_char);
+            else remaining = 0;
+        }
+        logical_position += active;
+    }
+    return {};
+}
 
 /**
  * @brief Appends packed words to a vector owned by the caller.
@@ -223,6 +281,36 @@ public:
         return status_;
     }
 
+    /** Validate a bounded packed rank group, then merge through the common LSB packer. */
+    [[nodiscard]] rank_pack_status append_prepacked_ranks(
+            storage_unit packed_word, std::size_t rank_count) {
+        if (status_ != rank_pack_status::ok || finished_) return status_;
+        if (rank_count > traits::letters_per_unit) {
+            status_ = rank_pack_status::unit_count_mismatch;
+            return status_;
+        }
+        if (rank_count > (std::numeric_limits<std::uint64_t>::max)() - emitted_symbols_) {
+            status_ = rank_pack_status::length_mismatch;
+            return status_;
+        }
+        auto remaining = packed_word;
+        for (std::size_t index = 0; index < rank_count; ++index) {
+            if ((remaining & traits::char_mask) >= traits::alphabet_size) {
+                status_ = rank_pack_status::invalid_rank;
+                return status_;
+            }
+            if constexpr (traits::bits_per_char < std::numeric_limits<storage_unit>::digits)
+                remaining = static_cast<storage_unit>(remaining >> traits::bits_per_char);
+            else remaining = 0;
+        }
+        auto write_unit = [this](storage_unit value) { return sink_.try_write(value); };
+        if (!rank_pack_detail::append_prepacked_ranks_lsb<storage_unit,
+                traits::bits_per_char, traits::letters_per_unit>(partial_word_,
+                partial_letters_, emitted_symbols_, packed_word, rank_count, write_unit))
+            status_ = rank_pack_status::capacity_overflow;
+        return status_;
+    }
+
     /**
      * @brief Appends rank bytes in order until an error occurs.
      * @param ranks Input ranks.
@@ -354,5 +442,71 @@ private:
     bool finished_{};
     rank_pack_result result_{};
 };
+
+/** Generate already-admitted disjoint packed spans through the existing TBB pool.
+ * Producer receives output-symbol offset/count and one checked fixed-span writer.
+ * Its reads must be worker-shareable when parallel execution is admitted. Interior
+ * boundaries align to both packed words and the producer's output quantum; only
+ * the final task owns padding. FailureFactory maps packing-contract failures to
+ * the producer's error type. All workers join before the borrowed spans expire. */
+template<supports_compact_sequence_range Instance, class Producer, class FailureFactory>
+[[nodiscard]] auto generate_packed_ranges(
+    std::span<typename compact_sequence_range<Instance>::traits::storage_unit> output,
+    std::size_t symbol_count, std::size_t output_quantum, bool worker_shareable,
+    Producer&& producer, FailureFactory&& failure_factory)
+    -> std::expected<rank_pack_result, std::invoke_result_t<FailureFactory, rank_pack_status>> {
+    using error_type = std::invoke_result_t<FailureFactory, rank_pack_status>;
+    using traits = typename compact_sequence_range<Instance>::traits;
+    using unit = typename traits::storage_unit;
+    using sink = fixed_rank_pack_unit_sink<unit>;
+    using writer_type = checked_rank_pack_sink<Instance, invalid_rank_policy::reject,
+        pack_capacity_policy::fixed_span, sink>;
+    constexpr auto letters_per_unit = traits::letters_per_unit;
+    const auto units = symbol_count / letters_per_unit + (symbol_count % letters_per_unit != 0u);
+    if (units > output.size())
+        return std::unexpected(failure_factory(rank_pack_status::capacity_overflow));
+    if (output_quantum == 0u || output_quantum > std::numeric_limits<std::size_t>::max() / letters_per_unit)
+        return std::unexpected(failure_factory(rank_pack_status::length_mismatch));
+    const auto quantum = std::lcm(static_cast<std::size_t>(letters_per_unit), output_quantum);
+    const auto quantum_units = quantum / letters_per_unit;
+    const auto chunk_units = std::max<std::size_t>(quantum_units,
+        (std::size_t{64u * 1024u} / sizeof(unit) / quantum_units) * quantum_units);
+    if (chunk_units > std::numeric_limits<std::size_t>::max() / letters_per_unit)
+        return std::unexpected(failure_factory(rank_pack_status::length_mismatch));
+    const auto chunk_symbols = chunk_units * letters_per_unit;
+    const auto chunks = symbol_count / chunk_symbols + (symbol_count % chunk_symbols != 0u);
+    std::mutex failure_mutex;
+    std::optional<error_type> failure;
+    auto failed_chunk = std::numeric_limits<std::size_t>::max();
+    const auto run = [output, symbol_count, chunk_symbols, &producer, &failure_factory,
+                      &failure_mutex, &failure, &failed_chunk](std::size_t first, std::size_t last) {
+        for (auto chunk = first; chunk < last; ++chunk) {
+            const auto offset = chunk * chunk_symbols;
+            const auto count = std::min(chunk_symbols, symbol_count - offset);
+            const auto local_units = count / letters_per_unit + (count % letters_per_unit != 0u);
+            writer_type writer{sink{output.subspan(offset / letters_per_unit, local_units)}};
+            auto generated = producer(offset, count, writer);
+            if (generated && (!*generated || generated->emitted_symbols != count
+                              || generated->written_units != local_units))
+                generated = std::unexpected(failure_factory(!*generated ? generated->status
+                    : generated->emitted_symbols != count ? rank_pack_status::length_mismatch
+                                                         : rank_pack_status::unit_count_mismatch));
+            if (!generated) {
+                const std::lock_guard lock{failure_mutex};
+                if (chunk < failed_chunk) { failed_chunk = chunk; failure = generated.error(); }
+            }
+        }
+    };
+    if (!worker_shareable || units < (std::size_t{1024u * 1024u} / sizeof(unit)) || chunks < 2u) {
+        run(0u, std::max<std::size_t>(chunks, 1u));
+    } else {
+        bioseq::parallelism::global_pool::instance().parallel_for(0u, chunks, 1u,
+            bioseq::parallelism::range_body{run});
+    }
+    if (failure) return std::unexpected(std::move(*failure));
+    return rank_pack_result{.status = rank_pack_status::ok, .emitted_symbols = symbol_count,
+        .written_units = units, .padding_letters = static_cast<std::uint16_t>(
+            symbol_count % letters_per_unit == 0u ? 0u : letters_per_unit - symbol_count % letters_per_unit)};
+}
 
 }  // namespace bioseq::sequences

@@ -60,11 +60,13 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
     SECTION("dna4 across {1,2,4,8} byte widths") {
         for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
             test_arena arena;
-            auto* hdr = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
+            const auto hdr_result = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
                 bw,
                 static_cast<test_stdc_t::bp_size_t>(input.size()),
                 input.data(),
                 arena.alloc_fn());
+            REQUIRE(hdr_result.has_value());
+            auto* hdr = *hdr_result;
             REQUIRE(hdr != nullptr);
             REQUIRE(static_cast<std::size_t>(hdr->bp_size) == input.size());
             REQUIRE(hdr->storage_unit_byte_width == bw);
@@ -83,11 +85,13 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
         const std::string with_n = "ACGTNNACGTACGTNNNACGTACGTACGTACGT";
         for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
             test_arena arena;
-            auto* hdr = stdc_convert_from_cstr<test_stdc_t, seq::dna5>(
+            const auto hdr_result = stdc_convert_from_cstr<test_stdc_t, seq::dna5>(
                 bw,
                 static_cast<test_stdc_t::bp_size_t>(with_n.size()),
                 with_n.data(),
                 arena.alloc_fn());
+            REQUIRE(hdr_result.has_value());
+            auto* hdr = *hdr_result;
             REQUIRE(hdr != nullptr);
             REQUIRE(hdr->alphabet_code == 1u);
             std::string decoded;
@@ -126,15 +130,12 @@ TEST_CASE("dna4 uint64 multiline SIMD encoding stops at sentinel chunks",
     state.output_storage = &packed;
     state.reset();
 
-    std::size_t newline_count = 0;
-    const std::size_t consumed =
-        encode_body_chunk_dna4_simd_multiline_until_byte<std::uint8_t{'>'}, std::uint64_t, 2, 32>(
-            state,
-            reinterpret_cast<const std::uint8_t*>(input.data()),
-            input.size(),
-            &newline_count);
-    REQUIRE(consumed == wrapped.size());
-    REQUIRE(newline_count == (body.size() + 59u) / 60u);
+    const auto encoded = encode_multiline_body_chunk<seq::dna4>(state,
+        reinterpret_cast<const std::uint8_t*>(input.data()), input.size(), true);
+    REQUIRE(encoded.encoded);
+    REQUIRE(encoded.at_record_boundary);
+    REQUIRE(encoded.encoded.consumed_bytes == wrapped.size());
+    REQUIRE(encoded.newline_bytes == (body.size() + 59u) / 60u);
 
     const auto [n_words, padding] = finalize_encode_state<std::uint64_t, 2, 32>(state);
     REQUIRE(n_words == packed.size());
@@ -149,8 +150,10 @@ TEST_CASE("storage send and receive preserve packed bytes",
     const std::string input = "ACGTACGTACGTACGT";
     for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
         test_arena arena;
-        auto* src = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
+        const auto src_result = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
             bw, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
+        REQUIRE(src_result.has_value());
+        auto* src = *src_result;
         REQUIRE(src != nullptr);
 
         // Save the units sent by the storage format for a receive round trip.
@@ -195,8 +198,10 @@ TEST_CASE("same-alphabet storage-width recasting preserves packed bytes",
     test_arena arena;
 
     // Start with 64-bit packed words.
-    auto* src_8 = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
+    const auto src_8_result = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
         8u, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
+    REQUIRE(src_8_result.has_value());
+    auto* src_8 = *src_8_result;
     REQUIRE(src_8 != nullptr);
 
     // Convert to byte-sized units and back to check that repacking preserves data.
@@ -215,8 +220,10 @@ TEST_CASE("zero-copy compact sequence views preserve decoded text",
     const std::string input = "ACGTACGTACGTACGT";
     for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
         test_arena arena;
-        auto* hdr = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
+        const auto hdr_result = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
             bw, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
+        REQUIRE(hdr_result.has_value());
+        auto* hdr = *hdr_result;
         REQUIRE(hdr != nullptr);
 
         // Decode the selected view and compare it with the original text.

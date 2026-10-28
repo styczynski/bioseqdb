@@ -8,6 +8,7 @@ module;
 #include <libassert/assert.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <compare>
 #include <cstddef>
@@ -15,6 +16,9 @@ module;
 #include <cstring>
 #include <string>
 #include <type_traits>
+#include <span>
+#include <limits>
+#include <expected>
 #include <utility>
 #include <vector>
 #include <functional>
@@ -72,19 +76,6 @@ HWY_INLINE hn::Vec<p_simd_tag> lookup_ranks_via_32byte_lut(
     return hn::IfThenElse(is_high, high_result, low_result);
 }
 
-/// Looks up dna4 ranks using each byte's low  four bits.
-/// Unused entries return 0xFF. Callers must account for bytes that share
-/// a letter's low bits, since the lookup cannot distinguish them.
-template <class p_simd_tag>
-HWY_INLINE hn::Vec<p_simd_tag> dna4_lookup_ranks(
-    p_simd_tag /* tag, deduction-only */,
-    hn::Vec<p_simd_tag> letter_to_rank_table_vec,
-    hn::Vec<p_simd_tag> low_nibble_mask,
-    hn::Vec<p_simd_tag> chunk_bytes) noexcept {
-    const auto letter_index = hn::And(chunk_bytes, low_nibble_mask);
-    return hn::TableLookupBytes(letter_to_rank_table_vec, letter_index);
-}
-
 /**
  * Packs sixteen dna4 ranks into one 32-bit value, first letter in the low bits.
  *
@@ -125,142 +116,6 @@ HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
 #endif
 }
 
-/// Returns true if any lane contains the 0xFF skip marker.
-template <class p_simd_tag>
-HWY_INLINE bool has_skip_sentinel(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> ranks) noexcept {
-    const auto sentinel_mask =
-        hn::Eq(ranks, hn::Set(simd_tag, std::uint8_t{0xFF}));
-    return !hn::AllFalse(simd_tag, sentinel_mask);
-}
-
-/// Appends sixteen packed dna4 ranks to a uint64_t packing state
-/// Writes completed words to packed_words and keeps the remaining ranks.
-/// local_partial_letters must be smaller than 32.
-template <typename p_storage_unit>
-HWY_INLINE void merge_packed_chunk_into_partial(
-    p_storage_unit& local_partial_word,
-    std::size_t& local_partial_letters,
-    std::vector<p_storage_unit>* HWY_RESTRICT packed_words,
-    std::uint32_t packed_chunk) noexcept {
-    std::size_t appended_letters = 0u;
-    // Flush one completed storage unit into the output vector.
-    auto write_unit = [packed_words](p_storage_unit value) {
-        packed_words->push_back(value);
-        return true;
-    };
-    const bool appended =
-        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
-            p_storage_unit, 2u, 32u>(
-                local_partial_word,
-                local_partial_letters,
-                appended_letters,
-                packed_chunk,
-                16u,
-                write_unit);
-    DEBUG_ASSERT(appended && appended_letters == 16u,
-                 "growing SIMD rank chunk pack unexpectedly failed");
-}
-
-/// Appends count packed dna4 ranks to the current uint64_t word.
-/// count must be at most 16, and local_partial_letters must be below 32.
-template <typename p_storage_unit>
-HWY_INLINE void merge_variable_chunk_into_partial(
-    p_storage_unit& local_partial_word,
-    std::size_t& local_partial_letters,
-    std::vector<p_storage_unit>* HWY_RESTRICT packed_words,
-    std::uint32_t packed_chunk,
-    std::size_t count) noexcept {
-    std::size_t appended_letters = 0u;
-    // Flush one completed storage unit into the output vector.
-    auto write_unit = [packed_words](p_storage_unit value) {
-        packed_words->push_back(value);
-        return true;
-    };
-    const bool appended =
-        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
-            p_storage_unit, 2u, 32u>(
-                local_partial_word,
-                local_partial_letters,
-                appended_letters,
-                packed_chunk,
-                count,
-                write_unit);
-    DEBUG_ASSERT(appended && appended_letters == count,
-                 "growing SIMD variable rank chunk pack unexpectedly failed");
-}
-
-// dna4 encoding for input with  line separators already removed.
-
-/**
- * Appends a dna4 text span using 32 two-bit ranks per uint64_t word.
- *
- * The input should have its line separators removed. drop uses the low-nibble
- * lookup and retries chunks containing skip markers with the scalar table.
- * map_to_default uses the five-bit lookup. These fast lookups assume DNA text
- * and do not check every posscble invalid byte. Partial words stay, in state.
- */
-template <typename p_storage_unit,
-          std::size_t p_bits_per_character,
-          std::size_t p_letters_per_unit,
-          unknown_byte_policy p_policy = unknown_byte_policy::drop>
-HWY_INLINE void encode_body_chunk_dna4_simd(
-    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size) {
-    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
-                  std::is_same_v<p_storage_unit, std::uint64_t>,
-                  "encode_body_chunk_dna4_simd is specialised for "
-                  "(dna4, uint64_t, 2, 32)");
-    if constexpr (p_policy == unknown_byte_policy::drop) {
-        detail::encode_body_chunk_dna4_simd_drop_impl(
-            state, body_bytes, body_size);
-    } else {
-        detail::encode_body_chunk_dna4_simd_map_to_default_impl(
-            state, body_bytes, body_size);
-    }
-}
-// dna4 encoding for multiline sequence bodies.
-
-/// Appends multiline dna4 text, skipping line separators.
-/// Chunks containing skip markers use scalar filtering. Other chunks use
-/// the low-nibble  lookup, which assumes DNA text.
-template <typename p_storage_unit,
-          std::size_t p_bits_per_character,
-          std::size_t p_letters_per_unit>
-HWY_INLINE void encode_body_chunk_dna4_simd_multiline(
-    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size) {
-    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
-                  std::is_same_v<p_storage_unit, std::uint64_t>,
-                  "encode_body_chunk_dna4_simd_multiline is specialised for "
-                  "(dna4, uint64_t, 2, 32)");
-    detail::encode_body_chunk_dna4_simd_multiline_impl(
-        state, body_bytes, body_size);
-}
-/// Appends multiline dna4 input up to the first p_boundary_character.
-/// Returns bytes consumed, excluding the boundary. If supplied,
-/// newline_count_out accumulates each CR and LF byte before that boundary.
-template <std::uint8_t p_boundary_character,
-          typename p_storage_unit,
-          std::size_t p_bits_per_character,
-          std::size_t p_letters_per_unit>
-[[nodiscard]] HWY_INLINE std::size_t
-encode_body_chunk_dna4_simd_multiline_until_byte(
-    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size,
-    std::size_t* HWY_RESTRICT newline_count_out) {
-    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
-                  std::is_same_v<p_storage_unit, std::uint64_t>,
-                  "encode_body_chunk_dna4_simd_multiline_until_byte is "
-                  "specialised for (dna4, uint64_t, 2, 32)");
-    return detail::encode_body_chunk_dna4_simd_multiline_until_byte_impl(
-        state, body_bytes, body_size, newline_count_out,
-        p_boundary_character);
-}
 // Decoding dna4 words to ASCII.
 
 /**
@@ -318,24 +173,6 @@ HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
     return line_position;
 }
 
-// dna5 encoding with two ranks per byte.
-
-/// Appends dna5 text with two three-bit ranks in each output byte.
-/// Uses the five-bit SIMD lookup and keeps an unfinished pair in state.
-/// The lookup assumes DNA text and cannot validate every ASCII byte.
-template <unknown_byte_policy p_policy>
-HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
-    encode_state<std::uint8_t, 3, 2>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size) {
-    if constexpr (p_policy == unknown_byte_policy::drop) {
-        detail::encode_body_chunk_dna5_uint8_simd_drop_impl(
-            state, body_bytes, body_size);
-    } else {
-        detail::encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
-            state, body_bytes, body_size);
-    }
-}
 // Decoding dna5 bytes to ASCII.
 
 /**
@@ -350,114 +187,362 @@ HWY_INLINE void decode_dna5_uint8_words_to_ascii(
     std::size_t total_letters) noexcept {
     detail::decode_dna5_uint8_words_to_ascii_impl(words, dst, total_letters);
 }
-// SIMD lookup with scalar packing for other dna4 and dna5 layouts.
+/** Look up arbitrary byte ranks without indexing a table outside its domain. */
+template<class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> lookup_byte_table(
+        D tag, hn::Vec<D> bytes, const std::array<std::uint8_t, 256>& table,
+        bool letters_and_stop) {
+    if (letters_and_stop) {
+        const auto ranks = lookup_ranks_via_32byte_lut(tag,
+            hn::LoadDup128(tag, table.data() + 64u),
+            hn::LoadDup128(tag, table.data() + 80u), bytes);
+        const auto upper = hn::And(bytes, hn::Set(tag, std::uint8_t{0xDF}));
+        const auto is_letter = hn::And(hn::Gt(upper, hn::Set(tag, std::uint8_t{'A' - 1})),
+            hn::Lt(upper, hn::Set(tag, std::uint8_t{'Z' + 1})));
+        return hn::IfThenElse(is_letter, ranks,
+            hn::IfThenElse(hn::Eq(bytes, hn::Set(tag, std::uint8_t{'*'})),
+                hn::Set(tag, table[static_cast<unsigned char>('*')]), hn::Set(tag, table[0])));
+    }
+    const auto low_bits = hn::And(bytes, hn::Set(tag, std::uint8_t{0x0F}));
+    const auto high_bits = hn::And(bytes, hn::Set(tag, std::uint8_t{0xF0}));
+    auto ranks = hn::Zero(tag);
+    for (std::size_t bank = 0; bank < table.size(); bank += 16u) {
+        const auto values = hn::TableLookupBytes(hn::LoadDup128(tag, table.data() + bank), low_bits);
+        ranks = hn::IfThenElse(hn::Eq(high_bits, hn::Set(tag, static_cast<std::uint8_t>(bank))),
+            values, ranks);
+    }
+    return ranks;
+}
 
-/**
- * Appends dna4 or dna5 text using SIMD lookup and  scalar rank packing.
- *
- * This supports layouts such as 21 dna5 ranks per uint64_t word. Lookup uses
- * the five-bit table, so callers should supply DNA text. The packing helper
- * skips 0xFF ranks under drop and keeps partial words between calls.
- */
-template <sequence_alphabet p_alphabet,
-          unknown_byte_policy p_policy,
-          typename p_storage_unit,
-          std::size_t p_bits_per_character,
-          std::size_t p_letters_per_unit>
-HWY_INLINE void encode_body_chunk_lut_simd_pack_scalar(
-    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size) {
-    static_assert(std::is_same_v<p_alphabet, seq::dna4>
-               || std::is_same_v<p_alphabet, seq::dna5>,
-                  "SIMD LUT pack_scalar path is implemented for dna4/dna5");
+/** Prove that the compact ASCII table is equivalent to the complete native table. */
+[[nodiscard]] consteval bool is_letter_and_stop_table(const std::array<std::uint8_t, 256>& table) {
+    for (std::size_t byte = 0; byte < table.size(); ++byte) {
+        const auto upper = byte >= 'a' && byte <= 'z' ? byte - 'a' + 'A' : byte;
+        const auto expected = (upper >= 'A' && upper <= 'Z') || upper == '*'
+            ? table[upper] : table[0];
+        if (table[byte] != expected) return false;
+    }
+    return true;
+}
 
-    constexpr std::size_t k_scratch_capacity = 1024;
-    std::array<std::uint8_t, k_scratch_capacity> rank_scratch{};
-    std::size_t read_cursor = 0;
-    while (read_cursor < body_size) {
-        const std::size_t chunk_size =
-            std::min(k_scratch_capacity, body_size - read_cursor);
-        if constexpr (std::is_same_v<p_alphabet, seq::dna4>) {
-            if constexpr (p_policy == unknown_byte_policy::drop) {
-                detail::ascii_to_rank_lut_simd_dna4_drop_impl(
-                    body_bytes + read_cursor, rank_scratch.data(), chunk_size);
-            } else {
-                detail::ascii_to_rank_lut_simd_dna4_map_to_default_impl(
-                    body_bytes + read_cursor, rank_scratch.data(), chunk_size);
+/** Bounded packed words produced by one native SIMD rank tile. */
+template<class Storage, std::size_t Capacity>
+struct packed_native_rank_tile {
+    std::array<Storage, Capacity> words{};
+    std::size_t word_count{};
+};
+
+/** Fuse adjacent native rank bytes into packed pairs before assembling storage words. */
+template<class D, class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE auto pack_native_rank_tile(D tag, std::span<const std::uint8_t> ranks) {
+    packed_native_rank_tile<Storage, (hn::MaxLanes(D{}) + Letters - 1u) / Letters> result{};
+    if constexpr (Bits == 2u && Letters >= std::numeric_limits<std::uint32_t>::digits / Bits
+        && hn::MaxLanes(D{}) == std::numeric_limits<std::uint32_t>::digits / Bits) {
+        std::array<std::uint8_t, hn::MaxLanes(tag)> padded{};
+        std::copy(ranks.begin(), ranks.end(), padded.begin());
+        result.words[0] = static_cast<Storage>(pack_16_dna4_to_u32(tag, hn::LoadU(tag, padded.data())));
+        result.word_count = ranks.empty() ? 0u : 1u;
+    } else if constexpr (Bits <= std::numeric_limits<std::uint8_t>::digits && Letters % 2u == 0u
+        && hn::MaxLanes(D{}) >= 2u) {
+        // Highway's byte-lane bitcast follows native endian order. Correct that
+        // once for big-endian targets before packing adjacent logical symbols.
+        const hn::Repartition<std::uint16_t, D> pair_tag;
+        std::array<std::uint8_t, hn::MaxLanes(tag)> padded{};
+        std::copy(ranks.begin(), ranks.end(), padded.begin());
+        auto pairs = hn::BitCast(pair_tag, hn::LoadU(tag, padded.data()));
+        if constexpr (std::endian::native == std::endian::big)
+            pairs = hn::Or(hn::ShiftRight<8>(pairs), hn::ShiftLeft<8>(pairs));
+        const auto lower = hn::And(pairs, hn::Set(pair_tag, std::uint16_t{0xFF}));
+        const auto upper = hn::ShiftRight<8>(pairs);
+        pairs = hn::Or(lower, hn::ShiftLeft<Bits>(upper));
+        std::array<std::uint16_t, hn::MaxLanes(pair_tag)> packed_pairs{};
+        hn::StoreU(pairs, pair_tag, packed_pairs.data());
+        for (std::size_t offset = 0; offset < ranks.size(); offset += Letters) {
+            const auto take = std::min(Letters, ranks.size() - offset);
+            Storage word{};
+            for (std::size_t slot = 0; slot < take; slot += 2u)
+                word |= static_cast<Storage>(static_cast<Storage>(packed_pairs[(offset + slot) / 2u])
+                    << (slot * Bits));
+            result.words[result.word_count++] = word;
+        }
+    } else {
+        for (std::size_t offset = 0; offset < ranks.size(); offset += Letters) {
+            const auto take = std::min(Letters, ranks.size() - offset);
+            Storage word{};
+            for (std::size_t slot = 0; slot < take; ++slot)
+                word |= static_cast<Storage>(static_cast<Storage>(ranks[offset + slot]) << (slot * Bits));
+            result.words[result.word_count++] = word;
+        }
+    }
+    return result;
+}
+
+/** Pack a bounded native-rank tile through the existing checked word sink. */
+template<class D, bioseq::sequences::sequence_conversion_sink Writer>
+[[nodiscard]] HWY_INLINE bioseq::sequences::rank_pack_status append_native_ranks_chunk(
+        D tag, std::span<const std::uint8_t> ranks, Writer& writer) {
+    using storage_unit = typename Writer::storage_unit;
+    using traits = typename Writer::traits;
+    for (const auto rank : ranks)
+        if (rank >= traits::alphabet_size) return bioseq::sequences::rank_pack_status::invalid_rank;
+    for (std::size_t offset = 0; offset < ranks.size();) {
+        const auto tile_count = std::min(hn::Lanes(tag), ranks.size() - offset);
+        const auto packed = pack_native_rank_tile<D, storage_unit, traits::bits_per_char,
+            traits::letters_per_unit>(tag, ranks.subspan(offset, tile_count));
+        std::size_t remaining = tile_count;
+        for (std::size_t index = 0; index < packed.word_count; ++index) {
+            const auto count = std::min(traits::letters_per_unit, remaining);
+            const auto status = writer.append_prepacked_ranks(packed.words[index], count);
+            if (status != bioseq::sequences::rank_pack_status::ok) return status;
+            remaining -= count;
+        }
+        offset += tile_count;
+    }
+    return bioseq::sequences::rank_pack_status::ok;
+}
+
+/** Validate, map and pack one native-rank tile; errors retain the first logical position. */
+template<class D, bioseq::sequences::sequence_conversion_sink Writer>
+[[nodiscard]] HWY_INLINE std::expected<void, bioseq::sequences::sequence_conversion_error>
+map_native_rank_chunk(D tag, std::span<const std::uint8_t> source,
+        std::span<const std::uint8_t> destinations, std::span<const std::uint8_t> valid,
+        Writer& writer, std::size_t logical_offset) {
+    using namespace bioseq::sequences;
+    std::array<std::uint8_t, hn::MaxLanes(tag)> mapped{};
+    for (std::size_t lane = 0; lane < source.size(); ++lane) {
+        const auto rank = source[lane];
+        if (rank >= destinations.size()) return std::unexpected(sequence_conversion_error{
+            sequence_conversion_error_code::invalid_source_rank, logical_offset + lane, {}, rank});
+        if (!valid[rank]) return std::unexpected(sequence_conversion_error{
+            sequence_conversion_error_code::unrepresentable_symbol, logical_offset + lane, {}, rank});
+    }
+    if (source.size() == hn::Lanes(tag) && destinations.size() <= 32u) {
+        std::array<std::uint8_t, 32> table{};
+        std::copy(destinations.begin(), destinations.end(), table.begin());
+        const auto ranks = hn::LoadU(tag, source.data());
+        hn::StoreU(lookup_ranks_via_32byte_lut(tag,
+            hn::LoadDup128(tag, table.data()), hn::LoadDup128(tag, table.data() + 16u), ranks),
+            tag, mapped.data());
+    } else for (std::size_t lane = 0; lane < source.size(); ++lane)
+        mapped[lane] = destinations[source[lane]];
+    const auto status = append_native_ranks_chunk(tag,
+        std::span<const std::uint8_t>{mapped.data(), source.size()}, writer);
+    if (status != rank_pack_status::ok) return std::unexpected(sequence_conversion_error{
+        status == rank_pack_status::capacity_overflow ? sequence_conversion_error_code::output_capacity
+            : sequence_conversion_error_code::output_contract_violation,
+        logical_offset, {}, {}, status});
+    return {};
+}
+
+/** Append an already validated bounded tile to the shared streaming pack state. */
+template<class D, class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE sequence_encode_status append_native_rank_state(D tag,
+        std::span<const std::uint8_t> ranks, encode_state<Storage, Bits, Letters>& state) {
+    if (ranks.size() > (std::numeric_limits<std::size_t>::max)() - state.total_letters)
+        return sequence_encode_status::arithmetic_overflow;
+    const auto units = (state.partial_letters + ranks.size()) / Letters;
+    if (units > state.output_storage->max_size() - state.output_storage->size())
+        return sequence_encode_status::capacity_overflow;
+    const auto packed = pack_native_rank_tile<D, Storage, Bits, Letters>(tag, ranks);
+    auto write_unit = [&state](Storage word) { state.output_storage->push_back(word); return true; };
+    std::size_t remaining = ranks.size();
+    for (std::size_t index = 0; index < packed.word_count; ++index) {
+        const auto take = std::min(Letters, remaining);
+        const bool appended = bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+            Storage, Bits, Letters>(state.partial_word, state.partial_letters, state.total_letters,
+                packed.words[index], take, write_unit);
+        DEBUG_ASSERT(appended, "validated native tile must fit its output");
+        remaining -= take;
+    }
+    return sequence_encode_status::ok;
+}
+
+/** Streaming multiline progress keeps physical line boundaries across input slabs. */
+struct sequence_multiline_encode_result {
+    sequence_encode_result encoded{};
+    bool at_line_start{true};
+    bool at_record_boundary{};
+    std::size_t newline_bytes{};
+};
+
+/** Fused strict FASTA body lookup/packing; only a line-initial '>' ends a record. */
+template<sequence_alphabet Alphabet, class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE sequence_multiline_encode_result encode_multiline_body_chunk(
+        encode_state<Storage, Bits, Letters>& state, const std::uint8_t* input,
+        std::size_t length, bool at_line_start) {
+    const hn::ScalableTag<std::uint8_t> tag;
+    static constexpr auto table = build_letter_to_rank_lut<Alphabet, unknown_byte_policy::reject>();
+    constexpr bool compact_lookup = is_letter_and_stop_table(table);
+    std::array<std::uint8_t, hn::MaxLanes(tag)> ranks{};
+    sequence_multiline_encode_result result{{}, at_line_start, false, 0u};
+    const auto initial_count = state.total_letters;
+    for (std::size_t cursor = 0; cursor < length;) {
+        const auto count = std::min(hn::Lanes(tag), length - cursor);
+        if (count == hn::Lanes(tag))
+            hn::StoreU(lookup_byte_table(tag, hn::LoadU(tag, input + cursor), table, compact_lookup), tag, ranks.data());
+        else for (std::size_t lane = 0; lane < count; ++lane) ranks[lane] = table[input[cursor + lane]];
+        std::size_t begin{};
+        for (std::size_t lane = 0; lane <= count; ++lane) {
+            if (lane < count && ranks[lane] != std::uint8_t{0xFF}) {
+                result.at_line_start = false;
+                continue;
             }
-        } else {
-            if constexpr (p_policy == unknown_byte_policy::drop) {
-                detail::ascii_to_rank_lut_simd_dna5_drop_impl(
-                    body_bytes + read_cursor, rank_scratch.data(), chunk_size);
+            const auto status = append_native_rank_state(tag,
+                std::span<const std::uint8_t>{ranks.data() + begin, lane - begin}, state);
+            if (status != sequence_encode_status::ok) {
+                result.encoded = {status, cursor + begin, state.total_letters - initial_count, input[cursor + begin]};
+                return result;
+            }
+            if (lane == count) break;
+            const auto byte = input[cursor + lane];
+            if (byte == '\n' || byte == '\r') {
+                result.at_line_start = true;
+                ++result.newline_bytes;
+            } else if (byte == '>' && result.at_line_start) {
+                result.at_record_boundary = true;
+                result.encoded = {sequence_encode_status::ok, cursor + lane, state.total_letters - initial_count, 0u};
+                return result;
             } else {
-                detail::ascii_to_rank_lut_simd_dna5_map_to_default_impl(
-                    body_bytes + read_cursor, rank_scratch.data(), chunk_size);
+                result.encoded = {sequence_encode_status::invalid_character, cursor + lane,
+                    state.total_letters - initial_count, byte};
+                return result;
+            }
+            begin = lane + 1u;
+        }
+        cursor += count;
+    }
+    result.encoded = {sequence_encode_status::ok, length, state.total_letters - initial_count, 0u};
+    return result;
+}
+
+/** Fused native byte lookup and bounded word packing for every registered alphabet. */
+template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
+         class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE sequence_encode_result encode_native_chunk(
+        D tag, encode_state<Storage, Bits, Letters>& state,
+        const std::uint8_t* HWY_RESTRICT input, std::size_t length) {
+    static constexpr auto table = build_letter_to_rank_lut<Alphabet, Policy>();
+    constexpr bool compact_lookup = is_letter_and_stop_table(table);
+    const auto lanes = hn::Lanes(tag);
+    std::array<std::uint8_t, hn::MaxLanes(tag)> ranks{};
+    const std::size_t original_count = state.total_letters;
+    std::size_t cursor{};
+    auto write_unit = [&state](Storage word) {
+        if (state.output_storage->size() == state.output_storage->max_size()) return false;
+        state.output_storage->push_back(word);
+        return true;
+    };
+    while (cursor < length) {
+        const auto count = std::min(lanes, length - cursor);
+        if (count == lanes)
+            hn::StoreU(lookup_byte_table(tag, hn::LoadU(tag, input + cursor), table, compact_lookup),
+                tag, ranks.data());
+        else for (std::size_t lane = 0; lane < count; ++lane) ranks[lane] = table[input[cursor + lane]];
+        const bool all_valid = std::find(ranks.begin(), ranks.begin() + count,
+            std::uint8_t{0xFF}) == ranks.begin() + count;
+        if (all_valid) {
+            const auto status = append_native_rank_state(tag,
+                std::span<const std::uint8_t>{ranks.data(), count}, state);
+            if (status != sequence_encode_status::ok)
+                return {status, cursor, state.total_letters - original_count, input[cursor]};
+            cursor += count;
+            continue;
+        }
+        std::size_t lane{};
+        while (lane < count) {
+            Storage packed_word{};
+            std::size_t packed_count{};
+            const std::size_t group_begin = lane;
+            while (lane < count && packed_count < Letters) {
+                const auto rank = ranks[lane];
+                if (rank == std::uint8_t{0xFF}) {
+                    if constexpr (Policy == unknown_byte_policy::reject) break;
+                    ++lane;
+                    continue;
+                }
+                packed_word |= static_cast<Storage>(static_cast<Storage>(rank) << (packed_count * Bits));
+                ++packed_count;
+                ++lane;
+            }
+            if (packed_count > (std::numeric_limits<std::size_t>::max)() - state.total_letters)
+                return {sequence_encode_status::arithmetic_overflow, cursor + group_begin,
+                    state.total_letters - original_count, input[cursor + group_begin]};
+            const auto required_units = (state.partial_letters + packed_count) / Letters;
+            if (required_units > state.output_storage->max_size() - state.output_storage->size())
+                return {sequence_encode_status::capacity_overflow, cursor + group_begin,
+                    state.total_letters - original_count, input[cursor + group_begin]};
+            if (packed_count != 0u) {
+                const bool appended = bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+                    Storage, Bits, Letters>(state.partial_word, state.partial_letters,
+                        state.total_letters, packed_word, packed_count, write_unit);
+                DEBUG_ASSERT(appended, "validated native packing must fit its growing sink");
+            }
+            if constexpr (Policy == unknown_byte_policy::reject) {
+                if (lane < count && ranks[lane] == std::uint8_t{0xFF})
+                    return {sequence_encode_status::invalid_character, cursor + lane,
+                        state.total_letters - original_count, input[cursor + lane]};
             }
         }
-        append_ranks<p_storage_unit, p_bits_per_character, p_letters_per_unit>(
-            state, rank_scratch.data(), chunk_size);
-        read_cursor += chunk_size;
+        cursor += count;
     }
+    return {sequence_encode_status::ok, length, state.total_letters - original_count, 0u};
 }
+
 // Codec selection by alphabet, and packed layout.
 
 /**
  * Appends a chunk using the codec for its alphabet and storage layout.
  *
- * dna4 in uint64_t words and dna5 with two ranks per byte use their specialized
- * codecs. Other dna4 and dna5 layouts combine SIMD lookup with scalar packing.
- * Remaining alphabets use the scalar codec. State keeps unfinished words for the next chunk.
+ * Native SeqAn lookup, invalid-byte checks and packed-word emission share one
+ * bounded SIMD traversal. State retains unfinished words across input chunks.
  */
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy = unknown_byte_policy::drop,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
-HWY_INLINE void encode_body_chunk(
+[[nodiscard]] HWY_INLINE sequence_encode_result encode_body_chunk(
     encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    constexpr bool k_is_dna4_uint64_shape =
-        std::is_same_v<p_alphabet, seq::dna4>
-        && std::is_same_v<p_storage_unit, std::uint64_t>
-        && p_bits_per_character == 2
-        && p_letters_per_unit == 32;
-    constexpr bool k_is_dna5_uint8_shape =
-        std::is_same_v<p_alphabet, seq::dna5>
-        && std::is_same_v<p_storage_unit, std::uint8_t>
-        && p_bits_per_character == 3
-        && p_letters_per_unit == 2;
-    constexpr bool k_is_simd_lut_alphabet =
-        std::is_same_v<p_alphabet, seq::dna4>
-        || std::is_same_v<p_alphabet, seq::dna5>;
+    return encode_native_chunk<hn::ScalableTag<std::uint8_t>, p_alphabet, p_policy>(
+        hn::ScalableTag<std::uint8_t>{}, state, body_bytes, body_size);
+}
 
-    if constexpr (k_is_dna4_uint64_shape) {
-        encode_body_chunk_dna4_simd<p_storage_unit, p_bits_per_character,
-                                    p_letters_per_unit, p_policy>(
-            state, body_bytes, body_size);
-    } else if constexpr (k_is_dna5_uint8_shape) {
-        encode_body_chunk_dna5_uint8_simd<p_policy>(
-            state, body_bytes, body_size);
-    } else if constexpr (k_is_simd_lut_alphabet) {
-        encode_body_chunk_lut_simd_pack_scalar<p_alphabet, p_policy,
-                                               p_storage_unit,
-                                               p_bits_per_character,
-                                               p_letters_per_unit>(
-            state, body_bytes, body_size);
-    } else {
-        encode_body_chunk_scalar<p_alphabet, p_policy,
-                                 p_storage_unit, p_bits_per_character,
-                                 p_letters_per_unit>(
-            state, body_bytes, body_size);
+/** Extract and decode native packed ranks in bounded SIMD tiles. */
+template<class D, sequence_alphabet Alphabet, class Storage,
+         std::size_t Bits, std::size_t Letters>
+HWY_INLINE void decode_native_words(D tag, const Storage* HWY_RESTRICT words,
+        std::uint8_t* HWY_RESTRICT output, std::size_t count, std::size_t source_begin = 0u) {
+    static constexpr auto table = build_rank_to_letter_lut<Alphabet>();
+    constexpr Storage mask = static_cast<Storage>(seqan3::alphabet_size<Alphabet> == 1u
+        ? 0u : (Storage{1u} << Bits) - 1u);
+    std::array<std::uint8_t, hn::MaxLanes(tag)> ranks{};
+    const auto lanes = hn::Lanes(tag);
+    for (std::size_t offset = 0; offset < count;) {
+        const auto take = std::min(lanes, count - offset);
+        for (std::size_t lane = 0; lane < take; ++lane) {
+            const auto position = source_begin + offset + lane;
+            ranks[lane] = static_cast<std::uint8_t>((words[position / Letters]
+                >> ((position % Letters) * Bits)) & mask);
+        }
+        if (take == lanes) {
+            const auto native = hn::LoadU(tag, ranks.data());
+            const auto characters = lookup_ranks_via_32byte_lut(tag,
+                hn::LoadDup128(tag, table.data()), hn::LoadDup128(tag, table.data() + 16u), native);
+            if constexpr (seqan3::alphabet_size<Alphabet> <= 32u)
+                hn::StoreU(characters, tag, output + offset);
+            else hn::StoreU(lookup_byte_table(tag, native, table, false), tag, output + offset);
+        } else for (std::size_t lane = 0; lane < take; ++lane) output[offset + lane] = table[ranks[lane]];
+        offset += take;
     }
 }
 
 /**
  * Decodes packed ranks to ASCII using the matching storage layout.
  *
- * dna4 with 32 ranks per uint64_t and dna5 with  two ranks per byte use SIMD.
- * Other layouts use the scalar decoder.
+ * Existing DNA geometry specializations remain fast paths. Every other alphabet
+ * uses bounded native extraction and the shared multi-bank SIMD character LUT.
  * @param words Packed sequence storage
  * @param dst Space for total_letters bytes.
  * @param total_letters Logical letters to decode, excluding padding.
@@ -485,10 +570,8 @@ HWY_INLINE void decode_words_to_ascii(
             reinterpret_cast<const std::uint8_t*>(words),
             dst, total_letters);
     } else {
-        decode_words_to_ascii_scalar<p_alphabet, p_storage_unit,
-                                     p_bits_per_character,
-                                     p_letters_per_unit>(
-            words, dst, total_letters);
+        decode_native_words<hn::ScalableTag<std::uint8_t>, p_alphabet, p_storage_unit,
+            p_bits_per_character, p_letters_per_unit>(hn::ScalableTag<std::uint8_t>{}, words, dst, total_letters);
     }
 }
 
@@ -554,13 +637,22 @@ template <sequence_alphabet p_alphabet,
         return line_position;
     } else {
         (void)scratch;
-        return decode_words_to_ascii_scalar_wrapped<
-            p_alphabet,
-            p_storage_unit,
-            p_bits_per_character,
-            p_letters_per_unit>(
-            words, total_letters, wrap_width,
-            letters_in_current_line, dst);
+        const hn::ScalableTag<std::uint8_t> tag;
+        std::array<std::uint8_t, hn::MaxLanes(tag)> decoded{};
+        std::size_t line_position = letters_in_current_line;
+        std::size_t output_offset{};
+        for (std::size_t offset = 0; offset < total_letters;) {
+            const auto take = std::min(hn::Lanes(tag), total_letters - offset);
+            decode_native_words<decltype(tag), p_alphabet, p_storage_unit,
+                p_bits_per_character, p_letters_per_unit>(tag, words, decoded.data(), take, offset);
+            for (std::size_t lane = 0; lane < take; ++lane) {
+                if (line_position == wrap_width) { dst[output_offset++] = '\n'; line_position = 0u; }
+                dst[output_offset++] = decoded[lane];
+                ++line_position;
+            }
+            offset += take;
+        }
+        return line_position;
     }
 }
 

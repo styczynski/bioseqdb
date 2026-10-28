@@ -37,6 +37,7 @@ module;
 export module bioseq.sequences:packed_sequence_range;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.common.templating;
 import bioseq.sequences.rank_pack_core;
@@ -121,11 +122,10 @@ struct compact_sequence_range_base {
          */
         template<typename p_other_storage_unit>
         [[always_inline]] static constexpr p_other_storage_unit kmer_mask(const size_t& length) noexcept {
-            constexpr size_t max_length = sizeof(p_other_storage_unit) * 8 / bits_per_char;
-            if (length > max_length) {
-                return std::numeric_limits<p_other_storage_unit>::max(); //static_cast<p_other_storage_unit>(-1);
-            }
-            return (static_cast<p_other_storage_unit>(1) << (length * bits_per_char)) - 1;
+            const auto width = bioseq::common::checked_mul(length, bits_per_char);
+            if (!width) return (std::numeric_limits<p_other_storage_unit>::max)();
+            return bioseq::common::checked_low_bits_mask<p_other_storage_unit>(*width)
+                .value_or((std::numeric_limits<p_other_storage_unit>::max)());
         };
 
 

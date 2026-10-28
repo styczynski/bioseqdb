@@ -468,10 +468,12 @@ void require_exhaustive_profile(std::string_view profile) {
             expected_text.data(), expected_text.size());
         const auto simd = bioseq::simd::active_target::encode_sequence_simd<instance>(
             expected_text.data(), expected_text.size());
-        require_unit_bytes_equal<p_unit>(scalar.packed_units, expected);
-        require_unit_bytes_equal<p_unit>(simd.packed_units, expected);
-        REQUIRE(scalar.padding() == expected_padding);
-        REQUIRE(simd.padding() == expected_padding);
+        REQUIRE(scalar.has_value());
+        REQUIRE(simd.has_value());
+        require_unit_bytes_equal<p_unit>(scalar->packed_units, expected);
+        require_unit_bytes_equal<p_unit>(simd->packed_units, expected);
+        REQUIRE(scalar->padding() == expected_padding);
+        REQUIRE(simd->padding() == expected_padding);
 
         require_stdc_io_oracle<p_alphabet, p_unit>(
             ranks, expected, expected_padding, expected_text);

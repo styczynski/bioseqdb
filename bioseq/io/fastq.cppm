@@ -48,8 +48,7 @@ struct alignas(64) fastq_parser_state {
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
     /// Sequence bytes excluding line endings, used as the expected quality length.
-    /// Kept  separate from the encoded letter count because encoding may drop
-    /// unsupported bytes.
+    /// Strict encoding preserves one accepted symbol per input residue byte.
     std::size_t sequence_byte_count = 0;
     /// Expected quality length saved when sequence parsing ends.
     std::size_t sequence_letter_count = 0;
@@ -202,13 +201,23 @@ template <sequence_alphabet p_alphabet,
         if (line_size > 0 && slab_data[parse_cursor + line_size - 1] == '\r') {
             line_size -= 1;
         }
-        bioseq::simd::active_target::encode_body_chunk<
+        const auto encoded = bioseq::simd::active_target::encode_body_chunk<
             p_alphabet,
-            bioseq::simd::active_target::unknown_byte_policy::drop,
+            bioseq::simd::active_target::unknown_byte_policy::reject,
             p_storage_unit,
             bits_per_char,
             letters_per_unit>(state.body, slab_data + parse_cursor, line_size);
-        state.sequence_byte_count += line_size;
+        if (!encoded) {
+            const auto failure_position = global_offset + parse_cursor + encoded.consumed_bytes;
+            state.body.output_storage->resize(state.body.record_start_offset);
+            state.header_storage->resize(state.header_start_offset);
+            state.quality_storage->resize(state.quality_start_offset);
+            state.reset_for_next_record();
+            emit_failure(failure_fn, "invalid sequence byte 0x{:02x} at file position {}",
+                static_cast<unsigned>(encoded.offending_byte), failure_position);
+            return record_parse_result{parse_outcome::abort, parse_cursor + encoded.consumed_bytes};
+        }
+        state.sequence_byte_count += encoded.emitted_symbols;
         parse_cursor += newline_offset + 1;
         state.progress = fastq_parser_progress::at_body_line_start;
     }

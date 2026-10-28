@@ -56,6 +56,8 @@ struct alignas(64) fasta_parser_state {
     fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
     /// Start of this record's header in the batch header buffer.
     std::size_t header_start_offset = 0;
+    /// Whether the next body byte begins a physical line (preserved across slabs).
+    bool body_line_start = true;
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
     /// Batch header buffer used while this record is being parsed.
@@ -65,6 +67,7 @@ struct alignas(64) fasta_parser_state {
     void reset_for_next_record() noexcept {
         progress = fasta_parser_progress::at_header_sigil;
         body.reset();
+        body_line_start = true;
     }
 
     /// Attaches the header and sequence buffers that receive  this record.
@@ -155,96 +158,35 @@ template <sequence_alphabet p_alphabet,
         state.progress = fasta_parser_progress::at_body_line_start;
     }
 
-    // For dna4 packed into 64-bit words, the encoder skips line breaks and
-    // stops at the next header in one  pass. Other encodings process one body
-    // line at a time.
-    constexpr bool use_multiline_encoder = std::is_same_v<p_alphabet, seq::dna4> &&
-                                           std::is_same_v<p_storage_unit, std::uint64_t> &&
-                                           bits_per_char == 2 && letters_per_unit == 32;
-
-    if constexpr (use_multiline_encoder) {
-        while (state.progress == fasta_parser_progress::at_body_line_start) {
-            if (cursor >= slab_size) {
-                if (is_eof) {
-                    state.progress = fasta_parser_progress::finished_record;
-                    break;
-                }
-                return record_parse_result{parse_outcome::incomplete, cursor};
-            }
-            if (slab_data[cursor] == '>') {
-                state.progress = fasta_parser_progress::finished_record;
-                break;
-            }
-            const std::size_t remaining = slab_size - cursor;
-            // Encode the body and locate the next record boundary in one pass.
-            // `consumed < remaining` means the encoder found `>`.
-            const std::size_t consumed =
-                bioseq::simd::active_target::encode_body_chunk_dna4_simd_multiline_until_byte<
-                    std::uint8_t{'>'},
-                    std::uint64_t,
-                    2,
-                    32>(state.body,
-                        slab_data + cursor,
-                        remaining,
-                        /*newline_count_out=*/nullptr);
-            cursor += consumed;
-            if (consumed < remaining) {
-                state.progress = fasta_parser_progress::finished_record;
-                break;
-            }
-            // EOF completes the record. Otherwise, continue after a refill.
-            if (is_eof) {
-                state.progress = fasta_parser_progress::finished_record;
-                break;
-            }
+    // All alphabets share bounded streaming input. A header marker is structural
+    // only at a physical line start, including when a line spans input slabs.
+    while (state.progress == fasta_parser_progress::at_body_line_start) {
+        if (cursor >= slab_size) {
+            if (is_eof) { state.progress = fasta_parser_progress::finished_record; break; }
             return record_parse_result{parse_outcome::incomplete, cursor};
         }
-    } else {
-        while (state.progress == fasta_parser_progress::at_body_line_start) {
-            if (cursor >= slab_size) {
-                if (is_eof) {
-                    state.progress = fasta_parser_progress::finished_record;
-                    break;
-                }
-                return record_parse_result{parse_outcome::incomplete, cursor};
-            }
-            if (slab_data[cursor] == '>') {
-                state.progress = fasta_parser_progress::finished_record;
-                break;
-            }
-            const std::size_t remaining = slab_size - cursor;
-            const std::size_t newline_offset =
-                simd::scan_first_byte('\n', slab_data + cursor, remaining);
-            if (newline_offset == remaining) {
-                if (is_eof) {
-                    std::size_t line_size = remaining;
-                    if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
-                        line_size -= 1;
-                    }
-                    bioseq::simd::active_target::encode_body_chunk<
-                        p_alphabet,
-                        bioseq::simd::active_target::unknown_byte_policy::drop,
-                        p_storage_unit,
-                        bits_per_char,
-                        letters_per_unit>(state.body, slab_data + cursor, line_size);
-                    cursor += remaining;
-                    state.progress = fasta_parser_progress::finished_record;
-                    break;
-                }
-                return record_parse_result{parse_outcome::incomplete, cursor};
-            }
-            std::size_t line_size = newline_offset;
-            if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
-                line_size -= 1;
-            }
-            bioseq::simd::active_target::encode_body_chunk<
-                p_alphabet,
-                bioseq::simd::active_target::unknown_byte_policy::drop,
-                p_storage_unit,
-                bits_per_char,
-                letters_per_unit>(state.body, slab_data + cursor, line_size);
-            cursor += newline_offset + 1; // consume '\n'
+        if (state.body_line_start && slab_data[cursor] == '>') {
+            state.progress = fasta_parser_progress::finished_record;
+            break;
         }
+        const auto chunk = bioseq::simd::active_target::encode_multiline_body_chunk<p_alphabet>(
+            state.body, slab_data + cursor, slab_size - cursor, state.body_line_start);
+        if (!chunk.encoded) {
+            const auto failure_position = global_offset + cursor + chunk.encoded.consumed_bytes;
+            state.body.output_storage->resize(state.body.record_start_offset);
+            state.header_storage->resize(state.header_start_offset);
+            state.reset_for_next_record();
+            emit_failure(failure_fn, "invalid sequence byte 0x{:02x} at file position {}",
+                static_cast<unsigned>(chunk.encoded.offending_byte), failure_position);
+            return record_parse_result{parse_outcome::abort, cursor + chunk.encoded.consumed_bytes};
+        }
+        cursor += chunk.encoded.consumed_bytes;
+        state.body_line_start = chunk.at_line_start;
+        if (chunk.at_record_boundary || is_eof) {
+            state.progress = fasta_parser_progress::finished_record;
+            break;
+        }
+        return record_parse_result{parse_outcome::incomplete, cursor};
     }
 
     // Finish the packed sequence, emit its offsets, and reset for the next record

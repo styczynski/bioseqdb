@@ -181,15 +181,6 @@ is_supported_alphabet_code(std::uint8_t code) noexcept
     return code < pgseq_supported_alphabets::alphabet_count;
 }
 
-/// @brief Choose the storage width used by this build.
-/// @param[in] requested Storage-unit width in bytes.
-/// @return Requested width; admission rejects widths unavailable in this build.
-export [[nodiscard]] constexpr std::uint8_t
-pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
-{
-    return requested;
-}
-
 /// @brief Adjust the packing width to the widths enabled in this build.
 /// @param[in] params Requested alphabet and stoage width.
 /// @return The same alphabet with the build's selected width.
@@ -198,10 +189,6 @@ pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
 {
     if (pgseq_is_cigar_alphabet(params.alphabet_code)) {
         params.encoding = bioseq::sequence_encoding::cigar_rle;
-    } else {
-        params.storage_unit_byte_width =
-            pgseq_normalize_storage_unit_byte_width(
-                params.storage_unit_byte_width);
     }
     return params;
 }

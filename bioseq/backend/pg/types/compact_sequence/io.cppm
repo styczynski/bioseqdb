@@ -37,6 +37,7 @@ import :tree_types;
 import :tree_ops;
 import :view_session;
 import :packed_output;
+import :conversion;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.sequences.rank_pack;
@@ -259,24 +260,6 @@ namespace {
         return make_pg_cigar_from_text(
             std::string_view{ascii, length}, target.space);
     }
-    for (std::size_t index = 0; index < length; ++index) {
-        std::uint8_t rank = 0;
-        if (!pgseq_rank_for_symbol(
-                target.alphabet_code,
-                static_cast<unsigned char>(ascii[index]), rank)) {
-            const auto alphabet =
-                pgseq_supported_alphabets::name_of_alphabet_code(
-                    target.alphabet_code);
-            bioseq::postgres::support::safety_runtime_probe::
-                record_site_visit("seq_in.invalid_symbol");
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                     errmsg("invalid symbol '%c' for bioseq alphabet %.*s",
-                            ascii[index], static_cast<int>(alphabet.size()),
-                            alphabet.data()),
-                     errdetail("symbol offset=%zu", index)));
-        }
-    }
     if (length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -288,16 +271,33 @@ namespace {
             (void) bound_flat_size<p_instance>(length);
         });
     bioseq::pg_types::seq* result = nullptr;
+    std::optional<bioseq::sequences::sequence_encode_result> failure;
     pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         target.alphabet_code,
-        [&result, target, length, ascii]<class p_alphabet>() {
-            result = ::bioseq::simd::active_target::
+        [&result, &failure, target, length, ascii]<class p_alphabet>() {
+            const auto encoded = ::bioseq::simd::active_target::
                 stdc_convert_from_cstr<bioseq::pg_types::seq, p_alphabet>(
                     target.storage_unit_byte_width,
                     static_cast<bioseq::pg_types::seq::bp_size_t>(length),
                     ascii,
                     pg_alloc);
+            if (encoded) result = *encoded;
+            else failure = encoded.error();
         });
+    if (failure) {
+        const bool invalid = failure->status
+            == bioseq::sequences::sequence_encode_status::invalid_character;
+        if (invalid) bioseq::postgres::support::safety_runtime_probe::
+            record_site_visit("seq_in.invalid_symbol");
+        ereport(ERROR,
+                (errcode(invalid ? ERRCODE_INVALID_TEXT_REPRESENTATION
+                                : ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("cannot encode bioseq sequence at byte %zu",
+                        failure->consumed_bytes),
+                 errdetail("status=%u, offending byte=%u",
+                    static_cast<unsigned>(failure->status),
+                    static_cast<unsigned>(failure->offending_byte))));
+    }
     if (result == nullptr) {
         ereport(ERROR,
                 (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -755,6 +755,12 @@ std::int32_t seq_typmod_in(
         params.space = *bioseq::cigar_space_from_name(DatumGetCString(values[0]));
     }
     params = pgseq_normalize_type_params(params);
+    if (!pgseq_supported_storage_unit_byte_widths::contains_runtime(
+            params.storage_unit_byte_width)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("bioseq.seq width %ld is not enabled in this build", width_bits)));
+    }
     return params.encode();
 }
 
@@ -1057,7 +1063,6 @@ Datum seq_cast(
     std::int32_t target_typmod,
     bool explicit_cast)
 {
-    static_cast<void>(explicit_cast);
     const auto descriptor = classify_and_describe_sequence_header(input);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
@@ -1070,9 +1075,10 @@ Datum seq_cast(
     const auto target = decode_seq_typmod_checked(target_typmod);
     if (descriptor.alphabet_bound
         && descriptor.alphabet_code != target.alphabet_code) {
-        ereport(ERROR,
-                (errcode(ERRCODE_DATATYPE_MISMATCH),
-                 errmsg("cannot cast bound bioseq.seq across alphabets")));
+        if (!explicit_cast)
+            ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                errmsg("cross-alphabet bioseq.seq conversion requires an explicit cast")));
+        return pg_convert_sequence(input, target);
     }
     if (pgseq_is_cigar_alphabet(target.alphabet_code)) {
         if (!descriptor.alphabet_bound) {
@@ -1545,6 +1551,23 @@ bioseq::pg_types::seq* seq_recv(
     }
     result->encoding = bioseq::sequence_encoding::rank_packed;
     result->space = bioseq::cigar_space::compatibility;
+    std::optional<bioseq::sequences::packed_rank_validation_error> payload_failure;
+    pgseq_dispatch_biological_instance(alphabet, width,
+        [result, unit_count, bp_size, padding, &payload_failure]<class Instance>() {
+            using traits = typename compact_sequence_range<Instance>::traits;
+            const auto words = std::span<const typename traits::storage_unit>{
+                reinterpret_cast<const typename traits::storage_unit*>(result->data), unit_count};
+            const auto checked = bioseq::sequences::validate_packed_rank_payload<Instance>(
+                words, bp_size, padding);
+            if (!checked) payload_failure = checked.error();
+        });
+    if (payload_failure) {
+        pfree(result);
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+                 errmsg("invalid packed bioseq payload at unit %zu",
+                        payload_failure->unit_index)));
+    }
     pq_getmsgend(buffer);
     return result;
 }

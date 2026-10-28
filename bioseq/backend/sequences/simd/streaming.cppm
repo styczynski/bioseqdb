@@ -18,6 +18,11 @@ module;
 #include <utility>
 #include <vector>
 #include <functional>
+#include <concepts>
+#include <expected>
+#include <limits>
+#include <optional>
+#include <span>
 
 #include <boost/integer.hpp>
 
@@ -26,7 +31,82 @@ export module bioseq.sequences.simd:streaming;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack_core;
+export import bioseq.sequences.rank_pack;
 import bioseq.simd.vector_stream;
+
+export namespace bioseq::sequences {
+
+/** Conversion failures cross the PostgreSQL boundary as values. */
+enum class sequence_conversion_error_code : std::uint8_t {
+    invalid_frame, invalid_interval, unsupported_genetic_code, incompatible_alphabets,
+    incomplete_codon, unrepresentable_symbol, size_overflow, output_capacity, allocation_failure,
+    invalid_source_rank, source_read_failed, output_contract_violation
+};
+
+/** Coordinates refer to the supplied logical source. */
+struct sequence_conversion_error {
+    sequence_conversion_error_code code{};
+    std::optional<std::size_t> input_position{};
+    std::optional<std::size_t> oriented_position{};
+    std::optional<std::uint8_t> source_rank{};
+    std::optional<rank_pack_status> pack_status{};
+};
+
+/** Existing checked packing is the destination contract for all conversions. */
+template<class Writer>
+concept sequence_conversion_sink = requires(Writer& writer, std::uint8_t rank,
+        typename Writer::storage_unit packed_word, std::size_t packed_count,
+        std::uint64_t symbols, std::uint64_t units) {
+    typename Writer::traits;
+    typename Writer::traits::alphabet_type;
+    typename Writer::storage_unit;
+    { writer.append_prepacked_ranks(packed_word, packed_count) } -> std::same_as<rank_pack_status>;
+    { writer.append_rank(rank) } -> std::same_as<rank_pack_status>;
+    { writer.finish(symbols, units) } -> std::same_as<rank_pack_result>;
+};
+
+/** Native destination ranks and representability for each source rank. */
+template<std::size_t SourceSize>
+struct native_rank_recode_table {
+    std::array<std::uint8_t, SourceSize> destination_ranks{};
+    std::array<std::uint8_t, SourceSize> valid{};
+};
+
+/** Derive exact DNA and explicitly reduced protein mappings from SeqAn. */
+template<seqan3::alphabet Source, seqan3::alphabet Destination>
+[[nodiscard]] consteval auto make_native_rank_recode_table() {
+    static_assert((seqan3::nucleotide_alphabet<Source> && seqan3::nucleotide_alphabet<Destination>)
+        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>));
+    static_assert(seqan3::alphabet_size<Destination> <= 256u);
+    native_rank_recode_table<seqan3::alphabet_size<Source>> table{};
+    for (std::size_t rank = 0; rank < table.destination_ranks.size(); ++rank) {
+        const auto character = seqan3::to_char(seqan3::assign_rank_to(
+            static_cast<seqan3::alphabet_rank_t<Source>>(rank), Source{}));
+        const auto destination = seqan3::assign_char_to(character, Destination{});
+        table.destination_ranks[rank] = static_cast<std::uint8_t>(seqan3::to_rank(destination));
+        if constexpr (seqan3::nucleotide_alphabet<Source>)
+            table.valid[rank] = static_cast<std::uint8_t>(seqan3::to_char(destination) == character);
+        else table.valid[rank] = 1u;
+    }
+    return table;
+}
+
+/** Exact progress, excluding a rejected byte, for streaming character input. */
+enum class sequence_encode_status : std::uint8_t {
+    ok, invalid_character, capacity_overflow, arithmetic_overflow
+};
+struct sequence_encode_result {
+    sequence_encode_status status{sequence_encode_status::ok};
+    std::size_t consumed_bytes{};
+    std::size_t emitted_symbols{};
+    std::uint8_t offending_byte{};
+    /** True only after all requested bytes were handled successfully. */
+    [[nodiscard]] constexpr explicit operator bool() const noexcept {
+        return status == sequence_encode_status::ok;
+    }
+};
+
+} // namespace bioseq::sequences
 
 export {
 
@@ -35,18 +115,20 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+using bioseq::sequences::sequence_encode_result;
+using bioseq::sequences::sequence_encode_status;
 
 
 /**
  * Controls how a character lookup handles an unrecognized byte.
  *
- * drop marks it with 0xFF so the packer can skip it. map_to_default uses
- * rank 3 (N) for dna5 and rank zero for other alphabets. File readers use
- * drop, while whole-sequence conversion defaults to map_to_default.
+ * drop omits invalid bytes; reject reports their exact input offset.
+ * map_to_default delegates every byte to the destination SeqAn alphabet.
  */
 enum class unknown_byte_policy {
     drop,
     map_to_default,
+    reject,
 };
 
 /**
@@ -87,34 +169,6 @@ struct encode_state {
 
 namespace detail {
 
-void encode_body_chunk_dna4_simd_drop_impl(
-    encode_state<std::uint64_t, 2, 32>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size);
-void encode_body_chunk_dna4_simd_map_to_default_impl(
-    encode_state<std::uint64_t, 2, 32>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size);
-void encode_body_chunk_dna4_simd_multiline_impl(
-    encode_state<std::uint64_t, 2, 32>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size);
-[[nodiscard]] std::size_t encode_body_chunk_dna4_simd_multiline_until_byte_impl(
-    encode_state<std::uint64_t, 2, 32>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size,
-    std::size_t* HWY_RESTRICT newline_count_out,
-    std::uint8_t boundary_char);
-
-void encode_body_chunk_dna5_uint8_simd_drop_impl(
-    encode_state<std::uint8_t, 3, 2>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size);
-void encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
-    encode_state<std::uint8_t, 3, 2>& state,
-    const std::uint8_t* HWY_RESTRICT body_bytes,
-    std::size_t body_size);
-
 void decode_dna4_words_to_ascii_impl(
     const std::uint64_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT dst,
@@ -124,72 +178,30 @@ void decode_dna5_uint8_words_to_ascii_impl(
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t total_letters) noexcept;
 
-void ascii_to_rank_lut_simd_dna4_drop_impl(
-    const std::uint8_t* HWY_RESTRICT src,
-    std::uint8_t* HWY_RESTRICT dst,
-    std::size_t size) noexcept;
-void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
-    const std::uint8_t* HWY_RESTRICT src,
-    std::uint8_t* HWY_RESTRICT dst,
-    std::size_t size) noexcept;
-void ascii_to_rank_lut_simd_dna5_drop_impl(
-    const std::uint8_t* HWY_RESTRICT src,
-    std::uint8_t* HWY_RESTRICT dst,
-    std::size_t size) noexcept;
-void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
-    const std::uint8_t* HWY_RESTRICT src,
-    std::uint8_t* HWY_RESTRICT dst,
-    std::size_t size) noexcept;
-
 }  // namespace detail
 
 
 /**
  * Builds a byte-to-rank table with the selected  unknown-byte policy.
  *
- * Canonical alphabet letters also accept the opposite ASCII case. dna4 and
- * dna5 map U and u to T. Unrecognized bytes map to 0xFF under drop, to
- * N under map_to_default for dna5, and to rank zero for other alphabets.
+ * Protein input validity comes from aa27 before the selected alphabet's native
+ * assignment applies aliases and reductions. Drop/reject use a distinct invalid
+ * sentinel; map_to_default uses SeqAn assignment for all byte values.
  */
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy = unknown_byte_policy::drop>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
 build_letter_to_rank_lut() {
     std::array<std::uint8_t, 256> lut{};
-    constexpr std::size_t k_alphabet_cardinality =
-        static_cast<std::size_t>(seqan3::alphabet_size<p_alphabet>);
-
-    if constexpr (p_policy == unknown_byte_policy::drop) {
-        for (std::size_t byte_value = 0; byte_value < 256; ++byte_value) {
-            lut[byte_value] = std::uint8_t{0xFF};
-        }
-    } else {
-        std::uint8_t default_rank = 0;
-        if constexpr (std::is_same_v<p_alphabet, seq::dna5>) {
-            default_rank = 3;  // N
-        }
-        for (std::size_t byte_value = 0; byte_value < 256; ++byte_value) {
-            lut[byte_value] = default_rank;
-        }
-    }
-
-    for (std::size_t rank = 0; rank < k_alphabet_cardinality; ++rank) {
-        const char canonical_char =
-            seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}));
-        const std::uint8_t upper_byte = static_cast<std::uint8_t>(canonical_char);
-        lut[upper_byte] = static_cast<std::uint8_t>(rank);
-        if (canonical_char >= 'A' && canonical_char <= 'Z') {
-            lut[upper_byte | 0x20] = static_cast<std::uint8_t>(rank);
-        }
-        if (canonical_char >= 'a' && canonical_char <= 'z') {
-            lut[upper_byte & 0x5F] = static_cast<std::uint8_t>(rank);
-        }
-    }
-    if constexpr (std::is_same_v<p_alphabet, seq::dna4>
-               || std::is_same_v<p_alphabet, seq::dna5>) {
-        const auto thymine_rank = lut[static_cast<std::uint8_t>('T')];
-        lut[static_cast<std::uint8_t>('U')] = thymine_rank;
-        lut[static_cast<std::uint8_t>('u')] = thymine_rank;
+    static_assert(seqan3::alphabet_size<p_alphabet> < 256u);
+    for (std::size_t byte = 0; byte < lut.size(); ++byte) {
+        const auto character = static_cast<char>(static_cast<unsigned char>(byte));
+        const bool valid = bioseq::sequences::source_character_is_valid<p_alphabet>(character);
+        if constexpr (p_policy == unknown_byte_policy::map_to_default)
+            lut[byte] = static_cast<std::uint8_t>(seqan3::to_rank(
+                seqan3::assign_char_to(character, p_alphabet{})));
+        else lut[byte] = valid ? static_cast<std::uint8_t>(seqan3::to_rank(
+            seqan3::assign_char_to(character, p_alphabet{}))) : std::uint8_t{0xFF};
     }
     return lut;
 }
@@ -205,39 +217,12 @@ template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy>
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 2>
 build_letter_to_rank_lut_32() {
-    std::array<std::uint8_t, 32> lut{};
-
-    constexpr std::uint8_t k_default_byte =
-        (p_policy == unknown_byte_policy::drop)
-            ? std::uint8_t{0xFF}
-            : (std::is_same_v<p_alphabet, seq::dna5>
-                ? std::uint8_t{3}    // N
-                : std::uint8_t{0});  // Rank zero, A for dna4.
-    for (std::size_t lut_index = 0; lut_index < 32; ++lut_index) {
-        lut[lut_index] = k_default_byte;
-    }
-
-    constexpr std::size_t k_alphabet_cardinality =
-        static_cast<std::size_t>(seqan3::alphabet_size<p_alphabet>);
-    for (std::size_t rank = 0; rank < k_alphabet_cardinality; ++rank) {
-        const char canonical_char =
-            seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}));
-        const std::uint8_t low_five_bits =
-            static_cast<std::uint8_t>(canonical_char) & 0x1F;
-        lut[low_five_bits] = static_cast<std::uint8_t>(rank);
-    }
-    if constexpr (std::is_same_v<p_alphabet, seq::dna4>
-               || std::is_same_v<p_alphabet, seq::dna5>) {
-        lut[static_cast<std::uint8_t>('U') & 0x1F] =
-            lut[static_cast<std::uint8_t>('T') & 0x1F];
-    }
-
+    constexpr auto full = build_letter_to_rank_lut<p_alphabet, p_policy>();
     std::array<std::array<std::uint8_t, 16>, 2> halves{};
-    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
-        halves[0][lut_index] = lut[lut_index];
-    }
-    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
-        halves[1][lut_index] = lut[lut_index + 16];
+    for (auto& half : halves) half.fill(full[0]);
+    for (unsigned char character = 'A'; character <= 'Z'; ++character) {
+        const std::size_t index = character & 0x1Fu;
+        halves[index / 16u][index % 16u] = full[character];
     }
     return halves;
 }
@@ -256,111 +241,6 @@ build_rank_to_letter_lut() {
     }
     return lut;
 }
-
-/// Builds the dna4 lookup indexed by a character's low four bits.
-/// A, C, G, and T have separate entries. Other entries are 0xFF.
-/// Bytes sharing those four bits are indistinguishable to this table
-[[nodiscard]] consteval std::array<std::uint8_t, 16>
-build_dna4_low_nibble_lut() {
-    std::array<std::uint8_t, 16> lut{};
-    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
-        lut[lut_index] = std::uint8_t{0xFF};
-    }
-    lut[0x01] = 0;  // 'A' & 0x0F == 'a' & 0x0F
-    lut[0x03] = 1;  // 'C'
-    lut[0x07] = 2;  // 'G'
-    lut[0x04] = 3;  // 'T'
-    return lut;
-}
-
-/// Build the 16-entry rank → ASCII LUT for the dna4 SIMD decoder.
-/// Indexed by ranks in [0..3]. Remaining entries are zero.
-[[nodiscard]] consteval std::array<std::uint8_t, 16>
-build_dna4_rank_to_ascii_lut() {
-    std::array<std::uint8_t, 16> lut{};
-    lut[0] = static_cast<std::uint8_t>('A');
-    lut[1] = static_cast<std::uint8_t>('C');
-    lut[2] = static_cast<std::uint8_t>('G');
-    lut[3] = static_cast<std::uint8_t>('T');
-    return lut;
-}
-
-/// Build the 16-entry rank → ASCII LUT for the dna5 SIMD decoder.
-/// Ranks: A=0, C=1, G=2, N=3, T=4. Trailing entries are zero.
-[[nodiscard]] consteval std::array<std::uint8_t, 16>
-build_dna5_rank_to_ascii_lut() {
-    std::array<std::uint8_t, 16> lut{};
-    lut[0] = static_cast<std::uint8_t>('A');
-    lut[1] = static_cast<std::uint8_t>('C');
-    lut[2] = static_cast<std::uint8_t>('G');
-    lut[3] = static_cast<std::uint8_t>('N');
-    lut[4] = static_cast<std::uint8_t>('T');
-    return lut;
-}
-
-// Byte-shuffle tables for gathering selected lanes from a 16-byte vector.
-// Low, and high tables gather their eight-lane halves in order. The shift
-// table places the high-half result  ater the selected low-half bytes.
-
-[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
-build_compact_low_table() {
-    std::array<std::array<std::uint8_t, 16>, 256> table{};
-    for (int mask = 0; mask < 256; ++mask) {
-        std::array<std::uint8_t, 16> pattern{};
-        std::size_t out_index = 0;
-        for (int input_index = 0; input_index < 8; ++input_index) {
-            if ((mask >> input_index) & 1) {
-                pattern[out_index] = static_cast<std::uint8_t>(input_index);
-                ++out_index;
-            }
-        }
-        for (std::size_t fill = out_index; fill < 16; ++fill) {
-            pattern[fill] = std::uint8_t{0xFF};
-        }
-        table[static_cast<std::size_t>(mask)] = pattern;
-    }
-    return table;
-}
-
-[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
-build_compact_high_table() {
-    std::array<std::array<std::uint8_t, 16>, 256> table{};
-    for (int mask = 0; mask < 256; ++mask) {
-        std::array<std::uint8_t, 16> pattern{};
-        std::size_t out_index = 0;
-        for (int input_index = 0; input_index < 8; ++input_index) {
-            if ((mask >> input_index) & 1) {
-                pattern[out_index] =
-                    static_cast<std::uint8_t>(input_index + 8);
-                ++out_index;
-            }
-        }
-        for (std::size_t fill = out_index; fill < 16; ++fill) {
-            pattern[fill] = std::uint8_t{0xFF};
-        }
-        table[static_cast<std::size_t>(mask)] = pattern;
-    }
-    return table;
-}
-
-[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 9>
-build_shift_left_byte_table() {
-    std::array<std::array<std::uint8_t, 16>, 9> table{};
-    for (std::size_t shift = 0; shift < 9; ++shift) {
-        std::array<std::uint8_t, 16> pattern{};
-        for (std::size_t lane = 0; lane < 16; ++lane) {
-            pattern[lane] = (lane >= shift)
-                ? static_cast<std::uint8_t>(lane - shift)
-                : std::uint8_t{0xFF};
-        }
-        table[shift] = pattern;
-    }
-    return table;
-}
-
-inline constexpr auto k_compact_low_table = build_compact_low_table();
-inline constexpr auto k_compact_high_table = build_compact_high_table();
-inline constexpr auto k_shift_left_byte_table = build_shift_left_byte_table();
 
 // Scalar packing and decoding helpers, also used by the SIMD codecs.
 
@@ -466,24 +346,29 @@ template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
-inline void encode_body_chunk_scalar(
+[[nodiscard]] inline sequence_encode_result encode_body_chunk_scalar(
     encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* __restrict__ body_bytes,
     std::size_t body_size) {
-    constexpr std::size_t k_scratch_capacity = 1024;
-    std::array<std::uint8_t, k_scratch_capacity> rank_scratch{};
-    std::size_t read_cursor = 0;
-    while (read_cursor < body_size) {
-        const std::size_t chunk_size =
-            std::min(k_scratch_capacity, body_size - read_cursor);
-        ascii_to_rank_scalar<p_alphabet, p_policy>(
-            body_bytes + read_cursor,
-            rank_scratch.data(),
-            chunk_size);
-        append_ranks<p_storage_unit, p_bits_per_character, p_letters_per_unit>(
-            state, rank_scratch.data(), chunk_size);
-        read_cursor += chunk_size;
+    constexpr auto lookup = build_letter_to_rank_lut<p_alphabet, p_policy>();
+    const auto initial_count = state.total_letters;
+    for (std::size_t cursor = 0; cursor < body_size; ++cursor) {
+        const auto rank = lookup[body_bytes[cursor]];
+        if (rank == std::uint8_t{0xFF}) {
+            if constexpr (p_policy == unknown_byte_policy::reject)
+                return {sequence_encode_status::invalid_character, cursor,
+                    state.total_letters - initial_count, body_bytes[cursor]};
+            continue;
+        }
+        if (state.total_letters == (std::numeric_limits<std::size_t>::max)())
+            return {sequence_encode_status::arithmetic_overflow, cursor,
+                state.total_letters - initial_count, body_bytes[cursor]};
+        if (state.output_storage->size() == state.output_storage->max_size())
+            return {sequence_encode_status::capacity_overflow, cursor,
+                state.total_letters - initial_count, body_bytes[cursor]};
+        append_ranks<p_storage_unit, p_bits_per_character, p_letters_per_unit>(state, &rank, 1u);
     }
+    return {sequence_encode_status::ok, body_size, state.total_letters - initial_count, 0u};
 }
 
 /// Decodes total_letters packed ranks to canonical alphabet characters.

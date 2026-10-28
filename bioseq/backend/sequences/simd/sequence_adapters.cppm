@@ -18,6 +18,8 @@ module;
 #include <utility>
 #include <vector>
 #include <functional>
+#include <expected>
+#include <span>
 
 #include <boost/integer.hpp>
 
@@ -25,6 +27,7 @@ export module bioseq.sequences.simd:sequence_adapters;
 
 export import :codec_kernels;
 import bioseq.sequences;
+import bioseq.storage.lazy_sequence;
 
 export {
 
@@ -32,13 +35,64 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 
+/** Recode a checked borrowed native source without expanding the complete input. */
+template<sequence_alphabet Source, bioseq::sequences::sequence_conversion_sink Writer>
+[[nodiscard]] inline std::expected<bioseq::sequences::rank_pack_result,
+    bioseq::sequences::sequence_conversion_error> recode_into(
+        const bioseq::storage::borrowed_rank_window_source& source,
+        std::size_t begin, std::size_t end, Writer& writer) {
+    using namespace bioseq::sequences;
+    using Destination = typename Writer::traits::alphabet_type;
+    if constexpr (!((seqan3::nucleotide_alphabet<Source> && seqan3::nucleotide_alphabet<Destination>)
+        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>))) {
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+    } else {
+        if (begin > end || end > source.symbol_count)
+            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::invalid_interval, begin});
+        if (source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
+            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+        static constexpr auto table = make_native_rank_recode_table<Source, Destination>();
+        const hn::ScalableTag<std::uint8_t> tag;
+        std::array<std::uint8_t, hn::MaxLanes(tag)> scratch{};
+        for (std::size_t offset = begin; offset < end;) {
+            const auto take = std::min(hn::Lanes(tag), end - offset);
+            const auto read = source.read_checked(offset, take, scratch);
+            if (!read) return std::unexpected(sequence_conversion_error{
+                sequence_conversion_error_code::source_read_failed, offset});
+            const auto mapped = map_native_rank_chunk(tag, *read,
+                std::span<const std::uint8_t>{table.destination_ranks},
+                std::span<const std::uint8_t>{table.valid}, writer, offset);
+            if (!mapped) return std::unexpected(mapped.error());
+            offset += take;
+        }
+        const auto count = end - begin;
+        const auto units = count / Writer::traits::letters_per_unit
+            + static_cast<std::size_t>(count % Writer::traits::letters_per_unit != 0u);
+        const auto packed = writer.finish(count, units);
+        if (!packed) return std::unexpected(sequence_conversion_error{
+            packed.status == rank_pack_status::capacity_overflow
+                ? sequence_conversion_error_code::output_capacity
+                : sequence_conversion_error_code::output_contract_violation,
+            {}, {}, {}, packed.status});
+        return packed;
+    }
+}
+
+/** Adapt compact packed ranges to the shared checked native recoder. */
+template<supports_compact_sequence_range R, bioseq::sequences::sequence_conversion_sink Writer>
+[[nodiscard]] inline auto recode_into(const compact_sequence_range<R>& source,
+        std::size_t begin, std::size_t end, Writer& writer) {
+    using Source = typename compact_sequence_range<R>::traits::alphabet_type;
+    return recode_into<Source>(bioseq::storage::make_borrowed_rank_source(source), begin, end, writer);
+}
+
 // Whole-sequence adapters for the streaming codecs.
 
 /**
  * Encodes text into an owned packed sequence with the scalar codec.
  *
- * The default policy maps unrecognized bytes to N for dna5 and rank zero
- * for other alphabets. The drop policy omits them.
+ * Native SeqAn assignment supplies defaults and aliases. Reject reports the
+ * first invalid lexical byte; drop omits invalid bytes.
  * @param input Input character buffer.
  * @param length Number of bytes to read.
  * @return Packed sequence with its final padding recorded.
@@ -46,7 +100,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
-[[nodiscard]] compact_sequence_range<p_destination_configuration>
+[[nodiscard]] std::expected<compact_sequence_range<p_destination_configuration>, sequence_encode_result>
 encode_sequence_scalar(
     const char* input, std::size_t length) {
     using sequence_type =
@@ -59,8 +113,11 @@ encode_sequence_scalar(
         sequence_type::traits::letters_per_unit;
 
     std::vector<storage_unit_type> packed;
-    packed.reserve(
-        (length + k_letters_per_unit - 1) / k_letters_per_unit);
+    const auto units = length / k_letters_per_unit
+        + static_cast<std::size_t>(length % k_letters_per_unit != 0u);
+    if (units > packed.max_size()) return std::unexpected(sequence_encode_result{
+        sequence_encode_status::capacity_overflow});
+    packed.reserve(units);
 
     encode_state<
         storage_unit_type,
@@ -68,7 +125,7 @@ encode_sequence_scalar(
         k_letters_per_unit> state{};
     state.output_storage = &packed;
     state.reset();
-    encode_body_chunk_scalar<
+    const auto encoded = encode_body_chunk_scalar<
         alphabet_type,
         p_policy,
         storage_unit_type,
@@ -77,6 +134,7 @@ encode_sequence_scalar(
         state,
         reinterpret_cast<const std::uint8_t*>(input),
         length);
+    if (!encoded) return std::unexpected(encoded);
     const auto [word_count, padding] =
         finalize_encode_state<
             storage_unit_type,
@@ -89,9 +147,8 @@ encode_sequence_scalar(
 /**
  * Encodes text into  an owned packed sequence using the selected codec.
  *
- * dna4 and dna5 use SIMD lookup, which assumes DNA text and can mistake some
- * ivalid bytes for letters. Other alphabets use the scalar codec. Unused lookup
- * entries default to N for dna5 and rank zero for other alphabets.
+ * All alphabets use the shared bounded native lookup/packing core, including
+ * strict invalid-byte detection before any rejected byte is emitted.
  * @param input Input character buffer
  * @param length Number of bytes to read.
  * @return Packed sequence with its final padding recorded.
@@ -99,7 +156,7 @@ encode_sequence_scalar(
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
-[[nodiscard]] compact_sequence_range<p_destination_configuration>
+[[nodiscard]] std::expected<compact_sequence_range<p_destination_configuration>, sequence_encode_result>
 encode_sequence_simd(
     const char* input, std::size_t length) {
     using sequence_type =
@@ -112,8 +169,11 @@ encode_sequence_simd(
         sequence_type::traits::letters_per_unit;
 
     std::vector<storage_unit_type> packed;
-    packed.reserve(
-        (length + k_letters_per_unit - 1) / k_letters_per_unit);
+    const auto units = length / k_letters_per_unit
+        + static_cast<std::size_t>(length % k_letters_per_unit != 0u);
+    if (units > packed.max_size()) return std::unexpected(sequence_encode_result{
+        sequence_encode_status::capacity_overflow});
+    packed.reserve(units);
 
     encode_state<
         storage_unit_type,
@@ -121,7 +181,7 @@ encode_sequence_simd(
         k_letters_per_unit> state{};
     state.output_storage = &packed;
     state.reset();
-    encode_body_chunk<
+    const auto encoded = encode_body_chunk<
         alphabet_type,
         p_policy,
         storage_unit_type,
@@ -130,6 +190,7 @@ encode_sequence_simd(
         state,
         reinterpret_cast<const std::uint8_t*>(input),
         length);
+    if (!encoded) return std::unexpected(encoded);
     const auto [word_count, padding] =
         finalize_encode_state<
             storage_unit_type,
