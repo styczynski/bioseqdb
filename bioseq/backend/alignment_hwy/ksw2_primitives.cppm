@@ -384,8 +384,8 @@ inline void ksw_backtrack_cigar(
     const int byte_columns_per_row = matrix.byte_columns_per_row();
 
     // Keep native word limits and alphabet-to-native translation in one adapter.
-    const auto append_operation = [&output_cigar](bioseq::cigar_symbol operation,
-                                                 std::size_t length) {
+    const auto append_operation = [&output_cigar] [[gnu::always_inline]]
+                                 (bioseq::cigar_symbol operation, std::size_t length) {
         if (!bioseq::push_native_cigar(output_cigar, operation, length)) {
             throw std::length_error{"traceback CIGAR is not representable"};
         }
