@@ -15,6 +15,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.common.memory_budget;
 import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
+import bioseq.simd.utils;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -174,11 +175,7 @@ struct scalar_pipeline_execution_stats {
 /// Return whether Block Aligner can represent the selected affine penalties.
 [[nodiscard]] constexpr bool
 block_aligner_native_penalties_representable(const minimap2_parameters& params) noexcept {
-    return params.gap_open1 > 0 && params.gap_ext1 > 0 &&
-           params.gap_open1 <= std::numeric_limits<std::int8_t>::max() &&
-           params.gap_ext1 <= std::numeric_limits<std::int8_t>::max() &&
-           params.gap_open1 + params.gap_ext1 <=
-               -static_cast<int>(std::numeric_limits<std::int8_t>::min());
+    return params.gap_open1 >= 0 && params.gap_ext1 > 0;
 }
 
 /// Set Block Aligner scoring and extension options for this fill.
@@ -187,8 +184,8 @@ project_block_aligner_params(const minimap2_parameters& params,
                              block_alignment_stage stage) noexcept {
     const bool is_extension = stage != block_alignment_stage::gap_extension;
     return block_aligner_parameters{
-        .gap_open = static_cast<std::int8_t>(params.gap_open1),
-        .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
+        .gap_open = params.gap_open1,
+        .gap_extend = params.gap_ext1,
         .minimum_block_size = params.block_min_size,
         .maximum_block_size = params.block_max_size,
         .x_drop_threshold = is_extension ? params.zdrop : 0,
@@ -209,7 +206,7 @@ project_block_aligner_params(const minimap2_parameters& params,
  * @tparam p_alphabet Alphabet shared by both sequences.
  */
 template <bool p_is_reversed, sequence_alphabet p_alphabet>
-[[nodiscard]] ksw_alignment_result
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error>
 ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                 bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                 std::size_t query_start,
@@ -237,8 +234,8 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     }
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         const ksw_single_affine_parameters z2_params{
-            .gap_open = static_cast<std::int8_t>(params.gap_open1),
-            .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
+            .gap_open = params.gap_open1,
+            .gap_extend = params.gap_ext1,
             .band_width = align_bandwidth,
             .z_drop = zdrop,
             .end_bonus = end_bonus,
@@ -255,10 +252,10 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                                           z2_params);
     }
     const ksw_dual_affine_parameters d2_params{
-        .gap_open_short = static_cast<std::int8_t>(params.gap_open1),
-        .gap_extend_short = static_cast<std::int8_t>(params.gap_ext1),
-        .gap_open_long = static_cast<std::int8_t>(params.gap_open2),
-        .gap_extend_long = static_cast<std::int8_t>(params.gap_ext2),
+        .gap_open_short = params.gap_open1,
+        .gap_extend_short = params.gap_ext1,
+        .gap_open_long = params.gap_open2,
+        .gap_extend_long = params.gap_ext2,
         .band_width = align_bandwidth,
         .z_drop = zdrop,
         .end_bonus = end_bonus,
@@ -285,7 +282,7 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
 template <bool p_is_reversed,
           bool p_enable_diagonal_certificate = true,
           sequence_alphabet p_alphabet>
-[[nodiscard]] ksw_alignment_result
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error>
 block_aligner_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                          bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                          std::size_t query_start,
@@ -310,7 +307,8 @@ block_aligner_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_s
             params.gap_ext1,
             params.zdrop,
             static_cast<unsigned>(stage));
-        std::abort();
+        return std::unexpected(is_extension && params.zdrop < 0
+            ? alignment_contract_error::x_drop_threshold : alignment_contract_error::gap_penalty);
     }
     const block_aligner_parameters ba_params = project_block_aligner_params(params, stage);
     return alignment_kernels.align_block(p_is_reversed,
@@ -480,7 +478,7 @@ struct align_one_region {
      * from traceback. KSW2 counts edits by comparing the baoes along its CIGAR.
      */
     template <bool p_strand_reversed>
-    [[gnu::always_inline]] sequence_size_t
+    [[nodiscard, gnu::always_inline]] std::expected<sequence_size_t, alignment_contract_error>
     exact_edit_distance_for_fill(const ksw_alignment_result& fill_result,
                                  std::size_t query_start,
                                  std::size_t query_end,
@@ -488,8 +486,7 @@ struct align_one_region {
                                  std::size_t target_end) const {
         if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
             if (!fill_result.is_edit_distance_valid) {
-                throw std::runtime_error{
-                    "Block Aligner result omitted requested exact edit accounting"};
+                return std::unexpected(alignment_contract_error::trace_accounting);
             }
             return static_cast<sequence_size_t>(fill_result.edit_distance);
         } else {
@@ -510,10 +507,7 @@ struct align_one_region {
                     : params.highway_kernels->common.count_equal_rank_chunk
             );
             if (!exact_edits) {
-                const auto error = exact_edits.error();
-                throw std::runtime_error{std::format(
-                    "alignment exact edit-distance CIGAR failed (code={}, run={})",
-                    std::to_underlying(error.code), error.input_offset)};
+                return std::unexpected(alignment_contract_error::trace_accounting);
             }
             return *exact_edits;
         }
@@ -521,7 +515,8 @@ struct align_one_region {
 
     /// Apply one gap-fill result and report whether Z-drop ended the walk.
     template <bool p_strand_reversed>
-    [[gnu::always_inline]] bool apply_gap_fill_result(alignment_region& region,
+    [[nodiscard, gnu::always_inline]] std::expected<bool, alignment_contract_error>
+    apply_gap_fill_result(alignment_region& region,
                                                       const ksw_alignment_result& fill_result,
                                                       std::int64_t qe,
                                                       std::int64_t re,
@@ -533,7 +528,7 @@ struct align_one_region {
             if (!bioseq::decode_native_cigar(
                     std::span<const std::uint32_t>{fill_result.cigar.data(), fill_result.cigar.size()},
                     region.cigar)) {
-                throw std::runtime_error{"alignment produced an invalid CIGAR"};
+                return std::unexpected(alignment_contract_error::trace_accounting);
             }
         }
         const std::int64_t fill_ref_end =
@@ -541,12 +536,14 @@ struct align_one_region {
         const std::int64_t fill_query_end =
             fill_result.is_z_dropped ? qs + (fill_result.max_q + 1) : qe;
         if (params.compute_edit_distance) {
-            region.edit_distance += exact_edit_distance_for_fill<p_strand_reversed>(
+            const auto edits = exact_edit_distance_for_fill<p_strand_reversed>(
                 fill_result,
                 static_cast<std::size_t>(qs),
                 static_cast<std::size_t>(fill_query_end),
                 static_cast<std::size_t>(rs),
                 static_cast<std::size_t>(fill_ref_end));
+            if (!edits) return std::unexpected(edits.error());
+            region.edit_distance += *edits;
         }
         if (fill_result.is_z_dropped) {
             final_ref_end = fill_ref_end;
@@ -564,7 +561,8 @@ struct align_one_region {
 
     /// Align one oriented region and set its score, CIGAR and coordinates.
     template <bool p_strand_reversed>
-    [[gnu::always_inline]] void run(alignment_region& region,
+    [[nodiscard, gnu::always_inline]] std::expected<void, alignment_contract_error>
+    run(alignment_region& region,
                                     std::span<const anchor> anchors,
                                     std::int32_t anchor_begin,
                                     std::int64_t seed_ref_start,
@@ -584,7 +582,7 @@ struct align_one_region {
         std::int64_t final_ref_start = seed_ref_start;
         std::int64_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            ksw_alignment_result left_result;
+            std::expected<ksw_alignment_result, alignment_contract_error> left_result;
             if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
                 left_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq,
@@ -617,30 +615,33 @@ struct align_one_region {
                     scalar_execution_stats,
                     scalar_ksw2_stage::left);
             }
-            if (!left_result.cigar.empty()) {
+            if (!left_result) return std::unexpected(left_result.error());
+            if (!left_result->cigar.empty()) {
                 if (!bioseq::decode_native_cigar(
-                        std::span<const std::uint32_t>{left_result.cigar.data(), left_result.cigar.size()},
+                        std::span<const std::uint32_t>{left_result->cigar.data(), left_result->cigar.size()},
                         region.cigar)) {
-                    throw std::runtime_error{"left alignment produced an invalid CIGAR"};
+                    return std::unexpected(alignment_contract_error::trace_accounting);
                 }
-                region.dp_score += left_result.max;
             }
+            region.dp_score += left_result->has_reached_end ? left_result->mqe : left_result->max;
             const std::int32_t left_ref_offset =
-                left_result.has_reached_end ? left_result.mqe_t + 1 : left_result.max_t + 1;
+                left_result->has_reached_end ? left_result->mqe_t + 1 : left_result->max_t + 1;
             final_ref_start = seed_ref_start - left_ref_offset;
-            const std::int32_t left_query_offset = left_result.has_reached_end
+            const std::int32_t left_query_offset = left_result->has_reached_end
                                                   ? seed_query_start - outer_query_start
-                                                  : left_result.max_q + 1;
+                                                  : left_result->max_q + 1;
             final_query_start = seed_query_start - left_query_offset;
             if (params.compute_edit_distance) {
-                region.edit_distance += exact_edit_distance_for_fill<p_strand_reversed>(
-                    left_result,
+                const auto edits = exact_edit_distance_for_fill<p_strand_reversed>(
+                    *left_result,
                     static_cast<std::size_t>(final_query_start),
                     static_cast<std::size_t>(seed_query_start),
                     static_cast<std::size_t>(final_ref_start),
                     static_cast<std::size_t>(seed_ref_start));
+                if (!edits) return std::unexpected(edits.error());
+                region.edit_distance += *edits;
             }
-            prior_stage_zdropped = left_result.is_z_dropped;
+            prior_stage_zdropped = left_result->is_z_dropped;
         }
 
         // Fill gaps along the seed chain
@@ -664,11 +665,9 @@ struct align_one_region {
                 if (!is_last && (gap_query < params.min_ksw_len || gap_ref < params.min_ksw_len)) {
                     continue;
                 }
-                if (gap_query <= 0 || gap_ref <= 0) {
-                    qs = qe;
-                    rs = re;
-                    continue;
-                }
+                if (gap_query < 0 || gap_ref < 0)
+                    return std::unexpected(alignment_contract_error::coordinates);
+                if (gap_query == 0 && gap_ref == 0) continue;
                 if constexpr (p_base_alignment_algorithm ==
                               base_alignment_algorithm::block_aligner) {
                     block_packed_certificate_attempt packed_attempt{};
@@ -705,7 +704,7 @@ struct align_one_region {
                                     region.cigar,
                                     bioseq::cigar_run{match_length,
                                         bioseq::cigar_symbol{}.assign_char('M')})) {
-                                throw std::length_error{"certified CIGAR run is not representable"};
+                                return std::unexpected(alignment_contract_error::trace_accounting);
                             }
                         }
                         region.dp_score += packed_attempt.certificate.score;
@@ -725,7 +724,7 @@ struct align_one_region {
                     }
 
                     // Create a result object only when the gap still needs DP.
-                    ksw_alignment_result fill_result;
+                    std::expected<ksw_alignment_result, alignment_contract_error> fill_result;
                     if (packed_attempt.decision == block_packed_certificate_decision::rejected) {
                         // The packed-input, check already rejected this certificate.
                         // Skip the same check after unpacking and run DP.
@@ -758,13 +757,16 @@ struct align_one_region {
                             block_alignment_stage::gap_extension,
                             block_execution_stats);
                     }
-                    if (apply_gap_fill_result<p_strand_reversed>(
-                            region, fill_result, qe, re, qs, rs, final_query_end, final_ref_end)) {
+                    if (!fill_result) return std::unexpected(fill_result.error());
+                    const auto applied = apply_gap_fill_result<p_strand_reversed>(
+                        region, *fill_result, qe, re, qs, rs, final_query_end, final_ref_end);
+                    if (!applied) return std::unexpected(applied.error());
+                    if (*applied) {
                         zdropped_any = true;
                         break;
                     }
                 } else {
-                    ksw_alignment_result fill_result = ksw2_align_pair<p_strand_reversed>(
+                    auto fill_result = ksw2_align_pair<p_strand_reversed>(
                         query_seq,
                         target_seq,
                         static_cast<std::size_t>(qs),
@@ -781,8 +783,11 @@ struct align_one_region {
                         block_execution_stats,
                         scalar_execution_stats,
                         scalar_ksw2_stage::gap);
-                    if (apply_gap_fill_result<p_strand_reversed>(
-                            region, fill_result, qe, re, qs, rs, final_query_end, final_ref_end)) {
+                    if (!fill_result) return std::unexpected(fill_result.error());
+                    const auto applied = apply_gap_fill_result<p_strand_reversed>(
+                        region, *fill_result, qe, re, qs, rs, final_query_end, final_ref_end);
+                    if (!applied) return std::unexpected(applied.error());
+                    if (*applied) {
                         zdropped_any = true;
                         break;
                     }
@@ -797,34 +802,35 @@ struct align_one_region {
                     region.cigar,
                     static_cast<std::size_t>(seed_query_end - seed_query_start),
                     static_cast<std::size_t>(seed_ref_end - seed_ref_start))) {
-                    throw std::length_error{"seed CIGAR run is not representable"};
+                    return std::unexpected(alignment_contract_error::trace_accounting);
                 }
             }
-            if (params.compute_edit_distance) {
-                const auto exact_edits = exact_edit_distance_for_implicit_seed<p_strand_reversed>(
-                    query_seq,
-                    target_seq,
-                    static_cast<std::size_t>(seed_query_start),
-                    static_cast<std::size_t>(seed_query_end),
-                    static_cast<std::size_t>(seed_ref_start),
-                    static_cast<std::size_t>(seed_ref_end),
-                    params.highway_kernels == nullptr ? nullptr
-                        : params.highway_kernels->common.count_equal_rank_chunk);
-                if (!exact_edits) {
-                    const auto error = exact_edits.error();
-                    throw std::runtime_error{std::format(
-                        "alignment implicit seed accounting failed (code={}, run={})",
-                        std::to_underlying(error.code), error.input_offset)};
-                }
-                region.edit_distance += *exact_edits;
-            }
+            const auto equality_counter = params.highway_kernels == nullptr ? nullptr
+                : params.highway_kernels->common.count_equal_rank_chunk;
+            if (equality_counter == nullptr)
+                return std::unexpected(alignment_contract_error::trace_accounting);
+            const auto replayed = replay_implicit_seed_alignment<p_strand_reversed>(
+                query_seq, target_seq,
+                static_cast<std::size_t>(seed_query_start),
+                static_cast<std::size_t>(seed_query_end),
+                static_cast<std::size_t>(seed_ref_start),
+                static_cast<std::size_t>(seed_ref_end), scoring_matrix,
+                params.gap_open1, params.gap_ext1, params.gap_open2, params.gap_ext2,
+                [equality_counter](const std::uint8_t* query_ranks,
+                                   const std::uint8_t* target_ranks, std::size_t count) {
+                    return equality_counter(query_ranks, target_ranks, count,
+                        sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>);
+                });
+            if (!replayed) return std::unexpected(replayed.error());
+            region.dp_score += replayed->score;
+            if (params.compute_edit_distance) region.edit_distance += replayed->edit_distance;
         }
 
         // Extend right from the last aligned seed.
         if ((p_base_alignment_algorithm == base_alignment_algorithm::block_aligner ||
              !prior_stage_zdropped) &&
             seed_query_end < outer_query_end && seed_ref_end < outer_ref_end) {
-            ksw_alignment_result right_result;
+            std::expected<ksw_alignment_result, alignment_contract_error> right_result;
             if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
                 right_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq,
@@ -857,28 +863,31 @@ struct align_one_region {
                                                        scalar_execution_stats,
                                                        scalar_ksw2_stage::right);
             }
-            if (!right_result.cigar.empty()) {
+            if (!right_result) return std::unexpected(right_result.error());
+            if (!right_result->cigar.empty()) {
                 if (!bioseq::decode_native_cigar(
-                        std::span<const std::uint32_t>{right_result.cigar.data(), right_result.cigar.size()},
+                        std::span<const std::uint32_t>{right_result->cigar.data(), right_result->cigar.size()},
                         region.cigar)) {
-                    throw std::runtime_error{"right alignment produced an invalid CIGAR"};
+                    return std::unexpected(alignment_contract_error::trace_accounting);
                 }
-                region.dp_score += right_result.max;
             }
+            region.dp_score += right_result->has_reached_end ? right_result->mqe : right_result->max;
             const std::int32_t right_ref_offset =
-                right_result.has_reached_end ? right_result.mqe_t + 1 : right_result.max_t + 1;
+                right_result->has_reached_end ? right_result->mqe_t + 1 : right_result->max_t + 1;
             final_ref_end = seed_ref_end + right_ref_offset;
-            const std::int32_t right_query_offset = right_result.has_reached_end
+            const std::int32_t right_query_offset = right_result->has_reached_end
                                                    ? outer_query_end - seed_query_end
-                                                   : right_result.max_q + 1;
+                                                   : right_result->max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
             if (params.compute_edit_distance) {
-                region.edit_distance += exact_edit_distance_for_fill<p_strand_reversed>(
-                    right_result,
+                const auto edits = exact_edit_distance_for_fill<p_strand_reversed>(
+                    *right_result,
                     static_cast<std::size_t>(seed_query_end),
                     static_cast<std::size_t>(final_query_end),
                     static_cast<std::size_t>(seed_ref_end),
                     static_cast<std::size_t>(final_ref_end));
+                if (!edits) return std::unexpected(edits.error());
+                region.edit_distance += *edits;
             }
         }
 
@@ -893,6 +902,7 @@ struct align_one_region {
             region.query_start = static_cast<sequence_size_t>(query_length - final_query_end);
             region.query_end = static_cast<sequence_size_t>(query_length - final_query_start);
         }
+        return {};
     }
 };
 
@@ -933,35 +943,34 @@ struct selected_alignment_region_storage_plan {
 
 /**
  * @brief Check region bounds and calculate CIGAR storage without allocating.
- * @throws std::length_error If coordinates or storage sizes cannot be represented.
- * @throws std::invalid_argument If anchors or gap parameters are invalid.
+ * @return Checked storage geometry or a typed coordinate contract failure.
  */
-[[nodiscard]] inline alignment_region_storage_plan derive_alignment_region_storage_plan(
+[[nodiscard]] inline std::expected<alignment_region_storage_plan, alignment_contract_error> derive_alignment_region_storage_plan(
     const alignment_region& region,
     std::span<const anchor> anchors,
     std::uint64_t query_size,
     std::uint64_t target_size,
-    const minimap2_parameters& params) {
+    const minimap2_parameters& params, std::int32_t maximum_substitution_score) {
     if (region.seed_count <= 0) {
-        return {};
+        return alignment_region_storage_plan{};
     }
     constexpr auto signed_limit =
         static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
     if (query_size > signed_limit || target_size > signed_limit) {
-        throw std::length_error{"alignment storage coordinates exceed the signed fill domain"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
     if (region.anchor_start < 0 ||
         static_cast<std::size_t>(region.anchor_start) > anchors.size() ||
         static_cast<std::size_t>(region.seed_count) >
             anchors.size() - static_cast<std::size_t>(region.anchor_start) ||
-        params.max_gap < 0 || params.match_score < 0 || params.gap_open1 < 0 ||
+        params.max_gap < 0 || maximum_substitution_score < 0 || params.gap_open1 < 0 ||
         params.gap_ext1 <= 0) {
-        throw std::invalid_argument{"alignment storage region or gap parameters are invalid"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
     // These nonnegative 32-bit scoring inputs keep the extension
     // calculations within signed 64-bit range.
     static_assert(std::is_same_v<decltype(params.max_gap), std::int32_t>);
-    static_assert(std::is_same_v<decltype(params.match_score), std::int32_t>);
+    static_assert(std::is_same_v<decltype(maximum_substitution_score), std::int32_t>);
     static_assert(std::is_same_v<decltype(params.gap_open1), std::int32_t>);
     static_assert(std::is_same_v<decltype(params.gap_ext1), std::int32_t>);
     const std::int64_t query_length = static_cast<std::int64_t>(query_size);
@@ -973,7 +982,7 @@ struct selected_alignment_region_storage_plan {
         anchors[first_index].ref_position >= target_size ||
         anchors[last_index].ref_position >= target_size ||
         anchors[first_index].query_span == 0u) {
-        throw std::invalid_argument{"alignment storage seed endpoints exceed their owning sequences"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
     const std::int32_t anchor_begin = region.anchor_start;
     const anchor& first_anchor = anchors[anchor_begin];
@@ -1008,8 +1017,8 @@ struct selected_alignment_region_storage_plan {
         std::int64_t extension_len = std::min<std::int64_t>(seed_query_start, params.max_gap);
         outer_query_start = seed_query_start - extension_len;
         const std::int64_t bonus_extension =
-            (extension_len * params.match_score > params.gap_open1)
-                ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+            (extension_len * maximum_substitution_score > params.gap_open1)
+                ? (extension_len * maximum_substitution_score - params.gap_open1) / params.gap_ext1
                 : 0;
         extension_len += bonus_extension;
         extension_len = std::min<std::int64_t>(extension_len, params.max_gap);
@@ -1021,8 +1030,8 @@ struct selected_alignment_region_storage_plan {
             std::min<std::int64_t>(query_length - seed_query_end, params.max_gap);
         outer_query_end = seed_query_end + extension_len;
         const std::int64_t bonus_extension =
-            (extension_len * params.match_score > params.gap_open1)
-                ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+            (extension_len * maximum_substitution_score > params.gap_open1)
+                ? (extension_len * maximum_substitution_score - params.gap_open1) / params.gap_ext1
                 : 0;
         extension_len += bonus_extension;
         extension_len = std::min<std::int64_t>(extension_len, params.max_gap);
@@ -1036,7 +1045,7 @@ struct selected_alignment_region_storage_plan {
     if (outer_query_start < 0 || outer_ref_start < 0 ||
         outer_query_end < outer_query_start || outer_ref_end < outer_ref_start ||
         outer_query_end > query_length || outer_ref_end > target_length) {
-        throw std::invalid_argument{"alignment storage has unordered or out-of-range extents"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
     const auto query_extent = static_cast<std::uint64_t>(outer_query_end - outer_query_start);
     const auto reference_extent = static_cast<std::uint64_t>(outer_ref_end - outer_ref_start);
@@ -1064,9 +1073,9 @@ struct selected_alignment_region_storage_plan {
         *cigar_steps > (std::numeric_limits<std::size_t>::max)() ||
         *cigar_bytes > (std::numeric_limits<std::size_t>::max)() ||
         *initial_reserve > (std::numeric_limits<std::size_t>::max)()) {
-        throw std::length_error{"alignment storage CIGAR extent is not representable"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
-    return {
+    return alignment_region_storage_plan{
         .has_work = true,
         .anchor_begin = anchor_begin,
         .seed_ref_start = seed_ref_start,
@@ -1338,7 +1347,8 @@ derive_selected_alignment_region_storage_plan(
  * Worker allocation hooks reserve memory when workers allocate their buffers.
  */
 template <base_alignment_algorithm p_base_alignment_algorithm>
-[[nodiscard]] inline std::size_t admitted_alignment_worker_concurrency(
+[[nodiscard]] inline std::expected<std::size_t, alignment_contract_error>
+admitted_alignment_worker_concurrency(
     std::span<const alignment_region> regions,
     std::span<const anchor> anchors,
     std::uint64_t query_size,
@@ -1350,7 +1360,8 @@ template <base_alignment_algorithm p_base_alignment_algorithm>
     bool sequences_worker_shareable,
     std::size_t pool_maximum_concurrency,
     std::uint64_t available_bytes,
-    std::span<std::uint64_t> workspace_scratch) {
+    std::span<std::uint64_t> workspace_scratch,
+    std::int32_t maximum_substitution_score) {
     static_assert(p_base_alignment_algorithm == base_alignment_algorithm::ksw2 ||
                   p_base_alignment_algorithm == base_alignment_algorithm::block_aligner);
     const std::size_t requested = alignment_worker_concurrency(
@@ -1376,14 +1387,14 @@ template <base_alignment_algorithm p_base_alignment_algorithm>
         if (nonempty_count >= workspace_scratch.size()) {
             throw std::length_error{"alignment workspace scratch is too small"};
         }
-        const alignment_region_storage_plan region_plan =
-            derive_alignment_region_storage_plan(
-                region, anchors, query_size, target_size, params);
+        const auto region_plan = derive_alignment_region_storage_plan(
+            region, anchors, query_size, target_size, params, maximum_substitution_score);
+        if (!region_plan) return std::unexpected(region_plan.error());
         const auto selected_plan =
             derive_selected_alignment_region_storage_plan<p_base_alignment_algorithm>(
                 region,
                 anchors,
-                region_plan,
+                *region_plan,
                 params,
                 align_bandwidth,
                 target_geometry);
@@ -1406,7 +1417,8 @@ template <base_alignment_algorithm p_base_alignment_algorithm>
 template <base_alignment_algorithm p_base_alignment_algorithm,
           bool p_enable_diagonal_certificate = true,
           sequence_alphabet p_alphabet>
-void align_regions(std::span<alignment_region> regions,
+[[nodiscard]] std::expected<void, alignment_contract_error>
+align_regions(std::span<alignment_region> regions,
                    std::span<const anchor> anchors,
                    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
@@ -1416,6 +1428,16 @@ void align_regions(std::span<alignment_region> regions,
                    block_aligner_execution_stats* block_execution_stats = nullptr,
                    scalar_pipeline_execution_stats* scalar_execution_stats = nullptr,
                    bioseq::parallelism::worker_context_factory worker_factory = {}) {
+    const auto reject = [regions](alignment_contract_error error) {
+        for (auto& region : regions) {
+            region.dp_score = 0;
+            region.dp_max_score = 0;
+            region.has_alignment = false;
+            region.cigar.clear();
+            region.edit_distance = 0;
+        }
+        return std::unexpected(error);
+    };
     static const auto* _desc = bioseq::instrumentation::register_static_region("mm_align_skeleton");
     auto _scope = bioseq::instrumentation::region(_desc);
     // Keep coordinates in signed 64-bit range for end extensions and
@@ -1424,12 +1446,22 @@ void align_regions(std::span<alignment_region> regions,
         static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
     if (query_seq.bp_size() > signed_coordinate_limit ||
         target_seq.bp_size() > signed_coordinate_limit) {
-        throw std::length_error{"alignment sequence exceeds the signed fill domain"};
+        return reject(alignment_contract_error::coordinates);
     }
     const std::int64_t query_length = static_cast<std::int64_t>(query_seq.bp_size());
     const std::int64_t target_length = static_cast<std::int64_t>(target_seq.bp_size());
-    const std::int32_t align_bandwidth =
-        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
+    if (!scoring_matrix.is_block_layout_valid())
+        return reject(alignment_contract_error::invalid_matrix_layout);
+    const auto numeric = validate_alignment_numeric_contract(scoring_matrix.summary(),
+        0u, 0u, params.gap_open1, params.gap_ext1, params.end_bonus, params.zdrop,
+        params.gap_open2, params.gap_ext2,
+        p_base_alignment_algorithm != base_alignment_algorithm::block_aligner);
+    if (!numeric) return reject(numeric.error());
+    const std::int64_t scaled_bandwidth = std::int64_t{params.bandwidth} * 3 / 2 + 1;
+    if (scaled_bandwidth < std::numeric_limits<std::int32_t>::min()
+        || scaled_bandwidth > std::numeric_limits<std::int32_t>::max())
+        return reject(alignment_contract_error::coordinates);
+    const std::int32_t align_bandwidth = static_cast<std::int32_t>(scaled_bandwidth);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     const auto tail_storage_plan = derive_alignment_tail_storage_plan(
         regions.size(),
@@ -1471,12 +1503,22 @@ void align_regions(std::span<alignment_region> regions,
         }
     }
 
+    std::mutex failure_mutex;
+    std::optional<std::pair<std::size_t, alignment_contract_error>> first_failure;
+    const auto retain_failure = [&failure_mutex, &first_failure](
+        std::size_t region_index, alignment_contract_error error) {
+        const std::lock_guard guard{failure_mutex};
+        if (!first_failure || region_index < first_failure->first)
+            first_failure = std::pair{region_index, error};
+    };
     auto align_one_region_by_index = [query_length,
                                       target_length,
                                       &regions,
                                       &anchors,
                                       &params,
                                       &aligner,
+                                      &retain_failure,
+                                      &scoring_matrix,
                                       &per_region_block_stats,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                       // Carry the caller's benchmark operation into region workers.
@@ -1488,9 +1530,17 @@ void align_regions(std::span<alignment_region> regions,
             return;
         }
 
-        const auto storage_plan = derive_alignment_region_storage_plan(
+        const auto planned = derive_alignment_region_storage_plan(
             region, anchors, static_cast<std::uint64_t>(query_length),
-            static_cast<std::uint64_t>(target_length), params);
+            static_cast<std::uint64_t>(target_length), params, scoring_matrix.summary().maximum);
+        if (!planned) { retain_failure(region_index, planned.error()); return; }
+        const auto& storage_plan = *planned;
+        const auto region_numeric = validate_alignment_numeric_contract(scoring_matrix.summary(),
+            storage_plan.outer_query_extent, storage_plan.outer_reference_extent,
+            params.gap_open1, params.gap_ext1, params.end_bonus, params.zdrop,
+            params.gap_open2, params.gap_ext2,
+            p_base_alignment_algorithm != base_alignment_algorithm::block_aligner);
+        if (!region_numeric) { retain_failure(region_index, region_numeric.error()); return; }
         const auto anchor_begin = storage_plan.anchor_begin;
         const auto seed_ref_start = storage_plan.seed_ref_start;
         const auto seed_query_start = storage_plan.seed_query_start;
@@ -1562,7 +1612,8 @@ void align_regions(std::span<alignment_region> regions,
         std::optional<benchmark_e2e_interval_scope> benchmark_e2e_cigar_scope;
 #endif
 
-        // Select the query orientation for the region's alignment calls.
+        // Select orientation once; proteins never instantiate complement kernels.
+        std::expected<void, alignment_contract_error> aligned;
         if (region.is_reverse) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             if constexpr (benchmark_e2e_supported_cigar_algorithm) {
@@ -1577,7 +1628,9 @@ void align_regions(std::span<alignment_region> regions,
                 }
             }
 #endif
-            aligner.template run<true>(region,
+            if constexpr (bioseq::storage::lazy_sequence_detail::
+                          complementable_sequence_alphabet<p_alphabet>) {
+                aligned = aligner.template run<true>(region,
                                        anchors,
                                        anchor_begin,
                                        seed_ref_start,
@@ -1591,6 +1644,9 @@ void align_regions(std::span<alignment_region> regions,
                                        query_length,
                                        region_block_stats,
                                        region_scalar_stats);
+            } else {
+                aligned = std::unexpected(alignment_contract_error::orientation);
+            }
         } else {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             if constexpr (benchmark_e2e_supported_cigar_algorithm) {
@@ -1605,7 +1661,7 @@ void align_regions(std::span<alignment_region> regions,
                 }
             }
 #endif
-            aligner.template run<false>(region,
+            aligned = aligner.template run<false>(region,
                                         anchors,
                                         anchor_begin,
                                         seed_ref_start,
@@ -1620,6 +1676,7 @@ void align_regions(std::span<alignment_region> regions,
                                         region_block_stats,
                                         region_scalar_stats);
         }
+        if (!aligned) { retain_failure(region_index, aligned.error()); return; }
 
         // Every CIGAR operation consumes at least one query or target base,
         // so the operation count must fit the sequence-step bound.
@@ -1707,6 +1764,17 @@ void align_regions(std::span<alignment_region> regions,
         }
     }
 
+    if (first_failure) {
+        for (auto& region : regions) {
+            region.dp_score = 0;
+            region.dp_max_score = 0;
+            region.has_alignment = false;
+            region.cigar.clear();
+            region.edit_distance = 0;
+        }
+        return std::unexpected(first_failure->second);
+    }
+
     if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
         if (block_execution_stats != nullptr) {
             *block_execution_stats = {};
@@ -1747,6 +1815,7 @@ void align_regions(std::span<alignment_region> regions,
             bioseq::common::memory::process_footprint_bytes() >> 20,
             bioseq::common::memory::system_available_bytes() >> 20);
     });
+    return {};
 }
 
 } // namespace bioseq::simd

@@ -17,6 +17,7 @@ module;
 #include <simdjson.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,10 @@ module;
 export module bioseq.bench.prefilters;
 
 import bioseq.bench.framework;
+import bioseq.sequences;
+import bioseq.common.seqan_adapter;
+import bioseq.storage.lazy_sequence;
+import bioseq.common.context;
 import bioseq.bench.prefilter_algorithm_selection;
 import bioseq.instrumentation;
 import bioseq.highway.dispatch_contract;
@@ -87,8 +92,8 @@ struct prepared_threshold {
 struct prefilter_input {
     std::vector<std::string> queries;
     std::vector<std::string> targets;
-    std::vector<std::uint8_t> query_ranks;
-    std::vector<std::uint8_t> target_ranks;
+    compact_sequence_range<seq::dna5> query_sequence;
+    compact_sequence_range<seq::dna5> target_sequence;
     std::map<std::uint32_t, prepared_threshold> prepared;
     std::uint64_t total_bases = 0u;
     /// One-time, shared batch input construction. It is not attributable to
@@ -226,13 +231,13 @@ struct prefilter_output {
     };
 }
 
-void append_rank_bytes(
-    std::string_view sequence,
-    std::vector<std::uint8_t>& ranks)
-{
-    ranks.reserve(ranks.size() + sequence.size());
-    for (const unsigned char value : sequence) {
-        ranks.push_back(static_cast<std::uint8_t>(value));
+/** Packs normalized dataset symbols once, outside every measured backend region. */
+void append_letters(std::string_view sequence, std::vector<seq::dna5>& letters) {
+    letters.reserve(letters.size() + sequence.size());
+    for (const char character : sequence) {
+        seq::dna5 letter{};
+        letter.assign_char(character);
+        letters.push_back(letter);
     }
 }
 
@@ -243,6 +248,8 @@ void append_rank_bytes(
     const run_constraints& constraints)
 {
     prefilter_input input;
+    std::vector<seq::dna5> query_letters;
+    std::vector<seq::dna5> target_letters;
     try {
         input.require_gatekeeper_rejection_diagnostics =
             test_case_name == "PREFILTER_SMALL_ERR_E40_32BP"
@@ -304,8 +311,8 @@ void append_rank_bytes(
                     "SneakySnake dataset sequence exceeds the reference int ABI");
             }
             input.total_bases += static_cast<std::uint64_t>(query.size()) * 2u;
-            append_rank_bytes(query, input.query_ranks);
-            append_rank_bytes(target, input.target_ranks);
+            append_letters(query, query_letters);
+            append_letters(target, target_letters);
             input.queries.push_back(std::move(query));
             input.targets.push_back(std::move(target));
         }
@@ -313,6 +320,10 @@ void append_rank_bytes(
             throw std::runtime_error("SneakySnake dataset contains no pairs");
         }
 
+        input.query_sequence = compact_sequence_range<seq::dna5>{query_letters};
+        input.target_sequence = compact_sequence_range<seq::dna5>{target_letters};
+        const std::array query_sources{storage::make_borrowed_rank_source(input.query_sequence)};
+        const std::array target_sources{storage::make_borrowed_rank_source(input.target_sequence)};
         std::vector<std::uint32_t> thresholds;
         thresholds.reserve(constraints.execution_tuples.size());
         bool prepare_gatekeeper_oracle = false;
@@ -338,8 +349,8 @@ void append_rank_bytes(
                 const auto length = static_cast<std::uint32_t>(
                     input.queries[index].size());
                 prepared.jobs.push_back(prefilter_job{
-                    .query_offset = query_offset,
-                    .target_offset = target_offset,
+                    .query_start = query_offset,
+                    .target_start = target_offset,
                     .query_length = length,
                     .target_length = length,
                     .max_edits = threshold,
@@ -361,23 +372,25 @@ void append_rank_bytes(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 input_preparation_end - input_preparation_start).count());
 
+        bioseq::parallelism::admitted_context oracle_workspace;
+        ::context::installed_context_scope oracle_installation(oracle_workspace.memory);
         const auto oracle_start = std::chrono::steady_clock::now();
         for (auto& [threshold, prepared] : input.prepared) {
             prepared.scalar_oracle_results =
                 bioseq::prefilter::sneaky_snake_scalar_batch(
                     prefilter_batch_input{
-                        .query_ranks = input.query_ranks,
-                        .target_ranks = input.target_ranks,
+                        .queries = query_sources,
+                        .targets = target_sources,
                         .jobs = prepared.jobs,
-                    });
+                    }).value();
             if (prepare_gatekeeper_oracle) {
                 prepared.gatekeeper_oracle_results =
                     prefilter::gatekeeper_scalar_batch(
                         prefilter_batch_input{
-                            .query_ranks = input.query_ranks,
-                            .target_ranks = input.target_ranks,
+                            .queries = query_sources,
+                            .targets = target_sources,
                             .jobs = prepared.jobs,
-                        });
+                        }).value();
             }
             if (prepared.scalar_oracle_results.size()
                 != input.queries.size()) {
@@ -600,6 +613,10 @@ void validate_available_backend(
         }
     }
 
+    const std::array query_sources{storage::make_borrowed_rank_source(input.query_sequence)};
+    const std::array target_sources{storage::make_borrowed_rank_source(input.target_sequence)};
+    const auto query_view = storage::make_lazy_sequence_view(input.query_sequence);
+    const auto target_view = storage::make_lazy_sequence_view(input.target_sequence);
     static const auto* backend_batch_region =
         bioseq::instrumentation::register_static_region("prefilter_backend_batch");
     const auto backend_batch_start = std::chrono::steady_clock::now();
@@ -623,27 +640,27 @@ void validate_available_backend(
             cpu_results =
                 bioseq::prefilter::sneaky_snake_scalar_batch(
                     prefilter_batch_input{
-                        .query_ranks = input.query_ranks,
-                        .target_ranks = input.target_ranks,
+                        .queries = query_sources,
+                        .targets = target_sources,
                         .jobs = prepared.jobs,
-                    });
+                    }).value();
         } else if (algorithm == "sneakysnake_simd") {
             cpu_results = fixed_sneaky_snake_simd_batch(
                 prefilter_batch_input{
-                    .query_ranks = input.query_ranks,
-                    .target_ranks = input.target_ranks,
+                    .queries = query_sources,
+                    .targets = target_sources,
                     .jobs = prepared.jobs,
                 },
-                {});
+                {}).value();
         } else if (is_sneaky_vulkan_algorithm(algorithm)) {
             vulkan_results = prefilter::run_sneaky_snake_vulkan_batch(
-                input.query_ranks,
-                input.target_ranks,
+                query_view,
+                target_view,
                 prepared.jobs);
         } else if (is_gatekeeper_algorithm(algorithm)) {
             vulkan_results = prefilter::run_gatekeeper_vulkan_batch(
-                input.query_ranks,
-                input.target_ranks,
+                query_view,
+                target_view,
                 prepared.jobs);
         } else {
             throw std::invalid_argument(

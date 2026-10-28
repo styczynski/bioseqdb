@@ -4,11 +4,13 @@
  */
 module;
 
+#include <bioseq/pg_compat.h>
 #include <new>
 
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_target_materialization;
 
 import std;
+import bioseq.postgres.support;
 import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
 import bioseq.common.logging;
 import bioseq.sequences;
@@ -57,7 +59,10 @@ try_materialize_target_for_segment_workers(
     auto resident_owner = bioseq::storage::materialize_packed_sequence(
         target_view, plan.from, plan.to, requested_width, std::move(*permit));
     const std::uint64_t materialize_elapsed_ns = elapsed_dispatch_host_ns(materialize_started_ns);
-    const auto& descriptor = resident_owner.descriptor();
+    if (!resident_owner) bioseq::postgres::support::invoke_pg_as_cpp([] {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq target source read failed during materialization")));
+    });
+    const auto& descriptor = resident_owner->descriptor();
     const std::uint64_t packed_bytes =
         static_cast<std::uint64_t>(descriptor.unit_count) * descriptor.storage_unit_width;
 
@@ -69,7 +74,7 @@ try_materialize_target_for_segment_workers(
         static_cast<unsigned long long>(packed_bytes),
         static_cast<unsigned long long>(materialize_elapsed_ns));
 
-    return resident_target_for_workers<p_alphabet>{std::move(resident_owner)};
+    return resident_target_for_workers<p_alphabet>{std::move(*resident_owner)};
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail

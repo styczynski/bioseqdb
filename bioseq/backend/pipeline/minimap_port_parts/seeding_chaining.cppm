@@ -11,6 +11,7 @@ export module bioseq.pipeline.minimap_port:seeding_chaining;
 import std;
 import :results;
 import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.chaining.core;
@@ -18,6 +19,10 @@ import bioseq.chaining.scalar;
 import bioseq.chaining.simd;
 import bioseq.chaining.rmq;
 import bioseq.instrumentation;
+import bioseq.sequences;
+import bioseq.storage.lazy_sequence;
+import bioseq.alignment.utils;
+import bioseq.simd.utils;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
 
@@ -74,19 +79,68 @@ struct canonical_seed_batch {
 // Look up query minimizers in the target index to collect seed hits.
 
 /**
+ * Verify one native k-symbol candidate before it becomes a chaining anchor.
+ * Scratch is bounded by the existing anchor span field. Borrowed query data is
+ * pinned into that scratch before a target read can reuse an aliasing cache slot.
+ */
+template<bool QueryReversed, sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<bool, alignment_contract_error> seed_anchor_matches(
+    const bioseq::storage::lazy_sequence_view<Alphabet>& query,
+    const bioseq::storage::lazy_sequence_view<Alphabet>& target,
+    const anchor& candidate, std::size_t span, sequence_rank_equality_kernel counter) {
+    constexpr std::size_t maximum_span = std::numeric_limits<decltype(anchor::query_span)>::max();
+    if (counter == nullptr || span == 0u || span > maximum_span
+        || candidate.query_span != span || candidate.query_position >= query.bp_size()
+        || candidate.ref_position >= target.bp_size()
+        || span > candidate.query_position + 1u || span > candidate.ref_position + 1u)
+        return std::unexpected(alignment_contract_error::coordinates);
+    std::array<std::uint8_t, maximum_span> query_scratch;
+    std::array<std::uint8_t, maximum_span> target_scratch;
+    const auto query_source = query.template borrow_rank_source<QueryReversed>();
+    const auto target_source = target.template borrow_rank_source<false>();
+    const auto query_ranks = query_source.read_checked(candidate.query_position + 1u - span,
+                                                       span, query_scratch);
+    if (!query_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+    if (query_ranks->data() != query_scratch.data())
+        std::copy(query_ranks->begin(), query_ranks->end(), query_scratch.begin());
+    const auto target_ranks = target_source.read_checked(candidate.ref_position + 1u - span,
+                                                         span, target_scratch);
+    if (!target_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+    const auto compared = counter(query_scratch.data(), target_ranks->data(), span,
+        sequence_rank_validation::upper_bound, seqan3::alphabet_size<Alphabet>);
+    if (!compared.valid_ranks) return std::unexpected(alignment_contract_error::trace_accounting);
+    return compared.equal_symbols == span;
+}
+
+/** Select native query orientation once per candidate; proteins are forward only. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<bool, alignment_contract_error> verify_seed_anchor(
+    const bioseq::storage::lazy_sequence_view<Alphabet>& query,
+    const bioseq::storage::lazy_sequence_view<Alphabet>& target,
+    const anchor& candidate, std::size_t span, sequence_rank_equality_kernel counter) {
+    if (candidate.is_reverse) {
+        if constexpr (bioseq::storage::lazy_sequence_detail::complementable_sequence_alphabet<Alphabet>)
+            return seed_anchor_matches<true>(query, target, candidate, span, counter);
+        else return std::unexpected(alignment_contract_error::orientation);
+    }
+    return seed_anchor_matches<false>(query, target, candidate, span, counter);
+}
+
+/**
  * Append anchors for one query minimizer's target hits. Decode each yarget
  * position and strand, then choose the matching query-strand coordinate.
  * Read 32-bit postings directly and widen each value only while building
  * its anchor, so, no temporary 64-bit position array is needed.
  */
-template <std::unsigned_integral p_stored_position>
-inline void
+template <std::unsigned_integral p_stored_position, class Verifier>
+[[nodiscard]] inline std::expected<void, alignment_contract_error>
 append_seed_hits_from_position_span(std::span<const p_stored_position> target_hits,
                                     std::uint32_t query_strand_bit,
                                     sequence_size_t forward_query_pos,
                                     sequence_size_t reverse_query_pos,
                                     std::uint32_t query_span_value,
-                                    ::bioseq::chaining::arena_slab<anchor>& anchors_out) {
+                                    ::bioseq::chaining::arena_slab<anchor>& anchors_out,
+                                    Verifier verify) {
     for (const p_stored_position stored_target_hit : target_hits) {
         const std::uint64_t target_hit = static_cast<std::uint64_t>(stored_target_hit);
         const sequence_size_t ref_position = static_cast<sequence_size_t>(target_hit >> 1u);
@@ -102,8 +156,11 @@ append_seed_hits_from_position_span(std::span<const p_stored_position> target_hi
         anchor.query_span = static_cast<std::uint8_t>(query_span_value);
         anchor.flags = 0;
         anchor.segment_id = 0;
-        anchors_out.push_back(anchor);
+        const auto accepted = verify(anchor);
+        if (!accepted) return std::unexpected(accepted.error());
+        if (*accepted) anchors_out.push_back(anchor);
     }
+    return {};
 }
 
 /// Sort anchors by the shared strand, reference, and  query ordering.
@@ -129,16 +186,26 @@ inline void sort_seed_hits(::bioseq::chaining::arena_slab<anchor>& anchors_out) 
  * @param kmer_size Span assigned to each anchor.
  * @param anchors_out Live slab in the caller's chaining arena
  */
-template <class p_minimizer, minimizer_lookup_index p_index>
-void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
+template <class p_minimizer, minimizer_lookup_index p_index, sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<void, alignment_contract_error> collect_seed_hits(std::span<const p_minimizer> query_minimizers,
                        const p_index& target_index,
-                       sequence_size_t query_len,
+                       bioseq::storage::lazy_sequence_view<Alphabet> query,
+                       bioseq::storage::lazy_sequence_view<Alphabet> target,
+                       sequence_rank_equality_kernel counter,
                        std::int32_t max_occ,
                        std::int32_t kmer_size,
                        ::bioseq::chaining::arena_slab<anchor>& anchors_out) {
     static const auto* _seed_hits_desc =
         bioseq::instrumentation::register_static_region("collect_seed_hits");
     auto _seed_hits_scope = bioseq::instrumentation::region(_seed_hits_desc);
+    anchors_out.resize(0u);
+    if (max_occ < 0 || kmer_size <= 0
+        || static_cast<std::uint64_t>(kmer_size) > std::numeric_limits<decltype(anchor::query_span)>::max())
+        return std::unexpected(alignment_contract_error::coordinates);
+    const auto query_len = query.bp_size();
+    const auto verify = [query, target, counter, kmer_size](const anchor& candidate) {
+        return verify_seed_anchor(query, target, candidate, static_cast<std::size_t>(kmer_size), counter);
+    };
     // Reserve an initial capacity for direct callers. An already-large slab
     // keeps its allocation, and push_back can grow it if more hits are found.
     anchors_out.reserve(query_minimizers.size() * 2);
@@ -150,11 +217,6 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
         auto _idx_lookup_scope = bioseq::instrumentation::region(_idx_lookup_desc);
         // Every seed in this call uses the configured k-mer span.
         const std::uint32_t query_span_value = static_cast<std::uint32_t>(kmer_size);
-        // Precompute the fixed part of the reverse-complement end coordinate.
-        const sequence_size_t reverse_pos_base = query_len - 2 + query_span_value;
-        if (max_occ < 0) [[unlikely]] {
-            throw std::invalid_argument("collect_seed_hits requires a nonnegative max_occ");
-        }
         for (const auto& query_minimizer : query_minimizers) {
             const minimizer_lookup_spans target_hits =
                 lookup_minimizer_spans(target_index, query_minimizer.kmer());
@@ -177,33 +239,41 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
             const sequence_size_t forward_query_pos =
                 static_cast<sequence_size_t>(query_pos_encoded >> 1);
             // Compute both  strand coordinates once for all hits of this minimizer.
-            const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
+            if (forward_query_pos >= query_len || query_span_value > forward_query_pos + 1u) {
+                anchors_out.resize(0u);
+                return std::unexpected(alignment_contract_error::coordinates);
+            }
+            const sequence_size_t reverse_query_pos =
+                query_len - (forward_query_pos + 1u - query_span_value) - 1u;
 
             const auto contiguous32 = target_hits.contiguous_positions32();
             const auto contiguous64 = target_hits.contiguous_positions();
             if (!contiguous32.empty()) {
-                append_seed_hits_from_position_span(contiguous32,
+                const auto appended = append_seed_hits_from_position_span(contiguous32,
                                                     query_strand_bit,
                                                     forward_query_pos,
                                                     reverse_query_pos,
                                                     query_span_value,
-                                                    anchors_out);
+                                                    anchors_out, verify);
+                if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
             } else if (!contiguous64.empty()) {
-                append_seed_hits_from_position_span(contiguous64,
+                const auto appended = append_seed_hits_from_position_span(contiguous64,
                                                     query_strand_bit,
                                                     forward_query_pos,
                                                     reverse_query_pos,
                                                     query_span_value,
-                                                    anchors_out);
+                                                    anchors_out, verify);
+                if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
             } else {
                 for (const minimizer_position_span& target_span :
                      target_hits.segmented_positions()) {
-                    append_seed_hits_from_position_span(target_span.positions,
+                    const auto appended = append_seed_hits_from_position_span(target_span.positions,
                                                         query_strand_bit,
                                                         forward_query_pos,
                                                         reverse_query_pos,
                                                         query_span_value,
-                                                        anchors_out);
+                                                        anchors_out, verify);
+                    if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
                 }
             }
         }
@@ -223,6 +293,7 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
             bioseq::common::memory::process_footprint_bytes() >> 20,
             bioseq::common::memory::system_available_bytes() >> 20);
     });
+    return {};
 }
 
 // Scalar and RMQ chaining come from their chaining modules. SIMD

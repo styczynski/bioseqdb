@@ -196,7 +196,7 @@ void append_result(
 [[nodiscard]] auto make_boundary_receipt() -> std::string {
     const alignment_table_t& alignment_table = selected_alignment_table();
     const auto scoring_matrix =
-        bioseq::simd::scoring_matrix<dna4_u64>::generate(2, 4, 1);
+        bioseq::simd::scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     const bioseq::simd::ksw_single_affine_parameters single_affine_parameters{
         .gap_open = 4,
         .gap_extend = 2,
@@ -238,7 +238,7 @@ void append_result(
                 alignment_table.align_ksw2_single_affine(
                     reversed, query_view, target_view,
                     0u, length, 0u, length, scoring_matrix,
-                    single_affine_parameters));
+                    single_affine_parameters).value());
         }
         for (const bool reversed : std::array{false, true}) {
             append_result(
@@ -246,7 +246,7 @@ void append_result(
                 alignment_table.align_ksw2_dual_affine(
                     reversed, query_view, target_view,
                     0u, length, 0u, length, scoring_matrix,
-                    dual_affine_parameters));
+                    dual_affine_parameters).value());
         }
     }
     return receipt;

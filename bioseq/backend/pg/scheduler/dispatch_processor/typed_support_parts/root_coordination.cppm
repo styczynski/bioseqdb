@@ -269,7 +269,7 @@ template <class p_sequence,
                 scanner_pg_ctx);
             bioseq::parallelism::memory_permit completed_suffix_rows_permit;
             std::vector<canonical_suffix_row_completion> completed_suffix_rows;
-            prepare_vulkan_query_host_capacity(completed_suffix_rows,
+            bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(completed_suffix_rows,
                                                completed_suffix_rows_permit,
                                                batch_size);
             std::uint64_t completed_query_sketch_host_ns = 0u;
@@ -286,7 +286,7 @@ template <class p_sequence,
                 completed_mpf_query_authorizations;
             if (selected_target_ownership == vulkan_seed_target_ownership::shared_mpf ||
                 selected_target_ownership == vulkan_seed_target_ownership::ordinary_mpf) {
-                prepare_vulkan_query_host_capacity(
+                bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
                     completed_mpf_query_authorizations,
                     completed_mpf_query_authorizations_permit,
                     batch_size);
@@ -302,13 +302,13 @@ template <class p_sequence,
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     "Vulkan proof-token capacity arithmetic overflowed");
             }
-            prepare_vulkan_query_host_capacity(completed_mpf_seed_operations,
+            bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(completed_mpf_seed_operations,
                                                completed_mpf_seed_operations_permit,
                                                batch_size * 3u + 1u);
             bioseq::parallelism::memory_permit completed_chaining_permit;
             std::vector<bioseq::gpu::vulkan::runtime_pipeline_operation_token>
                 completed_chaining;
-            prepare_vulkan_query_host_capacity(completed_chaining,
+            bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(completed_chaining,
                                                completed_chaining_permit,
                                                batch_size);
             completed_chaining.resize(batch_size);

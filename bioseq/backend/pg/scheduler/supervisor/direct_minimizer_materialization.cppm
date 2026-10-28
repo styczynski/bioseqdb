@@ -150,7 +150,10 @@ try_materialize_async_minimizer_sequence_worker_target(
             });
         auto resident_target = bioseq::storage::materialize_packed_sequence(
             seq, 0u, seq.bp_size(), requested_width, std::move(*permit));
-        const auto& descriptor = resident_target.descriptor();
+        if (!resident_target) bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq index source read failed during materialization")));
+        });
+        const auto& descriptor = resident_target->descriptor();
         const std::uint64_t packed_bytes =
             static_cast<std::uint64_t>(descriptor.unit_count) * descriptor.storage_unit_width;
         bioseq_log<logging_level::debug>(
@@ -160,7 +163,7 @@ try_materialize_async_minimizer_sequence_worker_target(
             index_name,
             static_cast<unsigned long long>(seq.bp_size()),
             static_cast<unsigned long long>(packed_bytes));
-        return async_minimizer_sequence_resident_target<p_alphabet>{std::move(resident_target),
+        return async_minimizer_sequence_resident_target<p_alphabet>{std::move(*resident_target),
                                                                     packed_bytes};
     } catch (...) {
         permit->release();

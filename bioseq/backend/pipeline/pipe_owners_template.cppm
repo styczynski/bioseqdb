@@ -30,13 +30,9 @@ import bioseq.indexing.gpu_minimizer_index;
 namespace bioseq {
 namespace simd {
 
-/// Generate DNA4 and DNA5 versions of each enabled route.
-static constexpr bool owner_dna5
-    [[bioseq::template_flatten(
-        "identity", "alphabet",
-        "dna4", "false",
-        "dna5", "true")]]
-    = false;
+/// Generate native owners for every registered biological alphabet.
+using owner_alphabet [[bioseq::template_flatten(
+    "identity", "alphabet", "supported_biological_alphabets")]] = ::seq::dna4;
 
 /// Split each alphabet's generated implementations acros six route choices.
 static constexpr std::uint8_t owner_route
@@ -50,13 +46,6 @@ static constexpr std::uint8_t owner_route
         "fragment_query", "5")]]
     = 0;
 
-namespace {
-
-/// Alphabet used by this generated implementation.
-using owner_alphabet = std::conditional_t<
-    owner_dna5, ::seq::dna5, ::seq::dna4>;
-
-} // namespace
 
 /**
  * Check the query sketch against the statement plan, then call the pipeline

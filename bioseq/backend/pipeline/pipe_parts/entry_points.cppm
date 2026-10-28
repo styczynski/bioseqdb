@@ -10,6 +10,7 @@ export module bioseq.pipeline.pipe:entry_points;
 
 import std;
 import :stage_graph;
+import :owned_entries;
 import :minimizer_execution;
 import :execution;
 import :shape_dispatch;
@@ -85,13 +86,14 @@ export {
     fixed_vulkan_target_host_adoption_route_selected(bool is_gpu_target_index_build,
                                                      const minimap2_parameters& params,
                                                      std::uint32_t alphabet_size,
+                                                     std::uint32_t alphabet_code,
                                                      std::uint64_t target_bp) noexcept {
         return !is_gpu_target_index_build && params.vulkan_enabled &&
                params.vulkan_seed_hits_enabled && !params.vulkan_fused_frontend_enabled &&
                !params.vulkan_gpu_index_build_enabled &&
                params.minimizer_algorithm == minimizer_algorithm::vulkan_minimap_integer &&
                bioseq::indexing::gpu_source_direct_tuple_supported<p_minimizer>(
-                   alphabet_size, params.kmer_size, params.window_size) &&
+                   alphabet_size, alphabet_code, params.kmer_size, params.window_size) &&
                target_bp >= k_vulkan_fixed_host_adoption_target_minimum_bp;
     }
 
@@ -501,135 +503,6 @@ export {
 
     } // namespace pipe_entry_detail
 
-    // Compile scheduler entries once per alphabet in this module's
-    // implementation files. Sequence  word width is already hidden by the lazy
-    // view, so generated scheduler callers can share these compiled functions.
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_batch_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>
-            query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_vector_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        std::shared_ptr<const std::vector<::bioseq::minimizers::minimap_sketch_data>> query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_fragment_index_physical_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_hash_major_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::hash_major_minimizer_selective_reader& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_grouped_soa_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::prepared_grouped_soa_query_reader& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_query_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::prepared_fragment_anchor_batch::query_handle&
-            prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_batch_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>
-            query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_vector_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        std::shared_ptr<const std::vector<::bioseq::minimizers::minimap_sketch_data>> query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_fragment_index_physical_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_hash_major_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::hash_major_minimizer_selective_reader& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_grouped_soa_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::prepared_grouped_soa_query_reader& prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
-    [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_query_owned(
-        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
-        const ::bioseq::indexing::prepared_fragment_anchor_batch::query_handle&
-            prebuilt_target_index,
-        pipe::statement_execution_plan_owner execution_plan,
-        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-        bool allow_gpu_target_index_build = false);
-
     /**
      * @brief Prepare a target index from supplied minimizers and run alignment.
      *
@@ -783,6 +656,7 @@ export {
                     ledger.minimizer_count,
                     ledger.distinct_count,
                     static_cast<std::uint32_t>(seqan3::alphabet_size<target_alphabet_type>),
+                    supported_biological_alphabets::template index_of<target_alphabet_type>(),
                     static_cast<std::uint32_t>(params.kmer_size),
                     static_cast<std::uint32_t>(params.window_size));
             ledger.is_identity_accepted =
@@ -1332,19 +1206,6 @@ export {
     }
 
     } // namespace pipe_entry_detail
-
-    // Scheduler calls share these compiled entries after sequence width is
-    // hidden by the lazy view. Each alphabet's dispatch code is instantiated
-    // in this module's implementation files.
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_raw_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-                           bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-                           pipe::statement_execution_plan_owner execution_plan);
-
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_raw_owned(bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-                           bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-                           pipe::statement_execution_plan_owner execution_plan);
 
     } // namespace bioseq::simd
 

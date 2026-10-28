@@ -204,6 +204,10 @@ export {
                                          bounded_nthash_segmented_route,
                                          scalar_segmented_route](
                                             match_result_collection collection) {
+            if (collection.failure) {
+                collection.results.clear();
+                return collection;
+            }
             if (exact_simd_segmented_route) {
                 if (!query_sketch.exact_simd_execution_stats_available ||
                     !query_sketch.exact_simd_execution_stats.is_internally_consistent(
@@ -511,6 +515,8 @@ export {
                         merged_collection.prepare_result_append(seg_res.results.size());
 #endif
                         merged_collection.combine_execution_stats(seg_res);
+
+                        if (merged_collection.failure) return finalize_segmented_stats(std::move(merged_collection));
                         for (auto& result : seg_res.results) {
                             if (result.target_start >= range.core_lo_bp &&
                                 result.target_start < range.core_hi_bp) {
@@ -567,6 +573,8 @@ export {
                     merged_collection.prepare_result_append(seg_res.results.size());
 #endif
                     merged_collection.combine_execution_stats(seg_res);
+
+                    if (merged_collection.failure) return finalize_segmented_stats(std::move(merged_collection));
                     seg_result_count = seg_res.results.size();
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp &&
@@ -613,6 +621,8 @@ export {
                     merged_collection.prepare_result_append(seg_res.results.size());
 #endif
                     merged_collection.combine_execution_stats(seg_res);
+
+                    if (merged_collection.failure) return finalize_segmented_stats(std::move(merged_collection));
                     seg_result_count = seg_res.results.size();
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp &&
@@ -644,6 +654,7 @@ export {
                                                     target_sketch_backend,
                                                     query_minimizers,
                                                     &query_gate,
+                                                    query_seq,
                                                     &target_seq,
                                                     w,
                                                     k,
@@ -667,12 +678,25 @@ export {
                     ? query_minimizers.device->words()
                     : nullptr;
 
+            const auto native_query = bioseq::seeding::prepare_native_query_seed_windows(
+                query_seq, sketch_span, static_cast<std::uint32_t>(params.kmer_size));
+            const std::array native_queries{native_query.view()};
+            const auto native_rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<
+                compact_sequence_range<p_alphabet>>();
+            using native_window_owner = bioseq::gpu::vulkan::admitted_sequence_detail::
+                canonical_u32_window_batch<p_alphabet>;
+            bioseq::parallelism::memory_permit native_targets_permit;
+            std::vector<native_window_owner> native_targets;
+
             std::vector<std::shared_ptr<bioseq::indexing::gpu_resident_minimizer_index>> residents;
             std::vector<bioseq::gpu::vulkan::gpu_seed_coordinate_job> jobs;
             std::vector<std::size_t> job_segment_indices;
             residents.reserve(ranges.size());
             jobs.reserve(ranges.size());
             job_segment_indices.reserve(ranges.size());
+            bioseq::parallelism::prepare_admitted_vector_capacity<
+                bioseq::gpu::vulkan::vulkan_runtime_error>(
+                    native_targets, native_targets_permit, ranges.size());
 
             const auto frozen_query_gate = pipe::freeze_gpu_query_gate(query_gate.vulkan_gate());
             const auto frozen_gate_identity = frozen_query_gate.canonical_identity();
@@ -692,14 +716,12 @@ export {
                     continue;
                 }
 
-                auto identity = segment_gpu_identity(segment_index);
-                bioseq::indexing::gpu_minimizer_index_cache_key key{
-                    .source_id = 0u,
-                    .caller_identity = identity.assembly_identity,
-                    .target_len = built->target_len,
-                    .table_size = built->occupied_slots,
-                    .position_count = built->position_count,
-                };
+                const auto identity = pipe::make_native_gpu_built_identity<p_minimizer, p_alphabet>(
+                    runtime, *built, segment_gpu_identity(segment_index),
+                    static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(w));
+                bioseq::indexing::minimizer_hashmap_fragment_index native_index_identity;
+                native_index_identity.target_len = built->target_len;
+                auto key = bioseq::indexing::make_gpu_index_cache_key(native_index_identity, identity);
                 pipe::bind_verified_gpu_segment_gate_identity(
                     key, frozen_gate_identity, built->gate_identity);
                 auto adopted =
@@ -711,8 +733,17 @@ export {
                 }
                 auto resident = std::move(*adopted);
                 resident->target_position_offset = segment_lo_bp;
+                if (!bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
+                        runtime, *resident, /*strict_prefix=*/false)) {
+                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                        "GPU segment native posting authority validation failed");
+                }
                 residents.push_back(resident);
+                native_targets.push_back(bioseq::seeding::prepare_native_target_seed_windows(
+                    target_seq, sketch_span, runtime, resident, params.max_occ,
+                    static_cast<std::uint32_t>(params.kmer_size)));
                 jobs.push_back(bioseq::gpu::vulkan::gpu_seed_coordinate_job{
+                    .native_target = native_targets.back().view(),
                     .slots = &resident->slots,
                     .positions = &resident->positions,
                     .target_len = resident->target_len,
@@ -739,6 +770,8 @@ export {
             const auto chain_key =
                 bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
             bioseq::gpu::vulkan::gpu_seed_query_inputs query_inputs{
+                .native_queries = native_queries,
+                .native_rank_policy = &native_rank_policy,
                 .host_minimizer_bytes = device_words != nullptr ? std::span<const std::byte>{}
                                                                 : std::as_bytes(sketch_span),
                 .device_minimizer_words = device_words,
@@ -1101,6 +1134,7 @@ export {
                     merged_collection.prepare_result_append(seg_res.results.size());
 #endif
                     merged_collection.combine_execution_stats(seg_res);
+                    if (merged_collection.failure) return;
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp &&
                             result.target_start < range.core_hi_bp) {
@@ -1128,6 +1162,8 @@ export {
                         for (std::size_t segment_index = wave_lo; segment_index < ranges.size();
                              ++segment_index) {
                             process_segment_serial(segment_index);
+                            if (merged_collection.failure)
+                                return finalize_segmented_stats(std::move(merged_collection));
                         }
                         wave_lo = ranges.size();
                         break;
@@ -1236,6 +1272,8 @@ export {
                             wave_seg_out[rel].results.size());
 #endif
                         merged_collection.combine_execution_stats(wave_seg_out[rel]);
+
+                        if (merged_collection.failure) return finalize_segmented_stats(std::move(merged_collection));
                         for (auto& result : wave_seg_out[rel].results) {
                             if (result.target_start >= range.core_lo_bp &&
                                 result.target_start < range.core_hi_bp) {
@@ -1484,6 +1522,8 @@ export {
             merged_collection.prepare_result_append(seg_out[segment_index].results.size());
 #endif
             merged_collection.combine_execution_stats(seg_out[segment_index]);
+
+            if (merged_collection.failure) return finalize_segmented_stats(std::move(merged_collection));
             for (auto& result : seg_out[segment_index].results) {
                 if (result.target_start >= range.core_lo_bp &&
                     result.target_start < range.core_hi_bp) {

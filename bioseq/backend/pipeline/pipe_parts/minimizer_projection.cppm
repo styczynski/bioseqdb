@@ -130,7 +130,7 @@ export {
                 ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2;
 
             template <sequence_alphabet p_alphabet>
-            [[gnu::always_inline]] static void
+            [[nodiscard, gnu::always_inline]] static std::expected<void, alignment_contract_error>
             call(std::span<alignment_region> regions,
                  std::span<const ::bioseq::chaining::anchor> anchors,
                  bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -144,7 +144,7 @@ export {
                 if (forbidden_block_stats != nullptr) {
                     abort_forbidden_ksw2_fallback(*forbidden_block_stats);
                 }
-                ::bioseq::simd::align_regions<::bioseq::simd::base_alignment_algorithm::ksw2>(
+                return ::bioseq::simd::align_regions<::bioseq::simd::base_alignment_algorithm::ksw2>(
                     regions,
                     anchors,
                     query_seq,
@@ -191,7 +191,7 @@ export {
                 ::bioseq::simd_dispatch::highway_kernel::alignment_block_aligner;
 
             template <sequence_alphabet p_alphabet>
-            [[gnu::always_inline]] static void
+            [[nodiscard, gnu::always_inline]] static std::expected<void, alignment_contract_error>
             call(std::span<alignment_region> regions,
                  std::span<const ::bioseq::chaining::anchor> anchors,
                  bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -202,7 +202,7 @@ export {
                  block_aligner_execution_stats* block_execution_stats,
                  scalar_pipeline_execution_stats* /*scalar_execution_stats*/,
                  bioseq::parallelism::worker_context_factory worker_factory = {}) {
-                ::bioseq::simd::align_regions<
+                return ::bioseq::simd::align_regions<
                     ::bioseq::simd::base_alignment_algorithm::block_aligner>(regions,
                                                                              anchors,
                                                                              query_seq,
@@ -261,7 +261,7 @@ export {
             }
 
             template <sequence_alphabet p_alphabet>
-            [[gnu::always_inline]] static void
+            [[nodiscard, gnu::always_inline]] static std::expected<void, alignment_contract_error>
             call(std::span<alignment_region> regions,
                  std::span<const ::bioseq::chaining::anchor> anchors,
                  bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -275,7 +275,7 @@ export {
                 if (forbidden_block_stats != nullptr) {
                     abort_forbidden_ksw2_fallback(*forbidden_block_stats);
                 }
-                alignment_kernels.align_ksw2_batched(regions,
+                return alignment_kernels.align_ksw2_batched(regions,
                                                      anchors,
                                                      query_seq,
                                                      target_seq,
@@ -422,32 +422,24 @@ export {
         return params.kmer_size * 2;
     }
 
-    /**
-     * @brief Reuse this thread's scoring  matrix while its scores stay unchanged.
-     *
-     * Each alphabet has its own cache. Rebuild when the match, mismatch, or
-     * ambiguous-base score changes after conversion to the matrix's byte type.
-     */
+    /** Reuse one prepared matrix per alphabet, keyed by the complete raw scores. */
     template <sequence_alphabet p_alphabet>
-    [[nodiscard, gnu::always_inline]] inline const scoring_matrix<p_alphabet>&
+    [[nodiscard, gnu::always_inline]] inline
+    std::expected<std::reference_wrapper<const scoring_matrix<p_alphabet>>,
+                  alignment_contract_error>
     thread_local_scoring_matrix(const ::bioseq::simd::minimap2_parameters& params) {
-        thread_local std::int8_t cached_match = std::numeric_limits<std::int8_t>::min();
-        thread_local std::int8_t cached_mismatch = std::numeric_limits<std::int8_t>::min();
-        thread_local std::int8_t cached_ambi = std::numeric_limits<std::int8_t>::min();
+        thread_local std::optional<std::array<std::int32_t, 3>> cached_scores;
         thread_local scoring_matrix<p_alphabet> cached_matrix{};
-
-        const std::int8_t want_match = static_cast<std::int8_t>(params.match_score);
-        const std::int8_t want_mismatch = static_cast<std::int8_t>(params.mismatch_pen);
-        const std::int8_t want_ambi = static_cast<std::int8_t>(params.sc_ambi);
-        if (cached_match != want_match || cached_mismatch != want_mismatch ||
-            cached_ambi != want_ambi) {
-            cached_matrix =
-                scoring_matrix<p_alphabet>::generate(want_match, want_mismatch, want_ambi);
-            cached_match = want_match;
-            cached_mismatch = want_mismatch;
-            cached_ambi = want_ambi;
+        const std::array<std::int32_t, 3> requested{
+            params.match_score, params.mismatch_pen, params.sc_ambi};
+        if (!cached_scores || *cached_scores != requested) {
+            auto prepared = scoring_matrix<p_alphabet>::generate(
+                requested[0], requested[1], requested[2]);
+            if (!prepared) return std::unexpected(prepared.error());
+            cached_matrix = std::move(*prepared);
+            cached_scores = requested;
         }
-        return cached_matrix;
+        return std::cref(cached_matrix);
     }
 
     } // namespace bioseq::simd::pipe

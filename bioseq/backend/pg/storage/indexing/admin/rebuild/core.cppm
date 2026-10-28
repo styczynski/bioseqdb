@@ -197,6 +197,9 @@ try_materialize_for_parallel_sequence_index_build(
 #endif
     auto owner = bioseq::storage::materialize_packed_sequence(
         seq, 0u, seq.bp_size(), requested_width, std::move(*permit));
+    if (!owner) bioseq::postgres::support::invoke_pg_as_cpp([] {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq rebuild source read failed during materialization")));
+    });
 #ifdef BIOSEQ_TEST_INDEXES
     note_pg_sequence_facade_materialization_complete();
 #endif
@@ -207,7 +210,7 @@ try_materialize_for_parallel_sequence_index_build(
         index_name,
         static_cast<unsigned long long>(seq.bp_size()),
         static_cast<unsigned long long>(access.admission_bytes));
-    return resident_index_build_target<p_alphabet>{std::move(owner)};
+    return resident_index_build_target<p_alphabet>{std::move(*owner)};
 }
 
 // Only scalar sequence-wide builds try copying the whole target into memory.

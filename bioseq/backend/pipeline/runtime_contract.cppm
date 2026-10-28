@@ -15,6 +15,8 @@ module;
 
 export module bioseq.pipeline.runtime_contract;
 
+import bioseq.alignment.utils;
+
 export namespace bioseq::simd_dispatch {
 
 /**
@@ -42,6 +44,8 @@ enum class highway_kernel : std::uint8_t {
     alignment_block_aligner,
     /** Bounded byte-rank equality shared by alignment and CIGAR accounting. */
     sequence_rank_equality,
+    /** Target-selected numeric tiles for native biological conversion. */
+    sequence_rank_transform,
     /** Number of kernel families. */
     count,
 };
@@ -171,6 +175,7 @@ struct stage_description {
 /** @brief Pipeline stages in execution order. */
 struct pipeline_description {
     std::vector<stage_description> stages;
+    std::optional<alignment_contract_error> failure{};
 };
 
 inline constexpr std::string_view query_sketch_stage_name = "QuerySketchStage";

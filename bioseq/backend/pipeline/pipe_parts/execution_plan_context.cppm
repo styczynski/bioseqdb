@@ -886,6 +886,8 @@ export {
 
         std::atomic<std::size_t> remaining_seed_users{0};
         bioseq::indexing::gpu_minimizer_index_cache* owned_gpu_cache = nullptr;
+        /** Operation-owned target bytes are required independently of optional cache reuse. */
+        std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> operation_gpu_resident;
         transient_target_index_release_authorization owned_cpu_index{};
         bioseq::parallelism::memory_permit retained_seed_arena_permit{};
 
@@ -947,12 +949,25 @@ export {
                 return {};
 
             release_receipt stats{};
+            if (operation_gpu_resident) {
+                // Shared persistent-cache ownership intentionally survives this operation.
+                // Release our direct owner before clearing an operation-owned cache so the
+                // same physical allocation is accounted for exactly once.
+                if (operation_gpu_resident.use_count() == 1u) {
+                    stats.gpu_resident_bytes_released = bioseq::common::saturating_add(
+                        operation_gpu_resident->slots.allocation_bytes,
+                        operation_gpu_resident->positions.allocation_bytes);
+                }
+                operation_gpu_resident.reset();
+            }
             if (owned_gpu_cache != nullptr) {
                 auto* const cache_to_release = owned_gpu_cache;
                 owned_gpu_cache = nullptr;
-                stats.gpu_resident_bytes_released = cache_to_release->resident_bytes();
+                const auto cache_bytes = cache_to_release->resident_bytes();
+                stats.gpu_resident_bytes_released = bioseq::common::saturating_add(
+                    stats.gpu_resident_bytes_released, cache_bytes);
                 cache_to_release->clear();
-                stats.gpu_cache_evictions = stats.gpu_resident_bytes_released != 0u ? 1u : 0u;
+                stats.gpu_cache_evictions = cache_bytes != 0u ? 1u : 0u;
                 if (owned_cpu_index.direct_ledger != nullptr) {
                     auto& ledger = *owned_cpu_index.direct_ledger;
                     ledger.cache_cleanup_releases = stats.gpu_cache_evictions;

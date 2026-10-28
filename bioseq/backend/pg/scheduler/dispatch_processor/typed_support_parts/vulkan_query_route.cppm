@@ -18,6 +18,7 @@ extern "C" {
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.vulkan_query_route;
 
 import std;
+import bioseq.postgres.support;
 import bioseq.common.checked_arithmetic;
 import bioseq.alignment.contracts;
 import bioseq.sequences;
@@ -167,74 +168,6 @@ template <class p_sequence,
         algorithm, maximum_sequence_bp, runtime_k, runtime_w);
 }
 
-/** @brief Reserves memory and allocates capacity for a fresh  query vector. */
-template <class p_value>
-void prepare_vulkan_query_host_capacity(
-    std::vector<p_value>& values,
-    bioseq::parallelism::memory_permit& retained_permit,
-    std::size_t count) {
-    if (values.capacity() != 0u || !values.empty() || retained_permit ||
-        count > values.max_size()) {
-        throw std::invalid_argument{"Vulkan query vector is not a fresh bounded owner"};
-    }
-    if (count == 0u)
-        return;
-    const auto bytes = bioseq::common::checked_mul(
-        static_cast<std::uint64_t>(count), sizeof(p_value));
-    const auto bound = bytes ? bioseq::common::checked_mul(
-        *bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor)
-        : std::optional<std::uint64_t>{};
-    if (!bound) {
-        throw std::length_error{"Vulkan query vector capacity overflows admission"};
-    }
-    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
-    auto pending_permit = admission.try_reserve(*bound);
-    if (!pending_permit) {
-        throw bioseq::gpu::vulkan::vulkan_runtime_error{
-            "Vulkan query vector physical admission was rejected"};
-    }
-    // Destroy the temporary vector before its permit, including when allocation throws.
-    std::vector<p_value> pending_values;
-    auto* const pending_values_owner = std::addressof(pending_values);
-    auto* const pending_permit_owner = std::addressof(pending_permit);
-    const auto materialization = admission.materialize(
-        *pending_permit,
-        [pending_values_owner, pending_permit_owner, count]() {
-            pending_values_owner->reserve(count);
-            const auto actual = bioseq::common::checked_mul(
-                static_cast<std::uint64_t>(pending_values_owner->capacity()),
-                sizeof(p_value));
-            if (!actual || *actual > (*pending_permit_owner)->bytes()) {
-                throw std::length_error{"Vulkan query allocation exceeds admitted capacity"};
-            }
-            (*pending_permit_owner)->shrink_to(*actual);
-            std::uint64_t fully_touched = 0u;
-            if constexpr (std::is_trivially_copyable_v<p_value> &&
-                          std::is_default_constructible_v<p_value>) {
-                pending_values_owner->resize(pending_values_owner->capacity());
-                std::memset(pending_values_owner->data(),
-                            0,
-                            static_cast<std::size_t>(*actual));
-                pending_values_owner->clear();
-                fully_touched = *actual;
-            }
-            return bioseq::parallelism::memory_materialization_snapshot{
-                .actual_allocation_bytes = *actual,
-                .fully_touched_bytes = fully_touched,
-                .is_host_visible = true,
-                .is_host_coherent = true,
-                .is_process_footprint_reflected = true,
-            };
-        });
-    const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
-    if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
-        materialization.admitted_bytes != actual ||
-        materialization.is_permit_released == static_cast<bool>(*pending_permit)) {
-        throw std::logic_error{"Vulkan query materialization did not reconcile physical storage"};
-    }
-    values.swap(pending_values);
-    retained_permit = std::move(*pending_permit);
-}
 
 /**
  * Keeps the statement plan, packed query copies, and GPU sketches alive while
@@ -342,7 +275,7 @@ void prepare_vulkan_query_route_rows(
     using gpu_row_alphabet = typename state_type::gpu_row_alphabet;
     using gpu_row_view = typename state_type::gpu_row_view;
     auto& gpu_query_admitted_owners = state.gpu_query_admitted_owners;
-    prepare_vulkan_query_host_capacity(gpu_query_admitted_owners,
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(gpu_query_admitted_owners,
         state.gpu_query_admitted_owners_permit, batch_size);
     auto& gpu_query_recipe_views = state.gpu_query_recipe_views;
     auto& gpu_target_recipe_views = state.gpu_target_recipe_views;
@@ -387,13 +320,17 @@ void prepare_vulkan_query_route_rows(
                     throw bioseq::gpu::vulkan::vulkan_runtime_error(
                         "Vulkan query recipe packed-region admission was rejected");
                 }
-                gpu_query_admitted_owners.push_back(bioseq::storage::materialize_packed_sequence(
+                auto materialized = bioseq::storage::materialize_packed_sequence(
                     original,
                     0u,
                     original.bp_size(),
                     storage_unit_byte_width,
                     std::move(*permit),
-                    bioseq::storage::packed_materialization_policy::require_native_copy));
+                    bioseq::storage::packed_materialization_policy::require_native_copy);
+                if (!materialized) bioseq::postgres::support::invoke_pg_as_cpp([] {
+                    ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq GPU query source read failed during materialization")));
+                });
+                gpu_query_admitted_owners.push_back(std::move(*materialized));
                 gpu_query_resident[row] = gpu_query_admitted_owners.size() - 1u;
                 gpu_query_recipe_views[row] = gpu_query_admitted_owners.back().view();
             }
@@ -412,7 +349,7 @@ void prepare_vulkan_query_route_rows(
     auto& query_sketch_authority = state.query_sketch_authority;
     auto& query_sidecars = state.query_sidecars;
     auto& row_to_query_index = state.row_to_query_index;
-    prepare_vulkan_query_host_capacity(row_to_query_index,
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(row_to_query_index,
         state.row_to_query_index_permit, batch_size);
     row_to_query_index.assign(batch_size, std::numeric_limits<std::uint32_t>::max());
     bioseq::parallelism::memory_permit batch_query_uploads_permit;
@@ -422,8 +359,8 @@ void prepare_vulkan_query_route_rows(
     };
     const std::uint64_t gpu_query_sketch_begin_ns = gpu_batch_now_ns();
 
-    prepare_vulkan_query_host_capacity(query_sidecars, state.query_sidecars_permit, batch_size);
-    prepare_vulkan_query_host_capacity(
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(query_sidecars, state.query_sidecars_permit, batch_size);
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
         batch_query_uploads, batch_query_uploads_permit, batch_size);
     for (std::size_t local_row = 0u; local_row < batch_size; ++local_row) {
         const std::size_t row_index = submitted_rows.first_row + local_row;

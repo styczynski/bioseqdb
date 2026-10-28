@@ -1480,6 +1480,8 @@ template<bool QueryReversed, sequence_alphabet Alphabet>
             const auto compared = count_equal_sequence_symbols<QueryReversed>(
                 query, target, query_start + query_position, target_start + target_position,
                 run.length, counter);
+            if (!compared.valid_ranks)
+                return std::unexpected(cigar_error{cigar_error_code::invalid_encoding, run_index});
             edits += run.length - compared.equal_symbols;
         } else if (role != cigar_role::paired_equal) {
             edits += run.length;
@@ -1510,6 +1512,8 @@ template<bool QueryReversed, sequence_alphabet Alphabet>
     const auto common_length = std::min(query_length, target_length);
     const auto compared = count_equal_sequence_symbols<QueryReversed>(
         query, target, query_start, target_start, common_length, counter);
+    if (!compared.valid_ranks)
+        return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
     return std::max(query_length, target_length) - compared.equal_symbols;
 }
 

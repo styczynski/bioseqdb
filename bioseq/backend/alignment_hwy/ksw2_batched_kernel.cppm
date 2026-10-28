@@ -27,6 +27,7 @@ import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.dispatch_contract;
+import bioseq.simd.utils;
 import bioseq.highway.sources.ksw2;
 import bioseq.highway.sources.alignment_utils;
 import bioseq.highway.sources.simd_utils;

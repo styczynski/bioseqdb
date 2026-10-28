@@ -40,6 +40,7 @@ import :packed_output;
 import :conversion;
 import bioseq.common.logging;
 import bioseq.postgres.support;
+import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.simd;
 import bioseq.sequences.cigar;
@@ -1282,9 +1283,17 @@ text* seq_send(
                         descriptor.storage_unit_byte_width,
                         [&view, &buffer, descriptor,
                          unit_count]<class p_instance>() {
-                            stream_view_to_wire<p_instance>(
-                                view, buffer, descriptor.bp_length,
-                                unit_count);
+                            using alphabet = typename std::remove_cvref_t<decltype(view)>::alphabet_type;
+                            if constexpr (std::same_as<alphabet, typename p_instance::alphabet_type>) {
+                                stream_view_to_wire<p_instance>(
+                                    view, buffer, descriptor.bp_length,
+                                    unit_count);
+                            } else {
+                                bioseq::postgres::support::invoke_pg_as_cpp([] {
+                                    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                        errmsg("bioseq biological wire alphabet dispatch mismatch")));
+                                });
+                            }
                         });
                     return std::monostate{};
                 });

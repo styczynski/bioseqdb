@@ -842,6 +842,13 @@ export {
                 host_timing_dst_->transition_region_to_alignment_result_host_stage(
                     host_stage_now_ns(), enabled || parameters().compute_mapq);
             }
+            const auto reject_alignment = [this, &token, &anchors](alignment_contract_error error) {
+                if (stats_dst_ != nullptr) stats_dst_->record_failure(error);
+                return std::move(token).emit_batch_pair(std::span<alignment_region>{},
+                    std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()});
+            };
+            if (stats_dst_ != nullptr && stats_dst_->failure)
+                return reject_alignment(*stats_dst_->failure);
             if (enabled) {
                 std::optional<route_worker_context_factory> admitted_workers;
                 bioseq::parallelism::worker_context_factory worker_factory{};
@@ -872,8 +879,9 @@ export {
                             parameters().bandwidth * 1.5 + 1.0);
                         const auto workspace_admission =
                             attempt_memory->alignment_workspace_diagnostic_snapshot();
+                        std::expected<std::size_t, alignment_contract_error> admitted_count{worker_count};
                         if constexpr (p_kernel::emits_scalar_ksw2_execution_stats) {
-                            worker_count = admitted_alignment_worker_concurrency<
+                            admitted_count = admitted_alignment_worker_concurrency<
                                 base_alignment_algorithm::ksw2>(
                                     std::span<const alignment_region>{
                                         regions.data(), regions.size()},
@@ -888,9 +896,9 @@ export {
                                     /*sequences_worker_shareable=*/true,
                                     static_cast<std::size_t>(pool.maximum_concurrency()),
                                     workspace_admission.allocatable_after_reservations_bytes,
-                                    workspace_scratch);
+                                    workspace_scratch, sm->summary().maximum);
                         } else if constexpr (p_kernel::emits_block_execution_stats) {
-                            worker_count = admitted_alignment_worker_concurrency<
+                            admitted_count = admitted_alignment_worker_concurrency<
                                 base_alignment_algorithm::block_aligner>(
                                     std::span<const alignment_region>{
                                         regions.data(), regions.size()},
@@ -905,8 +913,10 @@ export {
                                     /*sequences_worker_shareable=*/true,
                                     static_cast<std::size_t>(pool.maximum_concurrency()),
                                     workspace_admission.allocatable_after_reservations_bytes,
-                                    workspace_scratch);
+                                    workspace_scratch, sm->summary().maximum);
                         }
+                        if (!admitted_count) return reject_alignment(admitted_count.error());
+                        worker_count = *admitted_count;
                         if (worker_count == 0u) {
                             const std::uint64_t largest_workspace_bytes =
                                 workspace_scratch.empty() ? 0u : workspace_scratch.front();
@@ -943,7 +953,7 @@ export {
                         std::abort();
                     }
                     scalar_pipeline_execution_stats call_stats{};
-                    p_kernel::template call<p_alphabet>(
+                    const auto aligned = p_kernel::template call<p_alphabet>(
                         std::span<alignment_region>{regions.data(), regions.size()},
                         std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()},
                         query_seq_,
@@ -954,6 +964,7 @@ export {
                         /*forbidden_block_stats=*/nullptr,
                         &call_stats,
                         worker_factory);
+                    if (!aligned) return reject_alignment(aligned.error());
                     stats_dst_->record_scalar_pipeline_execution_stats(call_stats);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                     stats_dst_->record_completed_base_alignment_algorithm_identity(
@@ -966,7 +977,7 @@ export {
                         std::abort();
                     }
                     ksw2_batched_execution_stats call_stats{};
-                    p_kernel::template call<p_alphabet>(
+                    const auto aligned = p_kernel::template call<p_alphabet>(
                         std::span<alignment_region>{regions.data(), regions.size()},
                         std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()},
                         query_seq_,
@@ -977,6 +988,7 @@ export {
                         /*forbidden_block_stats=*/nullptr,
                         /*scalar_execution_stats=*/nullptr,
                         &call_stats);
+                    if (!aligned) return reject_alignment(aligned.error());
                     if (!call_stats.is_coherent(
                             /*require_nonempty_work=*/false)) {
                         bioseq_log<logging_level::error>(
@@ -991,7 +1003,7 @@ export {
                         std::abort();
                     }
                     block_aligner_execution_stats call_stats{};
-                    p_kernel::template call<p_alphabet>(
+                    const auto aligned = p_kernel::template call<p_alphabet>(
                         std::span<alignment_region>{regions.data(), regions.size()},
                         std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()},
                         query_seq_,
@@ -1002,6 +1014,7 @@ export {
                         &call_stats,
                         /*scalar_execution_stats=*/nullptr,
                         worker_factory);
+                    if (!aligned) return reject_alignment(aligned.error());
                     if (!call_stats.is_internally_consistent()) {
                         bioseq_log<logging_level::error>(
                             "Block Aligner stage produced a rejected execution stats");
@@ -1013,7 +1026,7 @@ export {
                         base_alignment_algorithm::block_aligner);
 #endif
                 } else {
-                    p_kernel::template call<p_alphabet>(
+                    const auto aligned = p_kernel::template call<p_alphabet>(
                         std::span<alignment_region>{regions.data(), regions.size()},
                         std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()},
                         query_seq_,
@@ -1023,6 +1036,7 @@ export {
                         parameters(),
                         /*forbidden_block_stats=*/nullptr,
                         /*scalar_execution_stats=*/nullptr);
+                    if (!aligned) return reject_alignment(aligned.error());
                 }
             }
             return std::move(token).emit_batch_pair(
@@ -1156,6 +1170,7 @@ export {
             // Conversion moves each CIGAR into the result. The original region
             // remains, valid for destruction by the owner of this span.
             for (auto& region_slot : regions) {
+                if (dst_->failure) break;
                 dst_->results.push_back(
                     region_to_match_result(std::move(region_slot), query_len, target_len));
             }

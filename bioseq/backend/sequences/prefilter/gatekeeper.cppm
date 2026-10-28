@@ -20,6 +20,7 @@ module;
 export module bioseq.prefilter.gatekeeper;
 
 import bioseq.sequences;
+import bioseq.storage.lazy_sequence;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.prefilter.types;
 
@@ -334,23 +335,30 @@ export namespace bioseq::prefilter {
  * @param input Query/target rank buffers and slices.
  * @return One result per job. Out-of-bounds slices are kept without evaluation.
  */
-[[nodiscard]] inline std::vector<prefilter_result> gatekeeper_scalar_batch(
+[[nodiscard]] inline prefilter_batch_result gatekeeper_scalar_batch(
     const prefilter_batch_input& input)
 {
-    std::vector<prefilter_result> results;
-    results.reserve(input.jobs.size());
-    for (const prefilter_job& job : input.jobs) {
-        if (!prefilter_job_in_bounds(input, job)) {
-            results.push_back(unsupported_prefilter_result());
-            continue;
-        }
-        const std::span<const std::uint8_t> query =
-            input.query_ranks.subspan(job.query_offset, job.query_length);
-        const std::span<const std::uint8_t> target =
-            input.target_ranks.subspan(job.target_offset, job.target_length);
-        results.push_back(gatekeeper_scalar(query, target, job.max_edits));
-    }
-    return results;
+    return evaluate_prefilter_batch(input,
+        [](const prefilter_rank_window& query, const prefilter_rank_window& target,
+           const prefilter_job& job) {
+            if (job.query_length != job.target_length) {
+                const auto difference = job.query_length > job.target_length
+                    ? job.query_length - job.target_length : job.target_length - job.query_length;
+                return make_prefilter_result(difference, prefilter_status::conservative_unequal,
+                    difference <= job.max_edits);
+            }
+            if (job.query_length == 0u) {
+                return make_prefilter_result(0u, prefilter_status::success, true);
+            }
+            if (job.query_length > gatekeeper_detail::k_maximum_length ||
+                job.max_edits > gatekeeper_detail::k_maximum_edits) {
+                return unsupported_prefilter_result();
+            }
+            const auto target_ranks = target.window(0u, job.target_length);
+            const auto query_ranks = query.window(0u, job.query_length);
+            if (query.failure->has_value()) return unsupported_prefilter_result();
+            return gatekeeper_scalar(query_ranks, target_ranks, job.max_edits);
+        });
 }
 
 /**
@@ -364,7 +372,7 @@ export namespace bioseq::prefilter {
  */
 template <supports_compact_sequence_range p_query_range_type,
           supports_compact_sequence_range p_target_range_type>
-[[nodiscard]] inline prefilter_result gatekeeper_scalar_compact(
+[[nodiscard]] inline std::expected<prefilter_result, prefilter_input_failure> gatekeeper_scalar_compact(
     const compact_sequence_range<p_query_range_type>& query,
     const compact_sequence_range<p_target_range_type>& target,
     std::uint32_t max_edits)
@@ -377,12 +385,20 @@ template <supports_compact_sequence_range p_query_range_type,
         std::same_as<query_alphabet, target_alphabet>,
         "GateKeeper compact operands must have identical alphabets");
 
-    const std::vector<std::uint8_t> query_ranks = query.to_encoded_vector();
-    const std::vector<std::uint8_t> target_ranks = target.to_encoded_vector();
-    return gatekeeper_scalar(
-        std::span<const std::uint8_t>{query_ranks},
-        std::span<const std::uint8_t>{target_ranks},
-        max_edits);
+    if (query.bp_size() > (std::numeric_limits<std::uint32_t>::max)() ||
+        target.bp_size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        return unsupported_prefilter_result();
+    }
+    const std::array query_sources{storage::make_borrowed_rank_source(query)};
+    const std::array target_sources{storage::make_borrowed_rank_source(target)};
+    const std::array jobs{prefilter_job{
+        .query_length = static_cast<std::uint32_t>(query.bp_size()),
+        .target_length = static_cast<std::uint32_t>(target.bp_size()),
+        .max_edits = max_edits,
+    }};
+    auto results = gatekeeper_scalar_batch({query_sources, target_sources, jobs});
+    if (!results) return std::unexpected(results.error());
+    return results->front();
 }
 
 } // namespace bioseq::prefilter

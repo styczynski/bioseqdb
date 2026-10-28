@@ -997,7 +997,7 @@ void prepare_statement_mpf_query_hash_union(
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "MPF query union has no matching generated hash owner");
     }
-    prepare_vulkan_query_host_capacity(
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
         selected_hashes,
         selected_hashes_permit,
         static_cast<std::size_t>(total_query_minimizers));
@@ -1111,7 +1111,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
         ? bioseq::minimizers::minimizer_scalar_width::u32
         : bioseq::minimizers::minimizer_scalar_width::u64;
     constexpr std::uint32_t alphabet_size = static_cast<std::uint32_t>(
-        compact_sequence_range<p_sequence>::traits::alphabet_size_n);
+        compact_sequence_range<p_sequence>::traits::alphabet_size);
     if (
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         prepared_target.transient_target_spill_receipt.has_value() ||
@@ -1121,7 +1121,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
 #endif
         algorithm_identity.hash_width != expected_width ||
         !bioseq::indexing::gpu_source_direct_tuple_supported<p_minimizer_type>(
-            alphabet_size, params.kmer_size, params.window_size)) {
+            alphabet_size, alphabet_code, params.kmer_size, params.window_size)) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "no-index MPF query union has no eligible sorted-dense generated record");
     }
@@ -1146,6 +1146,8 @@ void prepare_transient_mpf_query_union_resident_for_hash(
                                   0u,
                                   0u,
                                   alphabet_size,
+                                  bioseq::minimizers::minimizer_profile_alphabet_id<
+                                      typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                                   static_cast<std::uint32_t>(params.kmer_size),
                                   static_cast<std::uint32_t>(params.window_size));
         prepared_target.canonical_empty = true;
@@ -1192,6 +1194,8 @@ void prepare_transient_mpf_query_union_resident_for_hash(
                                   0u,
                                   0u,
                                   alphabet_size,
+                                  bioseq::minimizers::minimizer_profile_alphabet_id<
+                                      typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                                   static_cast<std::uint32_t>(params.kmer_size),
                                   static_cast<std::uint32_t>(params.window_size));
         prepared_target.canonical_empty = true;
@@ -1204,7 +1208,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
 
     bioseq::parallelism::memory_permit occurrence_counts_permit;
     std::vector<std::uint64_t> occurrence_counts;
-    prepare_vulkan_query_host_capacity(
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
         occurrence_counts,
         occurrence_counts_permit,
         selected_hashes.size());
@@ -1229,6 +1233,8 @@ void prepare_transient_mpf_query_union_resident_for_hash(
                     prepared_target.target_bp_size,
                     prepared_target.operation_identity,
                     alphabet_size,
+                    bioseq::minimizers::minimizer_profile_alphabet_id<
+                        typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                     static_cast<std::uint32_t>(params.kmer_size),
                     static_cast<std::uint32_t>(params.window_size));
     const auto completed_replay = replay.execution_receipt();
@@ -1324,12 +1330,8 @@ void prepare_transient_mpf_query_union_resident(
             "no-index MPF generated target identity does not match the query record");
     }
     using layout = typename p_minimizer_type::layout_type;
-    constexpr std::uint32_t available_hash_bits =
-        layout::k_storage_bits == 128u
-            ? std::min<std::uint32_t>(layout::k_hash_bits, 56u)
-            : layout::k_hash_bits;
-    constexpr std::uint32_t selected_hash_bits =
-        std::min<std::uint32_t>(2u * layout::k_physical_kmer_size, 56u);
+    constexpr std::uint32_t available_hash_bits = layout::k_hash_bits;
+    constexpr std::uint32_t selected_hash_bits = layout::k_hash_bits;
     static_assert(selected_hash_bits > 0u && selected_hash_bits <= available_hash_bits &&
                   available_hash_bits <= 64u);
     using selected_hash = std::conditional_t<
@@ -1414,7 +1416,7 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
 
     const auto& params = execution_plan->frozen_parameters;
     constexpr std::uint32_t alphabet_size = static_cast<std::uint32_t>(
-        compact_sequence_range<p_sequence>::traits::alphabet_size_n);
+        compact_sequence_range<p_sequence>::traits::alphabet_size);
     if (source_positions == 0u || selected_hashes.empty()) {
         prepared_target.resident_key =
             bioseq::indexing::make_gpu_mapped_fragment_sorted_dense_key<
@@ -1424,6 +1426,8 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
                                   0u,
                                   0u,
                                   alphabet_size,
+                                  bioseq::minimizers::minimizer_profile_alphabet_id<
+                                      typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                                   static_cast<std::uint32_t>(params.kmer_size),
                                   static_cast<std::uint32_t>(params.window_size));
         prepared_target.canonical_empty = true;
@@ -1432,7 +1436,7 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
 
     bioseq::parallelism::memory_permit occurrence_counts_permit;
     std::vector<std::uint64_t> occurrence_counts;
-    prepare_vulkan_query_host_capacity(
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
         occurrence_counts,
         occurrence_counts_permit,
         selected_hashes.size());
@@ -1461,6 +1465,8 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
                                   0u,
                                   0u,
                                   alphabet_size,
+                                  bioseq::minimizers::minimizer_profile_alphabet_id<
+                                      typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                                   static_cast<std::uint32_t>(params.kmer_size),
                                   static_cast<std::uint32_t>(params.window_size));
         prepared_target.canonical_empty = true;
@@ -1478,6 +1484,8 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
                     prepared_target.target_bp_size,
                     prepared_target.operation_identity,
                     alphabet_size,
+                    bioseq::minimizers::minimizer_profile_alphabet_id<
+                        typename compact_sequence_range<p_sequence>::traits::alphabet_type>(),
                     static_cast<std::uint32_t>(params.kmer_size),
                     static_cast<std::uint32_t>(params.window_size));
     if (!materialized || !materialized->resident ||
@@ -1536,12 +1544,8 @@ void prepare_persisted_mpf_query_union_resident(
             "persisted MPF physical query record changed before target projection");
     }
     using layout = typename p_minimizer_type::layout_type;
-    constexpr std::uint32_t available_hash_bits =
-        layout::k_storage_bits == 128u
-            ? std::min<std::uint32_t>(layout::k_hash_bits, 56u)
-            : layout::k_hash_bits;
-    constexpr std::uint32_t selected_hash_bits =
-        std::min<std::uint32_t>(2u * layout::k_physical_kmer_size, 56u);
+    constexpr std::uint32_t available_hash_bits = layout::k_hash_bits;
+    constexpr std::uint32_t selected_hash_bits = layout::k_hash_bits;
     static_assert(selected_hash_bits > 0u && selected_hash_bits <= available_hash_bits &&
                   available_hash_bits <= 64u);
     using selected_hash = std::conditional_t<
@@ -1741,6 +1745,20 @@ void process_vulkan_mpf_seed_route(
                     "empty MPF target failed canonical job publication");
             }
         } else {
+            const p_sequence_header* const row_query_header =
+                per_row_query_mode ? (*per_row_query_hdrs)[row] : query_hdr;
+            const bool recipe_query = state.gpu_query_recipe_views[row].has_value();
+            if ((row_query_header == nullptr) == !recipe_query) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                    "MPF native verification requires one query source owner");
+            }
+            std::optional<compact_sequence_range<p_sequence>> flat_query;
+            const row_view query_view = recipe_query
+                ? *state.gpu_query_recipe_views[row]
+                : [flat_query_owner = std::addressof(flat_query), row_query_header]() -> row_view {
+                      flat_query_owner->emplace(*row_query_header);
+                      return bioseq::storage::make_lazy_sequence_view(**flat_query_owner);
+                  }();
             const auto query_minimizers = state.host_query_minimizers(query_index);
             const auto& query_record = state.query_records[query_index];
             const auto query_device_span = state.query_minimizer_device_span.subspan(
@@ -1750,6 +1768,8 @@ void process_vulkan_mpf_seed_route(
                 query_device_span,
                 static_cast<const bioseq::indexing::minimizer_hashmap_fragment_index*>(nullptr),
                 wave_resident,
+                query_view,
+                target_view,
                 params.vulkan_enabled,
                 state.query_sidecars[query_index].query_len,
                 params.max_occ,
@@ -1917,7 +1937,7 @@ void process_vulkan_mps_seed_route(
     ) {
     const auto& params = execution_plan->frozen_parameters;
     const bool target_build_selected = params.vulkan_gpu_index_build_enabled;
-    if (!same_statement_owner(prepared_target.execution_plan, execution_plan) ||
+    if (batch_size == 0u || !same_statement_owner(prepared_target.execution_plan, execution_plan) ||
         !prepared_target.source_ready() || prepared_target.target_bp_size == 0u ||
         prepared_target.query_count < batch_size ||
         prepared_target.dispatched_query_count > prepared_target.query_count ||
@@ -1932,23 +1952,30 @@ void process_vulkan_mps_seed_route(
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "MPS Vulkan seed route has no matching grouped-SoA source owner");
     }
+    using state_type = vulkan_query_batch_state<p_sequence, p_batch_capacity, p_minimizer_type>;
+    using row_view = typename state_type::gpu_row_view;
+    using alphabet_type = typename state_type::gpu_row_alphabet;
+    using native_window_owner = bioseq::gpu::vulkan::admitted_sequence_detail::
+        canonical_u32_window_batch<alphabet_type>;
+    const std::size_t first_row = state.query_sidecars.front().row_index;
+    std::optional<compact_sequence_range<p_sequence>> flat_target;
+    const bool recipe_target = state.gpu_target_recipe_views[first_row].has_value();
+    const p_sequence_header* const flat_target_header = target_hdrs[first_row];
+    if ((flat_target_header == nullptr) == !recipe_target) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "MPS native verification requires one exclusive flat or source owner");
+    }
+    const row_view target_view = recipe_target
+        ? *state.gpu_target_recipe_views[first_row]
+        : [flat_target_owner = std::addressof(flat_target), flat_target_header]() -> row_view {
+              flat_target_owner->emplace(*flat_target_header);
+              return bioseq::storage::make_lazy_sequence_view(**flat_target_owner);
+          }();
+    if (target_view.bp_size() != prepared_target.target_bp_size) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "MPS native target changed its statement length");
+    }
     if (!prepared_target.persisted && !prepared_target.ready()) {
-        using row_view = typename vulkan_query_batch_state<
-            p_sequence, p_batch_capacity, p_minimizer_type>::gpu_row_view;
-        const std::size_t first_row = state.query_sidecars.front().row_index;
-        std::optional<compact_sequence_range<p_sequence>> flat_target;
-        const bool recipe_target = state.gpu_target_recipe_views[first_row].has_value();
-        const p_sequence_header* const flat_target_header = target_hdrs[first_row];
-        if ((flat_target_header == nullptr) == !recipe_target) {
-            throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                "transient MPS target requires one exclusive flat or source owner");
-        }
-        const row_view target_view = recipe_target
-            ? *state.gpu_target_recipe_views[first_row]
-            : [flat_target_owner = std::addressof(flat_target), flat_target_header]() -> row_view {
-                  flat_target_owner->emplace(*flat_target_header);
-                  return bioseq::storage::make_lazy_sequence_view(**flat_target_owner);
-              }();
         prepare_transient_mps_resident<p_sequence, p_minimizer_type>(runtime,
                                                                      alphabet_code,
                                                                      storage_unit_byte_width,
@@ -1976,7 +2003,7 @@ void process_vulkan_mps_seed_route(
 
     bioseq::parallelism::memory_permit submitted_ordinals_permit;
     std::vector<std::uint32_t> submitted_ordinals;
-    prepare_vulkan_query_host_capacity(
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
         submitted_ordinals, submitted_ordinals_permit, batch_size);
     for (std::size_t query_index = 0u; query_index < batch_size; ++query_index) {
         const auto& sidecar = state.query_sidecars[query_index];
@@ -1991,7 +2018,58 @@ void process_vulkan_mps_seed_route(
         }
         submitted_ordinals.push_back(sidecar.ordinal);
     }
+    bioseq::parallelism::memory_permit native_query_owners_permit;
+    std::vector<native_window_owner> native_query_owners;
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(
+        native_query_owners, native_query_owners_permit, batch_size);
+    bioseq::parallelism::memory_permit native_queries_permit;
+    std::vector<bioseq::gpu::vulkan::gpu_native_sequence_upload> native_queries;
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(native_queries, native_queries_permit, batch_size);
+    for (std::size_t query_index = 0u; query_index < batch_size; ++query_index) {
+        const std::size_t row = state.query_sidecars[query_index].row_index;
+        const p_sequence_header* const row_query_header =
+            per_row_query_mode ? (*per_row_query_hdrs)[row] : query_hdr;
+        const bool recipe_query = state.gpu_query_recipe_views[row].has_value();
+        if ((row_query_header == nullptr) == !recipe_query) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "MPS native verification requires one query source owner");
+        }
+        std::optional<compact_sequence_range<p_sequence>> flat_query;
+        const row_view query_view = recipe_query
+            ? *state.gpu_query_recipe_views[row]
+            : [flat_query_owner = std::addressof(flat_query), row_query_header]() -> row_view {
+                  flat_query_owner->emplace(*row_query_header);
+                  return bioseq::storage::make_lazy_sequence_view(**flat_query_owner);
+              }();
+        const auto minimizers = state.host_query_minimizers(query_index);
+        native_query_owners.push_back(bioseq::seeding::prepare_native_query_seed_windows(
+            query_view, minimizers.as_span(), static_cast<std::uint32_t>(params.kmer_size)));
+        native_queries.push_back(native_query_owners.back().view());
+    }
+    const auto native_rank_policy =
+        bioseq::gpu::vulkan::make_vulkan_rank_lut<compact_sequence_range<p_sequence>>();
+
+    // The runtime invokes this provider on the calling thread after producing
+    // candidate intervals. A completed verification fence precedes reuse of the owner.
+    struct native_target_state {
+        row_view source;
+        std::optional<native_window_owner> windows;
+    } native_target{target_view, std::nullopt};
+    const bioseq::gpu::vulkan::gpu_native_sequence_provider native_target_provider{
+        .context = std::addressof(native_target),
+        .prepare = [](void* context,
+                      std::span<const bioseq::gpu::vulkan::sequence_upload_interval> intervals)
+            -> bioseq::gpu::vulkan::gpu_native_sequence_upload {
+            auto& target = *static_cast<native_target_state*>(context);
+            target.windows.emplace(
+                bioseq::gpu::vulkan::prepare_native_seed_windows(target.source, intervals));
+            return target.windows->view();
+        },
+        .symbol_count = target_view.bp_size(),
+    };
     bioseq::gpu::vulkan::gpu_seed_query_inputs query_inputs{
+        .native_queries = native_queries,
+        .native_rank_policy = &native_rank_policy,
         .host_minimizer_bytes = {},
         .device_minimizer_words = state.query_minimizer_device_span.words(),
         .minimizer_count =
@@ -2024,6 +2102,7 @@ void process_vulkan_mps_seed_route(
     auto readback = runtime.run_grouped_soa_seed_anchor_roundtrip(
         prepared_target.resident_view,
         query_inputs,
+        native_target_provider,
         params.max_occ,
         static_cast<std::uint32_t>(params.kmer_size),
         std::move(state.query_sketch_authority));
@@ -2177,7 +2256,7 @@ void process_ordinary_vulkan_scan_route(
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "ordinary Vulkan route received a reused proof owner");
     }
-    prepare_vulkan_query_host_capacity(route_completion.row_proofs,
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(route_completion.row_proofs,
                                        route_completion.row_proofs_permit,
                                        batch_size);
 #endif
@@ -2185,7 +2264,7 @@ void process_ordinary_vulkan_scan_route(
     auto& hook = scanner_pg_ctx->ordinary_vulkan_target_preparation;
     bioseq::parallelism::memory_permit row_completion_permit;
     std::vector<canonical_suffix_row_completion> row_completion;
-    prepare_vulkan_query_host_capacity(row_completion, row_completion_permit, 1u);
+    bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(row_completion, row_completion_permit, 1u);
     for (std::size_t row = 0u; row < batch_size; ++row) {
         bioseq::postgres::support::invoke_pg_as_cpp([] { CHECK_FOR_INTERRUPTS(); });
         vulkan_query_batch_state<p_sequence, p_batch_capacity, p_minimizer_type> query_state;
@@ -2257,7 +2336,7 @@ void process_ordinary_vulkan_scan_route(
             bioseq::parallelism::memory_permit completed_seed_operations_permit;
             std::vector<bioseq::gpu::vulkan::runtime_pipeline_operation_token>
                 completed_seed_operations;
-            prepare_vulkan_query_host_capacity(completed_seed_operations,
+            bioseq::parallelism::prepare_admitted_vector_capacity<bioseq::gpu::vulkan::vulkan_runtime_error>(completed_seed_operations,
                                                completed_seed_operations_permit,
                                                1u);
             bioseq::gpu::vulkan::device_query_sketch_authorization

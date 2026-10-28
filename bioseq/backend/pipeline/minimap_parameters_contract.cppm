@@ -1100,7 +1100,7 @@ struct minimap2_parameters {
         ::bioseq::simd::base_alignment_algorithm::block_aligner;
     /** Minimizer-extraction implementation selected for the request. */
     ::bioseq::simd::minimizer_algorithm minimizer_algorithm =
-        ::bioseq::simd::minimizer_algorithm::scalar;
+        ::bioseq::simd::minimizer_algorithm::bounded_nthash_simd;
 
     /** Collect optional execution timings and counters. */
     bool enable_profiling = false;
@@ -1246,6 +1246,21 @@ using statement_execution_plan_owner = std::shared_ptr<const statement_execution
             "E2E execution excludes prefilter and legacy batched alignment");
     }
 #endif
+    if (frozen_parameters.prefilter_enabled) {
+        if (!frozen_parameters.exact_edit_filter_enabled || !frozen_parameters.compute_edit_distance) {
+            throw std::invalid_argument{
+                "rejecting prefilter requires an exact edit-distance predicate and exact edit computation"};
+        }
+        const auto upper = frozen_parameters.exact_edit_filter_exclusive_upper_bound;
+        if (upper <= 0 || static_cast<std::uint64_t>(upper - 1) >
+                              (std::numeric_limits<std::uint32_t>::max)()) {
+            // The final exact predicate handles impossible/large bounds; never truncate E.
+            frozen_parameters.prefilter_enabled = false;
+        } else if (frozen_parameters.prefilter_max_edits != static_cast<std::uint32_t>(upper - 1)) {
+            throw std::invalid_argument{
+                "prefilter inclusive edit bound must equal the exact exclusive bound minus one"};
+        }
+    }
     if (frozen_parameters.kmer_size <= 0 || frozen_parameters.window_size <= 0) {
         throw std::invalid_argument("statement plan requires positive minimizer k and w");
     }

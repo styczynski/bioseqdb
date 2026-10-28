@@ -1018,6 +1018,13 @@ enum class transient_cpu_target_generation_representation : std::uint8_t {
  */
 struct match_result_collection {
     match_result_vector results;
+    std::optional<alignment_contract_error> failure{};
+
+    /** Retain the first typed execution failure and discard every partial row. */
+    void record_failure(alignment_contract_error error) noexcept {
+        if (!failure) failure = error;
+        results.clear();
+    }
     two_stack_execution_stats exact_simd_query_execution_stats{};
     two_stack_execution_stats exact_simd_target_execution_stats{};
     bounded_nthash_execution_stats bounded_nthash_query_execution_stats{};
@@ -1571,6 +1578,7 @@ struct match_result_collection {
 #else
     void combine_execution_stats(const match_result_collection& other) noexcept {
 #endif
+        if (other.failure) record_failure(*other.failure);
         if (other.exact_simd_query_execution_stats_available) {
             record_exact_simd_query_execution_stats(other.exact_simd_query_execution_stats);
         }
@@ -1928,7 +1936,7 @@ struct match_result_collection {
             !bounded_nthash_target_execution_stats_available &&
             bounded_nthash_query_execution_stats == bounded_nthash_execution_stats{} &&
             bounded_nthash_target_execution_stats == bounded_nthash_execution_stats{};
-        const bool sketch_valid = [this, selected_minimizer, observed_minimizer,
+        const bool sketch_valid = [this, selected_minimizer,
                                     require_target_sketch,
                                     detailed_sketch_stats_absent]() noexcept {
             switch (selected_minimizer) {
@@ -1943,13 +1951,6 @@ struct match_result_collection {
                            selected_minimizer, require_target_sketch,
                            /*require_nonempty_vector_work=*/true);
             case minimizer_algorithm::simd_minimap2_reference:
-                if (observed_minimizer == minimizer_algorithm::scalar) {
-                    // DNA5 can execute the scalar sketcher when the reference SIMD
-                    // sketcher was requested. Keep the recorded effective choice.
-                    return is_selected_scalar_sketch_component_consistent(
-                               require_target_sketch, /*require_nonempty_work=*/true) ||
-                           detailed_sketch_stats_absent;
-                }
                 return detailed_sketch_stats_absent;
             case minimizer_algorithm::vulkan_minimap_integer:
                 return detailed_sketch_stats_absent;

@@ -628,25 +628,28 @@ template <class p_alphabet, std::size_t p_width>
     return operations;
 }
 
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna4, 8>() noexcept;
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna5, 8>() noexcept;
-#endif
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna4, 1>() noexcept;
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna4, 2>() noexcept;
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna4, 4>() noexcept;
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna5, 1>() noexcept;
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna5, 2>() noexcept;
-template const batch_processor::cpu_preparation_typmod_operations&
-typmod_ops<seq::dna5, 4>() noexcept;
-#endif
+/** Select the already-instantiated registry/width factory without duplicating an alphabet list. */
+[[nodiscard]] const batch_processor::cpu_preparation_typmod_operations& typmod_ops(
+    const std::uint8_t alphabet_code, const std::size_t storage_unit_byte_width) noexcept {
+    using factory_type = const batch_processor::cpu_preparation_typmod_operations& (*)() noexcept;
+    static constexpr auto factories = []<class... p_entries>(std::tuple<p_entries...>*) {
+        return std::array{
+            []<class p_entry>() {
+                return []<std::size_t... p_widths>(supported_storage_unit_byte_widths<p_widths...>*) {
+                    return std::array<factory_type, sizeof...(p_widths)>{
+                        &typmod_ops<typename p_entry::alphabet_type, p_widths>...};
+                }(static_cast<pgseq_supported_storage_unit_byte_widths*>(nullptr));
+            }.template operator()<p_entries>()...};
+    }(static_cast<typename pgseq_supported_biological_alphabets::alphabet_entries_tuple*>(nullptr));
+    DEBUG_ASSERT(alphabet_code < factories.size(), "Query-preparation alphabet must be registered");
+    const std::size_t width_index = []<std::size_t... p_widths>(
+        supported_storage_unit_byte_widths<p_widths...>*, const std::size_t width) {
+        constexpr std::array widths{p_widths...};
+        const auto found = std::ranges::find(widths, width);
+        DEBUG_ASSERT(found != widths.end(), "Query-preparation storage width must be registered");
+        return static_cast<std::size_t>(found - widths.begin());
+    }(static_cast<pgseq_supported_storage_unit_byte_widths*>(nullptr), storage_unit_byte_width);
+    return factories[alphabet_code][width_index]();
+}
 
 } // namespace bioseq::simd::cpu_preparation_detail

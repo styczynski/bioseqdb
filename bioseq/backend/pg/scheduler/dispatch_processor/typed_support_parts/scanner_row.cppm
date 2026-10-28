@@ -480,8 +480,8 @@ template <class p_sequence,
                             prepared_layout.effective_algorithm ==
                                 query_execution_layout.effective_algorithm &&
                             prepared_layout.alphabet_id == query_execution_layout.alphabet_id &&
-                            prepared_layout.physical_kmer_size ==
-                                query_execution_layout.physical_kmer_size &&
+                            prepared_layout.hash_bits ==
+                                query_execution_layout.hash_bits &&
                             prepared_layout.hash_width == query_execution_layout.hash_width &&
                             prepared_layout.packed_storage_bits ==
                                 query_execution_layout.packed_storage_bits &&
@@ -752,7 +752,8 @@ template <class p_sequence,
                                             prepared_query_index,
                                             execution_plan,
                                             /*gpu_index_cache=*/nullptr,
-                                            bioseq::indexing::gpu_index_cache_identity{});
+                                            bioseq::indexing::gpu_index_cache_identity{},
+                                            /*allow_gpu_target_index_build=*/false);
                                     match_collection.record_seed_lookup_host_time(
                                         prepare_host_wall_ns);
                                     match_collection.record_fragment_native_query_stats(

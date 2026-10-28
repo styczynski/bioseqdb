@@ -113,7 +113,8 @@ export {
     try_minimizer_resident_packed(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
                                   sequence_size_t from,
                                   sequence_size_t to) {
-        for (const std::uint8_t width : std::array<std::uint8_t, 4>{1u, 2u, 4u, 8u}) {
+        for (const std::uint8_t width : std::array{std::uint8_t{sizeof(std::uint8_t)}, std::uint8_t{sizeof(std::uint16_t)},
+                                                   std::uint8_t{sizeof(std::uint32_t)}, std::uint8_t{sizeof(std::uint64_t)}}) {
             auto descriptor = sequence.try_resident_packed(from, to, width);
             if (descriptor.has_value() && descriptor->leading_symbol_offset == 0u) {
                 return descriptor;
@@ -441,15 +442,16 @@ export {
                         two_stack_continuation_status::non_contiguous_range,
                         "query minimizer sketch admission"};
                 }
-                owner.emplace(bioseq::storage::materialize_packed_sequence(
-                    seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
+                auto materialized = bioseq::storage::materialize_packed_sequence(
+                    seq, 0u, seq.bp_size(), 4u, std::move(*permit));
+                if (!materialized) throw exact_simd_runtime_error{
+                    two_stack_continuation_status::invalid_state, "query minimizer source read failed"};
+                owner.emplace(std::move(*materialized));
                 descriptor = owner->descriptor();
             }
             auto route = ::bioseq::minimizers::two_stack_route::chronological_continuation;
-            if constexpr (std::same_as<p_alphabet, ::seq::dna4> &&
-                          exact_simd_minimizer_representation<p_minimizer>) {
-                if (borrowed_resident && descriptor.storage_unit_width == sizeof(std::uint32_t) &&
-                    w == 10u && k == 15u) [[likely]] {
+            if constexpr (exact_simd_minimizer_representation<p_minimizer>) {
+                if (borrowed_resident && descriptor.leading_symbol_offset == 0u) [[likely]] {
                     route = ::bioseq::minimizers::two_stack_route::resident_vector_stream;
                 }
             }
@@ -536,8 +538,11 @@ export {
                     if (!permit) {
                         throw std::bad_alloc{};
                     }
-                    owner.emplace(bioseq::storage::materialize_packed_sequence(
-                        seq, 0u, seq.bp_size(), requested_storage_width, std::move(*permit)));
+                    auto materialized = bioseq::storage::materialize_packed_sequence(
+                        seq, 0u, seq.bp_size(), requested_storage_width, std::move(*permit));
+                    if (!materialized) throw exact_simd_runtime_error{
+                        two_stack_continuation_status::invalid_state, "reference minimizer source read failed"};
+                    owner.emplace(std::move(*materialized));
                     descriptor = owner->descriptor();
                 }
                 run_reference(descriptor);
@@ -620,11 +625,7 @@ export {
                     "bounded_nthash_simd k/w exceeds its kernel capacity; "
                     "fallback is forbidden");
             }
-            if constexpr (!seqan3::nucleotide_alphabet<p_alphabet>) {
-                throw bounded_nthash_runtime_error(
-                    "bounded_nthash_simd requires a registered nucleotide alphabet; "
-                    "fallback is forbidden");
-            } else {
+            {
                 const std::uint8_t requested_storage_width = execution_layout != nullptr
                     ? execution_layout->packed_storage_bits / 8u
                     : sizeof(std::uint32_t);
@@ -693,20 +694,14 @@ export {
                     }
                     auto owner = bioseq::storage::materialize_packed_sequence(
                         seq, lo_bp, hi_bp, requested_storage_width, std::move(permit));
-                    return run_bounded(owner.descriptor());
+                    if (!owner) throw bounded_nthash_runtime_error("bounded ntHash source read failed");
+                    return run_bounded(owner->descriptor());
                 };
 
                 ::bioseq::minimizers::minimizer_kernel_result result{};
-                if constexpr (!std::same_as<p_alphabet, ::seq::dna4>) {
-                    if (auto resident = try_word_minimizer_resident_packed(
-                            seq, lo_bp, hi_bp);
-                        resident.has_value() &&
-                        (execution_layout == nullptr ||
-                         resident->storage_unit_width == requested_storage_width)) {
-                        result = run_bounded(*resident);
-                    } else {
-                        result = run_selected_access();
-                    }
+                if (auto resident = try_word_minimizer_resident_packed(seq, lo_bp, hi_bp);
+                    resident.has_value() && resident->storage_unit_width == requested_storage_width) {
+                    result = run_bounded(*resident);
                 } else {
                     result = run_selected_access();
                 }
@@ -758,18 +753,9 @@ export {
             const bool require_resident =
                 exact_simd_route == exact_simd_range_route::require_resident_vector_stream;
             if (require_resident) {
-                if constexpr (!std::same_as<p_alphabet, ::seq::dna4> ||
-                              !exact_simd_minimizer_representation<p_minimizer>) {
+                if constexpr (!exact_simd_minimizer_representation<p_minimizer>) {
                     throw std::invalid_argument(
-                        "resident exact_simd vector_stream requires DNA4 and an "
-                        "exact simd minimizer representation");
-                } else {
-                    if (lo_bp != 0u || hi_bp != seq.bp_size() || window_size != 10u ||
-                        kmer_size != 15u) {
-                        throw std::invalid_argument(
-                            "resident exact_simd vector_stream requires the whole "
-                            "p_window_size=10/p_kmer_size=15 range");
-                    }
+                        "resident exact_simd vector_stream requires an admitted exact representation");
                 }
             }
             const sequence_size_t length = hi_bp - lo_bp;
@@ -809,8 +795,11 @@ export {
                             require_resident ? "resident vector_stream admission"
                                              : "target minimizer range sketch admission"};
                     }
-                    owner.emplace(bioseq::storage::materialize_packed_sequence(
-                        seq, lo_bp, hi_bp, 4u, std::move(*permit)));
+                    auto materialized = bioseq::storage::materialize_packed_sequence(
+                        seq, lo_bp, hi_bp, 4u, std::move(*permit));
+                    if (!materialized) throw exact_simd_runtime_error{
+                        two_stack_continuation_status::invalid_state, "target minimizer source read failed"};
+                    owner.emplace(std::move(*materialized));
                     descriptor = owner->descriptor();
                 }
             }

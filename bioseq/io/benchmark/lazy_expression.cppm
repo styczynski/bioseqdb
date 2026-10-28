@@ -320,9 +320,11 @@ materialize_lazy_expression_view(lazy_expression_facade view,
         .context = std::addressof(observation),
         .publish = &lazy_expression_allocation_observation::publish,
     };
-    lazy_expression_packed packed = bioseq::storage::materialize_packed_sequence(
+    auto packed_attempt = bioseq::storage::materialize_packed_sequence(
         view.with_payload_allocation_observer(std::addressof(observer)),
         0u, view.bp_size(), lazy_expression_storage_width, std::move(*permit));
+    if (!packed_attempt) throw std::runtime_error("lazy-expression source read failed");
+    lazy_expression_packed packed = std::move(*packed_attempt);
     const std::uint64_t reserved_after = admission.reserved_bytes();
     const auto& descriptor = packed.descriptor();
     if (descriptor.unit_count >

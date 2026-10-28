@@ -169,7 +169,7 @@ struct scalar_traversal final {
         std::uint32_t position,
         std::uint32_t lower,
         std::uint32_t upper,
-        p_consumer_type&& consume) const noexcept
+        p_consumer_type&& consume) const
     {
         for (std::uint32_t candidate = lower;
              candidate <= upper;
@@ -191,15 +191,15 @@ struct scalar_traversal final {
  * Scalar and Highway implementations supply the rank-comparison function.
  * @return True when this candidate matches through the end of the block.
  */
-template <class p_traversal_type>
+template <class p_traversal_type, class p_sequence_type>
 [[nodiscard]] inline bool improve_diagonal_candidate_with(
     p_traversal_type& traversal,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t position,
     std::uint32_t submaze_end,
     std::uint32_t query_start,
-    std::uint32_t& best) noexcept
+    std::uint32_t& best)
 {
     const std::uint32_t remaining = submaze_end - position;
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
@@ -213,14 +213,14 @@ template <class p_traversal_type>
     return best == remaining;
 }
 
-template <class p_traversal_type>
+template <class p_traversal_type, class p_sequence_type>
 [[nodiscard]] inline std::uint32_t longest_diagonal_run_with(
     p_traversal_type& traversal,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t position,
     std::uint32_t submaze_end,
-    std::uint32_t max_edits) noexcept
+    std::uint32_t max_edits)
 {
     const std::uint32_t remaining = submaze_end - position;
     std::uint32_t best = traversal.diagonal_run(
@@ -251,7 +251,7 @@ template <class p_traversal_type>
         lower,
         upper,
         [&traversal, &query, &target, &position, &submaze_end, &best](
-            const std::uint32_t candidate) noexcept {
+            const std::uint32_t candidate) {
             return improve_diagonal_candidate_with(
                 traversal,
                 query,
@@ -267,13 +267,13 @@ template <class p_traversal_type>
     return best;
 }
 
-template <class p_traversal_type>
+template <class p_traversal_type, class p_sequence_type>
 [[nodiscard]] inline prefilter_result equal_length_with(
     p_traversal_type& traversal,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t max_edits,
-    sneaky_snake_options options) noexcept
+    sneaky_snake_options options)
 {
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
     if (length == 0u) {
@@ -296,6 +296,9 @@ template <class p_traversal_type>
         while (position < end && escapes < escape_limit) {
             const std::uint32_t best = longest_diagonal_run_with(
                 traversal, query, target, position, end, max_edits);
+            if constexpr (requires { query.failure; }) {
+                if (query.failure->has_value()) return unsupported_prefilter_result();
+            }
             if (best == end - position) {
                 position = end;
                 break;
@@ -320,13 +323,13 @@ template <class p_traversal_type>
 }
 
 /// Filters rank spans whose lengths have already been  checked to fit uint32_t.
-template <class p_traversal_type>
+template <class p_traversal_type, class p_sequence_type>
 [[nodiscard]] inline prefilter_result bounded_with(
     p_traversal_type& traversal,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t max_edits,
-    sneaky_snake_options options) noexcept
+    sneaky_snake_options options)
 {
     const std::uint32_t query_length = static_cast<std::uint32_t>(query.size());
     const std::uint32_t target_length = static_cast<std::uint32_t>(target.size());
@@ -356,31 +359,64 @@ template <class p_traversal_type>
 }
 
 /**
- * @brief Evaluates each valid rank-buffer job with the supplied backend.
- *
- * Out-of-bounds jobs remain candidates without reading their slices. Scalar and
- * Highway batches share these bounds checks.
- * @return Results in job order.
+ * Applies existing scalar/Highway contiguous comparisons to bounded native windows.
+ * The target window is owned scratch before any query read; candidate scans use
+ * separate scratch so invoking the diagonal consumer cannot invalidate them.
  */
-template <class p_evaluator_type>
-[[nodiscard]] inline std::vector<prefilter_result> evaluate_batch_with(
-    const prefilter_batch_input& input,
-    p_evaluator_type&& evaluate)
-{
-    std::vector<prefilter_result> results(input.jobs.size());
-    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const prefilter_job& job = input.jobs[index];
-        if (!prefilter_job_in_bounds(input, job)) {
-            results[index] = unsupported_prefilter_result();
-            continue;
+template <class Comparison>
+struct window_traversal {
+    Comparison comparison;
+
+    /** Finds a diagonal match across any number of bounded source windows. */
+    [[nodiscard]] std::uint32_t diagonal_run(
+        const prefilter_rank_window& query, const prefilter_rank_window& target,
+        std::uint32_t position, std::uint32_t submaze_end,
+        std::uint32_t query_index) const {
+        const auto limit = std::min<std::size_t>(submaze_end - position, query.size() - query_index);
+        std::size_t matched = 0u;
+        while (matched < limit) {
+            const auto count = std::min(prefilter_rank_window::chunk_size, limit - matched);
+            const auto target_ranks = target.window(position + matched, count);
+            const auto query_ranks = query.window(query_index + matched, count);
+            if (query.failure->has_value()) return 0u;
+            const auto run = comparison.diagonal_run(query_ranks, target_ranks, 0u,
+                static_cast<std::uint32_t>(count), 0u);
+            matched += run;
+            if (run != count) break;
         }
-        results[index] = evaluate(
-            input.query_ranks.subspan(job.query_offset, job.query_length),
-            input.target_ranks.subspan(job.target_offset, job.target_length),
-            job);
+        return static_cast<std::uint32_t>(matched);
     }
-    return results;
-}
+
+    /** Uses the selected comparison strategy to scan candidates in bounded tiles. */
+    template <class Consumer>
+    [[nodiscard]] bool visit_candidate_starts(
+        const prefilter_rank_window& query, std::uint32_t filter_offset,
+        std::uint8_t filter_rank, std::uint32_t position,
+        std::uint32_t lower, std::uint32_t upper, Consumer&& consume) const {
+        prefilter_rank_window candidates{.source = query.source, .start = query.start,
+            .length = query.length, .cardinality = query.cardinality,
+            .job_index = query.job_index, .target_source = false, .failure = query.failure};
+        std::uint64_t first = lower;
+        while (first <= upper) {
+            const auto count = std::min<std::uint64_t>(prefilter_rank_window::chunk_size,
+                static_cast<std::uint64_t>(upper) - first + 1u);
+            const auto ranks = candidates.window(first + filter_offset, count);
+            if (query.failure->has_value()) return false;
+            const auto excluded = position >= first && position - first < count
+                ? static_cast<std::uint32_t>(position - first)
+                : (std::numeric_limits<std::uint32_t>::max)();
+            const bool completed = comparison.visit_candidate_starts(ranks, 0u,
+                filter_rank, excluded, 0u, static_cast<std::uint32_t>(count - 1u),
+                [&consume, first](std::uint32_t offset) {
+                    return consume(static_cast<std::uint32_t>(first + offset));
+                });
+            if (completed) return true;
+            if (query.failure->has_value()) return false;
+            first += count;
+        }
+        return false;
+    }
+};
 
 } // namespace sneaky_snake_detail
 
@@ -402,18 +438,16 @@ template <class p_evaluator_type>
 }
 
 /// Filters a batch of rank-buffer slices using the, scalar SneakySnake walk.
-[[nodiscard]] inline std::vector<prefilter_result> sneaky_snake_scalar_batch(
+[[nodiscard]] inline prefilter_batch_result sneaky_snake_scalar_batch(
     const prefilter_batch_input& input,
     sneaky_snake_options options = {})
 {
-    return sneaky_snake_detail::evaluate_batch_with(
-        input,
-        [options](
-            std::span<const std::uint8_t> query,
-            std::span<const std::uint8_t> target,
-            const prefilter_job& job) noexcept {
-            return sneaky_snake_detail::bounded_scalar(
-                query, target, job.max_edits, options);
+    return evaluate_prefilter_batch(input,
+        [options](const prefilter_rank_window& query, const prefilter_rank_window& target,
+                  const prefilter_job& job) {
+            sneaky_snake_detail::window_traversal<sneaky_snake_detail::scalar_traversal> traversal{};
+            return sneaky_snake_detail::bounded_with(
+                traversal, query, target, job.max_edits, options);
         });
 }
 

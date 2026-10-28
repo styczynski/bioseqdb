@@ -171,18 +171,16 @@ void tuple_dispatch_buffer::hydrate_one_column(
             bioseq::pg_types::seq* dispatch_query = source_query;
             if (source_query->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
                 MemoryContext old_context = MemoryContextSwitchTo(batch_payload_ctx);
-                dispatch_query = ::bioseq::simd::stdc_rewidth_to_type_params(
+                const auto dispatch_query_result = ::bioseq::simd::stdc_rewidth_to_type_params(
                     *source_query,
                     compact_sequence_stdc_type_params{mmsearch_state.alphabet_code,
                                                       mmsearch_state.storage_unit_byte_width},
-                    pg_alloc);
+                    pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
                 MemoryContextSwitchTo(old_context);
-                if (dispatch_query == nullptr) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_DATATYPE_MISMATCH),
-                             errmsg("bioseq mmsearch hydrated query rewidth rejected an "
-                                    "incompatible alphabet")));
+                if (!dispatch_query_result) {
+                    pg_raise_sequence_conversion_error(dispatch_query_result.error());
                 }
+                dispatch_query = *dispatch_query_result;
             }
             buffered_entries[row_index].hydrated_per_row_query_hdr = dispatch_query;
         } else {

@@ -340,7 +340,8 @@ void process_persisted_native_batch(
                                             target_index,
                                             execution_plan,
                                             /*gpu_index_cache=*/nullptr,
-                                            bioseq::indexing::gpu_index_cache_identity{});
+                                            bioseq::indexing::gpu_index_cache_identity{},
+                                            /*allow_gpu_target_index_build=*/false);
                                     };
                                 /**
                                  * Aligns this query using its prepared fragment anchors and saves
@@ -373,7 +374,8 @@ void process_persisted_native_batch(
                                             target_index,
                                             execution_plan,
                                             /*gpu_index_cache=*/nullptr,
-                                            bioseq::indexing::gpu_index_cache_identity{});
+                                            bioseq::indexing::gpu_index_cache_identity{},
+                                            /*allow_gpu_target_index_build=*/false);
                                     };
                                 if (hash_major_reader != nullptr) {
                                     bioseq::parallelism::parallel_for_pipeline(

@@ -9,6 +9,7 @@ module;
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <libassert/assert.hpp>
 #include <span>
 #include <string>
 #include <string_view>

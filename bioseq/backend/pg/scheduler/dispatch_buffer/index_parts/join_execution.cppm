@@ -164,17 +164,15 @@ namespace bioseq::scheduler {
                 }
                 const bioseq::pg_types::seq* dispatch_query_hdr = query_hdr;
                 if (query_hdr->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
-                    bioseq::pg_types::seq* rewidth = ::bioseq::simd::stdc_rewidth_to_type_params(
+                    const auto rewidth_result = ::bioseq::simd::stdc_rewidth_to_type_params(
                         *query_hdr,
                         compact_sequence_stdc_type_params{mmsearch_state.alphabet_code,
                                                           mmsearch_state.storage_unit_byte_width},
-                        pg_alloc);
-                    if (rewidth == nullptr) {
-                        ereport(ERROR,
-                                (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                 errmsg("bioseq batch join query rewidth rejected an incompatible "
-                                        "alphabet")));
+                        pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
+                    if (!rewidth_result) {
+                        pg_raise_sequence_conversion_error(rewidth_result.error());
                     }
+                    auto* rewidth = *rewidth_result;
                     const std::size_t rewidth_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidth));
                     join_query_rewidth_varlenas[query_index].assign(
                         reinterpret_cast<const char*>(rewidth),

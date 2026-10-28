@@ -242,7 +242,9 @@ export {
         }
         const std::span<const anchor> all_anchors{seeds.anchors.data(), seeds.anchors.size()};
         const auto job_anchors = all_anchors.subspan(job.offset, job.count);
-        const auto& scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        const auto prepared_scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        if (!prepared_scoring) { output.record_failure(prepared_scoring.error()); return; }
+        const auto& scoring = prepared_scoring->get();
         const auto& alignment = detail::resolve_alignment_kernels<p_alphabet>(params);
         auto chain_scope = context::current().push<context::arena::chain>();
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -350,7 +352,7 @@ export {
                 );
         auto tail = make_pipeline<p_aligner_parameters>(
             index_stage<p_index>{{}, &target_index, gpu_index_identity},
-            seed_hit_stage{{}, execution_plan, query_len, gpu_index_cache,
+            seed_hit_stage<p_alphabet>{{}, execution_plan, query_len, query_seq, target_seq, gpu_index_cache,
                            &output_collection, owned_lifetime, &output_collection,
                            attempt_memory, submitted_query_ordinal},
             std::move(post_seed));
@@ -420,7 +422,14 @@ export {
             target_seq.bp_size());
 
         const sequence_size_t target_len = target_seq.bp_size();
-        const auto& scoring_matrix = thread_local_scoring_matrix<p_alphabet>(params);
+        const auto prepared_scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        if (!prepared_scoring) {
+            match_result_collection_vector failed;
+            failed.resize(query_seqs.size());
+            for (auto& result : failed) result.record_failure(prepared_scoring.error());
+            return failed;
+        }
+        const auto& scoring_matrix = prepared_scoring->get();
         // Resolve the alphabet's alignment kernels once for all queries.
         const auto& alignment_kernels = detail::resolve_alignment_kernels<p_alphabet>(params);
 
@@ -428,6 +437,7 @@ export {
         // Use the caller's cache when supplied. A selected GPU operation reports
         // device, failure instead of silently rerunning on the CPU.
         std::optional<bioseq::indexing::gpu_minimizer_index_cache> owned_gpu_index_cache;
+        std::optional<post_seed_owned_lifetime> shared_seed_lifetime;
         if (external_gpu_index_cache == nullptr && params.vulkan_enabled &&
             params.vulkan_seed_hits_enabled) {
             bioseq::gpu::vulkan::runtime& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
@@ -459,6 +469,7 @@ export {
 
         const p_index* effective_index_ptr = &target_index;
         bool vulkan_target_index_built = false;
+        std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> operation_gpu_index;
         bioseq::gpu::vulkan::gpu_index_build_stats vulkan_target_index_ownership{};
         if constexpr (std::same_as<std::remove_cvref_t<p_index>,
                                    bioseq::indexing::minimizer_hashmap_fragment_index>) {
@@ -475,6 +486,10 @@ export {
                 if (!built) {
                     throw_vulkan_sketch_declined("Stage C GPU target-index build", decline);
                 }
+                gpu_index_identity = make_native_gpu_built_identity<p_minimizer, p_alphabet>(
+                    gpu_rt, *built, gpu_index_identity,
+                    static_cast<std::uint32_t>(params.kmer_size),
+                    static_cast<std::uint32_t>(params.window_size));
                 auto key =
                     bioseq::indexing::make_gpu_index_cache_key(target_index, gpu_index_identity);
                 auto adopted =
@@ -487,11 +502,19 @@ export {
                 auto resident = std::move(*adopted);
                 vulkan_target_index_ownership = resident->ownership;
                 resident->target_len = target_len;
-                auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
-                if (!inserted) {
+                if (resident->position_count != 0u &&
+                    !bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
+                        gpu_rt, *resident, /*strict_prefix=*/false)) {
                     throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        fmt::format("Stage C GPU target-index cache insertion rejected ({})",
-                                    static_cast<unsigned>(inserted.error())));
+                        "GPU-built native posting authority validation failed");
+                }
+                if (params.vulkan_index_cache_enabled) {
+                    auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
+                    if (!inserted) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                            fmt::format("Stage C GPU target-index cache insertion rejected ({})",
+                                        static_cast<unsigned>(inserted.error())));
+                    }
                 }
                 vulkan_target_index_built = true;
                 bioseq_log<logging_level::error>(
@@ -499,9 +522,24 @@ export {
                     resident->slot_mask,
                     resident->position_count,
                     target_len);
+                operation_gpu_index = std::move(resident);
             }
         }
         const p_index& effective_index = *effective_index_ptr;
+
+        if (operation_gpu_index) {
+            const std::size_t seed_consumers = target_len == 0u ? 0u :
+                static_cast<std::size_t>(std::ranges::count_if(query_seqs,
+                    [](const auto source) { return source.bp_size() != 0u; }));
+            if (seed_consumers != 0u) {
+                shared_seed_lifetime.emplace(seed_consumers,
+                    owned_gpu_index_cache ? std::addressof(*owned_gpu_index_cache) : nullptr,
+                    transient_target_index_release_authorization{});
+                shared_seed_lifetime->operation_gpu_resident = std::move(operation_gpu_index);
+            } else {
+                operation_gpu_index.reset();
+            }
+        }
 
         // Supply an owned empty minimizer batch when the pipeline sketches the query.
         static const auto empty_minimizers_proto = minimizer_batch_view<p_minimizer>::from_shared_host(
@@ -516,6 +554,8 @@ export {
                               execution_plan,
                               gpu_index_cache_ptr,
                               gpu_index_identity,
+                              seed_lifetime = shared_seed_lifetime
+                                  ? std::addressof(*shared_seed_lifetime) : nullptr,
                               vulkan_target_index_built,
                               vulkan_target_index_ownership,
                               gpu_query_gate_identity](std::size_t qi) {
@@ -523,6 +563,14 @@ export {
             const auto query_seq = query_seqs[qi];
             const sequence_size_t query_len = query_seq.bp_size();
 
+            std::optional<route_attempt_memory> query_attempt;
+            std::optional<context::installed_context_scope> query_context;
+            if (query_len != 0u && target_len != 0u &&
+                (execution_plan->route == seed_chain_route::vulkan_seed_host_chain ||
+                 execution_plan->route == seed_chain_route::vulkan_seed_vulkan_chain)) {
+                query_attempt.emplace();
+                query_context.emplace(query_attempt->workspace->memory);
+            }
             auto per_query_chain_scope = context::current().push<context::arena::chain>();
 
             match_result_collection out;
@@ -623,10 +671,12 @@ export {
                                                            query_len,
                                                            target_len,
                                                            gpu_index_cache_ptr,
-                                                           gpu_index_identity
+                                                           gpu_index_identity,
+                                                           seed_lifetime,
+                                                           query_attempt
+                                                               ? std::addressof(*query_attempt) : nullptr
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-                                                           , nullptr, nullptr,
-                                                           &pending_chaining
+                                                           , &pending_chaining
 #endif
                                                            );
 
@@ -698,6 +748,12 @@ export {
         if (owned_gpu_index_cache) {
             owned_gpu_index_cache->clear();
         }
+        const auto failed = std::ranges::find_if(out_per_query,
+            [](const match_result_collection& result) { return result.failure.has_value(); });
+        if (failed != out_per_query.end()) {
+            const auto error = *failed->failure;
+            for (auto& result : out_per_query) result.record_failure(error);
+        }
         return out_per_query;
     }
 
@@ -759,7 +815,13 @@ export {
 
         const sequence_size_t target_len = target_seq.bp_size();
         const sequence_size_t query_len = query_seq.bp_size();
-        const auto& scoring_matrix = thread_local_scoring_matrix<p_alphabet>(params);
+        const auto prepared_scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        if (!prepared_scoring) {
+            match_result_collection failed;
+            failed.record_failure(prepared_scoring.error());
+            return failed;
+        }
+        const auto& scoring_matrix = prepared_scoring->get();
         const auto& alignment_kernels = detail::resolve_alignment_kernels<p_alphabet>(params);
 
         if (gpu_index_cache == nullptr && params.vulkan_enabled &&
@@ -791,6 +853,7 @@ export {
 
         const p_index* effective_index_ptr = &target_index;
         bool vulkan_target_index_built = false;
+        std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> operation_gpu_index;
         bioseq::gpu::vulkan::gpu_index_build_stats vulkan_target_index_ownership{};
         if constexpr (std::same_as<std::remove_cvref_t<p_index>,
                                    bioseq::indexing::minimizer_hashmap_fragment_index>) {
@@ -807,6 +870,10 @@ export {
                 if (!built) {
                     throw_vulkan_sketch_declined("Stage C GPU target-index build", decline);
                 }
+                gpu_index_identity = make_native_gpu_built_identity<p_minimizer, p_alphabet>(
+                    gpu_rt, *built, gpu_index_identity,
+                    static_cast<std::uint32_t>(params.kmer_size),
+                    static_cast<std::uint32_t>(params.window_size));
                 auto key =
                     bioseq::indexing::make_gpu_index_cache_key(target_index, gpu_index_identity);
                 auto adopted =
@@ -819,11 +886,19 @@ export {
                 auto resident = std::move(*adopted);
                 vulkan_target_index_ownership = resident->ownership;
                 resident->target_len = target_len;
-                auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
-                if (!inserted) {
+                if (resident->position_count != 0u &&
+                    !bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
+                        gpu_rt, *resident, /*strict_prefix=*/false)) {
                     throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        fmt::format("Stage C GPU target-index cache insertion rejected ({})",
-                                    static_cast<unsigned>(inserted.error())));
+                        "GPU-built native posting authority validation failed");
+                }
+                if (params.vulkan_index_cache_enabled) {
+                    auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
+                    if (!inserted) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                            fmt::format("Stage C GPU target-index cache insertion rejected ({})",
+                                        static_cast<unsigned>(inserted.error())));
+                    }
                 }
                 vulkan_target_index_built = true;
                 bioseq_log<logging_level::error>(
@@ -831,6 +906,7 @@ export {
                     resident->slot_mask,
                     resident->position_count,
                     target_len);
+                operation_gpu_index = std::move(resident);
             }
         }
         const p_index& effective_index = *effective_index_ptr;
@@ -922,6 +998,7 @@ export {
                 owned_gpu_index_cache ? &*owned_gpu_index_cache
                                       : transient_target_index_owner.operation_owned_gpu_cache,
                 transient_target_index_owner);
+            post_seed_owned_lifetime->operation_gpu_resident = std::move(operation_gpu_index);
         }
 
         if (early_zero_consumer_bypass) {
@@ -942,12 +1019,11 @@ export {
                 }
                 auto key =
                     bioseq::indexing::make_gpu_index_cache_key(effective_index, gpu_index_identity);
-                auto resident_index =
-                    gpu_index_cache_ptr == nullptr
-                        ? nullptr
-                        : gpu_index_cache_ptr->get_or_upload(
-                              runtime, effective_index, key, params.vulkan_index_cache_enabled);
-                if (!resident_index) {
+                auto resident_index = post_seed_owned_lifetime
+                    ? post_seed_owned_lifetime->operation_gpu_resident : nullptr;
+                if (!resident_index || !(resident_index->key == key) ||
+                    resident_index->slots.owner != std::addressof(runtime) ||
+                    resident_index->positions.owner != std::addressof(runtime)) {
                     throw_vulkan_declined("Stage C resident seed-to-coordinate index");
                 }
 
@@ -963,7 +1039,17 @@ export {
                      device_span->count() == sketch_span.size())
                         ? device_span->words()
                         : nullptr;
+                const auto native_query = bioseq::seeding::prepare_native_query_seed_windows(
+                    query_seq, sketch_span, static_cast<std::uint32_t>(params.kmer_size));
+                const auto native_target = bioseq::seeding::prepare_native_target_seed_windows(
+                    target_seq, sketch_span, runtime, resident_index, params.max_occ,
+                    static_cast<std::uint32_t>(params.kmer_size));
+                const auto native_rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<
+                    compact_sequence_range<p_alphabet>>();
                 bioseq::gpu::vulkan::gpu_seed_inputs inputs{
+                    .native_query = native_query.view(),
+                    .native_target = native_target.view(),
+                    .native_rank_policy = &native_rank_policy,
                     .host_minimizer_bytes = device_words != nullptr ? std::span<const std::byte>{}
                                                                     : std::as_bytes(sketch_span),
                     .device_minimizer_words = device_words,
@@ -1011,6 +1097,13 @@ export {
                     cp.min_chain_score,
                     cp.min_seed_count,
                     16u);
+                resident_index.reset();
+                const auto released = post_seed_owned_lifetime->complete_seed_user();
+                partial_vulkan_execution_stats release_stats{};
+                release_stats.post_seed_owned_gpu_cache_evictions = released.gpu_cache_evictions;
+                release_stats.post_seed_owned_gpu_resident_bytes_released =
+                    released.gpu_resident_bytes_released;
+                out.record_partial_vulkan_execution_stats(release_stats);
                 if (coord.is_valid != 0u) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                     out.prepare_result_append(1u);

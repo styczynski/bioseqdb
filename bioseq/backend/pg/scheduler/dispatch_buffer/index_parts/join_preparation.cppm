@@ -243,21 +243,19 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
                 const bioseq::pg_types::seq* preparation_query_header = query_header;
                 if (query_header->storage_unit_byte_width !=
                     mmsearch_state.storage_unit_byte_width) {
-                    bioseq::pg_types::seq* rewidthed = ::bioseq::simd::stdc_rewidth_to_type_params(
+                    const auto rewidthed_result = ::bioseq::simd::stdc_rewidth_to_type_params(
                         *query_header,
                         compact_sequence_stdc_type_params{mmsearch_state.alphabet_code,
                                                           mmsearch_state.storage_unit_byte_width},
-                        pg_alloc);
-                    if (rewidthed == nullptr) {
+                        pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
+                    if (!rewidthed_result) {
                         if (reinterpret_cast<void*>(query_header) !=
                             reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
                             pfree(query_header);
                         }
-                        ereport(ERROR,
-                                (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                 errmsg("bioseq batch join query preparation rewidth rejected an "
-                                        "incompatible alphabet")));
+                        pg_raise_sequence_conversion_error(rewidthed_result.error());
                     }
+                    auto* rewidthed = *rewidthed_result;
                     const std::size_t rewidthed_bytes =
                         static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
                     auto& owned = join_cpu_preparation_scratch.rewidthed_query_varlenas
@@ -664,21 +662,19 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
         }
         const bioseq::pg_types::seq* preparation_query_header = query_header;
         if (query_header->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
-            bioseq::pg_types::seq* rewidthed = ::bioseq::simd::stdc_rewidth_to_type_params(
+            const auto rewidthed_result = ::bioseq::simd::stdc_rewidth_to_type_params(
                 *query_header,
                 compact_sequence_stdc_type_params{mmsearch_state.alphabet_code,
                                                   mmsearch_state.storage_unit_byte_width},
-                pg_alloc);
-            if (rewidthed == nullptr) {
+                pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
+            if (!rewidthed_result) {
                 if (reinterpret_cast<void*>(query_header) !=
                     reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
                     pfree(query_header);
                 }
-                ereport(ERROR,
-                        (errcode(ERRCODE_DATATYPE_MISMATCH),
-                         errmsg("bioseq batch join query preparation rewidth rejected an "
-                                "incompatible alphabet")));
+                pg_raise_sequence_conversion_error(rewidthed_result.error());
             }
+            auto* rewidthed = *rewidthed_result;
             const std::size_t rewidthed_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
             auto& owned = rewidthed_query_varlenas[query_headers.size()];
             owned.assign(reinterpret_cast<const char*>(rewidthed),

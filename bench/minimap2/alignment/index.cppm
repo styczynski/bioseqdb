@@ -4205,6 +4205,8 @@ record_prefilter_pipeline_match_count_parity(
         throw std::logic_error(
             "prefilter correctness flags are not in lock-step with inputs");
     }
+    bioseq::parallelism::admitted_context oracle_workspace;
+    context::installed_context_scope oracle_installation(oracle_workspace.memory);
     std::vector<std::uint8_t> threshold_truth_flags(
         input.pairs.size(), 0u);
     for (std::size_t index = 0u; index < input.pairs.size(); ++index) {

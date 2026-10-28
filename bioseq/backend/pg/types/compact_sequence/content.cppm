@@ -278,9 +278,18 @@ template<bool p_match_order>
     } else {
         result = with_pg_sequence_views<int>(
             left_input, right_input,
-            [](auto left_view, auto right_view) {
-                return bioseq::storage::compare_lazy_sequences(
-                    left_view, right_view);
+            [](auto left_view, auto right_view) -> int {
+                using alphabet = typename decltype(left_view)::alphabet_type;
+                if constexpr (alphabet_in_supported_set<pgseq_supported_biological_alphabets, alphabet>) {
+                    return bioseq::storage::compare_lazy_sequences(
+                        left_view, right_view);
+                } else {
+                    bioseq::postgres::support::invoke_pg_as_cpp([] {
+                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("bioseq biological comparison alphabet dispatch mismatch")));
+                    });
+                    __builtin_unreachable();
+                }
             });
     }
     release_content_operand(left);
@@ -656,9 +665,18 @@ Datum seq_larger(
             seed, 1u, true, operand.descriptor.alphabet_code);
         result = with_pg_sequence_view<std::uint64_t>(
             input,
-            [prefixed](auto view) {
-                return bioseq::storage::hash_logical_sequence(
-                    view, prefixed);
+            [prefixed](auto view) -> std::uint64_t {
+                using alphabet = typename decltype(view)::alphabet_type;
+                if constexpr (alphabet_in_supported_set<pgseq_supported_biological_alphabets, alphabet>) {
+                    return bioseq::storage::hash_logical_sequence(
+                        view, prefixed);
+                } else {
+                    bioseq::postgres::support::invoke_pg_as_cpp([] {
+                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("bioseq biological hash alphabet dispatch mismatch")));
+                    });
+                    __builtin_unreachable();
+                }
             });
     }
     release_content_operand(operand);

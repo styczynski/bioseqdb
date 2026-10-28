@@ -38,6 +38,7 @@ import :tree_types;
 import :tree_ops;
 import :view_session;
 import bioseq.postgres.support;
+import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;

@@ -15,6 +15,7 @@ module;
 module bioseq.postgres.extension;
 
 import bioseq.pipeline.stats;
+import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.support;
 import bioseq.postgres.table.alignment_execution;
 
@@ -563,6 +564,10 @@ persisted_gpu_operation_stats_json(const alignment_exec::alignment_execution_sna
             result += std::to_string(job.direct_count_dispatches);
             append_unsigned("scan_dispatches", job.direct_scan_dispatches);
             append_unsigned("anchor_count", job.anchor_count);
+            append_unsigned("seed_candidate_count", job.seed_candidate_count);
+            append_unsigned("seed_verified_count", job.seed_verified_count);
+            append_unsigned("seed_emitted_count", job.seed_emitted_count);
+            append_unsigned("seed_coverage_interval_count", job.seed_coverage_interval_count);
             append_unsigned("emit_dispatches", job.direct_emit_dispatches);
             append_unsigned("sort_operations", job.sort_operations);
             append_unsigned("range_build_dispatches", job.range_build_dispatches);
@@ -572,13 +577,16 @@ persisted_gpu_operation_stats_json(const alignment_exec::alignment_execution_sna
             append_unsigned("coordinate_dispatches", job.coordinate_dispatches);
             result += '}';
             result += R"(,"submissions":[)";
-            constexpr std::array<std::string_view, 4> k_stages{
-                "count", "emit", "sort_range", "chain_coordinate"};
+            constexpr auto k_stages = bioseq::gpu::vulkan::seed_coordinate_submission_phase_names;
+            bool first_submission = true;
             for (std::size_t submission_index = 0u; submission_index < job.submissions.size();
                  ++submission_index) {
-                if (submission_index != 0u)
-                    result += ',';
                 const auto& submission = job.submissions[submission_index];
+                if (submission.ordinal == 0u)
+                    continue;
+                if (!first_submission)
+                    result += ',';
+                first_submission = false;
                 result += R"({"stage":")";
                 result.append(k_stages[submission_index]);
                 result += R"(","operation_identity":")";

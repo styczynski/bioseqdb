@@ -1620,12 +1620,7 @@ make_persisted_gpu_cache_validation_stats(
         source) noexcept {
     const auto& audit = source.audit;
     const auto& coordinate = audit.result;
-    const std::array<std::uint64_t, 4> submit_wait_identities{
-        audit.count_submit_wait_identity,
-        audit.emit_submit_wait_identity,
-        audit.sort_range_submit_wait_identity,
-        audit.chain_coordinate_submit_wait_identity,
-    };
+    const auto submit_wait_identities = audit.submission_wait_identities();
     ::bioseq::pipeline_stats::persisted_gpu_job_stats job_stats{
         .logical_target_row = audit.logical_target_row,
         .logical_query_ordinal = audit.logical_query_ordinal,
@@ -1642,6 +1637,10 @@ make_persisted_gpu_cache_validation_stats(
         .direct_count_dispatches = audit.direct_count_dispatches,
         .direct_scan_dispatches = audit.direct_scan_dispatches,
         .anchor_count = audit.anchor_count,
+        .seed_candidate_count = audit.seed_candidate_count,
+        .seed_verified_count = audit.seed_verified_count,
+        .seed_emitted_count = audit.seed_emitted_count,
+        .seed_coverage_interval_count = audit.seed_coverage_interval_count,
         .direct_emit_dispatches = audit.direct_emit_dispatches,
         .sort_operations = audit.sort_operations,
         .range_build_dispatches = audit.range_build_dispatches,
@@ -1671,11 +1670,14 @@ make_persisted_gpu_cache_validation_stats(
                 .is_valid = coordinate.is_valid != 0u,
             },
     };
+    std::size_t completed_submission = 0u;
     for (std::size_t submission_index = 0u; submission_index < job_stats.submissions.size();
          ++submission_index) {
+        if (submit_wait_identities[submission_index] == 0u)
+            continue;
         job_stats.submissions[submission_index] = {
             .operation_identity = source.shape_pipeline_operation_identity,
-            .ordinal = source.shape_submission_ordinals[submission_index],
+            .ordinal = source.shape_submission_ordinals[completed_submission++],
             .submit_wait_identity = submit_wait_identities[submission_index],
         };
     }

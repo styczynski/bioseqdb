@@ -207,7 +207,7 @@ try_select_legacy_minimap_sketch_data_execution_layout(
     return selection;
 }
 
-/// Select a minimap_sketch_data layout from a runtime DNA4 or DNA5 alphabet ID.
+/// Select a minimap_sketch_data layout from a registered biological alphabet ID.
 [[nodiscard]] inline std::optional<
     ::bioseq::minimizers::minimizer_physical_layout_selection>
 try_select_legacy_minimap_sketch_data_execution_layout(
@@ -217,25 +217,16 @@ try_select_legacy_minimap_sketch_data_execution_layout(
     const std::uint16_t runtime_kmer_size,
     const std::uint16_t runtime_window_size,
     const std::uint8_t native_storage_bits) {
-    if (alphabet_id ==
-        ::bioseq::minimizers::minimizer_profile_alphabet_id<::seq::dna4>()) {
-        return try_select_legacy_minimap_sketch_data_execution_layout<::seq::dna4>(
-            requested_algorithm,
-            maximum_query_bp,
-            runtime_kmer_size,
-            runtime_window_size,
-            native_storage_bits);
-    }
-    if (alphabet_id ==
-        ::bioseq::minimizers::minimizer_profile_alphabet_id<::seq::dna5>()) {
-        return try_select_legacy_minimap_sketch_data_execution_layout<::seq::dna5>(
-            requested_algorithm,
-            maximum_query_bp,
-            runtime_kmer_size,
-            runtime_window_size,
-            native_storage_bits);
-    }
-    return std::nullopt;
+    if (alphabet_id >= supported_biological_alphabets::alphabet_count) return std::nullopt;
+    std::optional<::bioseq::minimizers::minimizer_physical_layout_selection> result;
+    supported_biological_alphabets::dispatch_alphabet_by_code(alphabet_id,
+        [&result, requested_algorithm, maximum_query_bp, runtime_kmer_size,
+         runtime_window_size, native_storage_bits]<class Alphabet>() {
+            result = try_select_legacy_minimap_sketch_data_execution_layout<Alphabet>(
+                requested_algorithm, maximum_query_bp, runtime_kmer_size,
+                runtime_window_size, native_storage_bits);
+        });
+    return result;
 }
 
 /// Map the effective algorithm to its scalar, SIMD, or Vulkan sketch backend.

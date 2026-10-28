@@ -36,6 +36,7 @@ import :packed_output;
 import :io;
 import :letter;
 import :subscript;
+import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.cigar;
 

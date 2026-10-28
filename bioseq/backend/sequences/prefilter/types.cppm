@@ -7,12 +7,23 @@
  */
 module;
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <expected>
+#include <optional>
+#include <vector>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <type_traits>
 
 export module bioseq.prefilter.types;
+
+import bioseq.storage.lazy_sequence_view;
+import bioseq.storage.size;
+import bioseq.sequences;
+import bioseq.common.seqan_adapter;
 
 export namespace bioseq::prefilter {
 
@@ -33,11 +44,14 @@ enum class prefilter_status : std::uint32_t {
  * Offsets and lengths count symbols in unpacked rank-byte buffers.
  */
 struct prefilter_job {
-    std::uint32_t query_offset = 0u;  ///< First query-rank index.
-    std::uint32_t target_offset = 0u; ///< First target-rank index.
-    std::uint32_t query_length = 0u;  ///< Query slice length in symbols.
-    std::uint32_t target_length = 0u; ///< Target slice length in symbols.
-    std::uint32_t max_edits = 0u;     ///< Inclusive edit-distance threshold.
+    std::uint32_t query_record_index = 0u;
+    std::uint32_t target_record_index = 0u;
+    std::uint32_t query_start = 0u;
+    std::uint32_t target_start = 0u;
+    std::uint32_t query_length = 0u;
+    std::uint32_t target_length = 0u;
+    std::uint32_t max_edits = 0u;
+    std::uint32_t orientation = 0u;
 };
 
 /**
@@ -60,20 +74,39 @@ struct prefilter_result {
  * Each job selects its query and target independently. Result  order follows jobs.
  */
 struct prefilter_batch_input {
-    std::span<const std::uint8_t> query_ranks{};  ///< Concatenated query ranks.
-    std::span<const std::uint8_t> target_ranks{}; ///< Concatenated target ranks.
-    std::span<const prefilter_job> jobs{};         ///< Jobs in result order.
+    std::span<const storage::borrowed_rank_window_source> queries{};
+    std::span<const storage::borrowed_rank_window_source> targets{};
+    std::span<const prefilter_job> jobs{};
 };
+
+/** Invalid data is a batch failure, never an unsupported-algorithm keep. */
+enum class prefilter_input_failure_code : std::uint8_t {
+    invalid_descriptor, source_read_failed, invalid_rank,
+};
+
+/** Identifies the failing job, operand and absolute logical source position. */
+struct prefilter_input_failure {
+    prefilter_input_failure_code code{};
+    std::size_t job_index{};
+    bool target_source{};
+    storage::sequence_size_t position{};
+};
+
+using prefilter_batch_result =
+    std::expected<std::vector<prefilter_result>, prefilter_input_failure>;
 
 static_assert(std::is_standard_layout_v<prefilter_job>);
 static_assert(std::is_trivially_copyable_v<prefilter_job>);
-static_assert(sizeof(prefilter_job) == 5u * sizeof(std::uint32_t));
+static_assert(sizeof(prefilter_job) == 8u * sizeof(std::uint32_t));
 static_assert(alignof(prefilter_job) == alignof(std::uint32_t));
-static_assert(offsetof(prefilter_job, query_offset) == 0u);
-static_assert(offsetof(prefilter_job, target_offset) == 4u);
-static_assert(offsetof(prefilter_job, query_length) == 8u);
-static_assert(offsetof(prefilter_job, target_length) == 12u);
-static_assert(offsetof(prefilter_job, max_edits) == 16u);
+static_assert(offsetof(prefilter_job, query_record_index) == 0u);
+static_assert(offsetof(prefilter_job, target_record_index) == 4u);
+static_assert(offsetof(prefilter_job, query_start) == 8u);
+static_assert(offsetof(prefilter_job, target_start) == 12u);
+static_assert(offsetof(prefilter_job, query_length) == 16u);
+static_assert(offsetof(prefilter_job, target_length) == 20u);
+static_assert(offsetof(prefilter_job, max_edits) == 24u);
+static_assert(offsetof(prefilter_job, orientation) == 28u);
 
 static_assert(std::is_standard_layout_v<prefilter_result>);
 static_assert(std::is_trivially_copyable_v<prefilter_result>);
@@ -170,7 +203,7 @@ unsupported_prefilter_result() noexcept
  * @return True when the complete slice is in bounds. The check avoids overflow.
  */
 [[nodiscard]] constexpr bool prefilter_slice_in_bounds(
-    std::size_t rank_count,
+    storage::sequence_size_t rank_count,
     std::uint32_t offset,
     std::uint32_t length) noexcept
 {
@@ -186,14 +219,147 @@ unsupported_prefilter_result() noexcept
  * @param job Requested offsets and lengths.
  * @return True when both slices are in bounds.
  */
-[[nodiscard]] constexpr bool prefilter_job_in_bounds(
+[[nodiscard]] inline bool prefilter_job_in_bounds(
     const prefilter_batch_input& input,
     const prefilter_job& job) noexcept
 {
-    return prefilter_slice_in_bounds(
-               input.query_ranks.size(), job.query_offset, job.query_length)
-        && prefilter_slice_in_bounds(
-               input.target_ranks.size(), job.target_offset, job.target_length);
+    if (job.query_record_index >= input.queries.size() ||
+        job.target_record_index >= input.targets.size()) return false;
+    const auto& query = input.queries[job.query_record_index];
+    const auto& target = input.targets[job.target_record_index];
+    if (query.read_at == nullptr || target.read_at == nullptr ||
+        query.alphabet_code >= supported_biological_alphabets::alphabet_count ||
+        query.alphabet_code != target.alphabet_code ||
+        job.orientation != static_cast<std::uint32_t>(query.orientation) ||
+        target.orientation != storage::sequence_transform::identity) return false;
+    if (query.orientation != storage::sequence_transform::identity) {
+        if (query.orientation != storage::sequence_transform::reverse_complement) return false;
+        bool complementable = false;
+        supported_biological_alphabets::dispatch_alphabet_by_code(
+            query.alphabet_code, [&complementable]<class Alphabet>() {
+                complementable = supported_biological_alphabets::entry_for<Alphabet>::is_complementable;
+            });
+        if (!complementable) return false;
+    }
+    return prefilter_slice_in_bounds(query.symbol_count, job.query_start, job.query_length)
+        && prefilter_slice_in_bounds(target.symbol_count, job.target_start, job.target_length);
+}
+
+/**
+ * One bounded native-rank window over an admitted job interval.
+ * Every acquired backend span is copied before another read can evict it.
+ * Allocation and read sizes are independent of the edit threshold/submaze size.
+ */
+struct prefilter_rank_window {
+    static constexpr std::size_t chunk_size = 512u;
+    storage::borrowed_rank_window_source source{};
+    storage::sequence_size_t start{};
+    std::size_t length{};
+    std::size_t cardinality{};
+    std::size_t job_index{};
+    bool target_source{};
+    std::optional<prefilter_input_failure>* failure{};
+    mutable std::array<std::uint8_t, chunk_size> scratch{};
+    mutable std::size_t loaded_from{};
+    mutable std::size_t loaded_size{};
+
+    /** Returns the job interval size, not its backend's complete length. */
+    [[nodiscard]] std::size_t size() const noexcept { return length; }
+
+    /** Acquires a bounded window and validates native ranks before exposing it. */
+    [[nodiscard]] std::span<const std::uint8_t> window(
+        std::size_t position, std::size_t count) const {
+        if (failure->has_value()) return {};
+        if (position > length || count > length - position || count > scratch.size()) {
+            *failure = prefilter_input_failure{prefilter_input_failure_code::invalid_descriptor,
+                job_index, target_source, start + position};
+            return {};
+        }
+        if (position >= loaded_from && position - loaded_from <= loaded_size &&
+            count <= loaded_size - (position - loaded_from)) {
+            return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
+        }
+        const auto ranks = source.read_checked(start + position, count, scratch);
+        if (!ranks) {
+            *failure = prefilter_input_failure{
+                ranks.error() == storage::rank_window_read_failure::source_read_failed
+                    ? prefilter_input_failure_code::source_read_failed
+                    : prefilter_input_failure_code::invalid_descriptor,
+                job_index, target_source, start + position};
+            return {};
+        }
+        for (std::size_t offset = 0u; offset < ranks->size(); ++offset) {
+            if ((*ranks)[offset] >= cardinality) {
+                *failure = prefilter_input_failure{prefilter_input_failure_code::invalid_rank,
+                    job_index, target_source, start + position + offset};
+                return {};
+            }
+        }
+        if (ranks->data() != scratch.data() && count != 0u) {
+            std::memcpy(scratch.data(), ranks->data(), count);
+        }
+        loaded_from = position;
+        loaded_size = count;
+        return std::span<const std::uint8_t>{scratch}.first(count);
+    }
+
+    /** Reads one rank through the same checked bounded window. Inspect failure after traversal. */
+    [[nodiscard]] std::uint8_t operator[](std::size_t position) const {
+        if (failure->has_value()) return 0u;
+        if (position >= loaded_from && position - loaded_from < loaded_size) {
+            return scratch[position - loaded_from];
+        }
+        const auto ranks = window(position, std::min(chunk_size, length - position));
+        return ranks.empty() ? 0u : ranks.front();
+    }
+};
+
+/** Validates one descriptor pair and invokes an alphabet-erased bounded algorithm. */
+template <class Evaluator>
+[[nodiscard]] inline auto evaluate_prefilter_job(
+    const prefilter_batch_input& input, std::size_t index, Evaluator&& evaluate)
+    -> std::expected<std::invoke_result_t<Evaluator, const prefilter_rank_window&,
+                                         const prefilter_rank_window&, const prefilter_job&>,
+                     prefilter_input_failure> {
+    if (index >= input.jobs.size()) {
+        return std::unexpected(prefilter_input_failure{
+            prefilter_input_failure_code::invalid_descriptor, index, false, 0u});
+    }
+    const auto& job = input.jobs[index];
+    if (!prefilter_job_in_bounds(input, job)) {
+        return std::unexpected(prefilter_input_failure{
+            prefilter_input_failure_code::invalid_descriptor, index, false, job.query_start});
+    }
+    const auto& query_source = input.queries[job.query_record_index];
+    std::size_t cardinality = 0u;
+    supported_biological_alphabets::dispatch_alphabet_by_code(
+        query_source.alphabet_code, [&cardinality]<class Alphabet>() {
+            cardinality = seqan3::alphabet_size<Alphabet>;
+        });
+    std::optional<prefilter_input_failure> failure;
+    const prefilter_rank_window query{.source = query_source, .start = job.query_start,
+        .length = job.query_length, .cardinality = cardinality, .job_index = index,
+        .target_source = false, .failure = &failure};
+    const prefilter_rank_window target{.source = input.targets[job.target_record_index],
+        .start = job.target_start, .length = job.target_length, .cardinality = cardinality,
+        .job_index = index, .target_source = true, .failure = &failure};
+    auto result = evaluate(query, target, job);
+    if (failure) return std::unexpected(*failure);
+    return result;
+}
+
+/** Evaluates checked source descriptors in job order without expanding full inputs. */
+template <class Evaluator>
+[[nodiscard]] inline prefilter_batch_result evaluate_prefilter_batch(
+    const prefilter_batch_input& input, Evaluator&& evaluate) {
+    std::vector<prefilter_result> results;
+    results.reserve(input.jobs.size());
+    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
+        auto result = evaluate_prefilter_job(input, index, evaluate);
+        if (!result) return std::unexpected(result.error());
+        results.push_back(*result);
+    }
+    return results;
 }
 
 /** Returns the GateKeeper estimate stored in the  low diagnostic bits. */

@@ -22,6 +22,7 @@ module;
 #include <span>
 #include <string>
 #include <type_traits>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -109,7 +110,7 @@ struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
             static_cast<std::size_t>(seq::dna5{}.assign_char('N').to_rank());
         std::array<double, alphabet_size> probabilities{};
         for (std::size_t alphabet_index = 0; alphabet_index < alphabet_size; ++alphabet_index) {
-            probabilities[alphabet_index] = (1.0 - unknown_base_rate) / 4.0;
+            probabilities[alphabet_index] = (1.0 - unknown_base_rate) / static_cast<double>(alphabet_size - 1u);
         }
         probabilities[unknown_base_rank] = unknown_base_rate;
         return probabilities;
@@ -161,9 +162,9 @@ concept is_valid_alphabet_probability =
     probabilities_nonnegative(p_probability_model::probability()) &&
     probabilities_sum_to_one(p_probability_model::probability());
 
-static_assert(is_valid_alphabet_probability<alphabet_probability<seq::dna4>>);
-static_assert(is_valid_alphabet_probability<alphabet_probability<seq::dna5>>);
-static_assert(is_valid_alphabet_probability<alphabet_probability<seq::aa27>>);
+static_assert([]<class... Alphabets>(std::tuple<Alphabets...>) consteval {
+    return (is_valid_alphabet_probability<alphabet_probability<Alphabets>> && ...);
+}(supported_biological_alphabets::alphabets_tuple{}));
 
 /// @brief Accepts sequence configurations that support packed construction.
 /// @tparam p_sequence_config Candidate compact-sequence configuration.
@@ -454,6 +455,7 @@ void extract_window_ranks(
 /// @param seq_index Sequence number used to choose its random streams.
 /// @param cdf Cumulative rank boundaries from make_integer_cdf().
 /// @param seed Global random seed.
+/// @param first_output_unit First native packed word requested; permits bounded streaming output.
 template <typename p_sequence_traits>
 void generate_units_cpu_for_sequence(
     std::span<typename p_sequence_traits::storage_unit> out_units,
@@ -461,24 +463,34 @@ void generate_units_cpu_for_sequence(
     std::uint64_t seq_index,
     std::uint64_t /*seq_count*/,
     std::span<const std::uint32_t> cdf,
-    std::uint64_t seed) {
+    std::uint64_t seed,
+    std::uint64_t first_output_unit = 0u) {
     constexpr std::uint32_t letters_per_unit = p_sequence_traits::letters_per_unit;
-    const std::uint64_t units_per_seq = (symbols_per_seq + letters_per_unit - 1) / letters_per_unit;
-    const std::uint64_t chunks_per_seq = (units_per_seq + k_chunk_units - 1) / k_chunk_units;
+    const std::uint64_t units_per_seq = symbols_per_seq / letters_per_unit
+        + static_cast<std::uint64_t>(symbols_per_seq % letters_per_unit != 0u);
+    const std::uint64_t chunks_per_seq = units_per_seq / k_chunk_units
+        + static_cast<std::uint64_t>(units_per_seq % k_chunk_units != 0u);
     constexpr std::uint32_t alphabet_size = p_sequence_traits::alphabet_size;
+    DEBUG_ASSERT(first_output_unit <= units_per_seq && out_units.size() <= units_per_seq - first_output_unit,
+        "generation output must describe a bounded unit interval");
+    DEBUG_ASSERT(cdf.size() == alphabet_size, "generation CDF must match its native alphabet");
+    const std::uint64_t final_output_unit = first_output_unit + out_units.size();
+    const std::uint64_t first_chunk = first_output_unit / k_chunk_units;
+    const std::uint64_t final_chunk = final_output_unit / k_chunk_units
+        + static_cast<std::uint64_t>(final_output_unit % k_chunk_units != 0u);
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
-
     auto& pool = bioseq::parallelism::global_pool::instance();
     // Give ech chunk its own stream so workers can fill it in any order.
     pool.parallel_for(
-        0,
-        static_cast<std::size_t>(chunks_per_seq),
+        static_cast<std::size_t>(first_chunk),
+        static_cast<std::size_t>(final_chunk),
         1,
         bioseq::parallelism::range_body{
-            [out_units, cdf_ptr = cdf.data(), symbols_per_seq, units_per_seq, stream_base, seed](
+            [out_units, cdf_ptr = cdf.data(), symbols_per_seq, units_per_seq, stream_base, seed,
+             first_output_unit, final_output_unit](
                 std::size_t lo, std::size_t hi) {
                 std::array<typename p_sequence_traits::letter_unit,
-                           k_chunk_units * p_sequence_traits::letters_per_unit>
+                           p_sequence_traits::letters_per_unit>
                     ranks;
                 for (std::size_t local_chunk = lo; local_chunk < hi; ++local_chunk) {
                     taus_lcg_state state = seed_stream(seed, stream_base + local_chunk);
@@ -497,8 +509,9 @@ void generate_units_cpu_for_sequence(
                             ranks[slot] = static_cast<typename p_sequence_traits::letter_unit>(
                                 sample_rank(cdf_ptr, alphabet_size, next_u32(state)));
                         }
-                        out_units[static_cast<std::size_t>(local_unit)] =
-                            pack_unit<p_sequence_traits>(ranks.data(), valid);
+                        if (local_unit >= first_output_unit && local_unit < final_output_unit)
+                            out_units[static_cast<std::size_t>(local_unit - first_output_unit)] =
+                                pack_unit<p_sequence_traits>(ranks.data(), valid);
                     }
                 }
             }});
@@ -686,7 +699,9 @@ public:
 
   /// @brief Copy the settings used for subsequent generation calls.
   /// @param params Sequence sizes, mutation rates, seed, and backend choice.
-  explicit sequence_generator(const generator_params& params) noexcept : params_(params) {}
+  explicit sequence_generator(const generator_params& params) noexcept : params_(params) {
+      if constexpr (!seqan3::nucleotide_alphabet<alphabet_type>) params_.reverse_complement_rate = 0.0;
+  }
 
   /// @brief An edited query and the reference window from which it was sampled.
   struct query_target_pair {

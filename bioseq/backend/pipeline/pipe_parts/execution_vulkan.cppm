@@ -67,7 +67,8 @@ export {
      * Vulkan lookup uses the resident target index and returns anchors to the host.
      * A selected Vulkan lookup must succeed before chaining can start.
      */
-    struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
+    template<sequence_alphabet p_alphabet>
+    struct seed_hit_stage : stage_base<seed_hit_stage<p_alphabet>, ::bioseq::chaining::anchor> {
         static constexpr std::string_view stage_name = "seed_hit_stage";
 
         statement_execution_plan_owner execution_plan;
@@ -78,6 +79,8 @@ export {
             return execution_plan->frozen_parameters;
         }
         sequence_size_t query_len;
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_;
         // The caller keeps this cache  alive through seed lookup. A nonempty
         // Vulkan lookup requires a cache, even when reuse is disabled.
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr;
@@ -202,7 +205,14 @@ export {
                         // status record. Count an upload only in the call that creates
                         // the resident index. Later cache hits leave these counts zero
                         bioseq::indexing::gpu_index_upload_decline index_materialization{};
-                        if (gpu_index_cache == nullptr) {
+                        if (post_seed_lifetime != nullptr && post_seed_lifetime->operation_gpu_resident) {
+                            resident_index = post_seed_lifetime->operation_gpu_resident;
+                            if (!(resident_index->key == key) || resident_index->slots.owner != &runtime
+                                || resident_index->positions.owner != &runtime) {
+                                throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                                    "operation-owned seed index disagrees with its native input identity"};
+                            }
+                        } else if (gpu_index_cache == nullptr) {
                             seed_decline.reason = bioseq::seeding::
                                 vulkan_seed_lookup_decline_reason::index_cache_unavailable;
                         } else if (gpu_index_identity.source_direct_sorted_dense) {
@@ -270,6 +280,7 @@ export {
                                     device_span,
                                     std::addressof(target_index_ref),
                                     resident_index,
+                                    query_seq_, target_seq_,
                                     parameters().vulkan_enabled,
                                     query_len,
                                     parameters().max_occ,
@@ -513,10 +524,33 @@ export {
                         query_len,
                         parameters().max_occ,
                         kmer_size);
+                auto verified = make_arena_slab<anchor>();
+                bool copies_survivors = false;
+                const auto counter = parameters().highway_kernels == nullptr ? nullptr
+                    : parameters().highway_kernels->common.count_equal_rank_chunk;
+                for (std::size_t index = 0u; index < ordered_anchors.size(); ++index) {
+                    const auto accepted = verify_seed_anchor(query_seq_, target_seq_,
+                        ordered_anchors[index], static_cast<std::size_t>(kmer_size), counter);
+                    if (!accepted) {
+                        record_cpu_seed_completion();
+                        stats_dst->record_failure(accepted.error());
+                        return std::move(token).emit_batch(std::span<const anchor>{});
+                    }
+                    if (!*accepted && !copies_survivors) {
+                        // Preserve the borrowed fast path when no collision occurs.
+                        // Only a rejected candidate requires an admitted compacted copy.
+                        verified.reserve(ordered_anchors.size());
+                        for (std::size_t prefix = 0u; prefix < index; ++prefix)
+                            verified.push_back(ordered_anchors[prefix]);
+                        copies_survivors = true;
+                    } else if (*accepted && copies_survivors) {
+                        verified.push_back(ordered_anchors[index]);
+                    }
+                }
                 record_cpu_seed_completion();
-                // The prepared batch owns this ordered span throughout the synchronous
-                // pipeline call, so chaining can read it directly.
-                return std::move(token).emit_batch(ordered_anchors);
+                return copies_survivors
+                    ? std::move(token).emit_batch(verified.as_const_span())
+                    : std::move(token).emit_batch(ordered_anchors);
             } else {
                 // CPU lookup writes anchors into the arena. The separate permin covers
                 // job metadata and outlives its vector.
@@ -535,12 +569,16 @@ export {
                     static_cast<std::size_t>(query_len),
                     static_cast<std::size_t>(target_index_ref.target_length()),
                     kmer_size));
-                collect_seed_hits<p_minimizer>(sketch_span,
-                                               target_index_ref,
-                                               query_len,
-                                               parameters().max_occ,
-                                               kmer_size,
-                                               anchors_slab);
+                const auto collected = collect_seed_hits<p_minimizer>(sketch_span,
+                    target_index_ref, query_seq_, target_seq_,
+                    parameters().highway_kernels == nullptr ? nullptr
+                        : parameters().highway_kernels->common.count_equal_rank_chunk,
+                    parameters().max_occ, kmer_size, anchors_slab);
+                if (!collected) {
+                    record_cpu_seed_completion();
+                    stats_dst->record_failure(collected.error());
+                    return std::move(token).emit_batch(std::span<anchor>{});
+                }
                 seed_batch.jobs.push_back(
                     {submitted_query_ordinal, 0u, anchors_slab.size()});
                 const std::array<std::uint32_t, 1u> submitted_ordinals{
@@ -639,7 +677,8 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
-            if (!parameters().prefilter_enabled || !parameters().compute_edit_distance || regions.size() == 0) {
+            if (!parameters().prefilter_enabled || !parameters().exact_edit_filter_enabled ||
+                !parameters().compute_edit_distance || regions.size() == 0) {
                 return std::move(token).emit_batch_pair(
                     std::span<alignment_region>{regions.data(), regions.size()},
                     std::span<const anchor>{anchors.data(), anchors.size()});
@@ -649,11 +688,17 @@ export {
                 bioseq::instrumentation::register_static_region("prefilter");
             auto prefilter_scope = bioseq::instrumentation::region(prefilter_region);
 
-            std::vector<std::uint8_t> query_ranks;
-            std::vector<std::uint8_t> target_ranks;
+            std::array<bioseq::storage::borrowed_rank_window_source, 2> query_sources{
+                query_seq_.template borrow_rank_source<false>(), {}};
+            std::size_t query_source_count = 1u;
+            if constexpr (supported_biological_alphabets::entry_for<p_alphabet>::is_complementable) {
+                query_sources[1] = query_seq_.template borrow_rank_source<true>();
+                query_source_count = 2u;
+            }
+            const std::array target_sources{target_seq_.template borrow_rank_source<false>()};
             std::vector<prefilter::prefilter_job> jobs;
             std::vector<std::size_t> job_regions;
-            const std::uint64_t max_flat_offset = (std::numeric_limits<std::uint32_t>::max)();
+            const std::uint64_t max_job_coordinate = (std::numeric_limits<std::uint32_t>::max)();
 
             for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
                 const alignment_region& region = regions[region_index];
@@ -662,58 +707,39 @@ export {
                     std::span<const anchor>{anchors.data(), anchors.size()},
                     parameters(),
                     [this,
-                     &query_ranks,
-                     &target_ranks,
                      &jobs,
                      &job_regions,
                      &region,
                      region_index,
-                     max_flat_offset](const mandatory_alignment_gap_window& window) {
+                     max_job_coordinate](const mandatory_alignment_gap_window& window) {
                         const std::uint64_t query_length = window.query_end - window.query_start;
                         const std::uint64_t target_length = window.target_end - window.target_start;
                         if (window.query_end > query_seq_.bp_size() ||
                             window.target_end > target_seq_.bp_size() ||
-                            query_length > max_flat_offset || target_length > max_flat_offset ||
-                            query_ranks.size() > max_flat_offset - query_length ||
-                            target_ranks.size() > max_flat_offset - target_length) {
+                            query_length > max_job_coordinate || target_length > max_job_coordinate ||
+                            window.query_start > max_job_coordinate ||
+                            window.target_start > max_job_coordinate) {
                             /* Skip this gap if its coordinates cannot fit the prefilter input.
                              * Other supported gaps can still supply a rejection  bound. */
                             return true;
                         }
 
-                        const auto query_offset = static_cast<std::uint32_t>(query_ranks.size());
-                        const auto target_offset = static_cast<std::uint32_t>(target_ranks.size());
-                        query_ranks.resize(query_ranks.size() +
-                                           static_cast<std::size_t>(query_length));
-                        target_ranks.resize(target_ranks.size() +
-                                            static_cast<std::size_t>(target_length));
-                        std::span<std::uint8_t> query_destination{
-                            query_ranks.data() + query_offset,
-                            static_cast<std::size_t>(query_length)};
-                        std::span<std::uint8_t> target_destination{
-                            target_ranks.data() + target_offset,
-                            static_cast<std::size_t>(target_length)};
-                        if (region.is_reverse) {
-                            query_seq_.template copy_ranks<true, false>(
-                                query_destination,
-                                static_cast<std::size_t>(window.query_start),
-                                static_cast<std::size_t>(window.query_end));
-                        } else {
-                            query_seq_.template copy_ranks<false, false>(
-                                query_destination,
-                                static_cast<std::size_t>(window.query_start),
-                                static_cast<std::size_t>(window.query_end));
+                        if constexpr (!supported_biological_alphabets::entry_for<p_alphabet>::is_complementable) {
+                            if (region.is_reverse) {
+                                throw std::invalid_argument{"protein prefilter region cannot request reverse complement"};
+                            }
                         }
-                        target_seq_.template copy_ranks<false, false>(
-                            target_destination,
-                            static_cast<std::size_t>(window.target_start),
-                            static_cast<std::size_t>(window.target_end));
                         jobs.push_back(prefilter::prefilter_job{
-                            .query_offset = query_offset,
-                            .target_offset = target_offset,
+                            .query_record_index = region.is_reverse ? 1u : 0u,
+                            .target_record_index = 0u,
+                            .query_start = static_cast<std::uint32_t>(window.query_start),
+                            .target_start = static_cast<std::uint32_t>(window.target_start),
                             .query_length = static_cast<std::uint32_t>(query_length),
                             .target_length = static_cast<std::uint32_t>(target_length),
                             .max_edits = parameters().prefilter_max_edits,
+                            .orientation = static_cast<std::uint32_t>(region.is_reverse
+                                ? bioseq::storage::sequence_transform::reverse_complement
+                                : bioseq::storage::sequence_transform::identity),
                         });
                         job_regions.push_back(region_index);
                         return true;
@@ -727,11 +753,11 @@ export {
             }
 
             const prefilter::prefilter_batch_input input{
-                .query_ranks = query_ranks,
-                .target_ranks = target_ranks,
+                .queries = std::span{query_sources}.first(query_source_count),
+                .targets = target_sources,
                 .jobs = jobs,
             };
-            std::vector<prefilter::prefilter_result> results;
+            prefilter::prefilter_batch_result batch_results;
             using backend_type = ::bioseq::prefilter::prefilter_backend;
             using algorithm_type = ::bioseq::prefilter::resolved_prefilter_algorithm;
             const backend_type selected = parameters().prefilter_backend == backend_type::automatic
@@ -740,7 +766,7 @@ export {
             const algorithm_type algorithm = resolve_prefilter_algorithm(selected, jobs);
             switch (selected) {
             case backend_type::scalar:
-                results = sneaky_snake_scalar_batch(input);
+                batch_results = sneaky_snake_scalar_batch(input);
                 break;
             case backend_type::simd:
             case backend_type::automatic: {
@@ -750,20 +776,28 @@ export {
                     parameters().highway_kernels->common.sneaky_snake_simd_batch == nullptr) {
                     throw std::logic_error{"selected Highway table has no SneakySnake kernel"};
                 }
-                results = parameters().highway_kernels->common.sneaky_snake_simd_batch(input, {});
+                batch_results = parameters().highway_kernels->common.sneaky_snake_simd_batch(input, {});
                 break;
             }
             case backend_type::vulkan: {
                 if (algorithm == algorithm_type::gatekeeper) {
-                    results =
-                        prefilter::run_gatekeeper_vulkan_batch(query_ranks, target_ranks, jobs);
+                    batch_results =
+                        prefilter::run_gatekeeper_vulkan_batch(query_seq_, target_seq_, jobs);
                 } else {
-                    results =
-                        prefilter::run_sneaky_snake_vulkan_batch(query_ranks, target_ranks, jobs);
+                    batch_results =
+                        prefilter::run_sneaky_snake_vulkan_batch(query_seq_, target_seq_, jobs);
                 }
                 break;
             }
             }
+            if (!batch_results) {
+                const auto& failure = batch_results.error();
+                throw std::runtime_error{fmt::format(
+                    "prefilter input failure {} in job {} {} at position {}",
+                    static_cast<unsigned>(failure.code), failure.job_index,
+                    failure.target_source ? "target" : "query", failure.position)};
+            }
+            const auto& results = *batch_results;
             if (results.size() != jobs.size()) {
                 throw std::runtime_error("rank prefilter backend returned the wrong result count");
             }
@@ -1123,6 +1157,39 @@ export {
                                 ? "invalid_identity"
                                 : "cache_not_empty"));
         }
+    }
+
+    /** Bind a completed GPU build to its native alphabet, record layout, counts, and query gate.
+     * Generic builds retain their existing route identity; authenticated native coverage does
+     * not claim that they came from the distinct source-direct producer.
+     */
+    template <class Minimizer, sequence_alphabet Alphabet>
+    [[nodiscard]] inline bioseq::indexing::gpu_index_cache_identity
+    make_native_gpu_built_identity(
+        const bioseq::gpu::vulkan::runtime& runtime,
+        const bioseq::gpu::vulkan::gpu_built_index& built,
+        const bioseq::indexing::gpu_index_cache_identity& previous,
+        std::uint32_t kmer_size, std::uint32_t window_size) {
+        const auto operation_identity = previous.operation_identity != 0u
+            ? previous.operation_identity
+            : bioseq::indexing::next_gpu_source_direct_operation_identity();
+        const auto rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<
+            compact_sequence_range<Alphabet>>();
+        auto identity = bioseq::indexing::make_gpu_source_direct_sorted_dense_identity<Minimizer>(
+            runtime, operation_identity, built.position_count, built.occupied_slots,
+            rank_policy.alphabet_size, rank_policy.alphabet_code, kmer_size, window_size);
+        identity.source_direct_sorted_dense = false;
+        identity.assembly_identity = previous.assembly_identity != 0u
+            ? previous.assembly_identity : operation_identity;
+        identity.seed_policy_id = rank_policy.seed_policy_id;
+        identity.packed_storage_bits = std::numeric_limits<std::uint32_t>::digits;
+        identity.gate_enabled = previous.gate_enabled;
+        identity.gate_word_count = previous.gate_word_count;
+        identity.gate_mask = previous.gate_mask;
+        identity.gate_digest_lo = previous.gate_digest_lo;
+        identity.gate_digest_hi = previous.gate_digest_hi;
+        identity.gate_canonical_words = previous.gate_canonical_words;
+        return identity;
     }
 
     /// Keep the query gate in shared const storage for the segment wave.

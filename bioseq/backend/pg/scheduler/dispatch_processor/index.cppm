@@ -1357,8 +1357,8 @@ export class batch_processor {
 /** Query-preparation functions specialized for the generated dispatch types. */
 export namespace cpu_preparation_detail {
 
-template <class p_alphabet, std::size_t p_width>
-[[nodiscard]] const batch_processor::cpu_preparation_typmod_operations& typmod_ops() noexcept;
+[[nodiscard]] const batch_processor::cpu_preparation_typmod_operations& typmod_ops(
+    std::uint8_t alphabet_code, std::size_t storage_unit_byte_width) noexcept;
 
 } // namespace cpu_preparation_detail
 

@@ -137,23 +137,22 @@ export {
      * @tparam p_window_size Positive minimizer window size.
      * @tparam p_runtime_kmer_size K-mer length used by the algorithm.
      * @tparam p_sequence_length_log2 Selected  position-width bucket.
-     * @tparam p_physical_kmer_size K used to choose the record format A
-     *         fixed-32-bit hash can use the K15 format while sketching k=20.
+     * @tparam p_hash_bits Physical hash field width, independent of runtime k.
      */
     template <std::size_t p_window_size,
               std::size_t p_runtime_kmer_size,
               std::size_t p_sequence_length_log2,
-              std::size_t p_physical_kmer_size = p_runtime_kmer_size>
+              std::size_t p_hash_bits = std::numeric_limits<std::uint32_t>::digits>
     struct static_aligner_parameters {
         static constexpr std::size_t window_len = p_window_size;
         static constexpr std::size_t kmer_len = p_runtime_kmer_size;
-        static constexpr std::size_t physical_kmer_len = p_physical_kmer_size;
+        static constexpr std::size_t hash_bits = p_hash_bits;
         static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
         static constexpr bool generic_fallback = false;
 
         using minimizer_repr_t =
             ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2,
-                                                         p_physical_kmer_size>;
+                                                         p_hash_bits>;
 
         [[nodiscard]] static constexpr std::string_view label() noexcept {
             return "specialised";
@@ -167,17 +166,17 @@ export {
      * sizes. The zero constants here are placeholders.
      */
     template <std::size_t p_sequence_length_log2,
-              std::size_t p_physical_kmer_size = 15u>
+              std::size_t p_hash_bits = std::numeric_limits<std::uint32_t>::digits>
     struct fallback_aligner_parameters {
         static constexpr std::size_t window_len = 0;
         static constexpr std::size_t kmer_len = 0;
-        static constexpr std::size_t physical_kmer_len = p_physical_kmer_size;
+        static constexpr std::size_t hash_bits = p_hash_bits;
         static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
         static constexpr bool generic_fallback = true;
 
         using minimizer_repr_t =
             ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2,
-                                                         p_physical_kmer_size>;
+                                                         p_hash_bits>;
 
         [[nodiscard]] static constexpr std::string_view label() noexcept {
             return "fallback(generic w/k)";
@@ -189,7 +188,7 @@ export {
     concept is_constexpr_aligner_params = requires {
         { p_type::window_len } -> std::convertible_to<std::size_t>;
         { p_type::kmer_len } -> std::convertible_to<std::size_t>;
-        { p_type::physical_kmer_len } -> std::convertible_to<std::size_t>;
+        { p_type::hash_bits } -> std::convertible_to<std::size_t>;
         { p_type::sequence_len_log2 } -> std::convertible_to<std::size_t>;
         { p_type::generic_fallback } -> std::convertible_to<bool>;
         typename p_type::minimizer_repr_t;
@@ -199,12 +198,12 @@ export {
     static_assert(is_constexpr_aligner_params<static_aligner_parameters<10u, 15u, 28u>>);
     static_assert(is_constexpr_aligner_params<fallback_aligner_parameters<28u>>);
     static_assert(std::same_as<
-        static_aligner_parameters<15u, 20u, 28u, 15u>::minimizer_repr_t,
-        ::bioseq::minimizers::minimizer_representation<28u, 15u>>);
-    static_assert(static_aligner_parameters<15u, 20u, 28u, 15u>::kmer_len == 20u);
+        static_aligner_parameters<15u, 20u, 28u, 32u>::minimizer_repr_t,
+        ::bioseq::minimizers::minimizer_representation<28u, 32u>>);
+    static_assert(static_aligner_parameters<15u, 20u, 28u, 32u>::kmer_len == 20u);
     static_assert(std::same_as<
-        fallback_aligner_parameters<23u, 20u>::minimizer_repr_t,
-        ::bioseq::minimizers::minimizer_representation<23u, 20u>>);
+        fallback_aligner_parameters<23u, 40u>::minimizer_repr_t,
+        ::bioseq::minimizers::minimizer_representation<23u, 40u>>);
 
     /**
      * @brief Choose whether the pipeline receives a sketch or a sequence.

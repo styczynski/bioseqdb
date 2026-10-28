@@ -6,6 +6,9 @@ module;
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <memory>
+#include <type_traits>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -627,6 +630,81 @@ inline bool memory_permit::absorb(memory_permit&& other) noexcept {
     other.bytes_ = 0u;
     return true;
 }
+
+/** Reserves and materializes a fresh vector, retaining its exact physical capacity permit.
+ * @tparam p_admission_error Existing caller-boundary exception for rejected admission.
+ * @param values Empty vector with no allocated capacity.
+ * @param retained_permit Empty permit receiving ownership of the retained allocation.
+ * @param count Required element capacity; zero leaves the owner empty.
+ */
+template <class p_admission_error, class p_value>
+void prepare_admitted_vector_capacity(
+    std::vector<p_value>& values,
+    bioseq::parallelism::memory_permit& retained_permit,
+    std::size_t count) {
+    if (values.capacity() != 0u || !values.empty() || retained_permit ||
+        count > values.max_size()) {
+        throw std::invalid_argument{"Vulkan query vector is not a fresh bounded owner"};
+    }
+    if (count == 0u)
+        return;
+    const auto bytes = bioseq::common::checked_mul(
+        static_cast<std::uint64_t>(count), sizeof(p_value));
+    const auto bound = bytes ? bioseq::common::checked_mul(
+        *bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor)
+        : std::optional<std::uint64_t>{};
+    if (!bound) {
+        throw std::length_error{"Vulkan query vector capacity overflows admission"};
+    }
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    auto pending_permit = admission.try_reserve(*bound);
+    if (!pending_permit) {
+        throw p_admission_error{
+            "Vulkan query vector physical admission was rejected"};
+    }
+    // Destroy the temporary vector before its permit, including when allocation throws.
+    std::vector<p_value> pending_values;
+    auto* const pending_values_owner = std::addressof(pending_values);
+    auto* const pending_permit_owner = std::addressof(pending_permit);
+    const auto materialization = admission.materialize(
+        *pending_permit,
+        [pending_values_owner, pending_permit_owner, count]() {
+            pending_values_owner->reserve(count);
+            const auto actual = bioseq::common::checked_mul(
+                static_cast<std::uint64_t>(pending_values_owner->capacity()),
+                sizeof(p_value));
+            if (!actual || *actual > (*pending_permit_owner)->bytes()) {
+                throw std::length_error{"Vulkan query allocation exceeds admitted capacity"};
+            }
+            (*pending_permit_owner)->shrink_to(*actual);
+            std::uint64_t fully_touched = 0u;
+            if constexpr (std::is_trivially_copyable_v<p_value> &&
+                          std::is_default_constructible_v<p_value>) {
+                pending_values_owner->resize(pending_values_owner->capacity());
+                std::memset(pending_values_owner->data(),
+                            0,
+                            static_cast<std::size_t>(*actual));
+                pending_values_owner->clear();
+                fully_touched = *actual;
+            }
+            return bioseq::parallelism::memory_materialization_snapshot{
+                .actual_allocation_bytes = *actual,
+                .fully_touched_bytes = fully_touched,
+                .is_host_visible = true,
+                .is_host_coherent = true,
+                .is_process_footprint_reflected = true,
+            };
+        });
+    const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
+    if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
+        materialization.admitted_bytes != actual ||
+        materialization.is_permit_released == static_cast<bool>(*pending_permit)) {
+        throw std::logic_error{"Vulkan query materialization did not reconcile physical storage"};
+    }
+    values.swap(pending_values);
+    retained_permit = std::move(*pending_permit);
+}
+
 
 /// Try to reserve a work group through the shared process controller.
 [[nodiscard]] inline budgeted_wave

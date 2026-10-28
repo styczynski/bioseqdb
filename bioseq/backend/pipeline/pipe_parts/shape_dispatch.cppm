@@ -17,6 +17,9 @@ import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.minimizer_layout_geometry;
+import bioseq.sequences.kmers.hashers.base;
+import bioseq.sequences.kmers.minimizer_physical_records;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -61,180 +64,93 @@ export {
 
     using ::bioseq::common::templating::value_sequence;
 
-    // Choose position-width buckets where the minimizer record changes size.
-    // Add supported k values to kmer_size_buckets and storage_bits_for together.
+    /** Physical hash widths come from the existing generated record authority. */
+    inline constexpr auto hash_bits_buckets_pair = [] consteval {
+        constexpr auto records = ::bioseq::minimizers::registered_minimizer_physical_records();
+        std::array<std::size_t, records.size()> widths{};
+        std::size_t count{};
+        constexpr std::size_t native_hash_bits = std::numeric_limits<std::uint32_t>::digits;
+        for (const auto& record : records)
+            if (record.hash_bits == native_hash_bits)
+                ::bioseq::common::templating::append_unique_value(widths, count, native_hash_bits);
+        for (const auto& record : records)
+            ::bioseq::common::templating::append_unique_value(widths, count,
+                                                             std::size_t{record.hash_bits});
+        return std::pair{widths, count};
+    }();
+    inline constexpr auto hash_bits_buckets = hash_bits_buckets_pair.first;
+    inline constexpr std::size_t hash_bits_buckets_n = hash_bits_buckets_pair.second;
+    inline constexpr std::size_t hash_bits_default = std::numeric_limits<std::uint32_t>::digits;
+    static_assert(hash_bits_buckets_n != 0u && hash_bits_buckets[0] == hash_bits_default);
 
-    /// K-mer sizes with compiled dispatch entries. The first is the template default.
-    /// Infer the array length from its entries so a smaller, build profile cannot
-    /// leave zero-filled slots that would instantiate an invalid k=0 layout.
-    inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
-#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-        15u
-#else
-        15u, 7u, 27u
-#endif
-    });
-
-    /// Calculate the position-bit requirement  for max_bp bases, capped at 63
-    /// and raised to at least kmer_size for the layout's bucket range
-    /// Callers must supply a kmer_size no greater than 63.
-    [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(std::size_t max_bp,
-                                                              std::size_t kmer_size) noexcept {
-        // Saturate this legacy size helper. Registered-layout callers check the
-        // original sequence length before using a layout.
-        const std::size_t lg = ::bioseq::minimizers::minimizer_position_requirement(
-            std::min<std::uint64_t>(max_bp, std::uint64_t{1u} << 63u));
-        return std::clamp<std::size_t>(lg, kmer_size, 63u);
+    /** Position capacity is independent of both runtime k and hash width. */
+    [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(std::size_t max_bp) {
+        return ::bioseq::minimizers::minimizer_position_requirement(max_bp);
     }
-
-    static_assert(round_up_seq_len_log2(0u, 15u) == 15u);
-    static_assert(round_up_seq_len_log2(1u, 15u) == 15u);
-    static_assert(round_up_seq_len_log2(std::size_t{1} << 28, 15u) == 28u);
-    static_assert(round_up_seq_len_log2((std::size_t{1} << 48) + 1u, 15u) == 49u);
-    static_assert(round_up_seq_len_log2(std::size_t{1} << 62, 15u) == 62u);
 
     namespace detail {
-
-    /// Build a compile-time table of record sizes for one k-mer size and the
-    /// supplied position widths. Each entry instantiates its minimizer layout.
-    template <std::size_t p_kmer_size, std::size_t... p_bucket_values>
-    [[nodiscard]] consteval auto
-    make_storage_bits_table_impl(std::index_sequence<p_bucket_values...>) noexcept {
-        using ::bioseq::minimizers::minimizer_layout;
-        return std::array<std::size_t, sizeof...(p_bucket_values)>{
-            minimizer_layout<p_bucket_values, p_kmer_size>::k_storage_bits...};
+    /** Return the physical record size for validated independent dimensions. */
+    [[nodiscard]] consteval std::size_t storage_bits_for(std::size_t position_bits,
+                                                        std::size_t hash_bits) noexcept {
+        return position_bits != 0u && position_bits <= 63u && hash_bits != 0u && hash_bits <= 64u
+            ? ::bioseq::minimizers::minimizer_record_storage_bits(position_bits, hash_bits) : 0u;
     }
-
-    template <std::size_t p_kmer_size>
-    [[nodiscard]] consteval auto make_storage_bits_table() noexcept {
-        return make_storage_bits_table_impl<p_kmer_size>(std::make_index_sequence<64u>{});
-    }
-
-    /// Return the record size for a supported k-mer size, or zero otherwise.
-    /// Keep  this list consistent with kmer_size_buckets.
-    [[nodiscard]] consteval std::size_t storage_bits_for(std::size_t p_bucket_width,
-                                                         std::size_t p_kmer_size) noexcept {
-        if (p_kmer_size == 15u || p_kmer_size == 20u ||
-            p_kmer_size == 7u || p_kmer_size == 27u) {
-            return ::bioseq::minimizers::minimizer_record_storage_bits(
-                p_bucket_width, p_kmer_size);
-        }
-        return 0u;
-    }
-
-    /// Find poition-width buckets for one k-mer size. Keep the lower bound,
-    /// the last width before each increase in record size, and the final
-    /// 63-bit bound. These buckets cover the same storage choices with fewer
-    /// template instantiations.
-    template <std::size_t p_kmer_size>
+    /** Keep exactly the registered position capacities for one hash width. */
+    template<std::size_t HashBits>
     [[nodiscard]] consteval auto compute_breakpoints_for() noexcept {
-        std::array<std::size_t, 6u> out{};
-        std::size_t out_n = 0u;
-        std::size_t last_bits = 0u;
-        for (std::size_t p_bucket_width = p_kmer_size; p_bucket_width <= 63u; ++p_bucket_width) {
-            const std::size_t bits = storage_bits_for(p_bucket_width, p_kmer_size);
-            if (bits != last_bits) {
-                out[out_n++] = (last_bits == 0u) ? p_bucket_width : p_bucket_width - 1u;
-                last_bits = bits;
-            }
-        }
-        out[out_n++] = 63u;
-        return std::pair{out, out_n};
+        constexpr auto records = ::bioseq::minimizers::registered_minimizer_physical_records();
+        std::array<std::size_t, records.size()> positions{};
+        std::size_t count{};
+        for (const auto& record : records)
+            if (record.hash_bits == HashBits)
+                ::bioseq::common::templating::append_unique_value(
+                    positions, count, std::size_t{record.position_log2});
+        ::bioseq::common::templating::sort_in_place_ascending(positions, count);
+        return std::pair{positions, count};
     }
-
-    static_assert(compute_breakpoints_for<15u>().second <= 6u);
-    static_assert(compute_breakpoints_for<7u>().second <= 6u);
-    static_assert(compute_breakpoints_for<27u>().second <= 6u);
-
-    /// Scratch array for merging position-width buckets from the supported k values.
-    using raw_buf = std::array<std::size_t, 32u>;
-
-    /// Append this k-mer size's breakpoints, skipping values already present.
-    template <std::size_t p_kmer_size>
-    consteval void merge_breakpoints_into(raw_buf& raw, std::size_t& raw_n) noexcept {
-        constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
-        for (std::size_t i = 0u; i < bp.second; ++i) {
-            ::bioseq::common::templating::append_unique_value(raw, raw_n, bp.first[i]);
-        }
-    }
-
-    /// Combine and sort the position-width buckets for all compiled k values.
-    /// Sorting lets runtime dispatch choose the smallest sufficient  bucket.
-    template <std::size_t... p_indices>
-    [[nodiscard]] consteval auto
-    compute_global_l_buckets_impl(std::index_sequence<p_indices...>) noexcept {
-        raw_buf raw{};
-        std::size_t raw_n = 0u;
-        (merge_breakpoints_into<kmer_size_buckets[p_indices]>(raw, raw_n), ...);
-        ::bioseq::common::templating::sort_in_place_ascending(raw, raw_n);
-        return std::pair{raw, raw_n};
-    }
-
+    /** Merge position capacities without instantiating unsupported record pairs. */
     [[nodiscard]] consteval auto compute_global_l_buckets() noexcept {
-        return compute_global_l_buckets_impl(std::make_index_sequence<kmer_size_buckets.size()>{});
+        constexpr auto records = ::bioseq::minimizers::registered_minimizer_physical_records();
+        std::array<std::size_t, records.size()> positions{};
+        std::size_t count{};
+        for (const auto& record : records)
+            ::bioseq::common::templating::append_unique_value(
+                positions, count, std::size_t{record.position_log2});
+        ::bioseq::common::templating::sort_in_place_ascending(positions, count);
+        return std::pair{positions, count};
     }
-
     } // namespace detail
 
-    /// Combined position-width buckets and the number of populated entries.
-    /// The array has spare capacity, so use only its first _n entries.
     inline constexpr auto seq_len_log2_buckets_pair = detail::compute_global_l_buckets();
     inline constexpr auto seq_len_log2_buckets = seq_len_log2_buckets_pair.first;
     inline constexpr std::size_t seq_len_log2_buckets_n = seq_len_log2_buckets_pair.second;
-    static_assert(seq_len_log2_buckets_n >= 1u, "seq_len_log2_buckets must be non-empty");
+    static_assert(seq_len_log2_buckets_n != 0u);
 
     namespace detail {
-
-    /// Turn the populated position-width buckets into template arguments.
-    template <std::size_t... p_indices>
-    [[nodiscard]] consteval auto
-    make_seq_len_log2_buckets_seq(std::index_sequence<p_indices...>) noexcept {
-        return value_sequence<std::size_t, seq_len_log2_buckets[p_indices]...>{};
+    /** Turn actual generated position capacities into the common dispatch value list. */
+    template<std::size_t... Indices>
+    [[nodiscard]] consteval auto make_seq_len_log2_buckets_seq(std::index_sequence<Indices...>) noexcept {
+        return value_sequence<std::size_t, seq_len_log2_buckets[Indices]...>{};
     }
-
-    using seq_len_log2_buckets_seq =
-        decltype(make_seq_len_log2_buckets_seq(std::make_index_sequence<seq_len_log2_buckets_n>{}));
-
-    /// Turn the compiled k-mer sizes into template arguments.
-    template <std::size_t... p_indices>
-    [[nodiscard]] consteval auto
-    make_kmer_size_buckets_seq(std::index_sequence<p_indices...>) noexcept {
-        return value_sequence<std::size_t, kmer_size_buckets[p_indices]...>{};
+    using seq_len_log2_buckets_seq = decltype(make_seq_len_log2_buckets_seq(
+        std::make_index_sequence<seq_len_log2_buckets_n>{}));
+    /** Turn actual generated hash widths into the common dispatch value list. */
+    template<std::size_t... Indices>
+    [[nodiscard]] consteval auto make_hash_bits_buckets_seq(std::index_sequence<Indices...>) noexcept {
+        return value_sequence<std::size_t, hash_bits_buckets[Indices]...>{};
     }
-
-    using kmer_size_buckets_seq =
-        decltype(make_kmer_size_buckets_seq(std::make_index_sequence<kmer_size_buckets.size()>{}));
-
-    // Build the position-width list for one selected k Dispatching only, its
-    // relevant widths avoids compiling every combination in the global list.
-    template <std::size_t p_kmer_size, std::size_t... p_indices>
-    [[nodiscard]] consteval auto
-    make_per_k_breakpoints_seq_impl(std::index_sequence<p_indices...>) noexcept {
-        constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
-        return value_sequence<std::size_t, bp.first[p_indices]...>{};
+    using hash_bits_buckets_seq = decltype(make_hash_bits_buckets_seq(
+        std::make_index_sequence<hash_bits_buckets_n>{}));
+    /** Couple only the physical dimensions present in the generated registry. */
+    template<std::size_t HashBits, std::size_t... Indices>
+    [[nodiscard]] consteval auto make_per_hash_breakpoints_seq_impl(std::index_sequence<Indices...>) noexcept {
+        constexpr auto positions = compute_breakpoints_for<HashBits>();
+        return value_sequence<std::size_t, positions.first[Indices]...>{};
     }
-
-    template <std::size_t p_kmer_size>
-    [[nodiscard]] consteval auto make_per_k_breakpoints_seq() noexcept {
-        constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
-        return make_per_k_breakpoints_seq_impl<p_kmer_size>(std::make_index_sequence<bp.second>{});
-    }
-
-    template <std::size_t p_kmer_size>
-    using per_k_breakpoints_seq = decltype(make_per_k_breakpoints_seq<p_kmer_size>());
-
-    static_assert(per_k_breakpoints_seq<15u>::size() == compute_breakpoints_for<15u>().second);
-    static_assert(per_k_breakpoints_seq<7u>::size() == compute_breakpoints_for<7u>().second);
-    static_assert(per_k_breakpoints_seq<27u>::size() == compute_breakpoints_for<27u>().second);
-
+    template<std::size_t HashBits>
+    using per_hash_breakpoints_seq = decltype(make_per_hash_breakpoints_seq_impl<HashBits>(
+        std::make_index_sequence<compute_breakpoints_for<HashBits>().second>{}));
     } // namespace detail
-
-    /// Template k value used when the requested k has no compiled entry.
-    /// The generic pipeline still reads the requested k  from runtime parameters.
-    inline constexpr std::size_t kmer_size_default = 15u;
-    static_assert(kmer_size_default == kmer_size_buckets[0],
-                  "kmer_size_default must match the leading entry of kmer_size_buckets — "
-                  "the chain's default-value path expects them in sync.");
 
     // Reuse the shared exact-value and size-bucket dispazch helpers.
 
@@ -347,37 +263,59 @@ export {
         read_field(const ::bioseq::simd::minimap2_parameters& params,
                    const p_query_range& q,
                    const p_target_range& t,
-                   p_remaining_stages&&...) noexcept {
+                   p_remaining_stages&&...) {
             const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
-            return round_up_seq_len_log2(max_bp, static_cast<std::size_t>(params.kmer_size));
+            return round_up_seq_len_log2(max_bp);
         }
     };
 
-    struct kmer_size_registry {
+    struct hash_bits_registry {
         using target_t = std::size_t;
-        static constexpr std::size_t default_value = kmer_size_default;
-        using value_list = kmer_size_buckets_seq;
-
-        template <class... p_arguments>
-        [[nodiscard, gnu::always_inline]] static constexpr std::size_t
-        read_field(const ::bioseq::simd::minimap2_parameters& params, p_arguments&&...) noexcept {
-            return static_cast<std::size_t>(params.kmer_size);
+        static constexpr std::size_t default_value = hash_bits_default;
+        using value_list = hash_bits_buckets_seq;
+        template<has_bp_size Query, has_bp_size Target, class... Remaining>
+        [[nodiscard, gnu::always_inline]] static std::size_t read_field(
+            const minimap2_parameters& params, const Query& query, const Target& target,
+            Remaining&&...) {
+            using alphabet = typename Query::traits::alphabet_type;
+            if (params.kmer_size <= 0 || params.window_size <= 0
+                || static_cast<std::uint64_t>(params.kmer_size) > std::numeric_limits<std::uint16_t>::max()
+                || static_cast<std::uint64_t>(params.window_size) > std::numeric_limits<std::uint16_t>::max())
+                throw std::invalid_argument{"minimizer runtime shape exceeds the registry domain"};
+            if (use_generic_raw_optional_scalar_minimizer_route<alphabet>(
+                    params, ::bioseq::indexing::index_read_requirement::allow)) {
+                constexpr auto rank_bits = ::bioseq::minimizers::minimizer_exact_rank_bits<alphabet>;
+                if (params.kmer_size <= 0 || static_cast<std::size_t>(params.kmer_size)
+                        > std::numeric_limits<std::uint64_t>::digits / rank_bits)
+                    throw std::invalid_argument{"exact minimizer exceeds the native hash domain"};
+                const auto required = static_cast<std::size_t>(params.kmer_size) * rank_bits;
+                std::optional<std::size_t> selected;
+                for (std::size_t index = 0u; index < hash_bits_buckets_n; ++index) {
+                    const auto width = hash_bits_buckets[index];
+                    if (width >= required && (!selected || width < *selected)) selected = width;
+                }
+                if (!selected) throw std::invalid_argument{"no registered exact hash width"};
+                return *selected;
+            }
+            const auto selection = select_minimizer_execution_layout_prefer_native<alphabet>(
+                params.minimizer_algorithm, std::max(query.bp_size(), target.bp_size()),
+                static_cast<std::uint16_t>(params.kmer_size),
+                static_cast<std::uint16_t>(params.window_size), 32u);
+            return selection.hash_bits;
         }
     };
 
-    /// Select position-width buckets for the k value chosen by  an earlier step.
-    /// This reduces the number of compiled k/width combinations. Place this
-    /// registry's step after kmer_size_step so that k is already available.
-    struct seq_len_log2_registry_per_k {
+    /// Select only position capacities registered for the already selected hash width.
+    struct seq_len_log2_registry_per_hash {
         using target_t = std::size_t;
 
         /// Default required by the dispatch-step interface. This step is always active.
-        static constexpr std::size_t default_value = 15u;
+        static constexpr std::size_t default_value = seq_len_log2_buckets[0];
 
-        template <std::size_t p_kmer_size, auto... p_rest_pinned>
-        using value_list_for = per_k_breakpoints_seq<p_kmer_size>;
+        template <std::size_t p_hash_bits, auto... p_rest_pinned>
+        using value_list_for = per_hash_breakpoints_seq<p_hash_bits>;
 
-        template <std::size_t p_pinned_kmer_size,
+        template <std::size_t p_pinned_hash_bits,
                   has_bp_size p_query_range,
                   has_bp_size p_target_range,
                   class... p_remaining_stages>
@@ -385,9 +323,9 @@ export {
         read_field_for(const ::bioseq::simd::minimap2_parameters& params,
                        const p_query_range& q,
                        const p_target_range& t,
-                       p_remaining_stages&&...) noexcept {
+                       p_remaining_stages&&...) {
             const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
-            return round_up_seq_len_log2(max_bp, static_cast<std::size_t>(params.kmer_size));
+            return round_up_seq_len_log2(max_bp);
         }
     };
 
@@ -406,11 +344,11 @@ export {
     using baa_step = enum_step<algorithm_enum_values<::bioseq::simd::base_alignment_algorithm>>;
     using ca_step = enum_step<algorithm_enum_values<::bioseq::simd::chaining_algorithm>>;
     using ma_step = enum_step<algorithm_enum_values<::bioseq::simd::minimizer_algorithm>>;
-    using kmer_size_step = enum_step<kmer_size_registry>;
+    using hash_bits_step = enum_step<hash_bits_registry>;
     using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
 
-    /// Place this after kmer_size_step to select length buckets for the chosen k.
-    using seq_len_log2_step_per_k = dependent_bucket_step<seq_len_log2_registry_per_k>;
+    /// Place this after hash_bits_step to select that width's registered position buckets.
+    using seq_len_log2_step_per_hash = dependent_bucket_step<seq_len_log2_registry_per_hash>;
 
     /// A dispatch chain using minimap2_parameters. The caller supplies the final
     /// operation, its result type, and the sequence of selection steps.

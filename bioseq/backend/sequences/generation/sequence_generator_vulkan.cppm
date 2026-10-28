@@ -49,8 +49,11 @@ template <typename p_traits>
     std::uint64_t seed,
     std::uint32_t chunk_units) {
     constexpr std::uint32_t letters_per_unit = p_traits::letters_per_unit;
-    const std::uint64_t units_per_seq = (symbols_per_seq + letters_per_unit - 1) / letters_per_unit;
-    const std::uint64_t chunks_per_seq = (units_per_seq + chunk_units - 1) / chunk_units;
+    if (chunk_units == 0u) return std::nullopt;
+    const std::uint64_t units_per_seq = symbols_per_seq / letters_per_unit
+        + static_cast<std::uint64_t>(symbols_per_seq % letters_per_unit != 0u);
+    const std::uint64_t chunks_per_seq = units_per_seq / chunk_units
+        + static_cast<std::uint64_t>(units_per_seq % chunk_units != 0u);
     const std::uint64_t total_chunks =
         bioseq::common::saturating_mul(chunks_per_seq, seq_count);
     if (symbols_per_seq > 0xFFFFFFFFull ||
@@ -153,6 +156,7 @@ template <typename p_traits>
     if constexpr (!gpu_generatable<p_traits>) {
         return false;
     } else {
+        if (cdf.size() != p_traits::alphabet_size || chunk_units == 0u) return false;
         auto& runtime = bioseq::gpu::vulkan::runtime::instance();
         if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
             return false;
@@ -160,7 +164,8 @@ template <typename p_traits>
 
         constexpr std::uint32_t letters_per_unit = p_traits::letters_per_unit;
         const std::uint64_t units_per_seq =
-            (symbols_per_seq + letters_per_unit - 1) / letters_per_unit;
+            symbols_per_seq / letters_per_unit
+                + static_cast<std::uint64_t>(symbols_per_seq % letters_per_unit != 0u);
         const std::uint64_t total_units =
             bioseq::common::saturating_mul(units_per_seq, seq_count);
         if (total_units != static_cast<std::uint64_t>(out_units.size())) {

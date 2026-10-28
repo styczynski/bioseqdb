@@ -95,6 +95,7 @@ import bioseq.parallelism.pipeline_ops;
 export import bioseq.pipeline.stats;
 
 export import :stage_graph;
+export import :owned_entries;
 export import :minimizer_execution;
 export import :execution;
 export import :shape_dispatch;
@@ -112,7 +113,7 @@ export {
               class p_minimizer,
               class p_index,
               std::size_t p_bucket_width,
-              std::size_t p_kmer_size,
+              std::size_t p_hash_bits,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
               ::bioseq::simd::minimizer_algorithm p_minimizer_algorithm>
@@ -121,8 +122,8 @@ export {
                       "pipeline_run_leaf: p_bucket_width must be std::size_t (comes from "
                       "seq_len_log2_step).");
         static_assert(
-            std::is_same_v<decltype(p_kmer_size), std::size_t>,
-            "pipeline_run_leaf: p_kmer_size must be std::size_t (comes from kmer_size_step).");
+            std::is_same_v<decltype(p_hash_bits), std::size_t>,
+            "pipeline_run_leaf: p_hash_bits must be std::size_t (comes from hash_bits_step).");
         static_assert(std::is_same_v<decltype(p_alignment_algorithm),
                                      ::bioseq::simd::base_alignment_algorithm>,
                       "pipeline_run_leaf: p_alignment_algorithm must be base_alignment_algorithm "
@@ -147,16 +148,16 @@ export {
              bool allow_gpu_target_index_build,
              transient_target_index_release_authorization transient_target_index_owner = {}) {
             using specialized_parameters =
-                static_aligner_parameters<10u, p_kmer_size, p_bucket_width, p_kmer_size>;
+                static_aligner_parameters<10u, 15u, p_bucket_width, p_hash_bits>;
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
-            using fallback_parameters = fallback_aligner_parameters<63, p_kmer_size>;
+            using fallback_parameters = fallback_aligner_parameters<63, p_hash_bits>;
 #else
-            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_kmer_size>;
+            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_hash_bits>;
 #endif
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
             // Use the specialized parameters when runtime k and w atch them.
-            if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
+            if (params.window_size == 10 && params.kmer_size == 15) {
                 return pipeline_run_impl<specialized_parameters,
                                          p_alignment_algorithm,
                                          p_chaining_algorithm,
@@ -201,7 +202,7 @@ export {
               class p_minimizer,
               class p_index>
     struct pipeline_run_traits {
-        template <auto p_kmer_size,
+        template <auto p_hash_bits,
                   auto p_bucket_width,
                   auto p_alignment_algorithm,
                   auto p_chaining_algorithm,
@@ -211,7 +212,7 @@ export {
                                        p_minimizer,
                                        p_index,
                                        p_bucket_width,
-                                       p_kmer_size,
+                                       p_hash_bits,
                                        p_alignment_algorithm,
                                        p_chaining_algorithm,
                                        p_minimizer_algorithm>;
@@ -240,12 +241,12 @@ export {
             ) {
             using layout = typename p_minimizer::layout_type;
             constexpr std::size_t position_bits = layout::k_position_bits;
-            constexpr std::size_t physical_k = layout::k_physical_kmer_size;
+            constexpr std::size_t hash_bits = layout::k_hash_bits;
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
             if (params.window_size == 10 &&
-                params.kmer_size == static_cast<std::int32_t>(physical_k)) {
-                using specialized = static_aligner_parameters<10u, physical_k,
-                    position_bits, physical_k>;
+                params.kmer_size == 15) {
+                using specialized = static_aligner_parameters<10u, 15u,
+                    position_bits, hash_bits>;
                 return run_minimap_post_seed_job<specialized, p_alignment_algorithm,
                     p_chaining_algorithm, p_alphabet, p_minimizer>(seeds, job_index,
                         expected_ordinal, query_seq, target_seq, std::move(query_minimizers),
@@ -257,9 +258,9 @@ export {
             }
 #endif
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
-            using fallback = fallback_aligner_parameters<63, physical_k>;
+            using fallback = fallback_aligner_parameters<63, hash_bits>;
 #else
-            using fallback = fallback_aligner_parameters<position_bits, physical_k>;
+            using fallback = fallback_aligner_parameters<position_bits, hash_bits>;
 #endif
             return run_minimap_post_seed_job<fallback, p_alignment_algorithm,
                 p_chaining_algorithm, p_alphabet, p_minimizer>(seeds, job_index,
@@ -286,7 +287,7 @@ export {
               class p_minimizer,
               class p_index,
               std::size_t p_bucket_width,
-              std::size_t p_kmer_size>
+              std::size_t p_hash_bits>
     struct pipeline_run_pinned_shape_traits {
         template <auto p_alignment_algorithm, auto p_chaining_algorithm, auto p_minimizer_algorithm>
         using leaf = pipeline_run_leaf<p_entry_point,
@@ -294,7 +295,7 @@ export {
                                        p_minimizer,
                                        p_index,
                                        p_bucket_width,
-                                       p_kmer_size,
+                                       p_hash_bits,
                                        p_alignment_algorithm,
                                        p_chaining_algorithm,
                                        p_minimizer_algorithm>;
@@ -324,7 +325,9 @@ export {
             std::make_shared<const std::vector<p_minimizer>>(), 0u, 0u);
         minimizer_hashmap_fragment_index empty_index{};
         match_result_collection ignored_out{};
-        const auto& sm = thread_local_scoring_matrix<p_alphabet>(params);
+        const auto prepared_scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        if (!prepared_scoring) return pipeline_description{.failure = prepared_scoring.error()};
+        const auto& sm = prepared_scoring->get();
         // EXPLAIN builds stage descriptions without running kernels. Empty
         // alignment function pointers are sufficient for this graph.
         const ::bioseq::simd::alignment_kernels<p_alphabet> description_alignment_kernels{};
@@ -362,15 +365,15 @@ export {
     // query-sketch description from the frozen runtime selection.
     template <sequence_alphabet p_alphabet,
               std::size_t p_bucket_width,
-              std::size_t p_kmer_size,
+              std::size_t p_hash_bits,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm>
     struct describe_leaf {
         static_assert(
             std::is_same_v<decltype(p_bucket_width), std::size_t>,
             "describe_leaf: p_bucket_width must be std::size_t (from seq_len_log2_step).");
-        static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>,
-                      "describe_leaf: p_kmer_size must be std::size_t (from kmer_size_step).");
+        static_assert(std::is_same_v<decltype(p_hash_bits), std::size_t>,
+                      "describe_leaf: p_hash_bits must be std::size_t (from hash_bits_step).");
         static_assert(std::is_same_v<decltype(p_alignment_algorithm),
                                      ::bioseq::simd::base_alignment_algorithm>,
                       "describe_leaf: p_alignment_algorithm must be base_alignment_algorithm (from "
@@ -388,11 +391,11 @@ export {
                                          const query_sketch_route& query_sketch_route,
                                          statement_execution_plan_owner execution_plan) {
             using specialized_parameters =
-                static_aligner_parameters<10u, p_kmer_size, p_bucket_width, p_kmer_size>;
+                static_aligner_parameters<10u, 15u, p_bucket_width, p_hash_bits>;
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
-            using fallback_parameters = fallback_aligner_parameters<63, p_kmer_size>;
+            using fallback_parameters = fallback_aligner_parameters<63, p_hash_bits>;
 #else
-            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_kmer_size>;
+            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_hash_bits>;
 #endif
 
             constexpr auto describe_entry_point = pipeline_entry_point::with_prebuilt_minimizers;
@@ -404,7 +407,7 @@ export {
                 "sites if the p_minimizer_algorithm default ever changes.");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
-            if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
+            if (params.window_size == 10 && params.kmer_size == 15) {
                 return describe_pipeline_leaf<specialized_parameters,
                                               p_alignment_algorithm,
                                               p_chaining_algorithm,
@@ -426,13 +429,13 @@ export {
 
     template <sequence_alphabet p_alphabet> struct describe_traits {
         // Dispatch supplies k before the position width that depends on it.
-        template <auto p_kmer_size,
+        template <auto p_hash_bits,
                   auto p_bucket_width,
                   auto p_alignment_algorithm,
                   auto p_chaining_algorithm>
         using leaf = describe_leaf<p_alphabet,
                                    p_bucket_width,
-                                   p_kmer_size,
+                                   p_hash_bits,
                                    p_alignment_algorithm,
                                    p_chaining_algorithm>;
     };
@@ -502,7 +505,7 @@ export {
         using record_layout = typename p_minimizer::layout_type;
         using traits_type = detail::pipeline_run_pinned_shape_traits<
             p_entry_point, p_alphabet, p_minimizer, p_index,
-            record_layout::k_position_bits, record_layout::k_physical_kmer_size>;
+            record_layout::k_position_bits, record_layout::k_hash_bits>;
         // Keep the input record layout. Runtime biological k and w can differ
         // from the physical laiout chosen to store these records.
         return detail::dispatch_chain<
@@ -531,7 +534,7 @@ export {
      * specialized or runtime parameters.
      */
     template <std::size_t p_bucket_width,
-              std::size_t p_kmer_size,
+              std::size_t p_hash_bits,
               pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer,
@@ -553,14 +556,14 @@ export {
             throw std::invalid_argument("pipeline dispatch requires plan and query ownership");
         }
         const auto& params = execution_plan->frozen_parameters;
-        static_assert(p_kmer_size > 0u);
-        static_assert(p_bucket_width >= p_kmer_size);
+        static_assert(p_hash_bits > 0u);
+        static_assert(p_hash_bits <= std::numeric_limits<std::uint64_t>::digits);
         using traits_type = detail::pipeline_run_pinned_shape_traits<p_entry_point,
                                                                      p_alphabet,
                                                                      p_minimizer,
                                                                      p_index,
                                                                      p_bucket_width,
-                                                                     p_kmer_size>;
+                                                                     p_hash_bits>;
         return detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
@@ -602,8 +605,8 @@ export {
         // Select k before choosing a position width for that record layout.
         return detail::dispatch_chain<pipeline_description,
                                       traits_type::template leaf,
-                                      detail::kmer_size_step,
-                                      detail::seq_len_log2_step_per_k,
+                                      detail::hash_bits_step,
+                                      detail::seq_len_log2_step_per_hash,
                                       detail::baa_step,
                                       detail::ca_step>::template run<>(params,
                                                                        query_seq_proto,
@@ -791,7 +794,7 @@ export {
     };
 
     /// Keep a selected minimizer layout while dispatching the algorithms.
-    template <std::size_t p_bucket_width, std::size_t p_kmer_size>
+    template <std::size_t p_bucket_width, std::size_t p_hash_bits>
     struct pinned_shape_pipeline_dispatch {
         /// Run an entry point with the fixed k and position width.
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
@@ -813,9 +816,9 @@ export {
             static_assert(
                 std::same_as<
                     std::remove_cvref_t<p_minimizer>,
-                    ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>>);
+                    ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_hash_bits>>);
             return ::bioseq::simd::pipe::dispatch_pipeline_pinned_shape<p_bucket_width,
-                                                                        p_kmer_size,
+                                                                        p_hash_bits,
                                                                         p_entry_point,
                                                                         p_alphabet,
                                                                         p_minimizer,
@@ -1034,6 +1037,7 @@ export {
                 is_gpu_target_index_build,
                 params,
                 static_cast<std::uint32_t>(seqan3::alphabet_size<target_alphabet_type>),
+                static_cast<std::uint32_t>(supported_biological_alphabets::index_of<target_alphabet_type>()),
                 static_cast<std::uint64_t>(target_seq.bp_size()));
         if (!is_gpu_target_index_build) {
             if (fixed_target_zero_copy_route) {
@@ -1140,14 +1144,14 @@ export {
     // matching minimizer representation.
 
     /// Run raw-sequence preparation with one selecved minimizer layout.
-    template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
+    template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_hash_bits>
     struct minimap_port_repr_leaf {
         static_assert(
             std::is_same_v<decltype(p_bucket_width), std::size_t>,
             "minimap_port_repr_leaf: p_bucket_width must be std::size_t (from seq_len_log2_step).");
         static_assert(
-            std::is_same_v<decltype(p_kmer_size), std::size_t>,
-            "minimap_port_repr_leaf: p_kmer_size must be std::size_t (from kmer_size_step).");
+            std::is_same_v<decltype(p_hash_bits), std::size_t>,
+            "minimap_port_repr_leaf: p_hash_bits must be std::size_t (from hash_bits_step).");
 
         BIOSEQ_PIPELINE_INLINE_ATTR
         static match_result_collection call(const minimap2_parameters& params,
@@ -1155,22 +1159,22 @@ export {
                                             bioseq::storage::lazy_sequence_view<p_alphabet> t,
                                             pipe::statement_execution_plan_owner execution_plan) {
             using p_minimizer =
-                ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>;
+                ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_hash_bits>;
             return minimap_port_with_repr<p_minimizer, p_alphabet>(q, t, execution_plan);
         }
     };
 
     /// Map the selected k and position width to the raw-sequence implementation.
     template <sequence_alphabet p_alphabet> struct minimap_port_traits {
-        template <auto p_kmer_size, auto p_bucket_width>
-        using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
+        template <auto p_hash_bits, auto p_bucket_width>
+        using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_hash_bits>;
     };
 
     /// Run a generated entry with its minimizer layout fixed.
-    template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
+    template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_hash_bits>
     struct minimap_port_owned_repr_leaf {
         static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>);
-        static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>);
+        static_assert(std::is_same_v<decltype(p_hash_bits), std::size_t>);
 
         BIOSEQ_PIPELINE_INLINE_ATTR
         static match_result_collection
@@ -1179,8 +1183,8 @@ export {
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
              pipe::statement_execution_plan_owner execution_plan) {
             using p_minimizer =
-                ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>;
-            using pipeline_dispatch = pinned_shape_pipeline_dispatch<p_bucket_width, p_kmer_size>;
+                ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_hash_bits>;
+            using pipeline_dispatch = pinned_shape_pipeline_dispatch<p_bucket_width, p_hash_bits>;
             return minimap_port_with_repr_impl<pipeline_dispatch, p_minimizer, p_alphabet>(
                 query_seq, target_seq, execution_plan);
         }
@@ -1188,8 +1192,8 @@ export {
 
     /// Map the selected layout to its generated entry  implementation.
     template <sequence_alphabet p_alphabet> struct minimap_port_owned_traits {
-        template <auto p_kmer_size, auto p_bucket_width>
-        using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
+        template <auto p_hash_bits, auto p_bucket_width>
+        using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_hash_bits>;
     };
 
     /** Select a registered minimizer layout before preparing raw sequences. */
@@ -1217,7 +1221,7 @@ export {
             selection, [query_seq, target_seq, execution_plan]<class p_minimizer>() {
                 using layout = typename p_minimizer::layout_type;
                 using pipeline_dispatch = pinned_shape_pipeline_dispatch<
-                    layout::k_position_bits, layout::k_physical_kmer_size>;
+                    layout::k_position_bits, layout::k_hash_bits>;
                 return minimap_port_with_repr_impl<pipeline_dispatch, p_minimizer, p_alphabet>(
                     query_seq, target_seq, execution_plan);
             });
@@ -1243,8 +1247,8 @@ export {
         return ::bioseq::simd::pipe::detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
-            ::bioseq::simd::pipe::detail::kmer_size_step,
-            ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k>::template run<>(params,
+            ::bioseq::simd::pipe::detail::hash_bits_step,
+            ::bioseq::simd::pipe::detail::seq_len_log2_step_per_hash>::template run<>(params,
                                                                                    query_seq,
                                                                                    target_seq, execution_plan);
     }
@@ -1278,8 +1282,8 @@ export {
         return ::bioseq::simd::pipe::detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
-            ::bioseq::simd::pipe::detail::kmer_size_step,
-            ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k>::template run<>(params,
+            ::bioseq::simd::pipe::detail::hash_bits_step,
+            ::bioseq::simd::pipe::detail::seq_len_log2_step_per_hash>::template run<>(params,
                                                                                    query_seq,
                                                                                    target_seq,
                                                                                    execution_plan);
@@ -1350,7 +1354,7 @@ export {
                                                            target_index,
                                                            execution_plan,
                                                            gpu_index_cache,
-                                                           gpu_index_identity);
+                                                           gpu_index_identity, false);
         }
     };
 
@@ -1394,19 +1398,6 @@ export {
     }
 
     } // namespace pipe_entry_detail
-
-    // Scheduler calls discard the fragment index. Compile these alphabet
-    // overloads out of line for that case. The template entry still supports
-    // callers that request the index as output.
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_segmented_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-                                 bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-                                 pipe::statement_execution_plan_owner execution_plan);
-
-    [[nodiscard, gnu::noinline]] match_result_collection
-    minimap_port_segmented_owned(bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-                                 bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-                                 pipe::statement_execution_plan_owner execution_plan);
 
     } // namespace bioseq::simd
 

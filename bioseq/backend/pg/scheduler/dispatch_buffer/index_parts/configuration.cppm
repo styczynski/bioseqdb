@@ -190,17 +190,16 @@ void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Dat
     const bioseq::pg_types::seq* dispatch_header = header;
     bioseq::pg_types::seq* rewidth = nullptr;
     if (header->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
-        rewidth = ::bioseq::simd::stdc_rewidth_to_type_params(
+        const auto rewidth_result = ::bioseq::simd::stdc_rewidth_to_type_params(
             *header,
             compact_sequence_stdc_type_params{mmsearch_state.alphabet_code,
                                               mmsearch_state.storage_unit_byte_width},
-            pg_alloc);
-        if (rewidth == nullptr) {
+            pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
+        if (!rewidth_result) {
             source.free_if_copy();
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATATYPE_MISMATCH),
-                     errmsg("bioseq mmsearch query rewidth rejected an incompatible alphabet")));
+            pg_raise_sequence_conversion_error(rewidth_result.error());
         }
+        rewidth = *rewidth_result;
         dispatch_header = rewidth;
     }
     const size_t total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(dispatch_header));

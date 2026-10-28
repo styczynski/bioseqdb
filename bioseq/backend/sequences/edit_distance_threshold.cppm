@@ -14,12 +14,20 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <expected>
 #include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 export module bioseq.sequences.edit_distance_threshold;
+
+import bioseq.common.context;
+import bioseq.common.checked_arithmetic;
+import bioseq.prefilter.types;
+import bioseq.sequences;
+import bioseq.storage.lazy_sequence;
 
 /** @brief Helpers for evaluating the edit-distance band. */
 namespace bioseq::sequences::edit_distance_threshold_detail {
@@ -42,21 +50,6 @@ template <class p_cell_type>
 }
 
 /**
- * @brief Add sizes without wrapping on overflow.
- * @param lhs First size.
- * @param rhs Second size.
- * @return Sum, or the largest size_t value  if the sum would overflow.
- */
-[[nodiscard]] constexpr std::size_t add_size_saturated(
-    std::size_t lhs,
-    std::size_t rhs) noexcept
-{
-    constexpr std::size_t maximum =
-        (std::numeric_limits<std::size_t>::max)();
-    return rhs > maximum - lhs ? maximum : lhs + rhs;
-}
-
-/**
  * @brief Compute edit-distance rows inside the allowed diagonal band.
  *
  * A path outside this band already needs too many insertions or deletions.
@@ -74,10 +67,10 @@ template <class p_cell_type>
  * @param center Index of the main diagonal in either row.
  * @return Whether the complete sequences can be aligned within max_edits.
  */
-template <class p_symbol_type, class p_cell_type>
+template <class p_sequence_type, class p_cell_type>
 [[nodiscard]] bool evaluate_rows(
-    std::span<const p_symbol_type> query,
-    std::span<const p_symbol_type> target,
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t max_edits,
     p_cell_type cap,
     std::span<p_cell_type> prior_row,
@@ -98,7 +91,8 @@ template <class p_symbol_type, class p_cell_type>
         std::fill(current.begin(), current.end(), cap);
         const std::size_t j_low = i > edits ? i - edits : 0u;
         const std::size_t j_high = std::min(
-            n, add_size_saturated(i, edits));
+            n, bioseq::common::checked_add(i, edits).value_or(
+                (std::numeric_limits<std::size_t>::max)()));
 
         for (std::size_t j = j_low;; ++j) {
             const std::size_t slot = j >= i
@@ -120,6 +114,9 @@ template <class p_symbol_type, class p_cell_type>
                     deletion, insertion, diagonal});
             }
             if (j == j_high) break;
+        }
+        if constexpr (requires { query.failure; target.failure; }) {
+            if (query.failure->has_value() || target.failure->has_value()) return false;
         }
         std::swap(prior_row, current);
     }
@@ -148,10 +145,10 @@ export namespace bioseq::sequences {
  * @return True when the minimum global edit distance is  at most max_edits.
  * @throws std::length_error If the required band width cannot fit in size_t.
  */
-template <std::equality_comparable p_symbol_type>
-[[nodiscard]] bool edit_distance_within_threshold(
-    std::span<const p_symbol_type> query,
-    std::span<const p_symbol_type> target,
+template <class p_sequence_type>
+[[nodiscard]] bool edit_distance_within_threshold_ranks(
+    const p_sequence_type& query,
+    const p_sequence_type& target,
     std::uint32_t max_edits)
 {
     const std::size_t m = query.size();
@@ -198,8 +195,10 @@ template <std::equality_comparable p_symbol_type>
     const std::size_t width = static_cast<std::size_t>(width_wide);
     const std::size_t center =
         static_cast<std::size_t>(max_edits) + 1u;
-    std::vector<std::uint64_t> prior_row(width);
-    std::vector<std::uint64_t> current(width);
+    auto& memory = ::context::current();
+    auto scope = memory.push<::context::arena::scratch>();
+    const auto prior_row = memory.alloc_scratch_array<std::uint64_t>(width);
+    const auto current = memory.alloc_scratch_array<std::uint64_t>(width);
     return edit_distance_threshold_detail::evaluate_rows(
         query,
         target,
@@ -208,6 +207,73 @@ template <std::equality_comparable p_symbol_type>
         std::span<std::uint64_t>{prior_row},
         std::span<std::uint64_t>{current},
         center);
+}
+
+/** Evaluates equality-comparable resident symbols through the shared banded recurrence. */
+template <std::equality_comparable Symbol>
+[[nodiscard]] bool edit_distance_within_threshold(
+    std::span<const Symbol> query, std::span<const Symbol> target,
+    std::uint32_t max_edits) {
+    return edit_distance_within_threshold_ranks(query, target, max_edits);
+}
+
+/** Evaluates checked native-rank windows without expanding either complete input. */
+[[nodiscard]] inline std::expected<bool, prefilter::prefilter_input_failure>
+edit_distance_within_threshold(
+    const prefilter::prefilter_rank_window& query,
+    const prefilter::prefilter_rank_window& target,
+    std::uint32_t max_edits) {
+    const bool accepted = edit_distance_within_threshold_ranks(query, target, max_edits);
+    if (*query.failure) return std::unexpected(**query.failure);
+    if (*target.failure) return std::unexpected(**target.failure);
+    return accepted;
+}
+
+/** Checks two oriented biological sources using bounded native-rank windows. */
+[[nodiscard]] inline std::expected<bool, prefilter::prefilter_input_failure>
+edit_distance_within_threshold(
+    const storage::borrowed_rank_window_source& query,
+    const storage::borrowed_rank_window_source& target,
+    std::uint32_t max_edits) {
+    constexpr auto maximum_length = (std::numeric_limits<std::uint32_t>::max)();
+    if (query.symbol_count > maximum_length || target.symbol_count > maximum_length) {
+        return std::unexpected(prefilter::prefilter_input_failure{
+            prefilter::prefilter_input_failure_code::invalid_descriptor, 0u,
+            target.symbol_count > maximum_length, 0u});
+    }
+    const std::array queries{query};
+    const std::array targets{target};
+    const std::array jobs{prefilter::prefilter_job{
+        .query_length = static_cast<std::uint32_t>(query.symbol_count),
+        .target_length = static_cast<std::uint32_t>(target.symbol_count),
+        .max_edits = max_edits,
+        .orientation = static_cast<std::uint32_t>(query.orientation)}};
+    return prefilter::evaluate_prefilter_job({queries, targets, jobs}, 0u,
+        [max_edits](const prefilter::prefilter_rank_window& query_window,
+                    const prefilter::prefilter_rank_window& target_window,
+                    const prefilter::prefilter_job&) {
+            return edit_distance_within_threshold_ranks(query_window, target_window, max_edits);
+        });
+}
+
+/** Checks resident compact operands without a whole-input rank conversion. */
+template <supports_compact_sequence_range QueryRange, supports_compact_sequence_range TargetRange>
+[[nodiscard]] auto edit_distance_within_threshold(
+    const compact_sequence_range<QueryRange>& query,
+    const compact_sequence_range<TargetRange>& target, std::uint32_t max_edits) {
+    static_assert(std::same_as<typename compact_sequence_range<QueryRange>::traits::alphabet_type,
+                              typename compact_sequence_range<TargetRange>::traits::alphabet_type>);
+    return edit_distance_within_threshold(storage::make_borrowed_rank_source(query),
+        storage::make_borrowed_rank_source(target), max_edits);
+}
+
+/** Checks lazy biological operands while preserving their backend ownership contract. */
+template <sequence_alphabet Alphabet>
+[[nodiscard]] auto edit_distance_within_threshold(
+    const storage::lazy_sequence_view<Alphabet>& query,
+    const storage::lazy_sequence_view<Alphabet>& target, std::uint32_t max_edits) {
+    return edit_distance_within_threshold(query.template borrow_rank_source<false>(),
+        target.template borrow_rank_source<false>(), max_edits);
 }
 
 } // namespace bioseq::sequences

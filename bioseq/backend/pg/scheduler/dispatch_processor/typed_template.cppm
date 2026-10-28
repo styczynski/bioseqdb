@@ -103,9 +103,7 @@ namespace typed_dispatch {
 
 using alphabet
     [[bioseq::template_flatten(
-        "identity", "alphabet",
-        "dna4", "::seq::dna4",
-        "dna5", "::seq::dna5")]]
+        "identity", "alphabet", "supported_biological_alphabets")]]
     = ::seq::dna4;
 
 static constexpr std::size_t storage_width
@@ -736,7 +734,9 @@ process_inmemory_chunked_segmented_row(
     }
     const auto& base_params = execution_plan->frozen_parameters;
     const auto& typmod_operations =
-        cpu_preparation_detail::typmod_ops<alphabet, storage_width>();
+        cpu_preparation_detail::typmod_ops(
+            pgseq_supported_biological_alphabets::index_of<alphabet>(),
+            storage_width);
     if (!typmod_operations.matches(
             alphabet_code, storage_unit_byte_width)) {
         throw std::logic_error{

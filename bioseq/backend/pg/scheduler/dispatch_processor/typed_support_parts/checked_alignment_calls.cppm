@@ -28,6 +28,7 @@ import bioseq.postgres.support;
 import bioseq.indexing.minimizer_index;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
+import bioseq.alignment.utils;
 import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
@@ -86,7 +87,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
                                                    std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
     const std::string hint = fmt::format(
-        "operation_diagnostic={}; Exact SIMD has no scalar fallback; use DNA4 with a "
+        "operation_diagnostic={}; Exact SIMD has no scalar fallback; use a registered alphabet with a "
         "supported packed storage width and supported W/K/vector shape, or select a "
         "different algorithm tuple explicitly.",
         diagnostic);
@@ -103,7 +104,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
     const std::string hint = fmt::format(
         "operation_diagnostic={}; Bounded ntHash SIMD has no scalar or Exact SIMD "
-        "fallback; use DNA4 with packed uint32/uint64 storage, W=10, K=15, and an "
+        "fallback; use a registered native alphabet, W in 1..64, K in 1..31, and an "
         "admissible range, or select another algorithm explicitly.",
         diagnostic);
     raise_typed_dispatch_pg_error_as_cpp(
@@ -189,7 +190,21 @@ template <class p_function>
     std::array<char, 2048> detail{};
     std::size_t detail_size = 0u;
     try {
-        return std::forward<p_function>(fn)();
+        auto collection = std::forward<p_function>(fn)();
+        if (collection.failure) {
+            const auto error = *collection.failure;
+            const bool source_error = error == alignment_contract_error::source_read_failed
+                || error == alignment_contract_error::trace_accounting;
+            const int sqlstate = source_error ? ERRCODE_DATA_CORRUPTED
+                : error == alignment_contract_error::memory_admission ? ERRCODE_OUT_OF_MEMORY
+                : error == alignment_contract_error::device_capability ? ERRCODE_FEATURE_NOT_SUPPORTED
+                : ERRCODE_INVALID_PARAMETER_VALUE;
+            const std::string diagnostic = fmt::format("{}: contract error {}",
+                stage, static_cast<unsigned>(error));
+            raise_typed_dispatch_pg_error_as_cpp(sqlstate,
+                "Alignment contract rejected the request", diagnostic.c_str());
+        }
+        return collection;
     } catch (const bioseq::gpu::vulkan::vulkan_runtime_error& err) {
         failure = failure_kind::vulkan;
         detail_size = copy_pg_error_detail(detail, err.what());

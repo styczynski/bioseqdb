@@ -121,7 +121,7 @@ template <class p_descriptor> struct highway_traversal final {
   [[nodiscard]] bool visit_candidate_starts(
       std::span<const std::uint8_t> query, std::uint32_t filter_offset,
       std::uint8_t filter_rank, std::uint32_t position, std::uint32_t lower,
-      std::uint32_t upper, p_consumer &&consume) const noexcept {
+      std::uint32_t upper, p_consumer &&consume) const {
     /** Byte-lane vector type for comparing candidate ranks. */
     using byte_descriptor_type = hn::Repartition<std::uint8_t, p_descriptor>;
     const byte_descriptor_type byte_descriptor;
@@ -170,17 +170,17 @@ template <class p_descriptor> struct highway_traversal final {
  * @return Results in job order.
  */
 template <class p_descriptor>
-[[nodiscard]] inline std::vector<prefilter_result>
+[[nodiscard]] inline prefilter_batch_result
 sneaky_snake_simd_batch_for(p_descriptor descriptor,
                             const prefilter_batch_input &input,
                             sneaky_snake_options options = {}) {
   static_cast<void>(descriptor);
-  sneaky_snake_target_detail::highway_traversal<p_descriptor> traversal;
-  // Apply the shared walk to each job using SIMD rank comparisons.
-  return sneaky_snake_detail::evaluate_batch_with(
-      input, [&traversal, options](std::span<const std::uint8_t> query,
-                                   std::span<const std::uint8_t> target_ranks,
-                                   const prefilter_job &job) noexcept {
+  sneaky_snake_detail::window_traversal<
+      sneaky_snake_target_detail::highway_traversal<p_descriptor>> traversal{};
+  return evaluate_prefilter_batch(
+      input, [&traversal, options](const prefilter_rank_window& query,
+                                   const prefilter_rank_window& target_ranks,
+                                   const prefilter_job& job) {
         return sneaky_snake_detail::bounded_with(traversal, query, target_ranks,
                                                  job.max_edits, options);
       });
@@ -195,7 +195,7 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
  * @param options Block width and mismatch-oscape limit.
  * @return Results in job order.
  */
-[[nodiscard]] inline std::vector<prefilter_result>
+[[nodiscard]] inline prefilter_batch_result
 sneaky_snake_simd_batch(const prefilter_batch_input &input,
                         sneaky_snake_options options = {}) {
   const hn::ScalableTag<std::uint8_t> descriptor;
