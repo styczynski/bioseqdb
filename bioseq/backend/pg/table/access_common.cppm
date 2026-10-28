@@ -332,14 +332,8 @@ hydrate_sequence_columns_in_slot(Relation relation,
         const auto sequence_locator = bioseq::storage::decode_locator_from_stub(compact_sequence);
         bioseq::storage::validate_locator_flat_materialization_length(sequence_locator);
 
-        // Two bits per letter is the smallest supported packed payload. The
-        // storage manager validates the exact alphabet width after reading the
-        // first fragment.
-        const std::uint64_t projected_payload_bytes =
-            checked_ceil_div(sequence_locator.logical_length, 4u);
-        (void)checked_materialization_allocation_size(
-            projected_payload_bytes, bioseq::pg_types::seq::header_bytes(), "flat sequence");
-
+        // The storage manager checks the exact encoded allocation size before
+        // materialization, using the fragment codec and alphabet metadata.
         bioseq::pg_types::seq* sequence =
             bioseq::storage::bioseq_default_storage_manager::fetch_payload(
                 relation_locator.dbOid,
