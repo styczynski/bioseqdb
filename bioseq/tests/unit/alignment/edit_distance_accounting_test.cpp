@@ -553,18 +553,26 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     CHECK(plan.final_cigar_capacity_bytes == 32u * sizeof(bioseq::cigar_run));
 
     region.anchor_start = -1;
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    const auto invalid_anchor_start = derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score);
+    REQUIRE_FALSE(invalid_anchor_start.has_value());
+    CHECK(invalid_anchor_start.error() == alignment_contract_error::coordinates);
     region.anchor_start = 0;
     region.seed_count = 2;
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    const auto too_many_seeds = derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score);
+    REQUIRE_FALSE(too_many_seeds.has_value());
+    CHECK(too_many_seeds.error() == alignment_contract_error::coordinates);
     region.seed_count = 1;
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, 7u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    const auto out_of_bounds_seed = derive_alignment_region_storage_plan(
+        region, anchors, 7u, 8u, params, params.match_score);
+    REQUIRE_FALSE(out_of_bounds_seed.has_value());
+    CHECK(out_of_bounds_seed.error() == alignment_contract_error::coordinates);
     params.gap_ext1 = 0;
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    const auto invalid_gap_extension = derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score);
+    REQUIRE_FALSE(invalid_gap_extension.has_value());
+    CHECK(invalid_gap_extension.error() == alignment_contract_error::coordinates);
 }
 
 TEST_CASE("alignment storage plan rejects signed and CIGAR byte overflow before allocation",
@@ -579,10 +587,14 @@ TEST_CASE("alignment storage plan rejects signed and CIGAR byte overflow before 
     alignment_region region{};
     region.anchor_start = 0;
     region.seed_count = 2;
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, signed_limit + 1u, signed_limit, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
-    CHECK(derive_alignment_region_storage_plan(
-        region, anchors, signed_limit, signed_limit, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    const auto signed_coordinate_overflow = derive_alignment_region_storage_plan(
+        region, anchors, signed_limit + 1u, signed_limit, params, params.match_score);
+    REQUIRE_FALSE(signed_coordinate_overflow.has_value());
+    CHECK(signed_coordinate_overflow.error() == alignment_contract_error::coordinates);
+    const auto cigar_capacity_overflow = derive_alignment_region_storage_plan(
+        region, anchors, signed_limit, signed_limit, params, params.match_score);
+    REQUIRE_FALSE(cigar_capacity_overflow.has_value());
+    CHECK(cigar_capacity_overflow.error() == alignment_contract_error::coordinates);
 }
 
 TEST_CASE("Block storage plan matches existing constructor element requests",
@@ -814,7 +826,7 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
     REQUIRE(concurrent_selected->temporary_workspace_bytes <=
             (std::numeric_limits<std::uint64_t>::max)() / 2u);
     std::array<std::uint64_t, 4> workspace_scratch{};
-    CHECK(admitted_alignment_worker_concurrency<base_alignment_algorithm::ksw2>(
+    const auto two_worker_admission = admitted_alignment_worker_concurrency<base_alignment_algorithm::ksw2>(
               concurrent_regions,
               concurrency_anchors,
               1000u,
@@ -826,8 +838,10 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
               true,
               concurrent_regions.size(),
               concurrent_selected->temporary_workspace_bytes * 2u,
-              workspace_scratch, scoring.summary().maximum) == 2u);
-    CHECK(admitted_alignment_worker_concurrency<base_alignment_algorithm::ksw2>(
+              workspace_scratch, scoring.summary().maximum);
+    REQUIRE(two_worker_admission.has_value());
+    CHECK(*two_worker_admission == 2u);
+    const auto insufficient_workspace_admission = admitted_alignment_worker_concurrency<base_alignment_algorithm::ksw2>(
               concurrent_regions,
               concurrency_anchors,
               1000u,
@@ -839,7 +853,9 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
               true,
               concurrent_regions.size(),
               concurrent_selected->temporary_workspace_bytes - 1u,
-              workspace_scratch, scoring.summary().maximum) == 0u);
+              workspace_scratch, scoring.summary().maximum);
+    REQUIRE(insufficient_workspace_admission.has_value());
+    CHECK(*insufficient_workspace_admission == 0u);
 }
 #endif
 
