@@ -4,6 +4,10 @@
  */
 module;
 
+// Anchor Highway declarations before codec and conversion imports instantiate
+// their inline byte-vector operations through separate module paths.
+#include <hwy/highway.h>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
