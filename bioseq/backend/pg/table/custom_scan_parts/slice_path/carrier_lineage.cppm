@@ -164,6 +164,12 @@ export {
         }
         builder.producer_expressions.push_back(reinterpret_cast<Node*>(copyObject(expression)));
         builder.producer_dependencies.push_back(std::move(dependencies));
+        if (slice_project_is_sequence_conversion(expression, *builder.oids)) {
+            // Conversion executes as one opaque SQL expression. Only its physical
+            // inputs become lazy sources; its output never inherits source metadata.
+            builder.found = true;
+            slice_project_note_source_binding(builder, expression, stable_id);
+        }
         return stable_id;
     }
 
@@ -335,7 +341,8 @@ export {
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               slice_project_discovery& discovery) const {
-            if (slice_project_node_opcode(node.get(), *discovery.builder->oids).has_value()) {
+            if (slice_project_node_opcode(node.get(), *discovery.builder->oids).has_value() ||
+                slice_project_is_sequence_conversion(node.get(), *discovery.builder->oids)) {
                 if (contain_volatile_functions(node.get())) {
                     return pg_walk_step::skip_subtree;
                 }

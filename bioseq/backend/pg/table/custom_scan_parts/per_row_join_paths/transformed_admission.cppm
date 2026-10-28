@@ -39,6 +39,7 @@ import :custom_scan_planner_method_contracts;
 import :custom_scan_join_ownership_helper_contracts;
 import :custom_scan_join_ownership_carrier_lineage_contracts;
 import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+import :custom_scan_join_ownership_sequence_typmod;
 import :custom_scan_join_ownership_descendant_path_contracts;
 import :custom_scan_join_ownership_semantic_admission_contracts;
 import :custom_scan_join_ownership_target_contracts;
@@ -87,6 +88,8 @@ export {
             per_row_validate_sequence_typmod(target_expression, oids);
         const auto query_typmod_validation_result =
             per_row_validate_sequence_typmod(query_expression, oids);
+        require_bound_conversion_operand(target_expression, oids);
+        require_bound_conversion_operand(query_expression, oids);
         if (target_typmod_validation_result.has_value() &&
             query_typmod_validation_result.has_value() &&
             batch_join_typmod_is_supported(target_typmod_validation_result->typmod) &&

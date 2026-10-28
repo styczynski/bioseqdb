@@ -574,6 +574,45 @@ export {
             base_operand_sources.target_leaf_support_vars =
                 lappend(base_operand_sources.target_leaf_support_vars, variable);
         };
+        // Scalar conversions can occur only in a qual, without a SliceProject
+        // output owner. Bind their physical inputs before ExecQual/ExecProject
+        // so the existing provider serves bounded reads instead of hydrating
+        // the complete source or exposing a raw locator to the conversion.
+        /** @brief Registers only opaque conversion consumers at the base scan. */
+        const auto register_scalar_conversion = [](pg_expression_walk_cursor,
+                                                   pg_node_view node,
+                                                   slice_project_ir_builder& builder) {
+            if (!slice_project_is_sequence_conversion(node.get(), *builder.oids))
+                return pg_walk_step::descend;
+            if (!contain_volatile_functions(node.get())) {
+                (void)slice_project_build_ir_node(builder, node.get());
+            }
+            return pg_walk_step::skip_subtree;
+        };
+        walk_pg_expression_including_root(reinterpret_cast<Node*>(path->pathtarget->exprs),
+                                          base_operand_sources,
+                                          register_scalar_conversion);
+        for (RestrictInfo* restriction : postgres_list<RestrictInfo>(clause_references.get())) {
+            if (restriction != nullptr && restriction->clause != nullptr) {
+                walk_pg_expression_including_root(reinterpret_cast<Node*>(restriction->clause),
+                                                  base_operand_sources,
+                                                  register_scalar_conversion);
+            }
+        }
+        const bool needs_scalar_source_bindings = !base_operand_sources.source_bindings.empty();
+        if (needs_scalar_source_bindings) {
+            // Once ordinary hydration is skipped, every projected sequence column
+            // must retain source ownership, including columns beside the conversion.
+            base_operand_sources.source_bindings_only = false;
+            for (auto const& binding : base_operand_sources.source_bindings) {
+                Var* source = try_cast_pg_node<Var>(binding.first);
+                if (source != nullptr && source->varno == rel->relid &&
+                    source->varattno > 0 && source->varlevelsup == 0 &&
+                    bms_is_empty(source->varnullingrels)) {
+                    append_support_var(source);
+                }
+            }
+        }
         if (needs_evaluated_operands) {
             // Records the operand expression and the source columns that keep its data alive.
             auto register_operand = [&base_operand_sources, &append_support_var](
@@ -590,6 +629,8 @@ export {
             if (owned_mmsearch_resolution->local_query.has_value()) {
                 register_operand(*owned_mmsearch_resolution->local_query);
             }
+        }
+        if (needs_evaluated_operands || needs_scalar_source_bindings) {
             /* Remaining filters run before operand evaluation. Collect their
              * sequence columns from the full restriction list, including filters
              * that storage pushdown rejected. */
@@ -737,7 +778,7 @@ export {
                                  number_of_clauses_pushed);
             });
 
-        if (needs_evaluated_operands) {
+        if (needs_evaluated_operands || needs_scalar_source_bindings) {
             Path* private_path = slice_project_clone_mutable_path_spine(path);
             bool tagged_source = false;
             private_path = slice_project_tag_owned_path_tree(
@@ -745,7 +786,7 @@ export {
             if (!tagged_source) {
                 ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("BioseqScan evaluated mmsearch operand has no source provider")));
+                         errmsg("BioseqScan sequence expression has no source provider")));
             }
             return private_path;
         }

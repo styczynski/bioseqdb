@@ -7,6 +7,7 @@ module;
 // Declare global allocation functions before importing pipeline templates
 // and the standard-library module.
 #include <new>
+#include <bioseq/pg_compat.h>
 
 export module bioseq.postgres.table:custom_scan_runtime_pipeline_contracts;
 
@@ -14,6 +15,7 @@ import std;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.postgres.support;
 import bioseq.sequences;
 
 /** @brief Describes the existing execution plan for its alphabet and query-sketch route. */
@@ -37,6 +39,14 @@ describe_pipeline_for_pg_alphabet(
     if (!description.has_value()) {
         throw std::invalid_argument{
             "PostgreSQL alphabet dispatch produced no pipeline description"};
+    }
+    if (description->failure) {
+        const auto error = static_cast<unsigned>(*description->failure);
+        bioseq::postgres::support::invoke_pg_as_cpp([error] {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("alignment plan rejected by numeric contract %u", error)));
+        });
     }
     return std::move(*description);
 }

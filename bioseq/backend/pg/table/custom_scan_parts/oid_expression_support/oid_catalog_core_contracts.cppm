@@ -59,6 +59,8 @@ export struct bioseq_stub_oids {
     Oid seq_from_letter_array_named_oid;
     Oid seq_len_oid;
     Oid seq_cast_oid;
+    Oid seq_translate_oid;
+    Oid seq_back_translate_oid;
 };
 
 /** @brief Returns this backend's Bioseq OIDs, looking up required objects as needed. */

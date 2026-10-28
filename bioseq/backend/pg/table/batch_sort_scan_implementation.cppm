@@ -550,8 +550,11 @@ struct batch_cigar_scratch_provider {
                             admission_failed = true;
                             break;
                         }
-                        admitted.push_back(bioseq::storage::materialize_packed_sequence(
-                            view, 0u, view.bp_size(), width, std::move(*permit)));
+                        auto materialized = bioseq::storage::materialize_packed_sequence(
+                            view, 0u, view.bp_size(), width, std::move(*permit));
+                        if (!materialized) batch_sort_raise_as_cpp(
+                            ERRCODE_DATA_CORRUPTED, "bioseq sort source read failed during materialization");
+                        admitted.push_back(std::move(*materialized));
                         resident.push_back(admitted.back().view());
                         ++admitted_rows;
                         admitted_bytes =

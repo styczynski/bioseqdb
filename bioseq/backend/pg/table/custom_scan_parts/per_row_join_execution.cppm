@@ -467,9 +467,34 @@ export {
             target_storage_attno > relation_desc->natts
                 ? nullptr
                 : bioseq::postgres::support::tuple_descriptor_attribute(relation_desc, target_storage_attno - 1);
+        // The owner stores physical lineage separately from the evaluated result.
+        // A DNA source can therefore feed a protein target without changing the
+        // source-column identity or weakening the converted result-slot checks.
+        List* owner_descriptor = reinterpret_cast<List*>(
+            list_nth(cscan->custom_private, k_per_row_match_owner_descriptor));
+        const Index source_relid = static_cast<Index>(
+            intVal(list_nth(owner_descriptor, k_match_owner_base_relid)));
+        List* source_lineage = reinterpret_cast<List*>(
+            list_nth(owner_descriptor, k_match_owner_base_lineage));
+        const Var* storage_source = nullptr;
+        for (Node* source : postgres_list<Node>(source_lineage)) {
+            const Var* variable = try_cast_pg_node<Var>(source);
+            if (variable == nullptr || variable->varno != source_relid ||
+                variable->varattno != target_storage_attno || variable->varlevelsup != 0 ||
+                !bms_is_empty(variable->varnullingrels) ||
+                variable->vartype != get_cached_stub_oids().bioseq_seq_type_oid)
+                continue;
+            if (storage_source != nullptr && storage_source->vartypmod != variable->vartypmod) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("BioseqPerRowMmsearch source-column descriptors disagree")));
+            }
+            storage_source = variable;
+        }
         if (storage_attribute == nullptr || storage_attribute->attisdropped ||
             storage_attribute->atttypid != get_cached_stub_oids().bioseq_seq_type_oid ||
-            storage_attribute->atttypmod != expected_typmod) {
+            storage_source == nullptr || storage_source->vartypmod < 0 ||
+            storage_attribute->atttypmod != storage_source->vartypmod) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("BioseqPerRowMmsearch target storage column changed")));

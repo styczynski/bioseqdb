@@ -32,6 +32,7 @@ import :custom_scan_slice_path_expression_contract;
 import :custom_scan_join_ownership_helper_contracts;
 import :custom_scan_join_ownership_alphabet_mismatch_contracts;
 import :custom_scan_join_ownership_sequence_typmod_contract;
+import :custom_scan_join_ownership_sequence_typmod;
 import :custom_scan_join_ownership_expression_signature_contract;
 export import :custom_scan_join_ownership_target_contracts;
 export import :custom_scan_join_ownership_semantic_admission_contracts;
@@ -655,6 +656,9 @@ export {
             return finish(result);
         }
 
+        if (const auto converted = named_conversion_result_typmod(expression, oids))
+            return finish(base_local_sequence_typmod_resolution{*converted, false});
+
         /* Vars, constants, parameters, and other sequence-producing
          * expressions can supply a known typmod. An expression without one
          * needs type information from its  surrounding expression before
@@ -683,6 +687,7 @@ export {
         }
         const base_local_sequence_typmod_resolution type =
             resolve_base_local_sequence_typmod(expression, oids);
+        require_bound_conversion_operand(expression, oids);
         if (type.invalid || type.typmod < 0 || !batch_join_typmod_is_supported(type.typmod))
             return std::nullopt;
         Var* raw = try_cast_pg_node<Var>(expression);

@@ -27,11 +27,25 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_slice_path_expression_contract;
 
 import bioseq.postgres.support;
+import bioseq.postgres.types.compact_sequence;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_join_ownership_expression_signature_contract;
 
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Recognizes scalar conversions whose input requires an owning source provider. */
+    [[nodiscard]] bool slice_project_is_sequence_conversion(
+        Node* expression, const bioseq_stub_oids& oids) {
+        FuncExpr* function = try_cast_pg_node<FuncExpr>(expression);
+        return function != nullptr && function->funcresulttype == oids.bioseq_seq_type_oid &&
+               OidIsValid(function->funcid) &&
+               (function->funcid == oids.seq_cast_oid ||
+                function->funcid == oids.seq_translate_oid ||
+                function->funcid == oids.seq_back_translate_oid) &&
+               per_row_function_signature_is_exact(function);
+    }
+
     /** @brief Operation recorded for a node in the SliceProject expression graph. */
     enum class slice_project_opcode : std::uint8_t {
         source_expr = 1,
@@ -145,7 +159,7 @@ export {
      * records the lazy sequence work before the value is packed for storage.
      * Explicit casts and other function calls keep their own expression node. */
     [[nodiscard]] inline Node*
-    slice_project_typmod_cast_source(Node* node, const bioseq_stub_oids& oids) noexcept {
+    slice_project_typmod_cast_source(Node* node, const bioseq_stub_oids& oids) {
         FuncExpr* function = try_cast_pg_node<FuncExpr>(node);
         if (function == nullptr || function->funcid != oids.seq_cast_oid ||
             function->funcresulttype != oids.bioseq_seq_type_oid || function->funcretset ||
@@ -163,6 +177,39 @@ export {
             explicit_cast == nullptr || explicit_cast->constisnull ||
             explicit_cast->consttype != BOOLOID || DatumGetBool(explicit_cast->constvalue))
             return nullptr;
-        return source;
+        const int32 target_value = DatumGetInt32(target_typmod->constvalue);
+        // Decode only a valid width code; malformed typmods remain executable
+        // expressions so the normal cast boundary reports their error.
+        if ((target_value & 0xff) > 3)
+            return nullptr;
+        const auto target = compact_sequence_stdc_type_params::decode(target_value);
+        if (!is_supported_alphabet_code(target.alphabet_code) || target.encode() != target_value)
+            return nullptr;
+
+        const int32 source_value = exprTypmod(source);
+        if (source_value >= 0) {
+            if ((source_value & 0xff) > 3)
+                return nullptr;
+            const auto bound = compact_sequence_stdc_type_params::decode(source_value);
+            // Only a storage-width change is transparent. In particular,
+            // biological recoding and CIGAR projection retain their call node.
+            return bound.encode() == source_value && bound.alphabet_code == target.alphabet_code &&
+                   bound.encoding == target.encoding && bound.space == target.space
+                       ? source : nullptr;
+        }
+        if (Const* constant = try_cast_pg_node<Const>(source);
+            constant != nullptr && !constant->constisnull) {
+            const auto descriptor = classify_and_describe_sequence_header(constant->constvalue);
+            if (!descriptor.alphabet_bound)
+                return source;
+            const auto encoding = pgseq_is_cigar_alphabet(target.alphabet_code)
+                ? bioseq::sequence_encoding::cigar_rle : bioseq::sequence_encoding::rank_packed;
+            return descriptor.alphabet_code == target.alphabet_code &&
+                   descriptor.encoding == encoding && descriptor.space == target.space
+                       ? source : nullptr;
+        }
+        // An erased typmod is not proof of an unbound value. Preserve the cast
+        // until execution checks the actual resulting Datum.
+        return nullptr;
     }
 }

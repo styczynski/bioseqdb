@@ -29,12 +29,86 @@ import bioseq.postgres.support;
 import bioseq.postgres.types.compact_sequence;
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_slice_path_codec_contract;
+import :custom_scan_join_ownership_semantic_admission_contracts;
 export import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
 export import :custom_scan_join_ownership_expression_signature_contract;
 
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Infers a named conversion's uint64-packed destination from its constant name.
+     *
+     * PostgreSQL inserts default arguments before this analysis. Dynamic or invalid
+     * names supply no type proof; an enclosing bound cast may provide that proof,
+     * with the actual Datum checked when captured by the scan. Never infer the
+     * output alphabet from the source expression or evaluate conversion here.
+     */
+    [[nodiscard]] std::optional<int32>
+    named_conversion_result_typmod(Node* expression, const bioseq_stub_oids& oids) {
+        FuncExpr* function = try_cast_pg_node<FuncExpr>(expression);
+        if (function == nullptr || function->funcresulttype != oids.bioseq_seq_type_oid ||
+            !OidIsValid(function->funcid) ||
+            (function->funcid != oids.seq_translate_oid &&
+             function->funcid != oids.seq_back_translate_oid) ||
+            !per_row_function_signature_is_exact(function) || list_length(function->args) < 2)
+            return std::nullopt;
+        Const* destination =
+            try_cast_pg_node<Const>(reinterpret_cast<Node*>(lsecond(function->args)));
+        if (destination == nullptr || destination->constisnull || destination->consttype != TEXTOID)
+            return std::nullopt;
+        char* name = TextDatumGetCString(destination->constvalue);
+        const auto alphabet_code = pgseq_supported_biological_alphabets::try_index_of_name(name);
+        pfree(name);
+        if (!alphabet_code)
+            return std::nullopt;
+        const compact_sequence_stdc_type_params result{
+            .alphabet_code = *alphabet_code,
+            .storage_unit_byte_width = sizeof(std::uint64_t),
+        };
+        return batch_join_typmod_is_supported(result.encode())
+            ? std::optional<int32>{result.encode()} : std::nullopt;
+    }
+
+    /**
+     * @brief Rejects unbound dynamic conversion destinations throughout an alignment operand.
+     *
+     * Check even when another CASE/COALESCE arm supplies a known result type.
+     * Bound outer casts stop traversal; they remain authoritative subject to
+     * capture-time validation.
+     */
+    void require_bound_conversion_operand(Node* expression, const bioseq_stub_oids& oids) {
+        bool dynamic_destination = false;
+        const auto visit = [&oids](pg_expression_walk_cursor, pg_node_view node, bool& found) {
+            if (RelabelType* relabel = node.try_cast<RelabelType>(); relabel != nullptr &&
+                relabel->resulttype == oids.bioseq_seq_type_oid &&
+                batch_join_typmod_is_supported(relabel->resulttypmod))
+                return pg_walk_step::skip_subtree;
+            FuncExpr* function = node.try_cast<FuncExpr>();
+            if (function == nullptr || function->funcresulttype != oids.bioseq_seq_type_oid)
+                return pg_walk_step::descend;
+            if (batch_join_typmod_is_supported(exprTypmod(node.get())))
+                return pg_walk_step::skip_subtree;
+            if (OidIsValid(function->funcid) &&
+                (function->funcid == oids.seq_translate_oid ||
+                 function->funcid == oids.seq_back_translate_oid) &&
+                per_row_function_signature_is_exact(function) && list_length(function->args) >= 2 &&
+                !IsA(reinterpret_cast<Node*>(lsecond(function->args)), Const)) {
+                found = true;
+                return pg_walk_step::stop;
+            }
+            return pg_walk_step::descend;
+        };
+        walk_pg_expression_including_root(expression, dynamic_destination, visit);
+        if (dynamic_destination)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDETERMINATE_DATATYPE),
+                     errmsg("mmsearch requires a bound conversion destination alphabet"),
+                     errhint("Use a constant destination alphabet or cast the complete conversion "
+                             "result, for example bioseq.translate(source, destination)"
+                             "::bioseq.seq('aa27', 64).")));
+    }
+
     /** @brief Raises a PostgreSQL datatype error for operands with different alphabets. */
     [[noreturn]] void
     raise_mmsearch_alphabet_mismatch(const compact_sequence_stdc_type_params target,
@@ -61,97 +135,19 @@ export {
     }
 
     /**
-     * @brief Finds one  sequence typmod through supported slices, reversals, and concatenations.
+     * @brief Reuses whole-expression type resolution for joins and records catalog typmod erasure.
      *
-     * PostgreSQL can lose a function result's typmod, which identifies its alphabet
-     * and storage width. Recover it from the sequence inputs only when their
-     * concrete typmods agree. Registered concat overloads can also have literal
-     * or array arguments, which contribute no sequence type.
+     * Base scans and per-row joins share conversion, CASE/COALESCE, concatenation
+     * and explicit-cast rules. The resulting Datum is checked again at capture.
      */
     [[nodiscard]] std::optional<per_row_sequence_typmod_validation>
-    per_row_validate_sequence_typmod(Node* expression, bioseq_stub_oids const& oids) {
-        check_stack_depth();
-        if (expression == nullptr || exprType(expression) != oids.bioseq_seq_type_oid) {
+    per_row_validate_sequence_typmod(Node* expression, const bioseq_stub_oids& oids) {
+        const auto resolved = resolve_base_local_sequence_typmod(expression, oids);
+        if (resolved.invalid || !batch_join_typmod_is_supported(resolved.typmod))
             return std::nullopt;
-        }
-        const int32 descriptor_typmod = exprTypmod(expression);
-        auto finish =
-            [descriptor_typmod](
-                const int32 validated_typmod) -> std::optional<per_row_sequence_typmod_validation> {
-            if (!batch_join_typmod_is_supported(validated_typmod) ||
-                (descriptor_typmod != -1 && descriptor_typmod != validated_typmod)) {
-                return std::nullopt;
-            }
-            return per_row_sequence_typmod_validation{.typmod = validated_typmod,
-                                                      .descriptor_erased = descriptor_typmod == -1};
+        return per_row_sequence_typmod_validation{
+            .typmod = resolved.typmod,
+            .descriptor_erased = exprTypmod(expression) == -1,
         };
-        if (IsA(expression, RelabelType)) {
-            auto* relabel = reinterpret_cast<RelabelType*>(expression);
-            if (relabel->resulttype != oids.bioseq_seq_type_oid || relabel->arg == nullptr)
-                return std::nullopt;
-            auto child =
-                per_row_validate_sequence_typmod(reinterpret_cast<Node*>(relabel->arg), oids);
-            return child.has_value() ? finish(child->typmod) : std::nullopt;
-        }
-        const auto operation = slice_project_node_opcode(expression, oids);
-        if (!operation.has_value()) {
-            return batch_join_typmod_is_supported(descriptor_typmod) ? finish(descriptor_typmod)
-                                                                     : std::nullopt;
-        }
-        if (*operation == slice_project_opcode::slice) {
-            auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
-            if (subscript->refcontainertype != oids.bioseq_seq_type_oid ||
-                subscript->refrestype != oids.bioseq_seq_type_oid ||
-                subscript->reflowerindexpr == NIL || subscript->refexpr == nullptr)
-                return std::nullopt;
-            auto source =
-                per_row_validate_sequence_typmod(reinterpret_cast<Node*>(subscript->refexpr), oids);
-            return source.has_value() ? finish(source->typmod) : std::nullopt;
-        }
-        if (*operation == slice_project_opcode::reverse ||
-            *operation == slice_project_opcode::reverse_complement) {
-            FuncExpr* function = try_cast_pg_node<FuncExpr>(expression);
-            if (function == nullptr || function->funcresulttype != oids.bioseq_seq_type_oid ||
-                !per_row_function_signature_is_exact(function)) {
-                return std::nullopt;
-            }
-            if (list_length(function->args) != 1)
-                return std::nullopt;
-            auto source = per_row_validate_sequence_typmod(
-                reinterpret_cast<Node*>(linitial(function->args)), oids);
-            return source.has_value() ? finish(source->typmod) : std::nullopt;
-        }
-        if (*operation != slice_project_opcode::concat)
-            return std::nullopt;
-        List* arguments = NIL;
-        if (FuncExpr* function = try_cast_pg_node<FuncExpr>(expression)) {
-            if (function->funcresulttype != oids.bioseq_seq_type_oid ||
-                !slice_project_concat_oid(function->funcid, oids) ||
-                !per_row_function_signature_is_exact(function)) {
-                return std::nullopt;
-            }
-            arguments = function->args;
-        } else if (OpExpr* operator_expression = try_cast_pg_node<OpExpr>(expression)) {
-            if (operator_expression->opresulttype != oids.bioseq_seq_type_oid ||
-                !slice_project_concat_oid(operator_expression->opfuncid, oids) ||
-                list_length(operator_expression->args) != 2 ||
-                !per_row_operator_signature_is_exact(operator_expression)) {
-                return std::nullopt;
-            }
-            arguments = operator_expression->args;
-        } else {
-            return std::nullopt;
-        }
-        std::optional<int32> common_typmod;
-        for (Node* argument : postgres_list<Node>(arguments)) {
-            if (exprType(argument) != oids.bioseq_seq_type_oid)
-                continue;
-            auto child = per_row_validate_sequence_typmod(argument, oids);
-            if (!child.has_value() ||
-                (common_typmod.has_value() && *common_typmod != child->typmod))
-                return std::nullopt;
-            common_typmod = child->typmod;
-        }
-        return common_typmod.has_value() ? finish(*common_typmod) : std::nullopt;
     }
 }

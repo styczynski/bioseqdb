@@ -706,18 +706,15 @@ export {
                     }
                     bioseq::pg_types::seq* normalized_query = query_hdr;
                     if (physical_query_type != unpacked_typmod) {
-                        normalized_query =
-                            ::bioseq::simd::active_target::stdc_rewidth_to_type_params(
-                                *query_hdr, unpacked_typmod, pg_alloc);
-                        if (normalized_query == nullptr) {
+                        const auto normalized_query_result = ::bioseq::simd::active_target::stdc_rewidth_to_type_params(
+                                *query_hdr, unpacked_typmod, pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
+                        if (!normalized_query_result) {
                             if (reinterpret_cast<void*>(query_hdr) !=
                                 reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
                                 pfree(query_hdr);
-                            ereport(ERROR,
-                                    (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                     errmsg("bioseq mmsearch constant extra rewidth rejected an "
-                                            "incompatible alphabet")));
+                            pg_raise_sequence_conversion_error(normalized_query_result.error());
                         }
+                        normalized_query = *normalized_query_result;
                     }
                     const size_t query_total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(normalized_query));
                     std::vector<char> query_varlena_bytes(query_total_bytes);
@@ -776,19 +773,16 @@ export {
                          * bytes in the buffer through apply_typmod_coalesce(). */
                         bioseq::pg_types::seq* src_hdr2 = reinterpret_cast<bioseq::pg_types::seq*>(
                             PG_DETOAST_DATUM(query_const->constvalue));
-                        bioseq::pg_types::seq* rewidthed =
-                            ::bioseq::simd::active_target::stdc_rewidth_to_type_params(
-                                *src_hdr2, unpacked_typmod, pg_alloc);
+                        const auto rewidthed_result = ::bioseq::simd::active_target::stdc_rewidth_to_type_params(
+                                *src_hdr2, unpacked_typmod, pg_alloc, [](bioseq::pg_types::seq* value) noexcept { pfree(value); });
                         if (reinterpret_cast<void*>(src_hdr2) !=
                             reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
                             pfree(src_hdr2);
                         }
-                        if (rewidthed == nullptr) {
-                            ereport(ERROR,
-                                    (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                     errmsg("bioseq mmsearch literal rewidth rejected an "
-                                            "incompatible alphabet")));
+                        if (!rewidthed_result) {
+                            pg_raise_sequence_conversion_error(rewidthed_result.error());
                         }
+                        auto* rewidthed = *rewidthed_result;
                         if (rewidthed != nullptr) {
                             const size_t rewidthed_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
                             std::vector<char> coalesced_bytes(rewidthed_bytes);

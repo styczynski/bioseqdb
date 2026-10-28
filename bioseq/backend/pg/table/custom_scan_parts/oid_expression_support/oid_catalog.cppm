@@ -167,7 +167,11 @@ export {
                exact_function_exists_missing_ok(
                    "bioseq", "from_array", {letter_array_oid, TEXTOID, INT4OID}) &&
                exact_function_exists_missing_ok("bioseq", "len", {seq_oid}) &&
-               exact_function_exists_missing_ok("bioseq", "seq_cast", {seq_oid, INT4OID, BOOLOID});
+               exact_function_exists_missing_ok("bioseq", "seq_cast", {seq_oid, INT4OID, BOOLOID}) &&
+               exact_function_exists_missing_ok(
+                   "bioseq", "translate", {seq_oid, TEXTOID, INT4OID, INT4OID, TEXTOID}) &&
+               exact_function_exists_missing_ok(
+                   "bioseq", "back_translate", {seq_oid, TEXTOID, INT4OID});
     }
 
     /**
@@ -265,6 +269,10 @@ export {
             resolve("bioseq.from_array(bioseq.letter[],text,integer)");
         result.seq_len_oid = resolve("bioseq.len(bioseq.seq)");
         result.seq_cast_oid = resolve("bioseq.seq_cast(bioseq.seq,integer,boolean)");
+        result.seq_translate_oid =
+            resolve("bioseq.translate(bioseq.seq,text,integer,integer,text)");
+        result.seq_back_translate_oid =
+            resolve("bioseq.back_translate(bioseq.seq,text,integer)");
         return result;
     }
 
@@ -355,6 +363,8 @@ export {
             o.seq_from_letter_array_named_oid,
             o.seq_len_oid,
             o.seq_cast_oid,
+            o.seq_translate_oid,
+            o.seq_back_translate_oid,
         });
         for (const Oid oid : func_oids) {
             if (!oid_exists_in_syscache(PROCOID, oid)) {
