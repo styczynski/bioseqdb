@@ -447,7 +447,7 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
     report_validation(
         "symbol distribution",
         fmt::format("counts A/C/G/T/N={}/{}/{}/{}/{}",
-                    counts[0], counts[1], counts[2], counts[3], counts[4]));
+                    (*counts)[0], (*counts)[1], (*counts)[2], (*counts)[3], (*counts)[4]));
 
     std::uint64_t longest_run = 0;
     std::uint64_t current_run = 0;
@@ -487,7 +487,7 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
 
     double entropy = 0.0;
     for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
-        const double p = static_cast<double>(counts[rank])
+        const double p = static_cast<double>((*counts)[rank])
             / static_cast<double>(gp.reference_length);
         if (p > 0.0) {
             entropy -= p * std::log2(p);
