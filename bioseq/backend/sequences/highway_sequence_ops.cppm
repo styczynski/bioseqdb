@@ -14,12 +14,90 @@ import std;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 import bioseq.sequences.simd_iteration_geometry;
+import bioseq.simd.utils;
 import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.vector_stream;
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/** Apply native codon lookup to bounded tiles; rank geometry is runtime data. */
+template<class D, sequence_rank_transform Operation>
+[[nodiscard]] HWY_INLINE bool transform_sequence_rank_chunk_for(D tag,
+    std::span<const std::uint8_t> input, std::size_t cardinality,
+    std::span<const std::uint32_t> table, std::span<std::uint8_t> output) {
+    if (cardinality == 0u || cardinality > std::size_t{1u} + std::numeric_limits<std::uint8_t>::max())
+        return false;
+    const hn::Rebind<std::uint8_t, D> byte_tag;
+    const hn::Rebind<std::int32_t, D> index_tag;
+    const auto lane_count = hn::Lanes(tag);
+    const auto rank_limit = hn::Set(tag, static_cast<std::uint32_t>(cardinality));
+    const auto byte_mask = hn::Set(tag, static_cast<std::uint32_t>(std::numeric_limits<std::uint8_t>::max()));
+    if constexpr (Operation == sequence_rank_transform::translate_triplets) {
+        if (input.size() % 3u != 0u || output.size() != input.size() / 3u
+            || table.size() != cardinality * cardinality * cardinality) return false;
+        std::size_t position{};
+        for (; output.size() - position >= lane_count; position += lane_count) {
+            hn::Vec<decltype(byte_tag)> first, second, third;
+            hn::LoadInterleaved3(byte_tag, input.data() + 3u * position, first, second, third);
+            const auto first_wide = hn::PromoteTo(tag, first);
+            const auto second_wide = hn::PromoteTo(tag, second);
+            const auto third_wide = hn::PromoteTo(tag, third);
+            const auto invalid = hn::Or(hn::Ge(first_wide, rank_limit),
+                hn::Or(hn::Ge(second_wide, rank_limit), hn::Ge(third_wide, rank_limit)));
+            if (!hn::AllFalse(tag, invalid)) return false;
+            const auto indices = hn::Add(hn::Mul(hn::Add(hn::Mul(first_wide, rank_limit), second_wide), rank_limit), third_wide);
+            const auto ranks = hn::And(hn::GatherIndex(tag, table.data(), hn::BitCast(index_tag, indices)), byte_mask);
+            hn::StoreU(hn::DemoteTo(byte_tag, ranks), byte_tag, output.data() + position);
+        }
+        for (; position < output.size(); ++position) {
+            const auto first = input[3u * position];
+            const auto second = input[3u * position + 1u];
+            const auto third = input[3u * position + 2u];
+            if (first >= cardinality || second >= cardinality || third >= cardinality) return false;
+            output[position] = static_cast<std::uint8_t>(table[(first * cardinality + second) * cardinality + third]);
+        }
+    } else {
+        if (input.size() > std::numeric_limits<std::size_t>::max() / 3u
+            || output.size() != 3u * input.size() || table.size() != cardinality) return false;
+        std::size_t position{};
+        for (; input.size() - position >= lane_count; position += lane_count) {
+            const auto indices = hn::PromoteTo(tag, hn::LoadU(byte_tag, input.data() + position));
+            if (!hn::AllFalse(tag, hn::Ge(indices, rank_limit))) return false;
+            const auto codons = hn::GatherIndex(tag, table.data(), hn::BitCast(index_tag, indices));
+            constexpr auto rank_bits = std::numeric_limits<std::uint8_t>::digits;
+            const auto first = hn::DemoteTo(byte_tag, hn::And(codons, byte_mask));
+            const auto second = hn::DemoteTo(byte_tag, hn::And(hn::ShiftRight<rank_bits>(codons), byte_mask));
+            const auto third = hn::DemoteTo(byte_tag, hn::And(hn::ShiftRight<2u * rank_bits>(codons), byte_mask));
+            hn::StoreInterleaved3(first, second, third, byte_tag, output.data() + 3u * position);
+        }
+        for (; position < input.size(); ++position) {
+            if (input[position] >= cardinality) return false;
+            const auto codon = table[input[position]];
+            for (std::size_t base = 0u; base < 3u; ++base)
+                output[3u * position + base] = static_cast<std::uint8_t>(
+                    codon >> (base * std::numeric_limits<std::uint8_t>::digits));
+        }
+    }
+    return true;
+}
+
+/** Common generated-target entry; select the algebra once for the bounded tile. */
+[[nodiscard, gnu::noinline]] bool transform_sequence_rank_chunk(sequence_rank_transform operation,
+    std::span<const std::uint8_t> input, std::size_t source_cardinality,
+    std::span<const std::uint32_t> table, std::span<std::uint8_t> output) {
+    const hn::ScalableTag<std::uint32_t> tag;
+    switch (operation) {
+        case sequence_rank_transform::translate_triplets:
+            return transform_sequence_rank_chunk_for<std::remove_cv_t<decltype(tag)>, sequence_rank_transform::translate_triplets>(
+                tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::synthesize_triplets:
+            return transform_sequence_rank_chunk_for<std::remove_cv_t<decltype(tag)>, sequence_rank_transform::synthesize_triplets>(
+                tag, input, source_cardinality, table, output);
+    }
+    return false;
+}
 
 /** @brief Choose between full-lane processing and the masked final chunk. */
 enum class sequence_iteration_part : std::uint8_t {
@@ -414,15 +492,16 @@ iterate_sequence_bp_simd(
 		std::same_as<p_descriptor_tag, void>,
 		default_descriptor,
 		std::remove_cvref_t<p_descriptor_tag>>;
-	static_assert(std::same_as<hn::TFromD<resolved_descriptor>,
-		typename sequence_traits::storage_unit>,
-		"sequence iterator tag must preserve the packed storage unit type");
+	using decoded_lane_type = hn::TFromD<resolved_descriptor>;
+	static_assert(std::unsigned_integral<decoded_lane_type>
+		&& sizeof(decoded_lane_type) >= sizeof(typename sequence_traits::storage_unit),
+		"sequence iterator tag must preserve or widen packed words");
 	using vector_type = hn::Vec<resolved_descriptor>;
 	using vector_mask = hn::Mask<resolved_descriptor>;
 	using matrix = square_lane_matrix<resolved_descriptor>;
 	using stream_bundle = vector_stream<
 		resolved_descriptor,
-		typename sequence_traits::storage_unit,
+		decoded_lane_type,
 		p_stream_count>;
 	resolved_descriptor descriptor;
 
@@ -509,7 +588,7 @@ iterate_sequence_bp_simd(
         for (std::size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
             stream_bundle row =
                 make_vector_stream_from_rows<resolved_descriptor,
-                                             typename sequence_traits::storage_unit,
+                                             decoded_lane_type,
                                              p_stream_count>(raw_matrix_storage, row_index);
             for (std::size_t symbol_index = 0; symbol_index < sequence_traits::letters_per_unit;
                  ++symbol_index) {
@@ -554,7 +633,7 @@ iterate_sequence_bp_simd(
 		 row_index < lanes_per_stream; ++row_index) {
 		stream_bundle row = make_vector_stream_from_rows<
 			resolved_descriptor,
-			typename sequence_traits::storage_unit,
+			decoded_lane_type,
 			p_stream_count>(raw_matrix_storage, row_index);
 		for (std::size_t symbol_index = 0;
 			 symbol_index < sequence_traits::letters_per_unit;

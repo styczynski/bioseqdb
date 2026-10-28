@@ -66,12 +66,11 @@ template <sequence_alphabet p_alphabet,
         aborted = true;
     };
 
-    // Sequence words are drained between parser calls. Headers and quality bytes
-    // remain until record validation completes; draining words cannot erase the
-    // quality count used by the shared FASTQ parser.
+    // Sequence words are drained between parser calls. Headers remain until
+    // completion; the shared FASTQ parser counts qualities without retaining them.
     std::vector<char> header_scratch;
     std::vector<p_storage_unit> seq_scratch;
-    std::vector<std::uint8_t> quality_scratch; // FASTQ content is ignored here.
+    std::vector<std::uint8_t> quality_scratch; // Attached but empty: retention is disabled.
 
     bool record_open = false; // begin_record already called
     std::size_t completed_header_start = 0;
@@ -240,6 +239,7 @@ template <sequence_alphabet p_alphabet,
 
     } else {
         fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
+        parser_state.retain_quality = false;
         // Capture the completed FASTQ header and final-word padding.
         auto emit_fastq = [&capture_completion](std::size_t header_start,
                                                 std::size_t header_size,

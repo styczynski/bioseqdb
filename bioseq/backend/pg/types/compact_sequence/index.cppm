@@ -11,6 +11,7 @@ export import :tree_ops;
 export import :view_session;
 export import :packed_output;
 
+export import :conversion;
 import :io;
 import :content;
 export import :letter;

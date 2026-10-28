@@ -16,24 +16,23 @@ import bioseq.sequences.rank_pack;
 export namespace bioseq::storage {
 
 /**
- * Streams [from, to) to output.append_ranks in the requested orientation.
- *
- * Reads bounded chunks and reverses their traversal  when needed. Complement
- * transforms require a complementable alphabet Stops if the writer returns
- * false or a failed rank_pack_status.
- * @throws std::invalid_argument If coordinates are invalid or exceed size_t.
+ * Stream [from, to) through bounded checked native-rank reads.
+ * Writer rejection stops normally; source failure is returned without publishing a partial result.
+ * Reverse and complement operate only on the current tile, preserving the source owner.
  */
 template <sequence_transform p_transform, sequence_alphabet p_alphabet, class p_output_writer>
-void stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
-                              std::uint64_t from,
-                              std::uint64_t to,
-                              p_output_writer& output) {
+[[nodiscard]] std::expected<void, rank_window_read_failure>
+stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
+                         std::uint64_t from,
+                         std::uint64_t to,
+                         p_output_writer& output) {
     if (from > to || to > view.bp_size() ||
         to > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
-        throw std::invalid_argument("transformed sequence stream coordinates are unsupported");
+        return std::unexpected(rank_window_read_failure::invalid_range);
     }
     std::array<std::uint8_t, 256> scratch{};
-    auto append = [&output](std::span<const std::uint8_t> ranks) {
+    const auto source = view.template borrow_rank_source<false>();
+    const auto append = [&output](std::span<const std::uint8_t> ranks) {
         if constexpr (std::same_as<decltype(output.append_ranks(ranks)),
                                    bioseq::sequences::rank_pack_status>) {
             return output.append_ranks(ranks) == bioseq::sequences::rank_pack_status::ok;
@@ -44,49 +43,34 @@ void stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
             return true;
         }
     };
-
-    if constexpr (is_reversed(p_transform)) {
-        std::uint64_t position = to;
-        while (position > from) {
-            const auto count =
-                static_cast<std::size_t>(std::min<std::uint64_t>(scratch.size(), position - from));
-            const std::uint64_t chunk_from = position - count;
-            view.template copy_ranks<false, true>(std::span<std::uint8_t>{scratch.data(), count},
-                                                  static_cast<std::size_t>(chunk_from),
-                                                  static_cast<std::size_t>(position));
+    std::uint64_t consumed = 0u;
+    while (consumed < to - from) {
+        const auto count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(scratch.size(), to - from - consumed));
+        const auto chunk_from = is_reversed(p_transform)
+            ? to - consumed - count : from + consumed;
+        auto ranks = source.read_checked(chunk_from, count, scratch);
+        if (!ranks) return std::unexpected(ranks.error());
+        if constexpr (is_reversed(p_transform) || is_complemented(p_transform)) {
+            if (ranks->data() != scratch.data())
+                std::copy(ranks->begin(), ranks->end(), scratch.begin());
+            if constexpr (is_reversed(p_transform))
+                std::reverse(scratch.begin(), scratch.begin() + count);
             if constexpr (is_complemented(p_transform)) {
                 static_assert(lazy_sequence_detail::complementable_sequence_alphabet<p_alphabet>);
                 for (std::size_t index = 0u; index < count; ++index) {
-                    scratch[index] =
-                        lazy_sequence_traits<p_alphabet>::letter_complement(scratch[index]);
+                    if (scratch[index] >= seqan3::alphabet_size<p_alphabet>)
+                        return std::unexpected(rank_window_read_failure::source_read_failed);
+                    scratch[index] = lazy_sequence_traits<p_alphabet>::letter_complement(scratch[index]);
                 }
             }
-            if (!append(std::span<const std::uint8_t>{scratch.data(), count})) {
-                return;
-            }
-            position = chunk_from;
+            if (!append(std::span<const std::uint8_t>{scratch.data(), count})) return {};
+        } else {
+            if (!append(*ranks)) return {};
         }
-    } else {
-        std::uint64_t position = from;
-        while (position < to) {
-            const auto count =
-                static_cast<std::size_t>(std::min<std::uint64_t>(scratch.size(), to - position));
-            view.template copy_ranks<false, false>(std::span<std::uint8_t>{scratch.data(), count},
-                                                   static_cast<std::size_t>(position),
-                                                   static_cast<std::size_t>(position + count));
-            if constexpr (is_complemented(p_transform)) {
-                static_assert(lazy_sequence_detail::complementable_sequence_alphabet<p_alphabet>);
-                for (std::size_t index = 0u; index < count; ++index) {
-                    scratch[index] =
-                        lazy_sequence_traits<p_alphabet>::letter_complement(scratch[index]);
-                }
-            }
-            if (!append(std::span<const std::uint8_t>{scratch.data(), count})) {
-                return;
-            }
-            position += count;
-        }
+        consumed += count;
     }
+    return {};
 }
 
 /** Compares sequences by rank, using length to order equal prefixes. Returns -1, 0, or 1. */
@@ -121,7 +105,8 @@ template <sequence_alphabet p_alphabet>
             return true;
         }
     } writer{right.begin(), right.end(), 0};
-    stream_transformed_ranks<sequence_transform::identity>(left, 0u, left.bp_size(), writer);
+    const auto streamed = stream_transformed_ranks<sequence_transform::identity>(left, 0u, left.bp_size(), writer);
+    if (!streamed) throw std::runtime_error("lazy sequence comparison source read failed");
     if (writer.result != 0) {
         return writer.result;
     }
@@ -176,7 +161,8 @@ template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t hash_logical_sequence(lazy_sequence_view<p_alphabet> view,
                                                   std::uint64_t seed) {
     lazy_sequence_detail::logical_hash_writer writer{seed};
-    stream_transformed_ranks<sequence_transform::identity>(view, 0u, view.bp_size(), writer);
+    const auto streamed = stream_transformed_ranks<sequence_transform::identity>(view, 0u, view.bp_size(), writer);
+    if (!streamed) throw std::runtime_error("lazy sequence hash source read failed");
     return writer.finish(view.bp_size());
 }
 

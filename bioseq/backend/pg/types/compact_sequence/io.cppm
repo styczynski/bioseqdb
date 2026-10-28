@@ -485,9 +485,12 @@ void stream_view_to_wire(
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{&buffer, expected_units}};
-    bioseq::storage::stream_transformed_ranks<
+    const auto streamed = bioseq::storage::stream_transformed_ranks<
         bioseq::storage::sequence_transform::identity>(
             view, 0u, length, writer);
+    if (!streamed) bioseq::postgres::support::invoke_pg_as_cpp([] {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq wire source read failed")));
+    });
     const auto result = writer.finish(length, expected_units);
     if (!result) {
         wire_rank_pack_error(result.status);

@@ -402,6 +402,15 @@ make_lazy_sequence_view(const compact_sequence_range<p_sequence_range>& owner) n
                                             std::addressof(adapter_type::k_ops)};
 }
 
+/** Borrows the existing compact-range reader; the range must outlive all reads. */
+template <bool p_reverse_complement = false, class p_sequence_range>
+    requires (!p_reverse_complement || lazy_sequence_detail::complementable_sequence_alphabet<
+                  typename compact_sequence_range<p_sequence_range>::traits::alphabet_type>)
+[[nodiscard]] inline borrowed_rank_window_source make_borrowed_rank_source(
+    const compact_sequence_range<p_sequence_range>& owner) noexcept {
+    return make_lazy_sequence_view(owner).template borrow_rank_source<p_reverse_complement>();
+}
+
 /**
  * Calls callback with a view that reads the range in fixed-size fragments.
  *

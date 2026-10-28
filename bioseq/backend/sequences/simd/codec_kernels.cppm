@@ -278,9 +278,9 @@ template<class D, class Storage, std::size_t Bits, std::size_t Letters>
 }
 
 /** Pack a bounded native-rank tile through the existing checked word sink. */
-template<class D, bioseq::sequences::sequence_conversion_sink Writer>
+template<class D = hn::ScalableTag<std::uint8_t>, bioseq::sequences::sequence_conversion_sink Writer>
 [[nodiscard]] HWY_INLINE bioseq::sequences::rank_pack_status append_native_ranks_chunk(
-        D tag, std::span<const std::uint8_t> ranks, Writer& writer) {
+        std::span<const std::uint8_t> ranks, Writer& writer, D tag = {}) {
     using storage_unit = typename Writer::storage_unit;
     using traits = typename Writer::traits;
     for (const auto rank : ranks)
@@ -325,8 +325,8 @@ map_native_rank_chunk(D tag, std::span<const std::uint8_t> source,
             tag, mapped.data());
     } else for (std::size_t lane = 0; lane < source.size(); ++lane)
         mapped[lane] = destinations[source[lane]];
-    const auto status = append_native_ranks_chunk(tag,
-        std::span<const std::uint8_t>{mapped.data(), source.size()}, writer);
+    const auto status = append_native_ranks_chunk(
+        std::span<const std::uint8_t>{mapped.data(), source.size()}, writer, tag);
     if (status != rank_pack_status::ok) return std::unexpected(sequence_conversion_error{
         status == rank_pack_status::capacity_overflow ? sequence_conversion_error_code::output_capacity
             : sequence_conversion_error_code::output_contract_violation,

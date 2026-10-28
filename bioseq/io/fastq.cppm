@@ -2,8 +2,8 @@
  * @file fastq.cppm
  * @brief Incremental FASTQ record parser.
  *
- * Multi-line sequence and quality fields are appended directly to
- * batch-owned storage. Quality completion is determined by byte count, so
+ * Multi-line sequence fields and requested quality fields are appended directly
+ * to batch-owned storage. Quality completion is determined by byte count, so
  * marker characters at the start of a quality line remain data.
  */
 module;
@@ -19,6 +19,7 @@ module;
 
 export module bioseq.io.fastq;
 
+import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.io.options;
@@ -52,6 +53,11 @@ struct alignas(64) fastq_parser_state {
     std::size_t sequence_byte_count = 0;
     /// Expected quality length saved when sequence parsing ends.
     std::size_t sequence_letter_count = 0;
+    /// Quality bytes excluding line endings, independent of retained storage.
+    std::size_t quality_byte_count = 0;
+    /// Retain batch quality bytes; sequence-only streams disable this before parsing.
+    /// This policy survives record resets and storage reattachment.
+    bool retain_quality = true;
     /// Borrowed pointers to the batch's shared storage.
     std::vector<char>* header_storage = nullptr;
     std::vector<std::uint8_t>* quality_storage = nullptr;
@@ -62,6 +68,7 @@ struct alignas(64) fastq_parser_state {
         body.reset();
         sequence_byte_count = 0;
         sequence_letter_count = 0;
+        quality_byte_count = 0;
     }
 
     /// Discards the unfinished record's batch tails and resets its encoder state.
@@ -87,7 +94,9 @@ struct alignas(64) fastq_parser_state {
 /// input sequence length, so '@' and '+' within quality data stay unchanged.
 ///
 /// On completion, `emit_record` receives `(header_start, header_size, seq_start,
-/// seq_word_count, padding, qual_start, qual_size)` for the,  batch buffers.
+/// seq_word_count, padding, qual_start, qual_size)` for the batch buffers.
+/// `qual_size` is zero when retention is disabled; length validation still uses
+/// the cumulative quality count for the entire record.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit = std::uint64_t,
           typename p_emit_record,
@@ -138,7 +147,7 @@ template <sequence_alphabet p_alphabet,
     /// Completes only an exact quality count; EOF also rejects an incomplete one.
     const auto finish_quality = [&state, &parse_cursor, global_offset, &failure_fn](
                                     bool require_complete) -> parse_outcome {
-        const std::size_t quality_size = state.quality_storage->size() - state.quality_start_offset;
+        const std::size_t quality_size = state.quality_byte_count;
         const std::size_t sequence_size = state.sequence_letter_count;
         if (quality_size == sequence_size) {
             state.progress = fastq_parser_progress::finished_record;
@@ -289,10 +298,23 @@ template <sequence_alphabet p_alphabet,
         std::size_t line_size = newline_offset;
         if (line_size > 0u && slab_data[parse_cursor + line_size - 1u] == '\r')
             --line_size;
-        state.quality_storage->insert(state.quality_storage->end(),
-                                      slab_data + parse_cursor,
-                                      slab_data + parse_cursor + line_size);
-        parse_cursor += newline_offset + (has_newline ? 1u : 0u);
+        const std::size_t next_cursor = parse_cursor + newline_offset + (has_newline ? 1u : 0u);
+        const auto next_quality_count =
+            bioseq::common::checked_add(state.quality_byte_count, line_size);
+        if (!next_quality_count.has_value()) {
+            parse_cursor = next_cursor;
+            state.rollback_current_record();
+            emit_failure(failure_fn, "FASTQ quality length overflow at file position {}",
+                         global_offset + parse_cursor);
+            return record_parse_result{parse_outcome::abort, parse_cursor};
+        }
+        if (state.retain_quality) {
+            state.quality_storage->insert(state.quality_storage->end(),
+                                          slab_data + parse_cursor,
+                                          slab_data + parse_cursor + line_size);
+        }
+        state.quality_byte_count = *next_quality_count;
+        parse_cursor = next_cursor;
         const auto quality_outcome = finish_quality(!has_newline);
         if (quality_outcome == parse_outcome::abort)
             return record_parse_result{parse_outcome::abort, parse_cursor};

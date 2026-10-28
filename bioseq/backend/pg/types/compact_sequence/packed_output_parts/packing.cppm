@@ -370,9 +370,12 @@ void pack_view_into(bioseq::pg_types::seq& destination, p_view view, std::uint64
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{units}};
-    bioseq::storage::stream_transformed_ranks<
+    const auto streamed = bioseq::storage::stream_transformed_ranks<
         bioseq::storage::sequence_transform::identity>(
             view, 0u, length, writer);
+    if (!streamed) bioseq::postgres::support::invoke_pg_as_cpp([] {
+        ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED), errmsg("bioseq packed output source read failed")));
+    });
     const auto result = writer.finish(length, unit_count);
     if (!result) {
         rank_pack_error(result.status);
@@ -1226,27 +1229,19 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
     std::uint8_t alphabet_code)
 {
     if (pgseq_is_cigar_alphabet(alphabet_code)) return false;
-    bool complete = true;
+    bool complete = false;
     pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
-        [alphabet_code, &complete]<class p_alphabet>() {
-            for (std::uint16_t rank = 0u;
-                 rank <= static_cast<int>(std::numeric_limits<std::uint8_t>::max());
-                 ++rank) {
-                char original = '\0';
-                if (!pgseq_symbol_for_rank(
-                        alphabet_code, static_cast<std::uint8_t>(rank),
-                        original)) {
-                    continue;
-                }
-                const auto complemented =
-                    bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                        letter_complement(static_cast<std::uint8_t>(rank));
-                char symbol = '\0';
-                if (!pgseq_symbol_for_rank(
-                        alphabet_code, complemented, symbol)) {
-                    complete = false;
-                    return;
+        [&complete]<class Alphabet>() {
+            if constexpr (requires(Alphabet symbol) { seqan3::complement(symbol); }) {
+                complete = true;
+                for (std::size_t rank = 0; rank < seqan3::alphabet_size<Alphabet>; ++rank) {
+                    const auto letter = seqan3::assign_rank_to(rank, Alphabet{});
+                    if (seqan3::to_rank(seqan3::complement(letter))
+                        >= seqan3::alphabet_size<Alphabet>) {
+                        complete = false;
+                        return;
+                    }
                 }
             }
         });
@@ -1437,18 +1432,25 @@ public:
         });
     }
 
-    /** Generate only the unknown/filler backing, packing repeated ranks by words. */
-    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> filled(
-        Alphabet symbol, std::uint64_t count)
+    /** Generate exact packed output in the existing error-atomic literal arena.
+     * The producer borrows a checked fixed-span writer and returns its typed
+     * failure by value. A failed producer never publishes a partially built root. */
+    template<class Error, class Producer>
+    [[nodiscard]] std::expected<sequence_type, Error> generate(
+        std::uint64_t count, compact_sequence_stdc_type_params destination_type,
+        Producer&& producer)
         requires (!bioseq::cigar_operation_alphabet<Alphabet>)
     {
-        if (count > (std::numeric_limits<std::uint32_t>::max)()) {
-            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::length_overflow});
-        }
-        sequence_type output{{}, type_};
-        bioseq::postgres::support::invoke_pg_as_cpp([this, symbol, count, &output] {
-        pgseq_dispatch_biological_instance(type_.alphabet_code, type_.storage_unit_byte_width,
-            [this, symbol, count, &output]<class Instance>() {
+        std::expected<sequence_type, Error> output{sequence_type{{}, destination_type}};
+        bioseq::postgres::support::invoke_pg_as_cpp([this, count, destination_type, &producer, &output] {
+        if (count > (std::numeric_limits<std::uint32_t>::max)())
+            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                errmsg("generated bioseq sequence exceeds the supported length")));
+        if (destination_type.alphabet_code != pgseq_supported_alphabets::template index_of<Alphabet>())
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("generated bioseq alphabet does not match its backend")));
+        pgseq_dispatch_biological_instance(destination_type.alphabet_code, destination_type.storage_unit_byte_width,
+            [this, count, destination_type, &producer, &output]<class Instance>() {
                 if constexpr (std::same_as<typename Instance::alphabet_type, Alphabet>) {
                     using traits = typename compact_sequence_range<Instance>::traits;
                     using unit = typename traits::storage_unit;
@@ -1460,22 +1462,50 @@ public:
                     using writer_type = bioseq::sequences::checked_rank_pack_sink<Instance,
                         bioseq::sequences::invalid_rank_policy::reject,
                         bioseq::sequences::pack_capacity_policy::fixed_span, sink>;
-                    writer_type writer{sink{std::span<unit>{reinterpret_cast<unit*>(storage),
-                        static_cast<std::size_t>(unit_count)}}};
-                    const auto appended = writer.append_repeated_rank(
-                        static_cast<std::uint8_t>(seqan3::to_rank(symbol)), count);
-                    if (appended != bioseq::sequences::rank_pack_status::ok) rank_pack_error(appended);
-                    const auto finished = writer.finish(count, unit_count);
-                    if (!finished) rank_pack_error(finished.status);
-                    output.root = make_literal_node_error_atomic(destination, guard_->build_edges,
+                    const auto output_units = std::span<unit>{reinterpret_cast<unit*>(storage),
+                        static_cast<std::size_t>(unit_count)};
+                    writer_type writer{sink{output_units}};
+                    const auto packed = [&producer, &writer, output_units] {
+                        if constexpr (std::invocable<Producer&, writer_type&, std::span<unit>>)
+                            return producer(writer, output_units);
+                        else return producer(writer);
+                    }();
+                    if (!packed) {
+                        output = std::unexpected(packed.error());
+                        return;
+                    }
+                    if (!*packed || packed->emitted_symbols != count
+                        || packed->written_units != unit_count)
+                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("generated bioseq sequence violated its packing contract")));
+                    output->root = make_literal_node_error_atomic(destination, guard_->build_edges,
                         literal_piece{.storage_arena = std::addressof(destination), .bytes = storage,
-                            .symbol_from = 0u, .symbol_to = count, .stored_type_params = type_,
+                            .symbol_from = 0u, .symbol_to = count, .stored_type_params = destination_type,
                             .encoding = literal_encoding::packed,
                             .validation = literal_validation::alphabet_validated});
                 }
             });
         });
         return output;
+    }
+
+    /** Generate only the unknown/filler backing, packing repeated ranks by words. */
+    [[nodiscard]] std::expected<sequence_type, bioseq::cigar_error> filled(
+        Alphabet symbol, std::uint64_t count)
+        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+    {
+        if (count > (std::numeric_limits<std::uint32_t>::max)())
+            return std::unexpected(bioseq::cigar_error{bioseq::cigar_error_code::length_overflow});
+        return generate<bioseq::cigar_error>(count, type_, [symbol, count](auto& writer)
+            -> std::expected<bioseq::sequences::rank_pack_result, bioseq::cigar_error> {
+            const auto appended = writer.append_repeated_rank(
+                static_cast<std::uint8_t>(seqan3::to_rank(symbol)), count);
+            if (appended != bioseq::sequences::rank_pack_status::ok) rank_pack_error(appended);
+            using writer_type = std::remove_cvref_t<decltype(writer)>;
+            const auto finished = writer.finish(count, checked_ceil_div(count, writer_type::traits::letters_per_unit));
+            if (!finished) rank_pack_error(finished.status);
+            return finished;
+        });
     }
 };
 
@@ -1556,9 +1586,9 @@ export [[nodiscard]] inline Datum pg_cigar_from_runs(
     bioseq::cigar_space space = bioseq::cigar_space::compatibility)
 { return PointerGetDatum(make_pg_cigar_from_runs(operations, space)); }
 
-/** Execute one CIGAR operation under the existing read-session error lifecycle. */
+/** Execute a value-producing operation under the existing read-session error lifecycle. */
 export template<class Result, class Function>
-Result with_pg_cigar_sequence(Datum input, Function&& callback)
+Result with_pg_sequence_session(Function&& callback)
 {
     static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
     static_assert(!is_borrowed_view_result_v<Result>);
@@ -1573,11 +1603,7 @@ Result with_pg_cigar_sequence(Datum input, Function&& callback)
         auto* local = begin_pg_sequence_read_session(CurrentMemoryContext);
         session = local;
         try {
-            {
-                pg_cigar_backend backend{*local};
-                auto view = backend.borrow_input(input);
-                result.emplace(std::forward<Function>(callback)(backend, view));
-            }
+            result.emplace(std::forward<Function>(callback)(*local));
             finish_pg_sequence_read_session(local, true);
         } catch (...) {
             failure = std::current_exception();
@@ -1593,6 +1619,17 @@ Result with_pg_cigar_sequence(Datum input, Function&& callback)
     PG_END_TRY();
     if (failure) std::rethrow_exception(std::move(failure));
     return std::move(*result);
+}
+
+/** Bind one CIGAR value and retain its backend until the operation completes. */
+export template<class Result, class Function>
+Result with_pg_cigar_sequence(Datum input, Function&& callback)
+{
+    return with_pg_sequence_session<Result>([input, &callback](pg_sequence_read_session& session) {
+        pg_cigar_backend backend{session};
+        auto view = backend.borrow_input(input);
+        return std::forward<Function>(callback)(backend, view);
+    });
 }
 
 /** Execute a pair operation after binding both operands before allocating result arenas. */

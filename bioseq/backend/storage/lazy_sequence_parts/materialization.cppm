@@ -306,7 +306,7 @@ template <sequence_alphabet p_alphabet> struct resident_adapter {
 };
 
 template <sequence_alphabet p_alphabet, class p_storage_unit>
-[[nodiscard]] bioseq::sequences::rank_pack_result
+[[nodiscard]] std::expected<bioseq::sequences::rank_pack_result, rank_window_read_failure>
 pack_view_region_into(lazy_sequence_view<p_alphabet> view,
                       sequence_size_t from,
                       sequence_size_t to,
@@ -324,7 +324,8 @@ pack_view_region_into(lazy_sequence_view<p_alphabet> view,
 
     auto units = std::span<p_storage_unit>(static_cast<p_storage_unit*>(output), unit_count);
     packer writer{unit_sink{units}};
-    stream_transformed_ranks<sequence_transform::identity>(view, from, to, writer);
+    const auto streamed = stream_transformed_ranks<sequence_transform::identity>(view, from, to, writer);
+    if (!streamed) return std::unexpected(streamed.error());
     return writer.finish(to - from, unit_count);
 }
 
@@ -378,7 +379,7 @@ template <sequence_alphabet p_alphabet>
                                                             std::uint8_t requested_width);
 
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] admitted_packed_sequence<p_alphabet>
+[[nodiscard]] std::expected<admitted_packed_sequence<p_alphabet>, rank_window_read_failure>
 materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
                             sequence_size_t from,
                             sequence_size_t to,
@@ -507,7 +508,7 @@ template <sequence_alphabet p_alphabet> class admitted_packed_sequence {
         : state_(std::move(state)) {}
 
     template <sequence_alphabet p_other_alphabet>
-    friend admitted_packed_sequence<p_other_alphabet>
+    friend std::expected<admitted_packed_sequence<p_other_alphabet>, rank_window_read_failure>
     materialize_packed_sequence(lazy_sequence_view<p_other_alphabet>,
                                 sequence_size_t,
                                 sequence_size_t,
@@ -589,7 +590,7 @@ template <sequence_alphabet p_alphabet>
  * Requiring native copying also raises if that path is unavailable.
  */
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] admitted_packed_sequence<p_alphabet>
+[[nodiscard]] std::expected<admitted_packed_sequence<p_alphabet>, rank_window_read_failure>
 materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
                             sequence_size_t from,
                             sequence_size_t to,
@@ -723,7 +724,7 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
         throw native_packed_materialization_unavailable{};
     }
     if (!native_copied) {
-        bioseq::sequences::rank_pack_result packed{};
+        std::expected<bioseq::sequences::rank_pack_result, rank_window_read_failure> packed;
         switch (requested_width) {
         case 1u:
             packed = lazy_sequence_detail::pack_view_region_into<p_alphabet, std::uint8_t>(
@@ -744,9 +745,10 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
         default:
             throw std::invalid_argument("invalid packed storage-unit width");
         }
-        if (packed.status != bioseq::sequences::rank_pack_status::ok ||
-            packed.emitted_symbols != length || packed.written_units != unit_count ||
-            packed.padding_letters != trailing) {
+        if (!packed) return std::unexpected(packed.error());
+        if (packed->status != bioseq::sequences::rank_pack_status::ok ||
+            packed->emitted_symbols != length || packed->written_units != unit_count ||
+            packed->padding_letters != trailing) {
             throw std::runtime_error("checked lazy rank packing failed");
         }
     }

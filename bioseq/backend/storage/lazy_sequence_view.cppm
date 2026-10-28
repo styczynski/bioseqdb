@@ -13,6 +13,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.common.checked_arithmetic;
 import bioseq.storage.scanner;
 import bioseq.storage.size;
+export import bioseq.storage.coordinates;
 import bioseq.sequences;
 
 export namespace bioseq::storage {
@@ -31,6 +32,50 @@ static_assert(complementable_sequence_alphabet<seq::dna5>);
 static_assert(!complementable_sequence_alphabet<seq::aa27>);
 
 } // namespace lazy_sequence_detail
+
+/** Reads native alphabet ranks into scratch or temporarily borrowed backend storage. */
+using rank_window_read_fn = const std::uint8_t* (*)(
+    const void*, sequence_size_t, std::size_t, std::span<std::uint8_t>);
+
+/** Checked rank-window failures; a failed source read is never an empty window. */
+enum class rank_window_read_failure : std::uint8_t {
+    invalid_descriptor,
+    invalid_range,
+    source_read_failed,
+};
+
+/**
+ * Borrowed, alphabet-erased native-rank access for bounded CPU algorithms.
+ * The backend owner must outlive this value. A returned span remains borrowed:
+ * callers retaining it across another source read must first copy it to scratch.
+ * Non-shareable sources may only be invoked on their owning backend thread.
+ */
+struct borrowed_rank_window_source {
+    const void* context{};
+    rank_window_read_fn read_at{};
+    sequence_size_t symbol_count{};
+    std::uint8_t alphabet_code{};
+    sequence_transform orientation{sequence_transform::identity};
+    bool worker_shareable{};
+
+    /** Reads [from, from + count), validating ranges before invoking the backend. */
+    [[nodiscard]] std::expected<std::span<const std::uint8_t>, rank_window_read_failure>
+    read_checked(sequence_size_t from, std::size_t count,
+                 std::span<std::uint8_t> scratch) const {
+        if (read_at == nullptr) {
+            return std::unexpected(rank_window_read_failure::invalid_descriptor);
+        }
+        if (from > symbol_count || count > symbol_count - from || count > scratch.size()) {
+            return std::unexpected(rank_window_read_failure::invalid_range);
+        }
+        if (count == 0u) return std::span<const std::uint8_t>{};
+        const auto* ranks = read_at(context, from, count, scratch);
+        if (ranks == nullptr) {
+            return std::unexpected(rank_window_read_failure::source_read_failed);
+        }
+        return std::span<const std::uint8_t>{ranks, count};
+    }
+};
 
 /** Kind of sequence storage recorded by an allocation event. */
 enum class sequence_payload_allocation_kind : std::uint8_t {
@@ -168,12 +213,6 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     using traits = lazy_sequence_traits<p_alphabet>;
     using slice_tag = lazy_sequence_slice_tag;
 
-    /** Reads a rank window, returning caller scratch or storage kept alive by the backend. */
-    using read_at_fn = std::uint8_t const* (*)(void const*,
-                                               sequence_size_t,
-                                               std::size_t,
-                                               std::span<std::uint8_t>);
-
     /** @brief Bit order used by resident packed descriptors. */
     enum class packed_symbol_order : std::uint8_t {
         least_significant_symbol_first,
@@ -217,7 +256,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         /** Returns the logical number of sequence symbols. */
         sequence_size_t (*bp_size)(void const*) noexcept;
         /** Rank readers inkexed by reverse-complement and reverse-output flags. */
-        std::array<read_at_fn, 4> read_at;
+        std::array<rank_window_read_fn, 4> read_at;
         /** @brief Attempts to borrow one resident packed subrange. */
         resident_probe_fn try_resident_packed;
         /** @brief Copies one packed sequence when the backend exposes a fast path. */
@@ -237,7 +276,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         DEBUG_ASSERT(
             ops_ != nullptr && ops_->bp_size != nullptr && ops_->worker_shareable != nullptr &&
                 std::ranges::all_of(ops_->read_at,
-                                    [](read_at_fn callback) { return callback != nullptr; }),
+                                    [](rank_window_read_fn callback) { return callback != nullptr; }),
             "lazy sequence backend table must be complete");
     }
 
@@ -254,6 +293,22 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     /** Reports whether the backend allows access from worker tasks. */
     [[nodiscard]] bool worker_shareable() const noexcept {
         return ops_->worker_shareable(state_);
+    }
+
+    /** Borrows checked native-rank access without retaining this temporary facade. */
+    template <bool p_reverse_complement = false>
+        requires (!p_reverse_complement ||
+                  lazy_sequence_detail::complementable_sequence_alphabet<p_alphabet>)
+    [[nodiscard]] borrowed_rank_window_source borrow_rank_source() const noexcept {
+        return {
+            .context = state_,
+            .read_at = ops_->read_at[p_reverse_complement ? 2u : 0u],
+            .symbol_count = bp_size(),
+            .alphabet_code = supported_biological_alphabets::index_of<p_alphabet>(),
+            .orientation = p_reverse_complement ? sequence_transform::reverse_complement
+                                               : sequence_transform::identity,
+            .worker_shareable = worker_shareable(),
+        };
     }
 
     /** @brief Returns a copy of this view with a different allocation observer. */
@@ -481,18 +536,18 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                                                    std::span<p_stored_type> scratch) const {
             static_assert(std::same_as<p_stored_type, std::uint8_t>);
             static_assert(p_max_loaded_slots == 2, "facade backends implement the two-slot API");
-            if (bp_from > parent->bp_size() || required_length > parent->bp_size() - bp_from ||
-                scratch.size() < required_length) {
-                abort_lazy_sequence_access("lazy sequence read_at range is invalid");
-            }
             constexpr std::size_t k_orientation =
                 (p_is_reversed ? 2u : 0u) | (p_write_reversed ? 1u : 0u);
-            const std::uint8_t* result = parent->ops_->read_at[k_orientation](
-                parent->state_, bp_from, required_length, scratch);
-            if (required_length != 0u && result == nullptr) {
-                abort_lazy_sequence_access("lazy sequence backend returned null");
+            const borrowed_rank_window_source source{
+                .context = parent->state_,
+                .read_at = parent->ops_->read_at[k_orientation],
+                .symbol_count = parent->bp_size(),
+            };
+            const auto result = source.read_checked(bp_from, required_length, scratch);
+            if (!result) {
+                abort_lazy_sequence_access("lazy sequence rank read failed");
             }
-            return result;
+            return required_length == 0u ? scratch.data() : result->data();
         }
     };
 
