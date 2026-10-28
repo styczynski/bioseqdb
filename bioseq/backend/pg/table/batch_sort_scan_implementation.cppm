@@ -872,8 +872,9 @@ TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
     if (!rt->sortslot->tts_isnull[rt->seq_attno - 1]) {
         Datum sequence = rt->sortslot->tts_values[rt->seq_attno - 1];
         if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(sequence))) {
-            auto* flat = reinterpret_cast<bioseq::pg_types::seq*>(DatumGetPointer(sequence));
-            if (bioseq::storage::is_locator_stub(flat)) {
+            // Buffered MinimalTuple values may retain a one-byte TOAST header.
+            const auto descriptor = classify_and_describe_sequence_header(sequence);
+            if (descriptor.kind == pg_sequence_datum_kind::locator) {
                 if (!OidIsValid(rt->source_relation_oid) || rt->source_attno <= 0 ||
                     !rt->source_routes_acquired) {
                     ereport(ERROR,

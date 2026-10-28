@@ -723,8 +723,32 @@ export {
             ExplainPropertyText("Bioseq Vectorized Filter", vectorized_where_clauses, es);
         }
 
-        /* Read symbol_count calls from the plan so plain EXPLAIN lists metadata
-         * lookups too. The executor fills symbol_count_sites only on its first scan. */
+        /* Reuse the frozen scan snapshot for symbol-count and alignment policies. */
+        scan_state* explain_scan_state = scan_state::from_custom_scan_state(node);
+        const bioseq_scan_runtime* explain_runtime =
+            (explain_scan_state != nullptr && explain_scan_state->runtime_state != nullptr)
+                ? static_cast<const bioseq_scan_runtime*>(explain_scan_state->runtime_state)
+                : nullptr;
+        const per_scan_aligner_state* aligner_snapshot =
+            (explain_runtime != nullptr) ? &explain_runtime->aligner_state : nullptr;
+        frozen_scan_semantics explain_frozen_semantics{};
+        const bool explain_semantics_valid =
+            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
+                ? true
+                : decode_bioseq_semantic_payload(cscan->custom_private, &explain_frozen_semantics);
+        const bool explain_read_sequence_index =
+            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
+                ? explain_runtime->buffer.reads_sequence_index()
+            : explain_semantics_valid ? explain_frozen_semantics.read_sequence_index
+                                      : false;
+        const bioseq::indexing::index_read_requirement explain_index_read_requirement =
+            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
+                ? aligner_snapshot->index_read_requirement
+            : explain_semantics_valid ? explain_frozen_semantics.index_read_requirement
+                                      : bioseq::indexing::index_read_requirement::allow;
+
+        /* Read symbol_count calls from the plan so plain EXPLAIN lists their route
+         * too. The executor fills symbol_count_sites only on its first scan. */
         {
             StringInfoData meta_buf;
             initStringInfo(&meta_buf);
@@ -790,36 +814,17 @@ export {
                                  rank);
             }
             if (!first) {
-                ExplainPropertyText("Bioseq Fetched From Meta", meta_buf.data, es);
+                ExplainPropertyText(explain_read_sequence_index
+                                        ? "Bioseq Symbol Count Index Candidates"
+                                        : "Bioseq Symbol Counts From Sequence",
+                                    meta_buf.data,
+                                    es);
             }
             pfree(meta_buf.data);
         }
 
         /* Show index-use estimates and the alignment pipeline only for mmsearch.
-         * A scan that only reads symbol_count metadata does not use the minimizer index. */
-        /* Reuse the scan snapshot for the index summary and  pipeline details. */
-        scan_state* explain_scan_state = scan_state::from_custom_scan_state(node);
-        const bioseq_scan_runtime* explain_runtime =
-            (explain_scan_state != nullptr && explain_scan_state->runtime_state != nullptr)
-                ? static_cast<const bioseq_scan_runtime*>(explain_scan_state->runtime_state)
-                : nullptr;
-        const per_scan_aligner_state* aligner_snapshot =
-            (explain_runtime != nullptr) ? &explain_runtime->aligner_state : nullptr;
-        frozen_scan_semantics explain_frozen_semantics{};
-        const bool explain_semantics_valid =
-            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
-                ? true
-                : decode_bioseq_semantic_payload(cscan->custom_private, &explain_frozen_semantics);
-        const bool explain_read_sequence_index =
-            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
-                ? explain_runtime->buffer.reads_sequence_index()
-            : explain_semantics_valid ? explain_frozen_semantics.read_sequence_index
-                                      : false;
-        const bioseq::indexing::index_read_requirement explain_index_read_requirement =
-            aligner_snapshot != nullptr && aligner_snapshot->execution_plan
-                ? aligner_snapshot->index_read_requirement
-            : explain_semantics_valid ? explain_frozen_semantics.index_read_requirement
-                                      : bioseq::indexing::index_read_requirement::allow;
+         * A symbol-count projection alone does not use the minimizer index. */
 
         {
             /* Use saved feature flags when available. Otherwise inspect the plan,

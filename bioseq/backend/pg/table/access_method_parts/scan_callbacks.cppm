@@ -239,6 +239,13 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
                                             parallel_column_scan_handle parallel_column_scan,
                                             bool returns_vectorized_tuples,
                                             bool defer_sequence_hydration) {
+    /* PostgreSQL begins ANALYZE without a snapshot. Keep one registered for
+     * both row visibility and sequence fragments until bioseq_endscan. */
+    if (snapshot == nullptr && (flags & SO_TYPE_ANALYZE) != 0u) {
+        snapshot = RegisterSnapshot(GetTransactionSnapshot());
+        flags |= SO_TEMP_SNAPSHOT;
+    }
+
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
     Oid relfilelocator = relation->rd_locator.relNumber;
     /* This context owns the  scan and its reader. The caller's current context
