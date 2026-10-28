@@ -438,9 +438,9 @@ struct ksw_dp_cell {
 template <
     ksw_aligner_mode p_mode,
     bool p_is_fused_score,
+    sequence_alphabet p_alphabet,
     class p_simd_tag,
-    class p_state_type,
-    sequence_alphabet p_alphabet>
+    class p_state_type>
 [[always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
     p_simd_tag simd_tag, int state_offset,
     p_state_type& HWY_RESTRICT state,
@@ -475,7 +475,7 @@ template <
             hn::MaskFromVec(wildcard_lanes), wildcard_scores, cell.selected_scores);
     } else {
         const hn::RebindToUnsigned<p_simd_tag> rank_tag;
-        cell.selected_scores = get_pair_scores(matrix, simd_tag,
+        cell.selected_scores = get_pair_scores<p_alphabet>(matrix, simd_tag,
             hn::LoadU(rank_tag, state.target_bytes + state_offset),
             hn::LoadU(rank_tag, query_reversed_aligned + state_offset));
     }

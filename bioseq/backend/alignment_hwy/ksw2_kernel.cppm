@@ -394,12 +394,12 @@ template<
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
                 const int state_offset = band_vector_index * byte_lane_count_i32;
                 auto cell = should_use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                    ? load_ksw_dp_cell<p_mode, true, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
                         wildcard_ranks, scoring_matrix)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                    : load_ksw_dp_cell<p_mode, false, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
@@ -417,12 +417,12 @@ template<
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
                 const int state_offset = band_vector_index * byte_lane_count_i32;
                 auto cell = should_use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                    ? load_ksw_dp_cell<p_mode, true, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
                         wildcard_ranks, scoring_matrix)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                    : load_ksw_dp_cell<p_mode, false, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
@@ -514,12 +514,12 @@ template<
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
                 const int state_offset = band_vector_index * byte_lane_count_i32;
                 auto cell = should_use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                    ? load_ksw_dp_cell<p_mode, true, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
                         wildcard_ranks, scoring_matrix)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                    : load_ksw_dp_cell<p_mode, false, p_alphabet>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
