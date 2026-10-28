@@ -603,7 +603,7 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
         const exact_simd_index_bridge_request& request) {
     // Report unsupported alphabets and storage widths before missing callbacks
     // so input-format errors take priority.
-    if (request.alphabet_code > 1u) {
+    if (request.alphabet_code >= supported_biological_alphabets::alphabet_count) {
         return rejected_bridge_result(
             exact_simd_index_status::unsupported_alphabet);
     }
@@ -625,8 +625,8 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
         return rejected_bridge_result(exact_simd_index_status::invalid_state);
     }
     const std::size_t storage_bits = request.storage_unit_bytes * 8u;
-    const std::uint8_t expected_bits_per_symbol =
-        request.alphabet_code == 0u ? 2u : 3u;
+    const auto expected_bits_per_symbol =
+        *supported_biological_alphabets::rank_bits_for_code(request.alphabet_code);
     if (request.bits_per_symbol != expected_bits_per_symbol) {
         return rejected_bridge_result(
             exact_simd_index_status::unsupported_alphabet);

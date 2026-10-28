@@ -64,19 +64,7 @@ inline void build_and_verify_hash_major_minimizer_generation(
                                                              request.kernels);
         return;
     }
-    if constexpr (k_alphabet_code != 0u) {
-        build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
-                                                             request.column_attno,
-                                                             request.index_name,
-                                                             request.sequence_rowno,
-                                                             storage,
-                                                             sequence,
-                                                             source_binding,
-                                                             request.algorithm_identity,
-                                                             request.backend,
-                                                             request.kernels);
-        return;
-    } else {
+    {
         const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
             request.backend,
             request.algorithm_identity,

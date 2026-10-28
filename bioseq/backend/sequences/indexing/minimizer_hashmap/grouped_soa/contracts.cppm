@@ -18,6 +18,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.pipeline.runtime_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_layout_geometry;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.scanner;
@@ -42,9 +43,9 @@ inline constexpr std::uint32_t k_minimizer_hash_semantics_revision = 1u;
 /// Revision of the saved segment-local position encoding: `(local_bp << 1) | strand`.
 inline constexpr std::uint32_t k_minimizer_segment_local_position_encoding_revision = 2u;
 /// Revision of the grouped-SoA payload byte layout.
-inline constexpr std::uint16_t k_grouped_soa_payload_layout_abi_revision = 1u;
+inline constexpr std::uint16_t k_grouped_soa_payload_layout_abi_revision = 2u;
 /// Revision consumed by grouped-SoA GPU readers.
-inline constexpr std::uint32_t k_grouped_soa_gpu_abi_revision = 3u;
+inline constexpr std::uint32_t k_grouped_soa_gpu_abi_revision = 4u;
 /// Magic word stored at the start of the grouped-SoA manifest extension.
 inline constexpr std::uint32_t k_grouped_soa_extension_magic = 0x42494f53u;
 /// Revision encoded in the grouped-SoA manifest extension.
@@ -52,7 +53,8 @@ inline constexpr std::uint16_t k_grouped_soa_extension_layout_revision = 2u;
 /// Exact byte length of the grouped-SoA manifest extension.
 inline constexpr std::uint16_t k_grouped_soa_extension_bytes = 48u;
 /// DNA4 identifier in the saved format. It is the index in supported_alphabets.
-inline constexpr std::uint16_t k_minimizer_persisted_dna4_alphabet_code = 0u;
+inline constexpr std::uint16_t k_minimizer_persisted_dna4_alphabet_code =
+    ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>();
 /// DNA5 identifier from the minimizer profile registry used by queries.
 inline constexpr std::uint16_t k_minimizer_persisted_dna5_alphabet_code =
     ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna5>();
@@ -70,7 +72,7 @@ inline constexpr std::uint16_t k_minimap_scheme_revision = 0u;
 /// Saved identifier for  the 32-bit ntHash r7 sum scheme.
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_id = 1u;
 /// Saved revision of the 32-bit ntHash r7 sum scheme.
-inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_revision = 1u;
+inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_revision = 2u;
 /// Sentinel used when no persisted minimizer scheme is selected.
 inline constexpr std::uint16_t k_invalid_minimizer_scheme_id =
     (std::numeric_limits<std::uint16_t>::max)();
@@ -128,7 +130,7 @@ enum class minimizer_producer_backend : std::uint8_t {
 };
 
 /// Version of the producer IDs, stored in manifest byte 127.
-inline constexpr std::uint8_t k_minimizer_producer_identity_revision = 1u;
+inline constexpr std::uint8_t k_minimizer_producer_identity_revision = 2u;
 
 /// Identifies a minimizer implementation and the version of its saved ID.
 struct minimizer_producer_identity {
@@ -196,9 +198,9 @@ is_supported_minimizer_scheme_identity(std::uint16_t scheme_id,
 minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept {
     switch (backend) {
     case minimizer_sketch_backend::scalar:
-    case minimizer_sketch_backend::vulkan_segment:
     case minimizer_sketch_backend::exact_simd:
         return k_minimap_scheme_identity;
+    case minimizer_sketch_backend::vulkan_segment:
     case minimizer_sketch_backend::bounded_nthash_simd:
         return k_bounded_nthash_u32_r7_sum_scheme_identity;
     }
@@ -236,8 +238,8 @@ minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity ident
     switch (identity.id) {
     case minimizer_producer_backend::scalar:
     case minimizer_producer_backend::exact_simd:
-    case minimizer_producer_backend::vulkan_segment:
         return k_minimap_scheme_identity;
+    case minimizer_producer_backend::vulkan_segment:
     case minimizer_producer_backend::bounded_nthash_simd:
         return k_bounded_nthash_u32_r7_sum_scheme_identity;
     case minimizer_producer_backend::invalid:
@@ -351,7 +353,7 @@ struct minimizer_generation_algorithm_identity {
         ::bioseq::minimizers::minimizer_highway_owner_id::none;
     std::uint16_t alphabet_id = 0u;
     std::uint8_t record_position_log2 = 0u;
-    std::uint8_t physical_kmer_size = 0u;
+    std::uint8_t hash_bits = 0u;
     minimizer_scalar_width hash_width = minimizer_scalar_width::u32;
     std::uint8_t packed_storage_bits = 0u;
     std::uint16_t runtime_kmer_size = 0u;
@@ -362,8 +364,8 @@ struct minimizer_generation_algorithm_identity {
     operator==(const minimizer_generation_algorithm_identity&) const = default;
 };
 
-static_assert(k_grouped_soa_payload_layout_abi_revision == 1u);
-static_assert(k_minimizer_producer_identity_revision == 1u);
+
+
 static_assert(k_grouped_soa_payload_layout_abi_revision ==
               ::bioseq::minimizers::minimizer_profile_payload_layout_abi_revision);
 static_assert(k_minimizer_producer_identity_revision ==
@@ -444,15 +446,15 @@ make_minimizer_generation_algorithm_identity(
     using algorithm_type = ::bioseq::simd::minimizer_algorithm;
     const family_type expected_family =
         selection.requested_algorithm == algorithm_type::bounded_nthash_simd ||
-                selection.requested_algorithm == algorithm_type::two_stack_nthash
-            ? family_type::fixed_u32_hash_legacy_k15
+                selection.requested_algorithm == algorithm_type::vulkan_minimap_integer
+            ? family_type::fixed_u32_hash
             : selection.effective_algorithm == algorithm_type::scalar
                 ? family_type::minimap2_scalar_reference_exact_k
                 : family_type::minimap2_reference_exact_k;
     if (record == nullptr || binding == nullptr || selection.family != expected_family ||
         record->record_id != selection.record_id ||
         record->position_log2 != selection.record_position_log2 ||
-        record->physical_kmer_size != selection.physical_kmer_size ||
+        record->hash_bits != selection.hash_bits ||
         binding->requested_algorithm != selection.requested_algorithm ||
         binding->effective_algorithm != selection.effective_algorithm ||
         binding->alphabet_id != selection.alphabet_id ||
@@ -470,7 +472,7 @@ make_minimizer_generation_algorithm_identity(
         .highway_owner_id = binding->highway_owner_id,
         .alphabet_id = selection.alphabet_id,
         .record_position_log2 = selection.record_position_log2,
-        .physical_kmer_size = selection.physical_kmer_size,
+        .hash_bits = selection.hash_bits,
         .hash_width = selection.hash_width,
         .packed_storage_bits = selection.packed_storage_bits,
         .runtime_kmer_size = selection.runtime_kmer_size,
@@ -498,7 +500,7 @@ make_minimizer_generation_algorithm_identity(
            identity.packed_storage_bits % 8u == 0u &&
            record->record_id == identity.physical_record_id &&
            record->position_log2 == identity.record_position_log2 &&
-           record->physical_kmer_size == identity.physical_kmer_size &&
+           record->hash_bits == identity.hash_bits &&
            binding->requested_algorithm == identity.requested_algorithm &&
            binding->effective_algorithm == identity.effective_algorithm &&
            binding->alphabet_id == identity.alphabet_id &&
@@ -706,13 +708,15 @@ select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
         }
         return minimizer_scalar_width::u32;
     }
-    if (scheme != k_minimap_scheme_identity || kmer_size > 31u) {
+    const auto rank_bits = ::bioseq::minimizers::exact_rank_bits_for_alphabet_code(alphabet_code);
+    const auto hash_bits = rank_bits
+        ? bioseq::common::checked_mul(*rank_bits, static_cast<std::size_t>(kmer_size))
+        : std::nullopt;
+    if (scheme != k_minimap_scheme_identity || !hash_bits || *hash_bits > 64u) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
-    if (kmer_size <= 8u)
-        return minimizer_scalar_width::u16;
-    if (kmer_size <= 16u)
-        return minimizer_scalar_width::u32;
+    if (*hash_bits <= 16u) return minimizer_scalar_width::u16;
+    if (*hash_bits <= 32u) return minimizer_scalar_width::u32;
     return minimizer_scalar_width::u64;
 }
 
@@ -744,7 +748,8 @@ derive_grouped_soa_minimizer_profile(minimizer_scheme_identity scheme,
     const std::uint64_t max_hash =
         scheme == k_bounded_nthash_u32_r7_sum_scheme_identity
             ? static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())
-            : (std::uint64_t{1u} << (2u * kmer_size)) - 1u;
+            : *bioseq::common::checked_low_bits_mask<std::uint64_t>(
+                *::bioseq::minimizers::exact_rank_bits_for_alphabet_code(alphabet_code) * kmer_size);
     return grouped_soa_minimizer_profile{
         .layout = minimizer_generation_layout::grouped_soa_segment_local,
         .minimizer_scheme = scheme,

@@ -184,8 +184,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     query.minimizers.record_id());
             if (query_record == nullptr ||
                 profile_.hash_width != manifest_.algorithm_identity.hash_width ||
-                query_record->physical_kmer_size !=
-                    manifest_.algorithm_identity.physical_kmer_size ||
+                query_record->hash_bits !=
+                    manifest_.algorithm_identity.hash_bits ||
                 query.query_length >
                     (::bioseq::storage::sequence_size_t{1u} << query_record->position_log2) ||
                 query.kmer_size <= 0 ||

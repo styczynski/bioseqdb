@@ -130,7 +130,7 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
     crc.update_little_endian(
         static_cast<std::uint16_t>(manifest.algorithm_identity.highway_owner_id));
     crc.update_little_endian(manifest.algorithm_identity.record_position_log2);
-    crc.update_little_endian(manifest.algorithm_identity.physical_kmer_size);
+    crc.update_little_endian(manifest.algorithm_identity.hash_bits);
     crc.update_little_endian(manifest.algorithm_identity.payload_layout_abi_revision);
     // Minimap uses the base checksum. Include the scheme ID and revision
     // for other schemes.

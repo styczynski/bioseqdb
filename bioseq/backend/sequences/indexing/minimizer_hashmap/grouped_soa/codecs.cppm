@@ -414,8 +414,8 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
             read_le<std::uint16_t>(input, 166)),
         .alphabet_id = manifest.alphabet_code,
         .record_position_log2 = read_le<std::uint8_t>(input, 162),
-        .physical_kmer_size =
-            physical_record == nullptr ? 0u : physical_record->physical_kmer_size,
+        .hash_bits =
+            physical_record == nullptr ? 0u : physical_record->hash_bits,
         .hash_width = manifest.hash_width,
         .packed_storage_bits = manifest.storage_unit_byte_width == sizeof(std::uint32_t)
                                    ? 32u

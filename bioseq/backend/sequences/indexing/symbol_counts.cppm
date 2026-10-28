@@ -44,7 +44,8 @@ auto tally_symbol_counts(
     std::array<std::int64_t, rank_count> counts{};
     for (auto logical_rank : seq.template iterable<iterator_mode::logical_rank>()) {
         const std::size_t rank = static_cast<std::size_t>(logical_rank);
-        DEBUG_ASSERT(rank < rank_count, "tally_symbol_counts: rank in range");
+        DEBUG_ASSERT(rank < seqan3::alphabet_size<p_alphabet>,
+                     "tally_symbol_counts: biological rank in range");
         ++counts[rank];
     }
     return counts;

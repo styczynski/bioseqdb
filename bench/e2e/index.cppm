@@ -9447,7 +9447,7 @@ is_allowlisted_algorithm_matrix_table_setup_rejection(
             "total_bp_size, alphabet_code, storage_unit_byte_width, kmer_size, "
             "window_size, requested_algorithm_id, effective_algorithm_id, "
             "physical_record_id, highway_owner_id, record_position_log2, "
-            "physical_kmer_size, hash_width_bytes, packed_storage_bits, "
+            "hash_bits, hash_width_bytes, packed_storage_bits, "
             "payload_layout_abi_revision, producer_backend_id, "
             "producer_identity_revision, gpu_abi_revision "
             "FROM bioseq.inspect_ready_minimizer_generation("
@@ -9493,7 +9493,7 @@ is_allowlisted_algorithm_matrix_table_setup_rejection(
     const auto physical_record_id = integer_at(13);
     const auto highway_owner_id = integer_at(14);
     const auto record_position_log2 = integer_at(15);
-    const auto physical_kmer_size = integer_at(16);
+    const auto hash_bits = integer_at(16);
     const auto hash_width_bytes = integer_at(17);
     const auto packed_storage_bits = integer_at(18);
     const auto payload_layout_abi_revision = integer_at(19);
@@ -9524,8 +9524,8 @@ is_allowlisted_algorithm_matrix_table_setup_rejection(
             index_identity->highway_owner_id)
         && record_position_log2 == static_cast<std::int64_t>(
             index_identity->record_position_log2)
-        && physical_kmer_size == static_cast<std::int64_t>(
-            index_identity->physical_kmer_size)
+        && hash_bits == static_cast<std::int64_t>(
+            index_identity->hash_bits)
         && hash_width_bytes == static_cast<std::int64_t>(index_identity->hash_width)
         && packed_storage_bits == static_cast<std::int64_t>(
             index_identity->packed_storage_bits)

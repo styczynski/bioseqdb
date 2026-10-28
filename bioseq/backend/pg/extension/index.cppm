@@ -1804,7 +1804,7 @@ inspect_cold_no_index_absence(
  * @remark website.field physical_record_id: Identifier of the physical minimizer record representation.
  * @remark website.field highway_owner_id: Identifier of the Highway target that owns the physical record representation.
  * @remark website.field record_position_log2: Base-two logarithm of the position capacity encoded by the physical record.
- * @remark website.field physical_kmer_size: K-mer size encoded in the physical minimizer representation.
+ * @remark website.field hash_bits: Hash width encoded in the physical minimizer representation.
  * @remark website.field hash_width_bytes: Width of each stored minimizer hash in bytes.
  * @remark website.field packed_storage_bits: Packed storage width recorded by the minimizer compatibility contract, in bits.
  * @remark website.field payload_layout_abi_revision: ABI revision of the encoded minimizer payload layout.

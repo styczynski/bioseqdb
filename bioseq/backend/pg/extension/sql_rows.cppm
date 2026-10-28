@@ -193,7 +193,7 @@ struct inspect_ready_minimizer_generation_row final {
     std::int32_t physical_record_id;
     std::int32_t highway_owner_id;
     std::int16_t record_position_log2;
-    std::int16_t physical_kmer_size;
+    std::int16_t hash_bits;
     std::int16_t hash_width_bytes;
     std::int16_t packed_storage_bits;
     std::int32_t payload_layout_abi_revision;

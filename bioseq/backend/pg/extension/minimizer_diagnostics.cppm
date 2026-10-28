@@ -148,7 +148,7 @@ inspect_ready_minimizer_generation(Oid rel, std::string index_name, std::int64_t
         static_cast<std::int32_t>(algorithm_identity.physical_record_id),
         static_cast<std::int32_t>(algorithm_identity.highway_owner_id),
         sql_smallint(algorithm_identity.record_position_log2, "record_position_log2"),
-        sql_smallint(algorithm_identity.physical_kmer_size, "physical_kmer_size"),
+        sql_smallint(algorithm_identity.hash_bits, "hash_bits"),
         sql_smallint(static_cast<std::uint8_t>(algorithm_identity.hash_width),
                      "hash_width_bytes"),
         sql_smallint(algorithm_identity.packed_storage_bits, "packed_storage_bits"),

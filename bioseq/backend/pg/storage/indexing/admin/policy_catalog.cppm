@@ -205,9 +205,9 @@ constexpr std::size_t k_num_alphabets =
 constexpr std::size_t k_char_domain = 256;
 /// Build a byte-to-rank table for each alphabet, using -1 for invalid letters.
 inline auto build_letter_rank_table() {
-    std::array<std::array<std::int8_t, k_char_domain>, k_num_alphabets> table{};
+    std::array<std::array<std::int16_t, k_char_domain>, k_num_alphabets> table{};
     for (auto& row : table)
-        row.fill(static_cast<std::int8_t>(-1));
+        row.fill(static_cast<std::int16_t>(-1));
     for (std::uint8_t alphabet_code = 0; alphabet_code < k_num_alphabets; ++alphabet_code) {
         // Choose only the alphabet here. Rank conversion is independent of sequence
         // packing, and a made-up storage width can be disabled in this build.
@@ -215,12 +215,12 @@ inline auto build_letter_rank_table() {
             alphabet_code, [&table, alphabet_code]<class p_alphabet>() {
                 for (int char_code = 0; char_code < static_cast<int>(k_char_domain); ++char_code) {
                     const char letter = static_cast<char>(char_code);
-                    if (!seqan3::char_is_valid_for<p_alphabet>(letter))
+                    if (!bioseq::sequences::source_character_is_valid<p_alphabet>(letter))
                         continue;
                     p_alphabet symbol{};
                     symbol.assign_char(letter);
                     table[alphabet_code][static_cast<std::uint8_t>(char_code)] =
-                        static_cast<std::int8_t>(symbol.to_rank());
+                        static_cast<std::int16_t>(symbol.to_rank());
                 }
             });
     }

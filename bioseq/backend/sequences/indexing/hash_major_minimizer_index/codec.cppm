@@ -28,6 +28,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.indexing.storage;
 import bioseq.pipeline.runtime_contract;
+import bioseq.sequences.kmers.minimizer_layout_geometry;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::indexing::hash_major_minimizer_detail {
@@ -247,7 +248,7 @@ struct hash_major_minimizer_storage_profile {
     std::uint16_t hash_semantics_revision = 1;
     std::uint16_t count_semantics_revision = 1;
     std::uint16_t producer_backend_identity = 1;
-    std::uint32_t producer_backend_revision = 1;
+    std::uint32_t producer_backend_revision = 2;
     std::uint32_t controls_per_block = k_hash_major_minimizer_controls_per_block;
     std::uint64_t hash_seed = 0;
 
@@ -467,7 +468,7 @@ hash_major_minimizer_storage_profile_digest(
         || value.hash_seed != 0u) {
         return false;
     }
-    if (value.producer_backend_revision != 1u) {
+    if (value.producer_backend_revision != 2u) {
         return false;
     }
 
@@ -505,10 +506,11 @@ hash_major_minimizer_storage_profile_digest(
             (selected->effective_algorithm == algorithm_type::vulkan_minimap_integer &&
              value.producer_backend_identity == 4u);
         const bool bounded_scheme =
-            selected->effective_algorithm == algorithm_type::bounded_nthash_simd;
+            selected->effective_algorithm == algorithm_type::bounded_nthash_simd
+            || selected->effective_algorithm == algorithm_type::vulkan_minimap_integer;
         const bool scheme_matches =
             value.hash_scheme_identity == (bounded_scheme ? 1u : 0u) &&
-            value.hash_scheme_revision == (bounded_scheme ? 1u : 0u);
+            value.hash_scheme_revision == (bounded_scheme ? 2u : 0u);
         if (producer_matches && scheme_matches) {
             return true;
         }
@@ -522,8 +524,9 @@ hash_major_minimizer_storage_profile_digest(
     if (profile.hash_scheme_identity != 0u || profile.hash_scheme_revision != 0u) {
         return 0xffffffffu;
     }
-    const std::uint32_t biological_hash_bits =
-        static_cast<std::uint32_t>(profile.kmer_size) * 2u;
+    const auto rank_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(profile.alphabet_code);
+    if (!rank_bits) return 0u;
+    const auto biological_hash_bits = *rank_bits * profile.kmer_size;
     if (biological_hash_bits == 0u) {
         return 0u;
     }
