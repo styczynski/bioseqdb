@@ -406,7 +406,7 @@ private:
         case expression_kind::literal:
             return format_literal(
                 node.literal,
-                seq_typmod{.alphabet = "dna4", .width = 32});
+                seq_typmod{.alphabet = "dna4", .width = 64});
         case expression_kind::concat:
             return fmt::format(
                 "({} OPERATOR(bioseq.||) {})",
@@ -516,8 +516,8 @@ struct property_query {
     const std::string expected_sql = node.eager_symbols.has_value()
         ? format_literal(
             *node.eager_symbols,
-            seq_typmod{.alphabet = "dna4", .width = 32})
-        : "NULL::bioseq.seq('dna4',32)";
+            seq_typmod{.alphabet = "dna4", .width = 64})
+        : "NULL::bioseq.seq('dna4',64)";
 
     property_query query;
     query.sql = fmt::format(
@@ -726,15 +726,15 @@ TEST_CASE("randomized lazy expression trees match an eager oracle",
     exec_sql(ctx, fmt::format(
         "CREATE TABLE {} ("
         " id int PRIMARY KEY,"
-        " source_a bioseq.seq('dna4',32),"
-        " source_b bioseq.seq('dna4',32),"
-        " source_null bioseq.seq('dna4',32)) USING bioseq;"
+        " source_a bioseq.seq('dna4',64),"
+        " source_b bioseq.seq('dna4',64),"
+        " source_null bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO {} VALUES (1, {}, {}, NULL);",
         k_expression_table, k_expression_table,
         format_literal(
-            source_a, seq_typmod{.alphabet = "dna4", .width = 32}),
+            source_a, seq_typmod{.alphabet = "dna4", .width = 64}),
         format_literal(
-            source_b, seq_typmod{.alphabet = "dna4", .width = 32})));
+            source_b, seq_typmod{.alphabet = "dna4", .width = 64})));
 
     constexpr std::array forced_roots{
         expression_kind::concat,
@@ -835,7 +835,7 @@ TEST_CASE("effectful expression leaves execute once and skipped leaves never",
         "RETURNS bioseq.seq LANGUAGE plpgsql VOLATILE AS $$ "
         "BEGIN "
         "  PERFORM nextval('pg_temp.expression_effect_counter'); "
-        "  RETURN value::bioseq.seq('dna4',32); "
+        "  RETURN value::bioseq.seq('dna4',64); "
         "END $$;"
         "CREATE FUNCTION pg_temp.property_throw() "
         "RETURNS bioseq.seq LANGUAGE plpgsql VOLATILE AS $$ "
@@ -854,7 +854,7 @@ TEST_CASE("effectful expression leaves execute once and skipped leaves never",
     REQUIRE(query_scalar(
         ctx,
         "SELECT (CASE WHEN true "
-        "  THEN ('AC'::bioseq.seq('dna4',32))[0:] "
+        "  THEN ('AC'::bioseq.seq('dna4',64))[0:] "
         "  ELSE pg_temp.property_throw() END)::text;") == "AC");
     REQUIRE(query_scalar_int(
         ctx, "SELECT last_value FROM expression_effect_counter;") == 2);

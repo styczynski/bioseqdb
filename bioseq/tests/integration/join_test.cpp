@@ -142,7 +142,7 @@ TEST_CASE("LEFT JOIN with literal mmsearch and bioseq.cigar does not crash",
         fmt::format("SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
                     "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY t1.pk;",
                     k_hoe_join,
                     k_hoe_join));
@@ -173,7 +173,7 @@ TEST_CASE("LEFT JOIN with literal mmsearch is invariant under vectorisation "
         fmt::format("SELECT t1.pk, t2.pk, bioseq.target_start(t1.pk), bioseq.cigar(t1.pk) "
                     "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY t1.pk;",
                     k_hoe_join,
                     k_hoe_join);
@@ -243,7 +243,7 @@ TEST_CASE("RIGHT JOIN with literal mmsearch on right side preserves right-side r
         fmt::format("SELECT t1.pk, t2.pk, bioseq.cigar(t2.pk) "
                     "  FROM {} t1 RIGHT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t2.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY t2.pk;",
                     k_hoe_join,
                     k_hoe_join));
@@ -271,7 +271,7 @@ TEST_CASE("JOIN with ORDER BY bioseq.score then LIMIT/OFFSET stays sort-stable",
         fmt::format("SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
                     "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))",
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64))",
                     k_hoe_join,
                     k_hoe_join);
     const auto full =
@@ -300,7 +300,7 @@ TEST_CASE("JOIN with HAVING over MAX(bioseq.target_end) compiles and filters",
         fmt::format("SELECT t1.pk, MAX(bioseq.target_end(t1.pk)) AS best "
                     "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " GROUP BY t1.pk "
                     "HAVING MAX(bioseq.target_end(t1.pk)) > 0 "
                     " ORDER BY t1.pk;",
@@ -358,7 +358,7 @@ TEST_CASE("EXPLAIN VERBOSE on CROSS JOIN pins the bioseq plan-text invariants",
         fmt::format("SELECT t1.pk, bioseq.cigar(t1.pk) "
                     "  FROM {} t1 CROSS JOIN {} t2 "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));",
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));",
                     k_hoe_join,
                     k_hoe_join));
     REQUIRE_FALSE(plan.empty());
@@ -383,7 +383,7 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     exec_sql(ctx, "SET plan_cache_mode = force_generic_plan;");
 
     exec_sqlf(ctx,
-              "PREPARE p_join_test(bioseq.seq('dna4', 32)) AS "
+              "PREPARE p_join_test(bioseq.seq('dna4', 64)) AS "
               "SELECT t1.pk, bioseq.cigar(t1.pk) "
               "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
               " WHERE mmsearch(t1.seq0, $1) ORDER BY t1.pk;",
@@ -392,15 +392,15 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     const auto generic_plan =
         explain_text<false>(ctx,
                             "EXECUTE p_join_test("
-                            "'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));");
+                            "'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));");
     REQUIRE(plan_contains(generic_plan, "Custom Scan (BioseqScan)"));
 
     const auto run1 = query_rows(
-        ctx, "EXECUTE p_join_test('CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));");
+        ctx, "EXECUTE p_join_test('CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));");
     const auto run2 =
-        query_rows(ctx, "EXECUTE p_join_test('TCATCATCTACTCCTA'::bioseq.seq('dna4', 32));");
+        query_rows(ctx, "EXECUTE p_join_test('TCATCATCTACTCCTA'::bioseq.seq('dna4', 64));");
     const auto run3 = query_rows(
-        ctx, "EXECUTE p_join_test('CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));");
+        ctx, "EXECUTE p_join_test('CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));");
     const auto run_null = query_rows(ctx, "EXECUTE p_join_test(NULL);");
 
     // Same parameter must produce same output (no stale state).
@@ -417,7 +417,7 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     const auto bad_typmod = sql_error(ctx,
                                       "EXECUTE p_join_test("
                                       "'ACGTACGTACGTACGTACGTACGTACGTACGT'"
-                                      "::bioseq.seq('dna5', 32));");
+                                      "::bioseq.seq('dna5', 64));");
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     REQUIRE(bad_typmod.sqlstate == "22023");
     REQUIRE(bad_typmod.contains("bioseq.seq alphabet \"dna5\" is not supported"));
@@ -453,7 +453,7 @@ TEST_CASE("JOIN with insert maintenance and sequence-index reads disabled "
     create_seq_table(ctx,
                      seq_table_spec{
                          .name = std::string(k_hoe_join),
-                         .typmod = {.alphabet = "dna4", .width = 32},
+                         .typmod = {.alphabet = "dna4", .width = 64},
                          .seq_columns = 2,
                          .using_bioseq = true,
                      },
@@ -463,7 +463,7 @@ TEST_CASE("JOIN with insert maintenance and sequence-index reads disabled "
         fmt::format("SELECT t1.pk, bioseq.cigar(t1.pk) "
                     "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
                     " WHERE mmsearch(t1.seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY t1.pk;",
                     k_hoe_join,
                     k_hoe_join);
@@ -481,10 +481,11 @@ TEST_CASE("JOIN with insert maintenance and sequence-index reads disabled "
     REQUIRE(saw_valid_cigar);
 }
 
-TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
+TEST_CASE("Same-alphabet JOIN width admission and cross-width results follow the active profile",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     auto ctx = fresh_context({k_hoe_join});
-    seed_hoe_fixture(ctx, k_hoe_join);
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    seed_hoe_fixture(ctx, k_hoe_join, {.alphabet = "dna4", .width = 32});
     exec_sql(ctx,
              fmt::format("DROP TABLE IF EXISTS hoe_64 CASCADE; "
                          "CREATE TABLE hoe_64 ("
@@ -492,6 +493,14 @@ TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
                          "INSERT INTO hoe_64 SELECT pk, seq0 FROM {};",
                          k_hoe_join));
     publish_default_fixture_indexes(ctx, "hoe_64");
+#else
+    seed_hoe_fixture(ctx, k_hoe_join);
+    const auto disabled_width = sql_error(
+        ctx, "SELECT 'ACGT'::bioseq.seq('dna4', 32);");
+    REQUIRE(disabled_width.sqlstate == "22023");
+    REQUIRE(disabled_width.contains(
+        "bioseq.seq width 32 is not enabled in this build"));
+#endif
 
     const auto same_width =
         query_rows(ctx,
@@ -500,16 +509,17 @@ TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
                                "ORDER BY t1.pk, t2.pk;",
                                k_hoe_join,
                                k_hoe_join));
+    REQUIRE_FALSE(same_width.empty());
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     const auto cross_width =
         query_rows(ctx,
                    fmt::format("SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
                                "FROM {} t1 JOIN hoe_64 t2 ON mmsearch(t1.seq0, t2.seq0) "
                                "ORDER BY t1.pk, t2.pk;",
                                k_hoe_join));
-
-    REQUIRE_FALSE(same_width.empty());
     REQUIRE(cross_width == same_width);
     exec_sql(ctx, "DROP TABLE IF EXISTS hoe_64 CASCADE;");
+#endif
 }
 
 TEST_CASE("JOIN with CTE wrapping mmsearch preserves bioseq projections",

@@ -20,7 +20,7 @@ TEST_CASE("bioseq.symbol_count over a literal returns the real tally across vect
     const auto reference = expect_invariant_under_guc_toggle(
         ctx,
         "SELECT bioseq.symbol_count("
-        "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'A');",
+        "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64), 'A');",
         "bioseq.vectorization.enabled");
     REQUIRE(reference.size() == 1);
     REQUIRE(reference.front().size() == 1);
@@ -36,6 +36,16 @@ TEMPLATE_TEST_CASE_SIG("bioseq.len / bioseq.unit_len agree across widths on the 
                        64) {
     auto ctx = fresh_context();
     const seq_typmod typmod{.alphabet = "dna4", .width = p_width};
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    if constexpr (p_width != 64) {
+        const auto disabled_width = sql_error(
+            ctx, fmt::format("SELECT {}::text;", format_literal("", typmod)));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", p_width)));
+        return;
+    }
+#endif
     const auto row = query_one(ctx,
                                fmt::format("SELECT bioseq.len({}), bioseq.unit_len({});",
                                            format_literal("", typmod),
@@ -50,11 +60,11 @@ TEST_CASE("bioseq.symbol_count returns the real per-letter tally for C/G/T",
     const auto row =
         query_one(ctx,
                   "SELECT bioseq.symbol_count("
-                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'C'), "
+                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64), 'C'), "
                   "       bioseq.symbol_count("
-                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'G'), "
+                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64), 'G'), "
                   "       bioseq.symbol_count("
-                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'T');");
+                  "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64), 'T');");
     REQUIRE(std::stoll(row[0].value()) == 7); // C
     REQUIRE(std::stoll(row[1].value()) == 7); // G
     REQUIRE(std::stoll(row[2].value()) == 9); // T

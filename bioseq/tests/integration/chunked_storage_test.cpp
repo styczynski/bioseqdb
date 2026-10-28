@@ -45,7 +45,7 @@ TEST_CASE("per-fragment storage has the right query_keys after explicit rebuild"
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({"chunked_storage_insert"});
     seed_small_bioseq_column(ctx,
-                             "chunked_storage_insert"); // Three committed and indexed DNA4/32 rows.
+                             "chunked_storage_insert"); // Three committed and indexed DNA4/64 rows.
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_insert") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_insert") == 3);
 
@@ -115,7 +115,7 @@ TEST_CASE("index rows do not survive a ROLLBACK",
     exec_sql(ctx, "BEGIN;");
     exec_sql(ctx,
              "INSERT INTO chunked_storage_rollback VALUES (99, "
-             "'GGGGCCCCAAAATTTT'::bioseq.seq('dna4',32));");
+             "'GGGGCCCCAAAATTTT'::bioseq.seq('dna4',64));");
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_rollback") ==
             symbol_count_rows_before + 1);
     exec_sql(ctx, "ROLLBACK;");

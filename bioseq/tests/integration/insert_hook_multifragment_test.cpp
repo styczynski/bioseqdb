@@ -51,13 +51,13 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
     auto ctx = fresh_context({"insert_hook_multifragment"});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx,
-             "CREATE TABLE insert_hook_multifragment (pk int, target bioseq.seq('dna4',32), "
-             "query bioseq.seq('dna4',32)) USING bioseq;");
+             "CREATE TABLE insert_hook_multifragment (pk int, target bioseq.seq('dna4',64), "
+             "query bioseq.seq('dna4',64)) USING bioseq;");
     const std::string target = generate_dna4(200000, 1234567); // spans seven fragments
     const std::string query = target.substr(60000, 2000);      // an exact 2 kbp substring
     exec_sqlf(ctx,
-              "INSERT INTO insert_hook_multifragment VALUES (1, '{}'::bioseq.seq('dna4',32), "
-              "'{}'::bioseq.seq('dna4',32));",
+              "INSERT INTO insert_hook_multifragment VALUES (1, '{}'::bioseq.seq('dna4',64), "
+              "'{}'::bioseq.seq('dna4',64));",
               target,
               query);
 
@@ -86,7 +86,7 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({"insert_hook_manual_symbol_counts"});
     exec_sql(ctx,
-             "CREATE TABLE insert_hook_manual_symbol_counts (pk int, seq0 bioseq.seq('dna4',32)) "
+             "CREATE TABLE insert_hook_manual_symbol_counts (pk int, seq0 bioseq.seq('dna4',64)) "
              "USING bioseq;");
     exec_sql(ctx,
              "SELECT bioseq.set_index_policy('insert_hook_manual_symbol_counts'::regclass, "
@@ -94,7 +94,7 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx,
              "INSERT INTO insert_hook_manual_symbol_counts VALUES (1, "
-             "'AAAACCCCGGGGTTTT'::bioseq.seq('dna4',32));");
+             "'AAAACCCCGGGGTTTT'::bioseq.seq('dna4',64));");
     // Fragment minimizers are stored on insert. Symbol counts stay absent under the manual policy.
     REQUIRE(index_table_row_count(
                 ctx, "minimizers_per_fragment", "insert_hook_manual_symbol_counts") > 0);

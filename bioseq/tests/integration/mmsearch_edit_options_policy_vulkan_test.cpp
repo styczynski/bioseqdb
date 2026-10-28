@@ -53,7 +53,7 @@ TEST_CASE(
     const std::string target_two =
         source.substr(250u, 73u) + query + source.substr(1100u, 211u);
     const std::string query_literal = format_literal(
-        query, seq_typmod{.alphabet = "dna4", .width = 32});
+        query, seq_typmod{.alphabet = "dna4", .width = 64});
 
     for (const auto& route : routes) {
         DYNAMIC_SECTION(route.index_name << "/" << route.base_alignment) {
@@ -63,7 +63,7 @@ TEST_CASE(
                 ctx,
                 seq_table_spec{
                     .name = std::string{k_ordinary_vulkan_scan},
-                    .typmod = {.alphabet = "dna4", .width = 32},
+                    .typmod = {.alphabet = "dna4", .width = 64},
                     .seq_columns = 1,
                     .using_bioseq = true,
                 },
@@ -192,7 +192,7 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
         ctx,
         seq_table_spec{
             .name = std::string{k_sneaky_snake_edits},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 2,
             .using_bioseq = true,
         },
@@ -208,7 +208,7 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     exec_sql(ctx, "SET bioseq.vectorization.enabled = on;");
 
     const std::string query_literal = format_literal(
-        query, seq_typmod{.alphabet = "dna4", .width = 32});
+        query, seq_typmod{.alphabet = "dna4", .width = 64});
     const std::string exact_projection_sql = fmt::format(
         "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
         "       bioseq.cigar(seq0) "
@@ -328,7 +328,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
         ctx,
         seq_table_spec{
             .name = std::string{k_gatekeeper_edits},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -348,7 +348,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_seed_count = 2;");
 
     const std::string query_literal = format_literal(
-        query, seq_typmod{.alphabet = "dna4", .width = 32});
+        query, seq_typmod{.alphabet = "dna4", .width = 64});
     const std::string active_sql = fmt::format(
         "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
         "       bioseq.cigar(seq0) "
@@ -573,14 +573,14 @@ TEST_CASE("NULL target and query bypass both mmsearch arities",
         last_alignment_stats(ctx).front(), 0);
     const std::array<std::string, 4u> null_calls{
         fmt::format(
-            "mmsearch(NULL::bioseq.seq('dna4',32), {})",
+            "mmsearch(NULL::bioseq.seq('dna4',64), {})",
             hoe_probe_literal()),
-        "mmsearch(seq0, NULL::bioseq.seq('dna4',32))",
+        "mmsearch(seq0, NULL::bioseq.seq('dna4',64))",
         fmt::format(
-            "mmsearch(NULL::bioseq.seq('dna4',32), {}, "
+            "mmsearch(NULL::bioseq.seq('dna4',64), {}, "
             "NULL::bioseq_aligner_options)",
             hoe_probe_literal()),
-        "mmsearch(seq0, NULL::bioseq.seq('dna4',32), "
+        "mmsearch(seq0, NULL::bioseq.seq('dna4',64), "
         "NULL::bioseq_aligner_options)",
     };
     for (const auto& call : null_calls) {
@@ -722,7 +722,7 @@ TEST_CASE("stacked mmsearch rejects multiple index read requirements",
     seed_hoe_fixture(ctx, k_hoe);
     const std::string second_probe = format_literal(
         "CTAGTCACTGTAGCCTGATCGTAGCTAGC",
-        seq_typmod{.alphabet = "dna4", .width = 32});
+        seq_typmod{.alphabet = "dna4", .width = 64});
     const std::string sql = fmt::format(
         "SELECT pk FROM {} WHERE "
         "mmsearch(seq0, {}, aligner_options(index_read_requirement => 1)) "
@@ -757,7 +757,7 @@ TEST_CASE("owned mmsearch is strict for NULL target and query",
         k_hoe, hoe_probe_literal())) == 0);
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT count(*) FROM {} WHERE mmsearch("
-        "seq0, NULL::bioseq.seq('dna4', 32));",
+        "seq0, NULL::bioseq.seq('dna4', 64));",
         k_hoe)) == 0);
 }
 
@@ -768,7 +768,7 @@ TEST_CASE("stacked mmsearch fails closed independent of order",
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
     const std::string second_probe = format_literal(
         "CTAGTCACTGTAGCCTGATCGTAGCTAGC",
-        seq_typmod{.alphabet = "dna4", .width = 32});
+        seq_typmod{.alphabet = "dna4", .width = 64});
     const std::array<std::string, 2> sqls{
         fmt::format(
             "SELECT pk FROM {} WHERE "
@@ -897,7 +897,7 @@ TEST_CASE("require_compatible_persisted errors when target chunks are missing",
         ctx,
         seq_table_spec{
             .name = std::string{k_missing_index},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -922,7 +922,7 @@ TEST_CASE("require_compatible_persisted rejects before alternate scanner and GPU
         ctx,
         seq_table_spec{
             .name = std::string{k_missing_index},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -965,13 +965,13 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
         ctx,
         seq_table_spec{
             .name = std::string{k_missing_index},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         });
     exec_sql(ctx, fmt::format(
         "INSERT INTO {} VALUES "
-        "(1, repeat('ACGT', 2000)::bioseq.seq('dna4', 32));",
+        "(1, repeat('ACGT', 2000)::bioseq.seq('dna4', 64));",
         k_missing_index));
     REQUIRE(index_table_row_count(
         ctx, "minimizers_per_fragment", k_missing_index) == 0);
@@ -1014,7 +1014,7 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx, fmt::format(
         "INSERT INTO {} VALUES "
-        "(2, repeat('TGCA', 2000)::bioseq.seq('dna4', 32));",
+        "(2, repeat('TGCA', 2000)::bioseq.seq('dna4', 64));",
         k_missing_index));
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "on");
     REQUIRE(index_table_row_count(

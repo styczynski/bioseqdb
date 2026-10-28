@@ -187,7 +187,7 @@ TEST_CASE("GPU target outcomes count logical rows with identical sequence conten
         ctx,
         seq_table_spec{
             .name = std::string{k_duplicate_targets},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -320,7 +320,7 @@ TEST_CASE("Sliced concat reverse mmsearch preserves coordinates across GUCs",
     seed_hoe_fixture(ctx, k_hoe);
     exec_sql(ctx, fmt::format(
         "CREATE TEMP TABLE {} "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));",
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',64));",
         k_lazy_queries));
     exec_sql(ctx, fmt::format(
         "INSERT INTO {} VALUES (1, {});",
@@ -330,7 +330,7 @@ TEST_CASE("Sliced concat reverse mmsearch preserves coordinates across GUCs",
         ctx,
         seq_table_spec{
             .name = std::string{k_hoe_lazy_no_insert},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 2,
             .using_bioseq = true,
         },
@@ -388,7 +388,7 @@ TEST_CASE("Base-local sliced mmsearch matches a flat logical oracle",
     const std::string query = source.substr(
         query_source_offset, query_length);
     const std::string query_literal = format_literal(
-        query, seq_typmod{.alphabet = "dna4", .width = 32});
+        query, seq_typmod{.alphabet = "dna4", .width = 64});
 
     // This raw control exercises the optional fragment-directory reader.
     // Select its compatible exact algorithm and storage layout before rebuilding.
@@ -403,7 +403,7 @@ TEST_CASE("Base-local sliced mmsearch matches a flat logical oracle",
         ctx,
         seq_table_spec{
             .name = std::string{k_transform_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -412,7 +412,7 @@ TEST_CASE("Base-local sliced mmsearch matches a flat logical oracle",
         ctx,
         seq_table_spec{
             .name = std::string{k_oracle_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -581,7 +581,7 @@ TEST_CASE("Base-local sliced mmsearch preserves algorithm-route parity",
     const std::string logical_target = source.substr(1u);
     const std::string query = source.substr(97u, 96u);
     const std::string query_literal = format_literal(
-        query, seq_typmod{.alphabet = "dna4", .width = 32});
+        query, seq_typmod{.alphabet = "dna4", .width = 64});
     exec_sql(ctx,
         "SET max_parallel_workers_per_gather=0;"
         "SET bioseq.index.insert_maintenance.enabled=off;"
@@ -593,7 +593,7 @@ TEST_CASE("Base-local sliced mmsearch preserves algorithm-route parity",
         ctx,
         seq_table_spec{
             .name = std::string{k_transform_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -602,7 +602,7 @@ TEST_CASE("Base-local sliced mmsearch preserves algorithm-route parity",
         ctx,
         seq_table_spec{
             .name = std::string{k_oracle_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -780,7 +780,7 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
         ctx,
         seq_table_spec{
             .name = std::string{k_transform_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 2,
             .using_bioseq = true,
         },
@@ -892,7 +892,7 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
         "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
         "t.seq0[pg_temp.mark_operand_bound("
         "'target-before-global-null',1):], "
-        "NULL::bioseq.seq('dna4',32), "
+        "NULL::bioseq.seq('dna4',64), "
         "aligner_options(index_read_requirement=>1));",
         k_transform_target);
     const auto global_null_plan = explain_text<false>(
@@ -913,7 +913,7 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
     prior_id = stats_i64(last_alignment_stats(ctx).front(), 0);
     const std::string null_target = fmt::format(
         "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
-        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',32) "
+        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',64) "
         "ELSE t.seq0[1:] END, "
         "t.seq0[pg_temp.mark_operand_bound('query-after-null-target',97):193], "
         "aligner_options(index_read_requirement=>1));",
@@ -930,7 +930,7 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
     const std::string null_query = fmt::format(
         "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
         "t.seq0[pg_temp.mark_operand_bound('target-before-null-query',1):], "
-        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',32) "
+        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',64) "
         "ELSE t.seq0[97:193] END, "
         "aligner_options(index_read_requirement=>1));",
         k_transform_target);
@@ -945,7 +945,7 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
         "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
         "CASE WHEN t.pk=1 THEN t.seq0[1:] "
         "ELSE t.seq0[pg_temp.fail_operand_bound('target'):] END, "
-        "COALESCE(NULL::bioseq.seq('dna4',32), t.seq0[97:193], "
+        "COALESCE(NULL::bioseq.seq('dna4',64), t.seq0[97:193], "
         "t.seq0[pg_temp.fail_operand_bound('query'):]), "
         "aligner_options(index_read_requirement=>1));",
         k_transform_target);
@@ -964,9 +964,9 @@ TEST_CASE("Base-local operands preserve roots, effects, and control flow",
     const auto query_error = sql_error(ctx, fmt::format(
         "SELECT t.pk FROM {} AS t WHERE t.pk=1 "
         "AND mmsearch(t.seq0[1:], "
-        "COALESCE(NULL::bioseq.seq('dna4',32), "
+        "COALESCE(NULL::bioseq.seq('dna4',64), "
         "CASE WHEN t.pk=0 THEN t.seq0[97:193] "
-        "ELSE NULL::bioseq.seq('dna4',32) END, "
+        "ELSE NULL::bioseq.seq('dna4',64) END, "
         "t.seq0[pg_temp.fail_operand_bound('query'):]), "
         "aligner_options(index_read_requirement=>1));",
         k_transform_target));
@@ -985,7 +985,7 @@ TEST_CASE("Transformed INNER mmsearch matches a flat logical oracle",
         ctx,
         seq_table_spec{
             .name = std::string{k_transform_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -1002,17 +1002,17 @@ TEST_CASE("Transformed INNER mmsearch matches a flat logical oracle",
         ctx,
         seq_table_spec{
             .name = std::string{k_oracle_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
         oracle_rows);
     exec_sql(ctx, fmt::format(
         "CREATE TEMP TABLE {} ("
-        "id int PRIMARY KEY, source_seq bioseq.seq('dna4',32), "
-        "oracle_seq bioseq.seq('dna4',32));",
+        "id int PRIMARY KEY, source_seq bioseq.seq('dna4',64), "
+        "oracle_seq bioseq.seq('dna4',64));",
         k_oracle_queries));
-    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    const seq_typmod dna4{.alphabet = "dna4", .width = 64};
     for (std::size_t index = 0u; index < cases.size(); ++index) {
         exec_sql(ctx, fmt::format(
             "INSERT INTO {} VALUES ({}, {}, {});",
@@ -1230,7 +1230,7 @@ TEST_CASE("Transformed ownership reconstructs INNER join algorithms",
     seed_hoe_fixture(ctx, k_hoe);
     exec_sql(ctx,
         "CREATE TEMP TABLE join_shape_queries "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',64));");
     exec_sql(ctx, fmt::format(
         "INSERT INTO join_shape_queries VALUES (1, {});",
         batch_join_target_literal()));
@@ -1303,7 +1303,7 @@ TEST_CASE("Transformed mmsearch owns cross-table concat",
      * Its expected match crosses the join at target position 64. */
     const std::string needle = source.substr(16u, 48u)
         + prefix.substr(0u, 48u);
-    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    const seq_typmod dna4{.alphabet = "dna4", .width = 64};
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -1315,8 +1315,8 @@ TEST_CASE("Transformed mmsearch owns cross-table concat",
         {seq_row{.pk = 1, .sequences = {source}}});
     exec_sql(ctx,
         "CREATE TEMP TABLE cross_concat_queries ("
-        "id int PRIMARY KEY, prefix bioseq.seq('dna4',32), "
-        "needle bioseq.seq('dna4',32));");
+        "id int PRIMARY KEY, prefix bioseq.seq('dna4',64), "
+        "needle bioseq.seq('dna4',64));");
     exec_sql(ctx, fmt::format(
         "INSERT INTO cross_concat_queries VALUES (1, {}, {});",
         format_literal(prefix, dna4), format_literal(needle, dna4)));
@@ -1365,7 +1365,7 @@ TEST_CASE("Outer-join match quals fail closed",
     seed_hoe_fixture(ctx, k_hoe);
     exec_sql(ctx,
         "CREATE TEMP TABLE outer_match_queries "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',64));");
     exec_sql(ctx, fmt::format(
         "INSERT INTO outer_match_queries VALUES (1, {});",
         batch_join_target_literal()));
@@ -1391,12 +1391,12 @@ TEST_CASE("Outer-join match quals fail closed",
 TEST_CASE("Projection-only slicing is legal above outer joins",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({"outer_projection_target"});
-    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    const seq_typmod dna4{.alphabet = "dna4", .width = 64};
     exec_sql(ctx,
         "CREATE TABLE outer_projection_target "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32)) USING bioseq;"
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TEMP TABLE outer_projection_query "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',64));");
     exec_sql(ctx, fmt::format(
         "INSERT INTO outer_projection_target VALUES "
         "(1, {}), (2, {});"

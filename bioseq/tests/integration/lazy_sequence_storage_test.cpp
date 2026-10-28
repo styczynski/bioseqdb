@@ -97,7 +97,7 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
         " 'T'::bioseq.letter('dna4')],'');") == "ACGT");
     REQUIRE(query_scalar(
         ctx,
-        "SELECT ('ACGT'::bioseq.seq('dna4',8))[2]::text;") == "G");
+        "SELECT ('ACGT'::bioseq.seq('dna4',64))[2]::text;") == "G");
     REQUIRE(query_scalar(
         ctx,
         "SELECT encode(bioseq.letter_send(value),'hex') "
@@ -326,7 +326,7 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
         " 'N'::bioseq.letter('dna5')],'');") == "ACGTN");
     REQUIRE(query_scalar(
         ctx,
-        "SELECT ('ACGTN'::bioseq.seq('dna5',8))[4]::text;") == "N");
+        "SELECT ('ACGTN'::bioseq.seq('dna5',64))[4]::text;") == "N");
     REQUIRE(query_scalar(
         ctx,
         "SELECT ('N'::bioseq.letter('dna5')"
@@ -460,9 +460,9 @@ TEST_CASE("slice algebra is invariant across the required GUC matrix",
     auto ctx = fresh_context({"sequence_acceptance_slice_guc"});
     exec_sql(ctx,
         "CREATE TABLE sequence_acceptance_slice_guc "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq; "
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq; "
         "INSERT INTO sequence_acceptance_slice_guc VALUES "
-        " (1,repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+        " (1,repeat('ACGT',4096)::bioseq.seq('dna4',64));");
 
     constexpr std::array settings{"off", "on"};
     for (const char* vectorization : settings) {
@@ -599,12 +599,12 @@ TEST_CASE("synthetic logical lengths stay lazy through bigint limits",
     // compresses poorly. This case should report an index-row size error.
     exec_sql(ctx,
         "CREATE TABLE public.sequence_acceptance_synthetic_length_real_index_input "
-        " (id bigint, s bioseq.seq('dna4',8)); "
+        " (id bigint, s bioseq.seq('dna4',64)); "
         "INSERT INTO public.sequence_acceptance_synthetic_length_real_index_input "
         "SELECT 1, translate("
         " string_agg(md5(i::text), '' ORDER BY i), "
         " '0123456789abcdef', 'ACGTACGTACGTACGT')"
-        " ::bioseq.seq('dna4',8) "
+        " ::bioseq.seq('dna4',64) "
         "FROM generate_series(1,1024) AS g(i);");
     const auto physical_index_boundary = sql_error(
         ctx,
@@ -616,7 +616,7 @@ TEST_CASE("synthetic logical lengths stay lazy through bigint limits",
 
     exec_sql(ctx,
         "CREATE TABLE public.sequence_acceptance_synthetic_length_heap "
-        " (s bioseq.seq('dna4',8));");
+        " (s bioseq.seq('dna4',64));");
     const auto heap_boundary = sql_error(
         ctx,
         "INSERT INTO public.sequence_acceptance_synthetic_length_heap "
@@ -657,7 +657,7 @@ TEST_CASE("slice and cast builders release pre-error intermediates",
         "        pg_temp.sequence_acceptance_runtime_text(repeat('A',4097))::bioseq.seq "
         "        OPERATOR(bioseq.||) "
         "        pg_temp.sequence_acceptance_runtime_text('X')::bioseq.seq"
-        "      )::bioseq.seq('dna4',32); "
+        "      )::bioseq.seq('dna4',64); "
         "      RAISE EXCEPTION 'expected invalid DNA4 literal'; "
         "    EXCEPTION WHEN invalid_text_representation THEN "
         "      NULL; "

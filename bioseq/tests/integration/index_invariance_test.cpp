@@ -38,7 +38,7 @@ struct invariance_result {
         fmt::format("SELECT pk, bioseq.target_start(pk), bioseq.target_end(pk), bioseq.cigar(pk) "
                     "  FROM {} "
                     " WHERE mmsearch(seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY pk;",
                     table_name));
     // Also aggregate an  alignment field to check that it survives the aggregate plan.
@@ -47,7 +47,7 @@ struct invariance_result {
         fmt::format("SELECT MIN(bioseq.target_start(pk)) "
                     "  FROM {} "
                     " WHERE mmsearch(seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));",
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));",
                     table_name));
     return result;
 }
@@ -106,7 +106,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
     create_seq_table(ctx,
                      seq_table_spec{
                          .name = std::string(k_index_label_table),
-                         .typmod = {.alphabet = "dna4", .width = 32},
+                         .typmod = {.alphabet = "dna4", .width = 64},
                          .seq_columns = 2,
                          .using_bioseq = true,
                      },
@@ -142,7 +142,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
         fmt::format("SELECT pk, bioseq.target_start(pk), bioseq.cigar(pk) "
                     "  FROM {} "
                     " WHERE mmsearch(seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY pk;",
                     k_index_table));
     REQUIRE_FALSE(rows.empty());
@@ -164,7 +164,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
         ctx,
         fmt::format("SELECT pk, bioseq.cigar(pk) FROM {} "
                     " WHERE mmsearch(seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));",
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));",
                     k_index_table));
     REQUIRE_FALSE(plan.empty());
     REQUIRE(plan_contains(plan, "BioseqScan"));
@@ -181,7 +181,7 @@ TEST_CASE("Result rows are invariant under bioseq.planner.index_scan.enabled tog
         fmt::format("SELECT pk, bioseq.target_start(pk), bioseq.cigar(pk) "
                     "  FROM {} "
                     " WHERE mmsearch(seq0, "
-                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+                    "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
                     " ORDER BY pk;",
                     k_index_table);
     const auto rows_with_idx_on =

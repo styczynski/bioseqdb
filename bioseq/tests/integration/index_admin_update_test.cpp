@@ -151,7 +151,7 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
         ctx,
         seq_table_spec{
             .name = std::string(k_heap_table),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = false,
         },
@@ -260,7 +260,7 @@ TEST_CASE("update_index on an empty bioseq table returns 0 and list_metadata "
     auto ctx = fresh_context({k_table});
     // Create an empty USING bioseq table (no rows).
     exec_sqlf(ctx,
-              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
+              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 64)) "
               "USING bioseq;",
               k_table);
 

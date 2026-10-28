@@ -22,9 +22,9 @@ TEST_CASE("LIMIT Portal cancellation and xact release paths quiesce exactly",
     auto setup = fresh_context({table});
     exec_sql(setup,
         "CREATE TABLE source_lifetime_source_control_flow "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_control_flow "
-        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,64) AS g;");
 
     reset_source_counters(setup);
@@ -159,18 +159,18 @@ TEST_CASE("nested BatchJoin SliceProject shares and releases source routes",
         "SET bioseq.aligner.base_alignment.algorithm='ksw2';"
         "SET bioseq.aligner.vulkan.enabled=off;"
         "CREATE TABLE source_lifetime_source_batch_target "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TABLE source_lifetime_source_batch_query "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
 
     const std::string target_sequence =
         source_domain_high_entropy_dna4(16384u);
     const std::string query_sequence = target_sequence.substr(4096u, 4096u);
     exec_sqlf(ctx,
         "INSERT INTO source_lifetime_source_batch_target VALUES "
-        " (1, '{}'::bioseq.seq('dna4',32));"
+        " (1, '{}'::bioseq.seq('dna4',64));"
         "INSERT INTO source_lifetime_source_batch_query VALUES "
-        " (1, '{}'::bioseq.seq('dna4',32));",
+        " (1, '{}'::bioseq.seq('dna4',64));",
         target_sequence, query_sequence);
 
     REQUIRE(query_scalar_int(ctx,
@@ -210,9 +210,9 @@ TEST_CASE("materialized spill aggregate COPY generated and parallel routes are s
     exec_sql(ctx,
         "SET work_mem='64kB';"
         "CREATE TABLE source_lifetime_source_boundaries "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_boundaries "
-        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,96) AS g;");
 
     reset_source_counters(ctx);
@@ -297,7 +297,7 @@ TEST_CASE("materialized spill aggregate COPY generated and parallel routes are s
     reset_source_counters(ctx);
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_generated "
-        " (id int, s bioseq.seq('dna4',32), "
+        " (id int, s bioseq.seq('dna4',64), "
         "  prefix text GENERATED ALWAYS AS "
         "    (bioseq.to_text(s[0:8])) STORED) USING bioseq;"
         "INSERT INTO source_lifetime_source_generated(id,s) "
@@ -311,7 +311,7 @@ TEST_CASE("materialized spill aggregate COPY generated and parallel routes are s
     reset_source_counters(ctx);
     exec_sql(ctx,
         "CREATE MATERIALIZED VIEW source_lifetime_source_mv AS "
-        "SELECT id, s[0:128]::bioseq.seq('dna4',32) AS fragment "
+        "SELECT id, s[0:128]::bioseq.seq('dna4',64) AS fragment "
         "FROM source_lifetime_source_boundaries WHERE id<=4;");
     REQUIRE(query_scalar_int(ctx,
         "SELECT sum(bioseq.len(fragment)) FROM source_lifetime_source_mv;") == 512);
@@ -378,15 +378,15 @@ TEST_CASE("ordinary CTAS owns transformed source values",
         "SET max_parallel_workers_per_gather=0;"
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "CREATE TABLE source_lifetime_source_ctas_input "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_ctas_input VALUES "
-        " (7, repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+        " (7, repeat('ACGT',4096)::bioseq.seq('dna4',64));");
 
     constexpr auto ctas_sql =
         "CREATE TABLE source_lifetime_source_ctas_output USING heap AS "
         "SELECT id, "
         " (s[4093:4101] OPERATOR(bioseq.||) "
-        "  bioseq.reverse(s[8190:8194]))::bioseq.seq('dna4',32) "
+        "  bioseq.reverse(s[8190:8194]))::bioseq.seq('dna4',64) "
         "  AS fragment "
         "FROM source_lifetime_source_ctas_input WHERE id=7;";
     reset_source_counters(ctx);
@@ -425,7 +425,7 @@ TEST_CASE("ordinary CTAS owns transformed source values",
         "       bioseq.to_text(fragment), "
         "       encode(bioseq.seq_send(fragment),'hex'), "
         "       encode(bioseq.seq_send("
-        "         'CGTACGTACATG'::bioseq.seq('dna4',32)),'hex') "
+        "         'CGTACGTACATG'::bioseq.seq('dna4',64)),'hex') "
         "FROM source_lifetime_source_ctas_output WHERE id=7;");
     REQUIRE(durable.size() == 4u);
     REQUIRE(durable[0] == "12");
@@ -445,9 +445,9 @@ TEST_CASE("caught late binding errors release sliced source ownership",
         "SET max_parallel_workers_per_gather=0;"
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "CREATE TABLE source_lifetime_source_error_atomic "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_error_atomic VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));"
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',64));"
         "CREATE FUNCTION pg_temp.source_lifetime_source_runtime_text(value text) "
         "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
         "BEGIN RETURN value; END $$;");
@@ -458,7 +458,7 @@ TEST_CASE("caught late binding errors release sliced source ownership",
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     constexpr std::string_view late_rhs =
         "pg_temp.source_lifetime_source_runtime_text('N')"
-        "::bioseq.seq('dna4',32)";
+        "::bioseq.seq('dna4',64)";
     constexpr std::string_view expected_sqlstate = "22P02";
     constexpr std::string_view expected_message =
         "invalid symbol at byte 0 in unbound bioseq.seq";
@@ -467,7 +467,7 @@ TEST_CASE("caught late binding errors release sliced source ownership",
 #else
     constexpr std::string_view late_rhs =
         "pg_temp.source_lifetime_source_runtime_text('N')"
-        "::bioseq.seq('dna5',32)";
+        "::bioseq.seq('dna5',64)";
     constexpr std::string_view expected_sqlstate = "42804";
     constexpr std::string_view expected_message =
         "cannot concatenate bioseq alphabets dna4 and dna5";

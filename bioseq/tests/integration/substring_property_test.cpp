@@ -47,7 +47,7 @@ void seed_substring_table(const connection_test_context& ctx, std::string_view t
         ctx,
         seq_table_spec{
             .name = std::string(table_name),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 2, // seq0 stores the target, seq1 the probe.
             .using_bioseq = true,
         },
@@ -64,7 +64,7 @@ void seed_self_alignment_table(const connection_test_context& ctx, std::string_v
         ctx,
         seq_table_spec{
             .name = std::string(table_name),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 2, // seq0 == seq1 in every row
             .using_bioseq = true,
         },

@@ -122,15 +122,15 @@ TEST_CASE("BPCHAR comparisons preserve PostgreSQL parity in both modes",
             "    id integer NOT NULL,"
             "    lhs character(4),"
             "    rhs character(8),"
-            "    seq bioseq.seq('dna4', 32)"
+            "    seq bioseq.seq('dna4', 64)"
             ") USING bioseq;",
             k_bpchar_table);
   exec_sqlf(ctx,
             "INSERT INTO {} VALUES "
-            "    (1, 'a',    'a   ', 'ACGT'::bioseq.seq('dna4', 32)),"
-            "    (2, 'a',    'b',    'ACGT'::bioseq.seq('dna4', 32)),"
-            "    (3, NULL,   'a',    'ACGT'::bioseq.seq('dna4', 32)),"
-            "    (4, 'z   ', 'z',    'ACGT'::bioseq.seq('dna4', 32));",
+            "    (1, 'a',    'a   ', 'ACGT'::bioseq.seq('dna4', 64)),"
+            "    (2, 'a',    'b',    'ACGT'::bioseq.seq('dna4', 64)),"
+            "    (3, NULL,   'a',    'ACGT'::bioseq.seq('dna4', 64)),"
+            "    (4, 'z   ', 'z',    'ACGT'::bioseq.seq('dna4', 64));",
             k_bpchar_table);
 
   const std::string comparison_query =
@@ -282,17 +282,17 @@ TEST_CASE(
       "    id integer NOT NULL,"
       "    probe_ci character(8) COLLATE "
       "        {}.nondeterministic_ci,"
-      "    seq bioseq.seq('dna4', 32)"
+      "    seq bioseq.seq('dna4', 64)"
       ") USING bioseq;",
       k_bpchar_icu_table, k_bpchar_icu_schema);
   exec_sqlf(
       ctx,
       "INSERT INTO {} VALUES "
-      "    (1, 'A', 'ACGT'::bioseq.seq('dna4', 32)),"
-      "    (2, 'a', 'ACGT'::bioseq.seq('dna4', 32)),"
-      "    (3, 'B', 'ACGT'::bioseq.seq('dna4', 32)),"
-      "    (4, 'á', 'ACGT'::bioseq.seq('dna4', 32)),"
-      "    (5, NULL, 'ACGT'::bioseq.seq('dna4', 32));",
+      "    (1, 'A', 'ACGT'::bioseq.seq('dna4', 64)),"
+      "    (2, 'a', 'ACGT'::bioseq.seq('dna4', 64)),"
+      "    (3, 'B', 'ACGT'::bioseq.seq('dna4', 64)),"
+      "    (4, 'á', 'ACGT'::bioseq.seq('dna4', 64)),"
+      "    (5, NULL, 'ACGT'::bioseq.seq('dna4', 64));",
       k_bpchar_icu_table);
 
   REQUIRE(query_scalar(

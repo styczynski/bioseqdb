@@ -28,7 +28,7 @@ TEST_CASE("bioseq.len reports correct payload size after stub hydration",
         ctx,
         seq_table_spec{
             .name = std::string(k_table),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = false,
         },
@@ -52,12 +52,12 @@ TEST_CASE("bioseq.storage.sequence_shard.max_size_gib=0 forces one shard "
     exec_sql(ctx, "SET bioseq.storage.sequence_shard.max_size_gib = 0;");
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     for (int row_number = 0; row_number < 5; ++row_number) {
         exec_sqlf(ctx,
                   "INSERT INTO {} VALUES ({}, "
-                  "'ACGT'::bioseq.seq('dna4', 32));",
+                  "'ACGT'::bioseq.seq('dna4', 64));",
                   k_table, row_number);
     }
     const long long rows = query_scalar_int(
@@ -76,11 +76,11 @@ TEST_CASE("bioseq.seq_sub_table_summary view + list_seq_storage_shards "
     auto ctx = fresh_context({k_table});
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
-              "'ACGTACGTACGT'::bioseq.seq('dna4', 32));",
+              "'ACGTACGTACGT'::bioseq.seq('dna4', 64));",
               k_table);
 
     // View must list at least one row for the parent.
@@ -116,7 +116,7 @@ TEST_CASE("TEMP parents are rejected at CREATE TABLE",
     REQUIRE(sql_fails(
         ctx,
         "CREATE TEMPORARY TABLE _storage_bucket_temp_parent "
-        "(id int, seq bioseq.seq('dna4', 32)) USING bioseq;"));
+        "(id int, seq bioseq.seq('dna4', 64)) USING bioseq;"));
 }
 
 TEST_CASE("every SEQ column INSERT lands in the expected bucket",
@@ -124,15 +124,15 @@ TEST_CASE("every SEQ column INSERT lands in the expected bucket",
     auto ctx = fresh_context({k_table});
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     exec_sqlf(
         ctx,
-        "INSERT INTO {} VALUES (1, repeat('A', 16)::bioseq.seq('dna4', 32));",
+        "INSERT INTO {} VALUES (1, repeat('A', 16)::bioseq.seq('dna4', 64));",
         k_table);
     exec_sqlf(
         ctx,
-        "INSERT INTO {} VALUES (2, repeat('A', 1024)::bioseq.seq('dna4', 32));",
+        "INSERT INTO {} VALUES (2, repeat('A', 1024)::bioseq.seq('dna4', 64));",
         k_table);
 
     // At least one sub-table catalog row must exist for this parent.
@@ -151,12 +151,12 @@ TEST_CASE("DROP TABLE cascades to every sub-table",
     auto ctx = fresh_context({k_table});
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     for (int row_number = 0; row_number < 5; ++row_number) {
         exec_sqlf(ctx,
                   "INSERT INTO {} VALUES ({}, "
-                  "'ACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
+                  "'ACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64));",
                   k_table, row_number);
     }
     exec_sqlf(ctx, "DROP TABLE {};", k_table);
@@ -185,12 +185,12 @@ TEST_CASE("multi-SEQ-column parents route by column_attno",
 #endif
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq_a bioseq.seq('dna4', 32), "
+              "seq_a bioseq.seq('dna4', 64), "
               "seq_b bioseq.seq('{}', 64)) USING bioseq;",
               k_table, second_alphabet);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
-              "'ACGT'::bioseq.seq('dna4', 32), "
+              "'ACGT'::bioseq.seq('dna4', 64), "
               "'{}'::bioseq.seq('{}', 64));",
               k_table, second_sequence, second_alphabet);
     const auto column_attnos = query_rows(
@@ -211,11 +211,11 @@ TEST_CASE("UNLOGGED parents inherit UNLOGGED sub-tables",
     auto ctx = fresh_context({k_table});
     exec_sqlf(ctx,
               "CREATE UNLOGGED TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
-              "'ACGT'::bioseq.seq('dna4', 32));",
+              "'ACGT'::bioseq.seq('dna4', 64));",
               k_table);
     REQUIRE(query_scalar(
                 ctx,
@@ -235,15 +235,15 @@ TEST_CASE("round-trip via USING bioseq table preserves payload bytes",
     auto ctx = fresh_context({k_table});
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_table);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
-              "'ACGTACGTACGT'::bioseq.seq('dna4', 32));",
+              "'ACGTACGTACGT'::bioseq.seq('dna4', 64));",
               k_table);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (2, "
-              "'TTTTAAAA'::bioseq.seq('dna4', 32));",
+              "'TTTTAAAA'::bioseq.seq('dna4', 64));",
               k_table);
     const auto rows = query_rows(
         ctx,

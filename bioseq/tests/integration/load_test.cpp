@@ -176,7 +176,7 @@ TEST_CASE("bioseq.load: write-side sequence cache survives a full-stripe reset",
     REQUIRE(final_row[0][1].value() == records.back().second);
 }
 
-TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
+TEST_CASE("bioseq.load: width admission and cross-width equivalence follow the active profile",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
     it::connection_test_context ctx;
     it::reset_extension(ctx, { std::string_view{"load_width_32"}, std::string_view{"load_width_64"} });
@@ -185,19 +185,30 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
     const std::string path = "/tmp/bioseq_load_width.fasta";
     write_fasta(path, {{"width_record", body}});
 
-    it::exec_sql(ctx, "CREATE TABLE load_width_32 (header text, seq bioseq.seq('dna4', 32)) USING bioseq;");
-    it::exec_sql(ctx, "CREATE TABLE load_width_64 (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
+    constexpr std::string_view narrow_table_sql =
+        "CREATE TABLE load_width_32 (header text, seq bioseq.seq('dna4', 32)) USING bioseq;";
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    it::exec_sql(ctx, narrow_table_sql);
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_width_32'::regclass, '" + path + "');") == 1);
-    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_width_64'::regclass, '" + path + "');") == 1);
-
-    // Both storage widths must decode to the original sequence.
     REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_width_32") == body);
+#else
+    const auto disabled_width = it::sql_error(ctx, narrow_table_sql);
+    REQUIRE(disabled_width.sqlstate == "22023");
+    REQUIRE(disabled_width.contains(
+        "bioseq.seq width 32 is not enabled in this build"));
+#endif
+    it::exec_sql(ctx, "CREATE TABLE load_width_64 (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_width_64'::regclass, '" + path + "');") == 1);
     REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_width_64") == body);
 
     // Changing the storage width must preserve the alignment start position.
     const std::string query = body.substr(500, 800);
     std::string pos32, pos64;
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     for (const char* table_name : {"load_width_32", "load_width_64"}) {
+#else
+    for (const char* table_name : {"load_width_64"}) {
+#endif
         const std::string width =
             (std::string(table_name) == "load_width_32") ? "32" : "64";
         const auto rows = it::query_rows(
@@ -207,7 +218,10 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
         REQUIRE(rows.size() == 1);
         (width == "32" ? pos32 : pos64) = rows[0][0].value();
     }
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     REQUIRE(pos32 == pos64);   // identical target_start across storage widths
+#endif
+    REQUIRE_FALSE(pos64.empty());
 }
 
 TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across widths 8/16/32/64",
@@ -237,8 +251,19 @@ TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across 
         for (const char* width : {"8", "16", "32", "64"}) {
             it::connection_test_context ctx;                 // fresh backend per width
             it::reset_extension(ctx, { std::string_view{"load_active_profile_width"} });
-            it::exec_sqlf(ctx, "CREATE TABLE load_active_profile_width (header text, seq bioseq.seq('{}', {})) USING bioseq;",
-                          current_case->alpha, width);
+            const auto create_table_sql = fmt::format(
+                "CREATE TABLE load_active_profile_width (header text, seq bioseq.seq('{}', {})) USING bioseq;",
+                current_case->alpha, width);
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+            if (std::string_view{width} != "64") {
+                const auto disabled_width = it::sql_error(ctx, create_table_sql);
+                REQUIRE(disabled_width.sqlstate == "22023");
+                REQUIRE(disabled_width.contains(fmt::format(
+                    "bioseq.seq width {} is not enabled in this build", width)));
+                continue;
+            }
+#endif
+            it::exec_sql(ctx, create_table_sql);
             REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_active_profile_width'::regclass, '" + current_case->path + "');") == 1);
             // Loading and decoding must preserve every  base, including N.
             const auto rows = it::query_rows(ctx,

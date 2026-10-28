@@ -127,7 +127,7 @@ SELECT (SELECT count(*) FROM expected)::text,
             "    ts timestamp,"
             "    tz timestamptz,"
             "    c character(4),"
-            "    seq bioseq.seq('dna4', 32)"
+            "    seq bioseq.seq('dna4', 64)"
             ") USING bioseq;",
             k_vector_comparison_table);
   exec_sqlf(ctx,
@@ -136,19 +136,19 @@ SELECT (SELECT count(*) FROM expected)::text,
             "        TIMESTAMP '2024-01-01 13:00',"
             "        TIMESTAMPTZ '2024-01-02 00:00+00',"
             "        'm',"
-            "        'ACGT'::bioseq.seq('dna4', 32)),"
+            "        'ACGT'::bioseq.seq('dna4', 64)),"
             "    (2, 5, 41, 20, DATE '2024-01-01', TIME '11:00',"
             "        TIMESTAMP '2024-01-01 13:00',"
             "        TIMESTAMPTZ '2024-01-02 00:00+00',"
             "        'n',"
-            "        'ACGT'::bioseq.seq('dna4', 32)),"
+            "        'ACGT'::bioseq.seq('dna4', 64)),"
             "    (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,"
-            "        'ACGT'::bioseq.seq('dna4', 32)),"
+            "        'ACGT'::bioseq.seq('dna4', 64)),"
             "    (4, 32767, -1, 11, 'infinity'::date, TIME '00:00',"
             "        'infinity'::timestamp,"
             "        'infinity'::timestamptz,"
             "        'z',"
-            "        'ACGT'::bioseq.seq('dna4', 32));",
+            "        'ACGT'::bioseq.seq('dna4', 64));",
             k_vector_comparison_table);
 
   const std::string comparison_query =
@@ -388,19 +388,19 @@ SELECT (SELECT count(*) FROM expected)::text,
             "  i4 integer,"
             "  i8 bigint,"
             "  d date,"
-            "  seq bioseq.seq('dna4', 32)"
+            "  seq bioseq.seq('dna4', 64)"
             ") USING bioseq;",
             k_vector_aggregate_table);
   exec_sqlf(ctx,
             "INSERT INTO {} VALUES "
             " (1, 2, 20, 200, DATE '2024-01-01',"
-            "  'ACGT'::bioseq.seq('dna4', 32)),"
+            "  'ACGT'::bioseq.seq('dna4', 64)),"
             " (2, -3, -30, -300, DATE '2023-01-01',"
-            "  'ACGT'::bioseq.seq('dna4', 32)),"
+            "  'ACGT'::bioseq.seq('dna4', 64)),"
             " (3, 7, 70, 700, DATE '2025-01-01',"
-            "  'ACGT'::bioseq.seq('dna4', 32)),"
+            "  'ACGT'::bioseq.seq('dna4', 64)),"
             " (4, NULL, NULL, NULL, NULL,"
-            "  'ACGT'::bioseq.seq('dna4', 32));",
+            "  'ACGT'::bioseq.seq('dna4', 64));",
             k_vector_aggregate_table);
   exec_sql(
       ctx,
@@ -582,21 +582,21 @@ TEST_CASE(
       "CREATE TEMP VIEW sql_boundary_from_array_two_positional AS "
       "SELECT bioseq.from_array("
       "  ARRAY['A'::bioseq.letter('dna4'),"
-      "        'C'::bioseq.letter('dna4')], 32)::text AS value;");
+      "        'C'::bioseq.letter('dna4')], 64)::text AS value;");
   exec_sql(
       ctx,
       "CREATE TEMP VIEW sql_boundary_from_array_two_named AS "
       "SELECT bioseq.from_array("
       "  \"array\" => ARRAY['A'::bioseq.letter('dna4'),"
       "                 'C'::bioseq.letter('dna4')],"
-      "  width_bits => 32)::text AS value;");
+      "  width_bits => 64)::text AS value;");
   exec_sql(
       ctx,
       "CREATE TEMP VIEW sql_boundary_from_array_two_mixed AS "
       "SELECT bioseq.from_array("
       "  ARRAY['A'::bioseq.letter('dna4'),"
       "        'C'::bioseq.letter('dna4')],"
-      "  width_bits => 32)::text AS value;");
+      "  width_bits => 64)::text AS value;");
 
   exec_sql(
       ctx,
@@ -604,7 +604,7 @@ TEST_CASE(
       "SELECT bioseq.from_array("
       "  ARRAY['A'::bioseq.letter('dna4'),"
       "        'C'::bioseq.letter('dna4')],"
-      "  'dna4', 32)::text AS value;");
+      "  'dna4', 64)::text AS value;");
   exec_sql(
       ctx,
       "CREATE TEMP VIEW sql_boundary_from_array_three_named AS "
@@ -612,7 +612,7 @@ TEST_CASE(
       "  \"array\" => ARRAY['A'::bioseq.letter('dna4'),"
       "                 'C'::bioseq.letter('dna4')],"
       "  alphabet_name => 'dna4',"
-      "  width_bits => 32)::text AS value;");
+      "  width_bits => 64)::text AS value;");
   exec_sql(
       ctx,
       "CREATE TEMP VIEW sql_boundary_from_array_three_mixed AS "
@@ -620,7 +620,7 @@ TEST_CASE(
       "  ARRAY['A'::bioseq.letter('dna4'),"
       "        'C'::bioseq.letter('dna4')],"
       "  alphabet_name => 'dna4',"
-      "  width_bits => 32)::text AS value;");
+      "  width_bits => 64)::text AS value;");
 
   exec_sql(
       ctx,

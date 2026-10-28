@@ -21,7 +21,7 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_async_minimizer_sequence_worker_leaves});
     exec_sqlf(ctx,
-        "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) USING bioseq;",
+        "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 64)) USING bioseq;",
         k_async_minimizer_sequence_worker_leaves);
     exec_sqlf(ctx,
         "SELECT bioseq.set_index_policy('{}'::regclass, "
@@ -38,7 +38,7 @@ TEST_CASE(
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     exec_sqlf(ctx,
         "INSERT INTO {} VALUES "
-        "(1, repeat('ACGT', 10000)::bioseq.seq('dna4', 32));",
+        "(1, repeat('ACGT', 10000)::bioseq.seq('dna4', 64));",
         k_async_minimizer_sequence_worker_leaves);
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = on;");

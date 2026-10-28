@@ -188,9 +188,9 @@ TEST_CASE("INSERT plan declares a heap-tuple boundary",
     seed_small_bioseq_column(ctx, k_table);
     exec_sql(ctx,
              "CREATE TABLE explain_flat_insert_target "
-             "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;"
+             "(pk int, seq0 bioseq.seq('dna4',64)) USING bioseq;"
              "CREATE TABLE explain_slice_insert_target "
-             "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;");
+             "(pk int, seq0 bioseq.seq('dna4',64)) USING bioseq;");
 
     /* First check that EXPLAIN ANALYZE inserts all three unsliced rows.
      * This gives the sriced INSERT below a control with the same source data. */
@@ -235,13 +235,13 @@ TEST_CASE("ordinary INSERT restores the page-cache GUC",
     exec_sql(ctx,
              "DROP PUBLICATION IF EXISTS page_cache_insert_publication;"
              "CREATE TABLE page_cache_insert "
-             " (id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING bioseq;"
+             " (id int PRIMARY KEY, s bioseq.seq('dna4',64)) USING bioseq;"
              "SET bioseq.column_cache.enabled=on;");
     REQUIRE(query_scalar(ctx, "SHOW bioseq.column_cache.enabled;") == "on");
 
     exec_sql(ctx,
              "INSERT INTO page_cache_insert VALUES "
-             " (1, repeat('ACGT',1024)::bioseq.seq('dna4',32));");
+             " (1, repeat('ACGT',1024)::bioseq.seq('dna4',64));");
     REQUIRE(query_scalar(ctx, "SHOW bioseq.column_cache.enabled;") == "on");
     REQUIRE(query_int_column(ctx, "SELECT id FROM page_cache_insert ORDER BY id;") ==
             std::vector<long long>{1});
@@ -251,14 +251,14 @@ TEST_CASE("ordinary INSERT restores the page-cache GUC",
              "FOR TABLE page_cache_insert;");
     const auto failure = sql_error(ctx,
                                    "INSERT INTO page_cache_insert VALUES "
-                                   " (2, repeat('TGCA',1024)::bioseq.seq('dna4',32));");
+                                   " (2, repeat('TGCA',1024)::bioseq.seq('dna4',64));");
     const auto cache_after_error = query_scalar(ctx, "SHOW bioseq.column_cache.enabled;");
     const auto rows_after_error =
         query_int_column(ctx, "SELECT id FROM page_cache_insert ORDER BY id;");
     exec_sql(ctx,
              "DROP PUBLICATION page_cache_insert_publication;"
              "INSERT INTO page_cache_insert VALUES "
-             " (3, repeat('TGCA',1024)::bioseq.seq('dna4',32));");
+             " (3, repeat('TGCA',1024)::bioseq.seq('dna4',64));");
 
     REQUIRE(failure.sqlstate == "0A000");
     REQUIRE(failure.contains("cannot insert into columnar table that is a part of a publication"));
@@ -321,7 +321,7 @@ TEST_CASE("LIMIT and skipped CASE arms retain zero boundary calls",
         ctx,
         "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT",
         fmt::format("SELECT CASE WHEN seq0 IS NULL THEN seq0[0:4] "
-                    "ELSE 'ACGT'::bioseq.seq('dna4',32) END FROM {} WHERE pk = 1;",
+                    "ELSE 'ACGT'::bioseq.seq('dna4',64) END FROM {} WHERE pk = 1;",
                     k_table));
     REQUIRE(plan_contains(skipped, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(boundary_actual_calls(skipped, "text", "client output") == 0u);
@@ -358,11 +358,11 @@ TEST_CASE("unsliced EXPLAIN remains zero-payload around a sliced heap boundary",
                          "SET bioseq.index.insert_maintenance.enabled=off; "
                          "TRUNCATE {}; "
                          "INSERT INTO {} VALUES "
-                         "(1, repeat('ACGT',262144)::bioseq.seq('dna4',32)), "
-                         "(2, repeat('TGCA',262144)::bioseq.seq('dna4',32)), "
-                         "(3, repeat('AAAA',262144)::bioseq.seq('dna4',32)); "
+                         "(1, repeat('ACGT',262144)::bioseq.seq('dna4',64)), "
+                         "(2, repeat('TGCA',262144)::bioseq.seq('dna4',64)), "
+                         "(3, repeat('AAAA',262144)::bioseq.seq('dna4',64)); "
                          "CREATE TABLE {} "
-                         "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;",
+                         "(pk int, seq0 bioseq.seq('dna4',64)) USING bioseq;",
                          k_table,
                          k_table,
                          materialized_table));
@@ -430,9 +430,9 @@ TEST_CASE("SliceProject shallow publication allocates no payload",
                          "SET bioseq.index.insert_maintenance.enabled=off; "
                          "TRUNCATE {}; "
                          "INSERT INTO {} VALUES "
-                         "(1, repeat('ACGT',262144)::bioseq.seq('dna4',32)), "
-                         "(2, repeat('TGCA',262144)::bioseq.seq('dna4',32)), "
-                         "(3, repeat('AAAA',262144)::bioseq.seq('dna4',32));",
+                         "(1, repeat('ACGT',262144)::bioseq.seq('dna4',64)), "
+                         "(2, repeat('TGCA',262144)::bioseq.seq('dna4',64)), "
+                         "(3, repeat('AAAA',262144)::bioseq.seq('dna4',64));",
                          k_table,
                          k_table));
     const auto expression = fmt::format("bioseq.reverse(seq0[0:4]) OPERATOR(bioseq.||) seq0[4:8]");

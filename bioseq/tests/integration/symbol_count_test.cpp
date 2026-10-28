@@ -29,24 +29,24 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna4)",
     // 'ACGTACGTACGTACGT' has each of A/C/G/T exactly four times.
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32), 'A');") == 4);
+                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 'A');") == 4);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32), 'C');") == 4);
+                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 'C');") == 4);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32), 'G');") == 4);
+                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 'G');") == 4);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32), 'T');") == 4);
+                     "    'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 'T');") == 4);
 
     // 'AAAAAAAA' is eight A's and nothing else.
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'AAAAAAAA'::bioseq.seq('dna4', 32), 'A');") == 8);
+                     "    'AAAAAAAA'::bioseq.seq('dna4', 64), 'A');") == 8);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'AAAAAAAA'::bioseq.seq('dna4', 32), 'C');") == 0);
+                     "    'AAAAAAAA'::bioseq.seq('dna4', 64), 'C');") == 0);
 }
 
 TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
@@ -56,7 +56,7 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     const auto error = sql_error(
         ctx, "SELECT bioseq.symbol_count("
-             "    'NNNNN'::bioseq.seq('dna5', 32), 'N');");
+             "    'NNNNN'::bioseq.seq('dna5', 64), 'N');");
     REQUIRE(error.sqlstate == "22023");
     REQUIRE(error.contains("bioseq.seq alphabet \"dna5\" is not supported"));
     REQUIRE(error.contains("Valid alphabets: 'dna4'"));
@@ -64,27 +64,27 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
     // DNA5 must count five N symbols and zero A symbols in NNNNN.
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'NNNNN'::bioseq.seq('dna5', 32), 'N');") == 5);
+                     "    'NNNNN'::bioseq.seq('dna5', 64), 'N');") == 5);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'NNNNN'::bioseq.seq('dna5', 32), 'A');") == 0);
+                     "    'NNNNN'::bioseq.seq('dna5', 64), 'A');") == 0);
 
     // 'ACGTN' is one of each letter.
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTN'::bioseq.seq('dna5', 32), 'A');") == 1);
+                     "    'ACGTN'::bioseq.seq('dna5', 64), 'A');") == 1);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTN'::bioseq.seq('dna5', 32), 'C');") == 1);
+                     "    'ACGTN'::bioseq.seq('dna5', 64), 'C');") == 1);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTN'::bioseq.seq('dna5', 32), 'G');") == 1);
+                     "    'ACGTN'::bioseq.seq('dna5', 64), 'G');") == 1);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTN'::bioseq.seq('dna5', 32), 'T');") == 1);
+                     "    'ACGTN'::bioseq.seq('dna5', 64), 'T');") == 1);
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
-                     "    'ACGTN'::bioseq.seq('dna5', 32), 'N');") == 1);
+                     "    'ACGTN'::bioseq.seq('dna5', 64), 'N');") == 1);
 #endif
 }
 
@@ -96,7 +96,7 @@ TEST_CASE("vectorization on/off agree on the scalar tally",
     const auto rows = expect_invariant_under_guc_toggle(
         ctx,
         "SELECT bioseq.symbol_count("
-        "  'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32), 'A');",
+        "  'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 'A');",
         "bioseq.vectorization.enabled");
     REQUIRE(rows.size() == 1);
     REQUIRE(rows.front().size() == 1);
@@ -151,7 +151,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                 ctx, "bioseq.index.insert_maintenance.enabled", "off");
             exec_sqlf(ctx,
                       "INSERT INTO {} VALUES "
-                      "(4, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
+                      "(4, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 64));",
                       k_bioseq_column);
         }
 

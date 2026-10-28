@@ -23,7 +23,7 @@ TEST_CASE("PARAM_EXEC rescan clears NULL and restores the next primary query",
 
     const std::string sql = fmt::format("SELECT p.ord, sub.pk "
                                         "FROM (VALUES (1, {}), "
-                                        "             (2, NULL::bioseq.seq('dna4', 32)), "
+                                        "             (2, NULL::bioseq.seq('dna4', 64)), "
                                         "             (3, {})) AS p(ord, probe) "
                                         "LEFT JOIN LATERAL ("
                                         "  SELECT t.pk FROM {} t "
@@ -154,7 +154,7 @@ TEST_CASE("Partition child reparameterization retains one transformed owner",
     exec_sql(ctx,
              fmt::format("CREATE TEMP TABLE transformed_partition_queries ("
                          "id int, bucket int, target_pk int NOT NULL, "
-                         "seq bioseq.seq('dna4',32)) PARTITION BY RANGE(bucket);"
+                         "seq bioseq.seq('dna4',64)) PARTITION BY RANGE(bucket);"
                          "CREATE TEMP TABLE transformed_partition_queries_lo "
                          "PARTITION OF transformed_partition_queries "
                          "FOR VALUES FROM (0) TO (10);"
@@ -163,7 +163,7 @@ TEST_CASE("Partition child reparameterization retains one transformed owner",
                          "FOR VALUES FROM (10) TO (20);"
                          "INSERT INTO transformed_partition_queries VALUES "
                          "(1, 5, 1, {}), "
-                         "(2, 15, 1, NULL::bioseq.seq('dna4',32)), "
+                         "(2, 15, 1, NULL::bioseq.seq('dna4',64)), "
                          "(3, 5, 1, {});",
                          hoe_probe_literal(),
                          hoe_probe_literal()));
@@ -210,7 +210,7 @@ TEST_CASE("Dominating SliceProject spans Append branches across rescans",
     exec_sql(ctx,
              fmt::format("CREATE TEMP TABLE transformed_owner_append_queries ("
                          "id int, driver int, bucket int, target_pk int NOT NULL, "
-                         "seq bioseq.seq('dna4',32)) PARTITION BY RANGE(bucket);"
+                         "seq bioseq.seq('dna4',64)) PARTITION BY RANGE(bucket);"
                          "CREATE TEMP TABLE transformed_owner_append_queries_lo "
                          "PARTITION OF transformed_owner_append_queries "
                          "FOR VALUES FROM (0) TO (10);"
@@ -458,9 +458,9 @@ TEST_CASE("Ineligible mmsearch arguments keep target, query, and options order",
     connection_test_context ctx;
     exec_sql(ctx,
              fmt::format("CREATE TEMP TABLE argument_effect_targets ("
-                         "id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+                         "id int PRIMARY KEY, seq bioseq.seq('dna4',64));"
                          "CREATE TEMP TABLE argument_effect_queries ("
-                         "id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+                         "id int PRIMARY KEY, seq bioseq.seq('dna4',64));"
                          "INSERT INTO argument_effect_targets VALUES (1,{});"
                          "INSERT INTO argument_effect_queries VALUES (1,{});"
                          "CREATE TEMP SEQUENCE argument_effect_sequence;"

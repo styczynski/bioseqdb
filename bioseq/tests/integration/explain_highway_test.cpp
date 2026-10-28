@@ -126,10 +126,10 @@ TEST_CASE(
     exec_sql(ctx, "SET geqo = off;");
     exec_sql(ctx,
              "CREATE TEMP TABLE explain_highway_join_query "
-             "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+             "(id int PRIMARY KEY, seq bioseq.seq('dna4',64));");
     exec_sql(ctx,
              "INSERT INTO explain_highway_join_query VALUES "
-             "(1, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4',32));");
+             "(1, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4',64));");
 
     const std::string batch_join_sql =
         fmt::format("SELECT q.id, t.pk, bioseq.edit(t.pk) AS edit_distance "
@@ -175,7 +175,7 @@ TEST_CASE(
         "INSERT INTO {} (pk, seq0) VALUES (4, {});",
         k_table,
         format_literal(highway_probe,
-                       seq_typmod{.alphabet = "dna4", .width = 32})));
+                       seq_typmod{.alphabet = "dna4", .width = 64})));
     configure_highway_simd_pipeline(ctx);
 
     const auto baseline_mask = static_cast<std::int64_t>(
@@ -206,7 +206,7 @@ TEST_CASE(
                     "{}) ORDER BY pk;",
                     k_table,
                     format_literal(highway_probe,
-                                   seq_typmod{.alphabet = "dna4", .width = 32}));
+                                   seq_typmod{.alphabet = "dna4", .width = 64}));
     const rowset_t baseline_rows = query_rows(ctx, public_sql);
     REQUIRE_FALSE(baseline_rows.empty());
     for (const auto& row : baseline_rows) {

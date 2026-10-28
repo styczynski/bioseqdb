@@ -64,6 +64,16 @@ TEMPLATE_TEST_CASE_SIG("bioseq.seq encode/decode roundtrip across full typmod ma
     } else
 #endif
     {
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        if constexpr (p_width != 64) {
+            const auto disabled_width = sql_error(
+                ctx, fmt::format("SELECT {}::text;", literal));
+            REQUIRE(disabled_width.sqlstate == "22023");
+            REQUIRE(disabled_width.contains(fmt::format(
+                "bioseq.seq width {} is not enabled in this build", p_width)));
+            return;
+        }
+#endif
         const auto row = query_one(ctx,
                                    fmt::format("SELECT {0}::text AS roundtrip, "
                                                "       bioseq.len({0}) AS bp, "
@@ -86,6 +96,16 @@ TEMPLATE_TEST_CASE_SIG(
     auto ctx = fresh_context();
     const seq_typmod typmod = make_seq_typmod<dna4_entry>(p_width);
     const std::string typmod_sql = typmod.sql();
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    if constexpr (p_width != 64) {
+        const auto disabled_width = sql_error(
+            ctx, fmt::format("SELECT 'ACGT'::{};", typmod_sql));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", p_width)));
+        return;
+    }
+#endif
 
     const auto row = query_one(ctx,
                                fmt::format("WITH long_input AS (SELECT repeat('ACGT', 128) AS s) "
@@ -107,7 +127,19 @@ TEMPLATE_TEST_CASE_SIG("bioseq.seq cross-typmod cast follows the active alphabet
                        32,
                        64) {
     auto ctx = fresh_context();
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    if constexpr (p_width != 64) {
+        const auto disabled_width = sql_error(ctx, fmt::format(
+            "SELECT 'ACGTA'::bioseq.seq('dna4', {});", p_width));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", p_width)));
+        return;
+    }
+    constexpr int source_width = 64;
+#else
     constexpr int source_width = p_width == 8 ? 16 : 8;
+#endif
     REQUIRE(query_scalar(ctx,
                          fmt::format("SELECT ('ACGTA'::bioseq.seq('dna4', {}))"
                                      "       ::bioseq.seq('dna4', {})::text;",

@@ -22,7 +22,7 @@ TEST_CASE("exact Python slicing examples and sequence algebra",
     const auto elements = query_one(
         ctx,
         "WITH v(s) AS (VALUES "
-        " ('ACGTA'::bioseq.seq('dna4',32))) "
+        " ('ACGTA'::bioseq.seq('dna4',64))) "
         "SELECT s[0]::text, s[4]::text, s[-1]::text, s[-5]::text, "
         "       s[5] IS NULL, s[-6] IS NULL FROM v;");
     REQUIRE(elements[0] == "A");
@@ -35,7 +35,7 @@ TEST_CASE("exact Python slicing examples and sequence algebra",
     const auto slices = query_one(
         ctx,
         "WITH v(s) AS (VALUES "
-        " ('ACGTA'::bioseq.seq('dna4',32))) "
+        " ('ACGTA'::bioseq.seq('dna4',64))) "
         "SELECT s[:2]::text, s[2:]::text, s[1:4]::text, "
         "       s[1:-1]::text, s[-4:-1]::text, "
         "       s[-100:100]::text, bioseq.len(s[4:2]), "
@@ -52,7 +52,7 @@ TEST_CASE("exact Python slicing examples and sequence algebra",
     const auto null_bounds = query_one(
         ctx,
         "WITH v(s) AS (VALUES "
-        " ('ACGTA'::bioseq.seq('dna4',32))) "
+        " ('ACGTA'::bioseq.seq('dna4',64))) "
         "SELECT s[NULL::bigint:2] IS NULL, "
         "       s[:NULL::bigint] IS NULL FROM v;");
     REQUIRE(null_bounds[0] == "t");
@@ -61,13 +61,13 @@ TEST_CASE("exact Python slicing examples and sequence algebra",
     REQUIRE(query_scalar(
         ctx,
         "SELECT (('CTAGTCACTGTAGCCTGATCGTAGCTAGT' "
-        "         ::bioseq.seq('dna4',32))[4:9])::text;") == "TCACT");
+        "         ::bioseq.seq('dna4',64))[4:9])::text;") == "TCACT");
 
     const auto algebra = query_one(
         ctx,
         "WITH v(a,b) AS (VALUES "
-        " ('ACGTACGTACGT'::bioseq.seq('dna4',32), "
-        "  'TTGCAAGCTTAA'::bioseq.seq('dna4',32))) "
+        " ('ACGTACGTACGT'::bioseq.seq('dna4',64), "
+        "  'TTGCAAGCTTAA'::bioseq.seq('dna4',64))) "
         "SELECT (((a[:10])[5:] OPERATOR(bioseq.||) b[5:10])"
         "          [1:-1])::text, "
         "       (a[6:10] OPERATOR(bioseq.||) b[5:9])::text, "
@@ -93,7 +93,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         ctx,
         seq_table_spec{
             .name = std::string{target_table},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -102,18 +102,18 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         ctx,
         seq_table_spec{
             .name = std::string{secondary_table},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
         {seq_row{.pk = 1, .sequences = {short_motif}}});
     exec_sql(ctx, fmt::format(
         "CREATE TEMP TABLE sequence_acceptance_match_binding_queries ("
-        " id integer PRIMARY KEY, seq bioseq.seq('dna4',32)); "
+        " id integer PRIMARY KEY, seq bioseq.seq('dna4',64)); "
         "INSERT INTO sequence_acceptance_match_binding_queries VALUES "
-        " (1, '{}'::bioseq.seq('dna4',32)),"
-        " (2, '{}'::bioseq.seq('dna4',32)),"
-        " (3, '{}'::bioseq.seq('dna4',32));",
+        " (1, '{}'::bioseq.seq('dna4',64)),"
+        " (2, '{}'::bioseq.seq('dna4',64)),"
+        " (3, '{}'::bioseq.seq('dna4',64));",
         motif, short_motif, motif));
     exec_sql(ctx,
         "SET max_parallel_workers_per_gather = 0; "
@@ -175,7 +175,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "SELECT bioseq.query_len(t.seq0), bioseq.target_len(t.seq0), "
         "       bioseq.cigar(t.seq0) "
         "FROM {} AS t "
-        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))",
+        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',64))",
         target_table, motif));
     REQUIRE(base_owner_rows.size() == 1u);
     REQUIRE(base_owner_rows.front()[0]
@@ -198,7 +198,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "         bioseq.query_end(t.pk) AS query_end, "
         "         bioseq.cigar(t.pk) AS lineage_cigar "
         "  FROM {} AS t "
-        "  WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))"
+        "  WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',64))"
         ") "
         "SELECT owned.query_len, owned.target_len, owned.exact_cigar, "
         "       owned.query_start, owned.query_end, owned.lineage_cigar "
@@ -257,7 +257,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "FROM {} AS t "
         "INNER JOIN sequence_acceptance_match_binding_queries AS q "
         "ON q.id=2 AND mmsearch(t.seq0[128:224],q.seq) "
-        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))",
+        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',64))",
         target_table, motif));
     REQUIRE(base_outer_ambiguous.sqlstate == "42702");
     REQUIRE(base_outer_ambiguous.contains(
@@ -420,7 +420,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     const std::string base_param_execution = fmt::format(
         "EXECUTE sequence_acceptance_base_param_sliced_join({});",
         format_literal(
-            motif, seq_typmod{.alphabet = "dna4", .width = 32}));
+            motif, seq_typmod{.alphabet = "dna4", .width = 64}));
     const auto base_param_plan = explain_text<false>(
         ctx, base_param_execution);
     REQUIRE(std::count_if(
@@ -460,7 +460,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "ORDER BY t.pk, q.id",
         target_table,
         format_literal(
-            motif, seq_typmod{.alphabet = "dna4", .width = 32}));
+            motif, seq_typmod{.alphabet = "dna4", .width = 64}));
     const auto base_const_same_target_plan = explain_text<false>(
         ctx, base_const_same_target_sql);
     REQUIRE(std::count_if(
@@ -488,7 +488,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "ORDER BY t.pk",
         target_table,
         format_literal(
-            motif, seq_typmod{.alphabet = "dna4", .width = 32})));
+            motif, seq_typmod{.alphabet = "dna4", .width = 64})));
     const auto sliced_query_rows = query_rows(ctx, fmt::format(
         "SELECT t.pk, q.id FROM {} AS t "
         "INNER JOIN sequence_acceptance_match_binding_queries AS q "

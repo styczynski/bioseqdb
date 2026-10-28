@@ -43,10 +43,10 @@ void seed_transformed_join_fixture(connection_test_context& ctx) {
     exec_sql(ctx,
              fmt::format("CREATE TEMP TABLE {} ("
                          "id int PRIMARY KEY, target_pk int NOT NULL, "
-                         "seq bioseq.seq('dna4',32));"
+                         "seq bioseq.seq('dna4',64));"
                          "INSERT INTO {} VALUES "
                          "(1, 1, {}), "
-                         "(2, 1, NULL::bioseq.seq('dna4',32)), "
+                         "(2, 1, NULL::bioseq.seq('dna4',64)), "
                          "(3, 1, {});",
                          k_transformed_join_queries,
                          k_transformed_join_queries,

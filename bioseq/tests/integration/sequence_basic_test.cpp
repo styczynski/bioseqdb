@@ -141,6 +141,16 @@ TEMPLATE_TEST_CASE_SIG(
     for (const auto alphabet : {std::string_view("dna4"), std::string_view("dna5")}) {
 #endif
         const seq_typmod typmod{.alphabet = alphabet, .width = p_width};
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        if constexpr (p_width != 64) {
+            const auto disabled_width = sql_error(
+                ctx, fmt::format("SELECT {}::text;", format_literal("", typmod)));
+            REQUIRE(disabled_width.sqlstate == "22023");
+            REQUIRE(disabled_width.contains(fmt::format(
+                "bioseq.seq width {} is not enabled in this build", p_width)));
+            continue;
+        }
+#endif
         const auto text = query_scalar(
             ctx, fmt::format("SELECT {}::text;", format_literal("", typmod)));
         REQUIRE(text == "");
@@ -171,7 +181,7 @@ TEST_CASE("Empty literal survives INSERT-then-SELECT on heap table",
         ctx,
         seq_table_spec{
             .name = std::string(k_table),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
         },
         {
@@ -200,8 +210,8 @@ TEST_CASE("bioseq.seq comparison operators yield lexicographic ordering",
                   "       (a OPERATOR(bioseq.=) b) AS eq, "
                   "       (a OPERATOR(bioseq.>) b) AS gt, "
                   "       bioseq.seq_cmp(a, b) AS cmp "
-                  "FROM (SELECT 'ACGT'::bioseq.seq('dna4', 8) AS a, "
-                  "             'ACTA'::bioseq.seq('dna4', 8) AS b) t;");
+                  "FROM (SELECT 'ACGT'::bioseq.seq('dna4', 64) AS a, "
+                  "             'ACTA'::bioseq.seq('dna4', 64) AS b) t;");
     REQUIRE(row[0].value() == "t");
     REQUIRE(row[1].value() == "f");
     REQUIRE(row[2].value() == "f");
@@ -248,12 +258,12 @@ TEST_CASE("bioseq.seq prefix ordering: shorter prefix sorts before its extension
     auto ctx = fresh_context();
     const auto row = query_one(
         ctx,
-        "SELECT ('A'::bioseq.seq('dna4', 8) "
-        "        OPERATOR(bioseq.<) 'AC'::bioseq.seq('dna4', 8)),"
-        "       ('AC'::bioseq.seq('dna4', 8) "
-        "        OPERATOR(bioseq.=) 'AC'::bioseq.seq('dna4', 8)),"
-        "       ('ACGT'::bioseq.seq('dna4', 8) "
-        "        OPERATOR(bioseq.>) 'ACG'::bioseq.seq('dna4', 8));");
+        "SELECT ('A'::bioseq.seq('dna4', 64) "
+        "        OPERATOR(bioseq.<) 'AC'::bioseq.seq('dna4', 64)),"
+        "       ('AC'::bioseq.seq('dna4', 64) "
+        "        OPERATOR(bioseq.=) 'AC'::bioseq.seq('dna4', 64)),"
+        "       ('ACGT'::bioseq.seq('dna4', 64) "
+        "        OPERATOR(bioseq.>) 'ACG'::bioseq.seq('dna4', 64));");
     REQUIRE(row[0].value() == "t");
     REQUIRE(row[1].value() == "t");
     REQUIRE(row[2].value() == "t");
@@ -262,20 +272,27 @@ TEST_CASE("bioseq.seq prefix ordering: shorter prefix sorts before its extension
 TEST_CASE("bioseq.seq_cmp accepts unequal-typmod operands and orders consistently",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
-    // If comparison succeeds across storage widths, reversing the operands
-    // must reverse its sign
     constexpr std::string_view sql_pair =
         "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 16), "
         "                      'ACGT'::bioseq.seq('dna4', 64));";
-    const bool succeeds = !sql_fails(ctx, sql_pair);
-    if (succeeds) {
-        const int forward = std::stoi(query_scalar(ctx, sql_pair));
-        const int reverse = std::stoi(query_scalar(
-            ctx,
-            "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 64), "
-            "                      'ACGT'::bioseq.seq('dna4', 16));"));
-        REQUIRE(forward == -reverse);
-    }
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    const auto disabled_width = sql_error(ctx, sql_pair);
+    REQUIRE(disabled_width.sqlstate == "22023");
+    REQUIRE(disabled_width.contains(
+        "bioseq.seq width 16 is not enabled in this build"));
+    REQUIRE(query_scalar_int(
+        ctx,
+        "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 64), "
+        "                      'ACGT'::bioseq.seq('dna4', 64));") == 0);
+#else
+    // Reversing physically distinct operands must reverse the comparison sign.
+    const int forward = std::stoi(query_scalar(ctx, sql_pair));
+    const int reverse = std::stoi(query_scalar(
+        ctx,
+        "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 64), "
+        "                      'ACGT'::bioseq.seq('dna4', 16));"));
+    REQUIRE(forward == -reverse);
+#endif
 }
 
 TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
@@ -333,7 +350,7 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
     const auto invalid_dna4 = sql_error(
-        ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;");
+        ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 64)::text;");
     REQUIRE(invalid_dna4.sqlstate == "22P02");
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     /* The DNA4-only build rejects N while parsing the unbound input. */
@@ -349,7 +366,7 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
 #endif
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     const auto unsupported_alphabet = sql_error(
-        ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;");
+        ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 64)::text;");
     REQUIRE(unsupported_alphabet.sqlstate == "22023");
     REQUIRE(unsupported_alphabet.contains(
         "bioseq.seq alphabet \"dna5\" is not supported"));
@@ -357,7 +374,7 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
 #else
     REQUIRE(query_scalar(
         ctx,
-        "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;") == "ACGTN");
+        "SELECT 'ACGTN'::bioseq.seq('dna5', 64)::text;") == "ACGTN");
 #endif
 }
 

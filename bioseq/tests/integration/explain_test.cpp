@@ -80,7 +80,7 @@ TEST_CASE("EXPLAIN ANALYZE on mmsearch query reports the BioseqScan rows",
     const auto plan =
         explain_text<true>(ctx,
                            fmt::format("SELECT pk, bioseq.cigar(pk) FROM {} WHERE mmsearch(seq0, "
-                                       "'AAAA'::bioseq.seq('dna4', 32)) ORDER BY pk;",
+                                       "'AAAA'::bioseq.seq('dna4', 64)) ORDER BY pk;",
                                        k_table));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
     REQUIRE(plan_contains(plan, "actual time"));

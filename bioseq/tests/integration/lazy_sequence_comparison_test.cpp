@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <libpq-fe.h>
+#include <fmt/format.h>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -15,7 +16,7 @@ import bioseq.tests.integration.lazy_sequence_slicing_acceptance_test_support;
 using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::lazy_sequence_slicing_acceptance_test_support;
 
-TEST_CASE("self casts preserve logical values across widths and layouts",
+TEST_CASE("self casts preserve logical values across supported widths and layouts",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({
         "sequence_acceptance_cast_matrix",
@@ -24,33 +25,75 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
         "sequence_acceptance_cast_layout_assign",
         "sequence_acceptance_cast_dna5",
     });
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    for (const int width : {8, 16, 32}) {
+        const auto disabled_width = sql_error(ctx, fmt::format(
+            "SELECT 'ACGT'::bioseq.seq('dna4', {});", width));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", width)));
+    }
+#endif
+    // Keep the actual narrow representations in the wider profile. Normal
+    // builds exercise the same flat/source/expanded/TOAST paths with 64-bit storage.
     exec_sql(ctx,
         "CREATE TABLE sequence_acceptance_cast_matrix "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (id int, s bioseq.seq('dna4',8)); "
+#else
+        " (id int, s bioseq.seq('dna4',64)); "
+#endif
         "ALTER TABLE sequence_acceptance_cast_matrix ALTER COLUMN s SET STORAGE EXTERNAL; "
         "INSERT INTO sequence_acceptance_cast_matrix VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (1,'ACGT'::bioseq.seq('dna4',8)), "
         " (2,repeat('ACGT',300000)::bioseq.seq('dna4',8)); "
+#else
+        " (1,'ACGT'::bioseq.seq('dna4',64)), "
+        " (2,repeat('ACGT',300000)::bioseq.seq('dna4',64)); "
+#endif
         "CREATE TABLE sequence_acceptance_cast_source "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (id int, s bioseq.seq('dna4',8)) USING bioseq; "
+#else
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq; "
+#endif
         "INSERT INTO sequence_acceptance_cast_source VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (1,'ACGT'::bioseq.seq('dna4',8)); "
-        "CREATE TABLE sequence_acceptance_cast_assign "
-        " (w8 bioseq.seq('dna4',8), "
+#else
+        " (1,'ACGT'::bioseq.seq('dna4',64)); "
+#endif
+        "CREATE TABLE sequence_acceptance_cast_assign ("
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        "  w8 bioseq.seq('dna4',8), "
         "  w16 bioseq.seq('dna4',16), "
         "  w32 bioseq.seq('dna4',32), "
+#endif
         "  w64 bioseq.seq('dna4',64)); "
-        "INSERT INTO sequence_acceptance_cast_assign "
-        "SELECT s,s,s,s FROM sequence_acceptance_cast_source WHERE id=1; "
+        "INSERT INTO sequence_acceptance_cast_assign SELECT "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        "s,s,s,"
+#endif
+        "s FROM sequence_acceptance_cast_source WHERE id=1; "
         "CREATE TABLE sequence_acceptance_cast_layout_assign "
         " (id int, value bioseq.seq('dna4',64)); "
         "INSERT INTO sequence_acceptance_cast_layout_assign VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (1,'ACGT'::bioseq.seq('dna4',8)); "
+#else
+        " (1,'ACGT'::bioseq.seq('dna4',64)); "
+#endif
         "INSERT INTO sequence_acceptance_cast_layout_assign VALUES "
         " (2,'ACGT'::bioseq.seq); "
         "INSERT INTO sequence_acceptance_cast_layout_assign VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (3,'AC'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
         "    'GT'::bioseq.seq('dna4',8)); "
+#else
+        " (3,'AC'::bioseq.seq('dna4',64) OPERATOR(bioseq.||) "
+        "    'GT'::bioseq.seq('dna4',64)); "
+#endif
         "INSERT INTO sequence_acceptance_cast_layout_assign "
         "SELECT 4,s FROM sequence_acceptance_cast_matrix WHERE id=2; "
         "INSERT INTO sequence_acceptance_cast_layout_assign "
@@ -58,9 +101,13 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
 
     const auto flat = query_one(
         ctx,
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "SELECT (s::bioseq.seq('dna4',8))::text, "
         "       (s::bioseq.seq('dna4',16))::text, "
         "       (s::bioseq.seq('dna4',32))::text, "
+#else
+        "SELECT "
+#endif
         "       (s::bioseq.seq('dna4',64))::text, "
         "       (s::bioseq.seq)::text "
         "FROM sequence_acceptance_cast_matrix WHERE id=1;");
@@ -71,26 +118,39 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
     const auto typmodless = query_one(
         ctx,
         "SELECT bioseq.seq_send("
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "         'ACGT'::bioseq.seq('dna4',8)::bioseq.seq) = "
         "       bioseq.seq_send('ACGT'::bioseq.seq('dna4',8)), "
+#else
+        "         'ACGT'::bioseq.seq('dna4',64)::bioseq.seq) = "
+        "       bioseq.seq_send('ACGT'::bioseq.seq('dna4',64)), "
+#endif
         "       bioseq.seq_cmp("
         "         'ACGT'::bioseq.seq::bioseq.seq, "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "         'ACGT'::bioseq.seq::bioseq.seq('dna4',8)) < 0;");
+#else
+        "         'ACGT'::bioseq.seq::bioseq.seq('dna4',64)) < 0;");
+#endif
     REQUIRE(typmodless[0] == "t");
     REQUIRE(typmodless[1] == "t");
 
     const auto unbound_bind = query_one(
         ctx,
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "SELECT ('ACGT'::bioseq.seq::bioseq.seq('dna4',8))::text, "
         "       ('ACGT'::bioseq.seq::bioseq.seq('dna4',16))::text, "
         "       ('ACGT'::bioseq.seq::bioseq.seq('dna4',32))::text, "
+#else
+        "SELECT "
+#endif
         "       ('ACGT'::bioseq.seq::bioseq.seq('dna4',64))::text;");
     for (const auto& value : unbound_bind) {
         REQUIRE(value == "ACGT");
     }
     const auto invalid_unbound_bind = sql_error(
         ctx,
-        "SELECT 'ACGN'::bioseq.seq::bioseq.seq('dna4',8);");
+        "SELECT 'ACGN'::bioseq.seq::bioseq.seq('dna4',64);");
     REQUIRE(invalid_unbound_bind.sqlstate == "22P02");
 
     REQUIRE(query_scalar_int(
@@ -103,11 +163,19 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
         "FROM sequence_acceptance_cast_matrix WHERE id=2;") == "ACGT");
     REQUIRE(query_scalar(
         ctx,
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "SELECT (('ACGT'::bioseq.seq('dna4',8))[1:3]"
+#else
+        "SELECT (('ACGT'::bioseq.seq('dna4',64))[1:3]"
+#endif
         "          ::bioseq.seq('dna4',64))::text;") == "CG");
     REQUIRE(query_scalar(
         ctx,
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "SELECT ('ACGT'::bioseq.seq::bioseq.seq('dna4',32))::text;")
+#else
+        "SELECT ('ACGT'::bioseq.seq::bioseq.seq('dna4',64))::text;")
+#endif
         == "ACGT");
 
     const auto expanded = query_one(
@@ -116,12 +184,21 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
         "          'GT'::bioseq.seq)"
         "          ::bioseq.seq('dna4',64)))::text, "
         "       (bioseq.reverse("
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "          'ACGT'::bioseq.seq('dna4',8))"
         "          ::bioseq.seq('dna4',16))::text, "
+#else
+        "          'ACGT'::bioseq.seq('dna4',64))"
+        "          ::bioseq.seq('dna4',64))::text, "
+#endif
         "       bioseq.seq_cmp("
         "         bioseq.reverse('ACGT'::bioseq.seq)::bioseq.seq, "
         "         bioseq.reverse('ACGT'::bioseq.seq)"
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "           ::bioseq.seq('dna4',8)) < 0;");
+#else
+        "           ::bioseq.seq('dna4',64)) < 0;");
+#endif
     REQUIRE(expanded[0] == "ACGT");
     REQUIRE(expanded[1] == "TGCA");
     REQUIRE(expanded[2] == "t");
@@ -138,8 +215,11 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
 
     const auto assigned = query_one(
         ctx,
-        "SELECT w8::text,w16::text,w32::text,w64::text "
-        "FROM sequence_acceptance_cast_assign;");
+        "SELECT "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        "w8::text,w16::text,w32::text,"
+#endif
+        "w64::text FROM sequence_acceptance_cast_assign;");
     for (const auto& value : assigned) {
         REQUIRE(value == "ACGT");
     }
@@ -160,10 +240,10 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
         "CREATE TABLE sequence_acceptance_cast_dna5 "
         " (value bioseq.seq('dna5',64));");
     constexpr std::array cross_alphabet_explicit{
-        "SELECT 'A'::bioseq.seq('dna4',8)"
+        "SELECT 'A'::bioseq.seq('dna4',64)"
         "         ::bioseq.seq('dna5',64);",
-        "SELECT ('A'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
-        "        'C'::bioseq.seq('dna4',8))"
+        "SELECT ('A'::bioseq.seq('dna4',64) OPERATOR(bioseq.||) "
+        "        'C'::bioseq.seq('dna4',64))"
         "         ::bioseq.seq('dna5',64);",
         "SELECT s::bioseq.seq('dna5',64) "
         "FROM sequence_acceptance_cast_source WHERE id=1;",
@@ -175,10 +255,10 @@ TEST_CASE("self casts preserve logical values across widths and layouts",
 
     constexpr std::array cross_alphabet_assignment{
         "INSERT INTO sequence_acceptance_cast_dna5 "
-        "VALUES ('A'::bioseq.seq('dna4',8));",
+        "VALUES ('A'::bioseq.seq('dna4',64));",
         "INSERT INTO sequence_acceptance_cast_dna5 "
-        "VALUES ('A'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
-        "        'C'::bioseq.seq('dna4',8));",
+        "VALUES ('A'::bioseq.seq('dna4',64) OPERATOR(bioseq.||) "
+        "        'C'::bioseq.seq('dna4',64));",
         "INSERT INTO sequence_acceptance_cast_dna5 "
         "SELECT s FROM sequence_acceptance_cast_source WHERE id=1;",
     };
@@ -195,9 +275,15 @@ TEST_CASE("logical equality order and hashes ignore storage width",
     const auto row = query_one(
         ctx,
         "WITH v(a,b,c,d) AS (VALUES ("
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " 'ACGT'::bioseq.seq('dna4',8), "
         " 'ACGT'::bioseq.seq('dna4',16), "
         " 'ACGT'::bioseq.seq('dna4',32), "
+#else
+        " 'ACGT'::bioseq.seq('dna4',64), "
+        " bioseq.reverse(bioseq.reverse('ACGT'::bioseq.seq('dna4',64))), "
+        " ('AACGTT'::bioseq.seq('dna4',64))[1:5], "
+#endif
         " 'ACGT'::bioseq.seq('dna4',64))) "
         "SELECT bioseq.seq_eq(a,b), bioseq.seq_eq(b,c), "
         "       bioseq.seq_eq(c,d), "
@@ -219,22 +305,42 @@ TEST_CASE("logical equality order and hashes ignore storage width",
         ctx,
         "SELECT count(*) FROM ("
         " SELECT value FROM (VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "  ('ACGT'::bioseq.seq('dna4',8)), "
+#else
         "  ('ACGT'::bioseq.seq('dna4',64)), "
+#endif
+        "  ('ACGT'::bioseq.seq('dna4',64)), "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "  ('TGCA'::bioseq.seq('dna4',32))) AS x(value) "
+#else
+        "  ('TGCA'::bioseq.seq('dna4',64))) AS x(value) "
+#endif
         " GROUP BY value) AS grouped;") == 2);
     REQUIRE(query_scalar_int(
         ctx,
         "SELECT count(DISTINCT value) FROM (VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('ACGT'::bioseq.seq('dna4',8)), "
+#else
         " ('ACGT'::bioseq.seq('dna4',64)), "
+#endif
+        " ('ACGT'::bioseq.seq('dna4',64)), "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('TGCA'::bioseq.seq('dna4',32))) AS x(value);") == 2);
+#else
+        " ('TGCA'::bioseq.seq('dna4',64))) AS x(value);") == 2);
+#endif
 
     const auto tagged = query_one(
         ctx,
         "WITH v(ua,uc,ba,bc) AS (VALUES ("
         " 'A'::bioseq.seq, 'C'::bioseq.seq, "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " 'A'::bioseq.seq('dna4',8), "
+#else
+        " 'A'::bioseq.seq('dna4',64), "
+#endif
         " 'C'::bioseq.seq('dna4',64))) "
         "SELECT bioseq.seq_cmp(ua,uc) < 0, "
         "       bioseq.seq_cmp(ba,bc) < 0, "
@@ -253,14 +359,22 @@ TEST_CASE("logical equality order and hashes ignore storage width",
         "SELECT string_agg(label, ',' ORDER BY value) FROM (VALUES "
         " ('ua','A'::bioseq.seq), "
         " ('uc','C'::bioseq.seq), "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('ba','A'::bioseq.seq('dna4',8)), "
+#else
+        " ('ba','A'::bioseq.seq('dna4',64)), "
+#endif
         " ('bc','C'::bioseq.seq('dna4',64))) AS v(label,value);")
         == "ua,uc,ba,bc");
     REQUIRE(query_scalar_int(
         ctx,
         "SELECT count(DISTINCT value) FROM (VALUES "
         " ('A'::bioseq.seq), "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('A'::bioseq.seq('dna4',8)), "
+#else
+        " ('A'::bioseq.seq('dna4',64)), "
+#endif
         " ('A'::bioseq.seq('dna4',64)), "
         " ('C'::bioseq.seq)) AS v(value);") == 3);
 
@@ -268,7 +382,11 @@ TEST_CASE("logical equality order and hashes ignore storage width",
     const auto mixed_alphabet = query_one(
         ctx,
         "WITH v(d4,d5) AS (VALUES ("
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " 'A'::bioseq.seq('dna4',8), "
+#else
+        " 'A'::bioseq.seq('dna4',64), "
+#endif
         " 'A'::bioseq.seq('dna5',64))) "
         "SELECT NOT bioseq.seq_eq(d4,d5), "
         "       bioseq.seq_cmp(d4,d5) < 0, "
@@ -299,15 +417,27 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
         "INSERT INTO sequence_acceptance_total_key VALUES "
         " ('uc','C'::bioseq.seq); "
         "INSERT INTO sequence_acceptance_total_key VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('d4a8','A'::bioseq.seq('dna4',8)); "
+#else
+        " ('d4a8','A'::bioseq.seq('dna4',64)); "
+#endif
         "INSERT INTO sequence_acceptance_total_key VALUES "
         " ('d4a64','A'::bioseq.seq('dna4',64)); "
         "INSERT INTO sequence_acceptance_total_key VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('d4c','C'::bioseq.seq('dna4',32));");
+#else
+        " ('d4c','C'::bioseq.seq('dna4',64));");
+#endif
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     exec_sql(ctx,
         "INSERT INTO sequence_acceptance_total_key VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " ('d5a','A'::bioseq.seq('dna5',16));");
+#else
+        " ('d5a','A'::bioseq.seq('dna5',64));");
+#endif
 #endif
     exec_sql(ctx,
         "CREATE INDEX sequence_acceptance_total_key_btree_idx "
@@ -319,10 +449,19 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
         "CREATE TABLE public.sequence_acceptance_total_key_join AS "
         " TABLE sequence_acceptance_total_key; "
         "CREATE TABLE public.sequence_acceptance_total_key_source "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (id int, value bioseq.seq('dna4',8)) USING bioseq; "
+#else
+        " (id int, value bioseq.seq('dna4',64)) USING bioseq; "
+#endif
         "INSERT INTO sequence_acceptance_total_key_source VALUES "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " (1,'A'::bioseq.seq('dna4',8)), "
         " (2,'C'::bioseq.seq('dna4',8)); "
+#else
+        " (1,'A'::bioseq.seq('dna4',64)), "
+        " (2,'C'::bioseq.seq('dna4',64)); "
+#endif
         "CREATE INDEX sequence_acceptance_total_key_source_length_idx "
         " ON sequence_acceptance_total_key_source ((bioseq.len(value)));");
 
@@ -359,7 +498,11 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
             ctx,
             "SELECT string_agg(label,',' ORDER BY label) "
             "FROM sequence_acceptance_total_key "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
             "WHERE value = 'A'::bioseq.seq('dna4',16);")
+#else
+            "WHERE value = 'A'::bioseq.seq('dna4',64);")
+#endif
             == "d4a64,d4a8");
 
         const auto hash_plan = explain_text<false>(

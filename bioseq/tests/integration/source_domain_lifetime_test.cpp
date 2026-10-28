@@ -21,9 +21,9 @@ TEST_CASE("thousands of locator rows share one binding domain",
     auto ctx = fresh_context({"source_lifetime_source_many"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_many "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_many "
-        "SELECT g, repeat('ACGT',1024)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',1024)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,1500) AS g;");
 
     constexpr auto aggregate_sql =
@@ -57,11 +57,11 @@ TEST_CASE("BatchSort retains exact source routes without flattening tuples",
     auto ctx = fresh_context({"source_lifetime_source_batch_sort"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_batch_sort "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_batch_sort VALUES "
-        " (1, repeat('T',4096)::bioseq.seq('dna4',32)),"
-        " (2, repeat('A',4096)::bioseq.seq('dna4',32)),"
-        " (3, repeat('AC',2048)::bioseq.seq('dna4',32)),"
+        " (1, repeat('T',4096)::bioseq.seq('dna4',64)),"
+        " (2, repeat('A',4096)::bioseq.seq('dna4',64)),"
+        " (3, repeat('AC',2048)::bioseq.seq('dna4',64)),"
         " (4, NULL);"
         "SET bioseq.planner.sequence_sort_scan.enabled = on;"
         "SET bioseq.aligner.vulkan.enabled = off;");
@@ -96,9 +96,9 @@ TEST_CASE("repeated source leaves reuse one callback scanner entry",
     auto ctx = fresh_context({"source_lifetime_source_repeat"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_repeat "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_repeat VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',64));");
 
     reset_source_counters(ctx);
     REQUIRE(query_scalar(ctx,
@@ -146,9 +146,9 @@ TEST_CASE("cached readers survive serial per-tuple resets",
         "SET max_parallel_workers_per_gather=0;"
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "CREATE TABLE source_lifetime_source_reader_context "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_reader_context "
-        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,8) AS g;");
 
     constexpr auto sql =
@@ -188,10 +188,10 @@ TEST_CASE("SliceProject keeps one lowest owner across ordering and Gather",
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "SET max_parallel_workers_per_gather=0;"
         "CREATE TABLE source_lifetime_slice_ordered_owner ("
-        " pk int, s bioseq.seq('dna4',32)"
+        " pk int, s bioseq.seq('dna4',64)"
         ") USING bioseq WITH (autovacuum_enabled=false);"
         "INSERT INTO source_lifetime_slice_ordered_owner "
-        "SELECT g, repeat('A',4161-g)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('A',4161-g)::bioseq.seq('dna4',64) "
         "FROM generate_series(64,1,-1) AS g;");
 
     std::vector<long long> lengths_by_pk;
@@ -304,13 +304,13 @@ TEST_CASE("nested two-provider projection preserves upper leases",
         {"source_lifetime_source_left", "source_lifetime_source_right"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_left "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TABLE source_lifetime_source_right "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_left VALUES "
-        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));"
+        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',64));"
         "INSERT INTO source_lifetime_source_right VALUES "
-        " (1, repeat('TGCA',2048)::bioseq.seq('dna4',32));");
+        " (1, repeat('TGCA',2048)::bioseq.seq('dna4',64));");
     const auto plan = explain_text<false>(ctx,
         "SELECT (l.s[0:16] OPERATOR(bioseq.||) r.s[0:16])[2:30] "
         "FROM source_lifetime_source_left l "
@@ -347,17 +347,17 @@ TEST_CASE("three-source concat retains arbitrary upper routes",
     });
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_three_left "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TABLE source_lifetime_source_three_middle "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TABLE source_lifetime_source_three_right "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_three_left VALUES "
-        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));"
+        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',64));"
         "INSERT INTO source_lifetime_source_three_middle VALUES "
-        " (1, repeat('TGCA',2048)::bioseq.seq('dna4',32));"
+        " (1, repeat('TGCA',2048)::bioseq.seq('dna4',64));"
         "INSERT INTO source_lifetime_source_three_right VALUES "
-        " (1, repeat('GATC',2048)::bioseq.seq('dna4',32));");
+        " (1, repeat('GATC',2048)::bioseq.seq('dna4',64));");
 
     constexpr const char* three_source_expression =
         "((l.s[0:16] OPERATOR(bioseq.||) m.s[0:16]) "
@@ -412,9 +412,9 @@ TEST_CASE("expression index build uses one standalone source owner",
     auto ctx = fresh_context({"source_lifetime_source_index"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_index "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_index "
-        "SELECT g, repeat('ACGT',1024)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',1024)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,128) AS g;");
 
     reset_source_counters(ctx);
@@ -434,9 +434,9 @@ TEST_CASE("cursor-held source registries promote or abort with subxact",
     auto ctx = fresh_context({"source_lifetime_source_subxact"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_subxact "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_subxact VALUES "
-        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',64));");
     // Start the subtransaction test after the setup statements have committed.
     exec_sql(ctx, "BEGIN;");
 
@@ -543,9 +543,9 @@ TEST_CASE("source bindings obey MVCC epoch rewrite and relcache invalidation",
     auto setup = fresh_context({table});
     exec_sql(setup,
         "CREATE TABLE source_lifetime_source_mvcc "
-        " (id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int PRIMARY KEY, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_mvcc VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',64));");
 
     connection_test_context reader;
     connection_test_context writer;
@@ -557,7 +557,7 @@ TEST_CASE("source bindings obey MVCC epoch rewrite and relcache invalidation",
 
     exec_sql(writer,
         "UPDATE source_lifetime_source_mvcc "
-        "SET s=repeat('TGCA',4096)::bioseq.seq('dna4',32) "
+        "SET s=repeat('TGCA',4096)::bioseq.seq('dna4',64) "
         "WHERE id=1;");
     REQUIRE(query_scalar(reader,
         "SELECT bioseq.to_text(s[0:8]) "
@@ -593,11 +593,11 @@ TEST_CASE("attribute snapshot and callback session keys remain distinct",
     auto ctx = fresh_context({"source_lifetime_source_binding"});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_source_binding "
-        " (id int, left_seq bioseq.seq('dna4',32), "
-        "  right_seq bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, left_seq bioseq.seq('dna4',64), "
+        "  right_seq bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_binding "
-        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32), "
-        "          repeat('TGCA',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',64), "
+        "          repeat('TGCA',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,4) AS g;");
 
     reset_source_counters(ctx);

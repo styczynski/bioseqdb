@@ -27,13 +27,13 @@ TEST_CASE("COALESCE short circuits without inspecting lazy arms",
     const auto selected = query_one(
         ctx,
         "WITH v(s) AS (VALUES "
-        " ('ACGTA'::bioseq.seq('dna4',32))) "
-        "SELECT COALESCE(NULL::bioseq.seq('dna4',32), s[1:4]) "
+        " ('ACGTA'::bioseq.seq('dna4',64))) "
+        "SELECT COALESCE(NULL::bioseq.seq('dna4',64), s[1:4]) "
         "         OPERATOR(bioseq.=) s[1:4], "
         "       bioseq.len(COALESCE("
         "         s[:2], pg_temp.sequence_acceptance_raise_seq()::"
-        "                   bioseq.seq('dna4',32))), "
-        "       pg_typeof(COALESCE(NULL::bioseq.seq('dna4',32), "
+        "                   bioseq.seq('dna4',64))), "
+        "       pg_typeof(COALESCE(NULL::bioseq.seq('dna4',64), "
         "                          s[1:4]))::text "
         "FROM v;");
     REQUIRE(selected[0] == "t");
@@ -42,13 +42,13 @@ TEST_CASE("COALESCE short circuits without inspecting lazy arms",
 
     REQUIRE(query_scalar(
         ctx,
-        "SELECT COALESCE(NULL::bioseq.seq('dna4',32), "
-        "                NULL::bioseq.seq('dna4',32)) IS NULL;") == "t");
+        "SELECT COALESCE(NULL::bioseq.seq('dna4',64), "
+        "                NULL::bioseq.seq('dna4',64)) IS NULL;") == "t");
     REQUIRE(query_scalar(
         ctx,
-        "SELECT COALESCE('AC'::bioseq.seq('dna4',32), "
+        "SELECT COALESCE('AC'::bioseq.seq('dna4',64), "
         "                pg_temp.sequence_acceptance_raise_seq()::"
-        "                  bioseq.seq('dna4',32))::text;")
+        "                  bioseq.seq('dna4',64))::text;")
         == "AC");
     REQUIRE(query_scalar(
         ctx,
@@ -162,15 +162,15 @@ TEST_CASE("COALESCE-selected operands preserve the concat matrix",
         "   pg_temp.sequence_acceptance_concat_raise_letter_array()) || "
         "   COALESCE('AC'::bioseq.seq, "
         "     pg_temp.sequence_acceptance_concat_raise_seq()))) "
-        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(c,c::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(d,d::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(e,e::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(f,f::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(g,g::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(h,h::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(i,i::bioseq.seq('dna4',8)) < 0 "
+        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(c,c::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(d,d::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(e,e::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(f,f::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(g,g::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(h,h::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(i,i::bioseq.seq('dna4',64)) < 0 "
         "FROM v;");
     for (const auto& value : unbound_states) {
         REQUIRE(value == "t");
@@ -255,11 +255,11 @@ TEST_CASE("concat overloads are symmetric strict and typed",
 
     const auto examples = query_one(
         ctx,
-        "SELECT ('AC'::bioseq.seq('dna4',32) || 'TG')::text, "
-        "       (text 'GT' || 'AC'::bioseq.seq('dna4',32))::text, "
+        "SELECT ('AC'::bioseq.seq('dna4',64) || 'TG')::text, "
+        "       (text 'GT' || 'AC'::bioseq.seq('dna4',64))::text, "
         "       (ARRAY['A','CT','G'] || "
-        "        'TA'::bioseq.seq('dna4',32))::text, "
-        "       ('CG'::bioseq.seq('dna4',32) || "
+        "        'TA'::bioseq.seq('dna4',64))::text, "
+        "       ('CG'::bioseq.seq('dna4',64) || "
         "        ARRAY['A'::bioseq.letter('dna4'), "
         "              'T'::bioseq.letter('dna4')])::text;");
     REQUIRE(examples[0] == "ACTG");
@@ -270,19 +270,19 @@ TEST_CASE("concat overloads are symmetric strict and typed",
     const auto symmetric = query_one(
         ctx,
         "SELECT (varchar 'GT' || "
-        "        'AC'::bioseq.seq('dna4',8))::text, "
-        "       ('AC'::bioseq.seq('dna4',8) || varchar 'GT')::text, "
+        "        'AC'::bioseq.seq('dna4',64))::text, "
+        "       ('AC'::bioseq.seq('dna4',64) || varchar 'GT')::text, "
         "       (ARRAY['G','T']::text[] || "
-        "        'AC'::bioseq.seq('dna4',8))::text, "
-        "       ('AC'::bioseq.seq('dna4',8) || "
+        "        'AC'::bioseq.seq('dna4',64))::text, "
+        "       ('AC'::bioseq.seq('dna4',64) || "
         "        ARRAY['G','T']::text[])::text, "
         "       (ARRAY['G'::bioseq.letter('dna4'), "
         "              'T'::bioseq.letter('dna4')] || "
-        "        'AC'::bioseq.seq('dna4',8))::text, "
-        "       ('AC'::bioseq.seq('dna4',8) || "
+        "        'AC'::bioseq.seq('dna4',64))::text, "
+        "       ('AC'::bioseq.seq('dna4',64) || "
         "        ARRAY['G'::bioseq.letter('dna4'), "
         "              'T'::bioseq.letter('dna4')])::text, "
-        "       pg_typeof('AC'::bioseq.seq('dna4',8) || 'GT') = "
+        "       pg_typeof('AC'::bioseq.seq('dna4',64) || 'GT') = "
         "         'bioseq.seq'::regtype;");
     REQUIRE(symmetric[0] == "GTAC");
     REQUIRE(symmetric[1] == "ACGT");
@@ -294,10 +294,10 @@ TEST_CASE("concat overloads are symmetric strict and typed",
 
     const auto identities = query_one(
         ctx,
-        "SELECT ('AC'::bioseq.seq('dna4',8) || "
+        "SELECT ('AC'::bioseq.seq('dna4',64) || "
         "        ARRAY[]::text[])::text, "
         "       (ARRAY[]::text[] || "
-        "        'AC'::bioseq.seq('dna4',8))::text, "
+        "        'AC'::bioseq.seq('dna4',64))::text, "
         "       ('AC'::bioseq.seq || ''::bioseq.seq)::text, "
         "       (''::bioseq.seq || 'AC'::bioseq.seq)::text;");
     REQUIRE(identities[0] == "AC");
@@ -308,32 +308,32 @@ TEST_CASE("concat overloads are symmetric strict and typed",
     REQUIRE(query_scalar(
         ctx,
         "SELECT (NULL::bioseq.seq || "
-        "        'AC'::bioseq.seq('dna4',8)) IS NULL "
-        "   AND ('AC'::bioseq.seq('dna4',8) || "
+        "        'AC'::bioseq.seq('dna4',64)) IS NULL "
+        "   AND ('AC'::bioseq.seq('dna4',64) || "
         "        NULL::bioseq.seq) IS NULL "
-        "   AND ('AC'::bioseq.seq('dna4',8) || NULL::text) IS NULL "
-        "   AND (NULL::text || 'AC'::bioseq.seq('dna4',8)) IS NULL "
-        "   AND ('AC'::bioseq.seq('dna4',8) || NULL::varchar) IS NULL "
-        "   AND (NULL::varchar || 'AC'::bioseq.seq('dna4',8)) IS NULL "
-        "   AND ('AC'::bioseq.seq('dna4',8) || NULL::text[]) IS NULL "
-        "   AND (NULL::text[] || 'AC'::bioseq.seq('dna4',8)) IS NULL "
-        "   AND ('AC'::bioseq.seq('dna4',8) || "
+        "   AND ('AC'::bioseq.seq('dna4',64) || NULL::text) IS NULL "
+        "   AND (NULL::text || 'AC'::bioseq.seq('dna4',64)) IS NULL "
+        "   AND ('AC'::bioseq.seq('dna4',64) || NULL::varchar) IS NULL "
+        "   AND (NULL::varchar || 'AC'::bioseq.seq('dna4',64)) IS NULL "
+        "   AND ('AC'::bioseq.seq('dna4',64) || NULL::text[]) IS NULL "
+        "   AND (NULL::text[] || 'AC'::bioseq.seq('dna4',64)) IS NULL "
+        "   AND ('AC'::bioseq.seq('dna4',64) || "
         "        NULL::bioseq.letter[]) IS NULL "
         "   AND (NULL::bioseq.letter[] || "
-        "        'AC'::bioseq.seq('dna4',8)) IS NULL;")
+        "        'AC'::bioseq.seq('dna4',64)) IS NULL;")
         == "t");
 
     constexpr std::array null_element_queries{
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
         "       ARRAY['G'::text,NULL::text];",
         "SELECT ARRAY['G'::text,NULL::text] || "
-        "       'AC'::bioseq.seq('dna4',8);",
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
+        "       'AC'::bioseq.seq('dna4',64);",
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
         "       ARRAY['G'::bioseq.letter('dna4'), "
         "             NULL::bioseq.letter];",
         "SELECT ARRAY['G'::bioseq.letter('dna4'), "
         "             NULL::bioseq.letter] || "
-        "       'AC'::bioseq.seq('dna4',8);",
+        "       'AC'::bioseq.seq('dna4',64);",
     };
     for (const char* query : null_element_queries) {
         CAPTURE(query);
@@ -341,18 +341,18 @@ TEST_CASE("concat overloads are symmetric strict and typed",
     }
 
     constexpr std::array multidimensional_queries{
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
         "       ARRAY[['G','T'],['A','C']]::text[];",
         "SELECT ARRAY[['G','T'],['A','C']]::text[] || "
-        "       'AC'::bioseq.seq('dna4',8);",
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
+        "       'AC'::bioseq.seq('dna4',64);",
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
         "       ARRAY[["
         "         'G'::bioseq.letter('dna4')],["
         "         'T'::bioseq.letter('dna4')]];",
         "SELECT ARRAY[["
         "         'G'::bioseq.letter('dna4')],["
         "         'T'::bioseq.letter('dna4')]] || "
-        "       'AC'::bioseq.seq('dna4',8);",
+        "       'AC'::bioseq.seq('dna4',64);",
     };
     for (const char* query : multidimensional_queries) {
         CAPTURE(query);
@@ -360,12 +360,12 @@ TEST_CASE("concat overloads are symmetric strict and typed",
     }
 
     constexpr std::array invalid_fragment_queries{
-        "SELECT 'AC'::bioseq.seq('dna4',8) || text 'N';",
-        "SELECT text 'N' || 'AC'::bioseq.seq('dna4',8);",
-        "SELECT 'AC'::bioseq.seq('dna4',8) || varchar 'N';",
-        "SELECT varchar 'N' || 'AC'::bioseq.seq('dna4',8);",
-        "SELECT 'AC'::bioseq.seq('dna4',8) || ARRAY['N']::text[];",
-        "SELECT ARRAY['N']::text[] || 'AC'::bioseq.seq('dna4',8);",
+        "SELECT 'AC'::bioseq.seq('dna4',64) || text 'N';",
+        "SELECT text 'N' || 'AC'::bioseq.seq('dna4',64);",
+        "SELECT 'AC'::bioseq.seq('dna4',64) || varchar 'N';",
+        "SELECT varchar 'N' || 'AC'::bioseq.seq('dna4',64);",
+        "SELECT 'AC'::bioseq.seq('dna4',64) || ARRAY['N']::text[];",
+        "SELECT ARRAY['N']::text[] || 'AC'::bioseq.seq('dna4',64);",
     };
     for (const char* query : invalid_fragment_queries) {
         CAPTURE(query);
@@ -374,15 +374,15 @@ TEST_CASE("concat overloads are symmetric strict and typed",
 
     REQUIRE(query_scalar_int(
         ctx,
-        "SELECT bioseq.len('AC'::bioseq.seq('dna4',8) || "
+        "SELECT bioseq.len('AC'::bioseq.seq('dna4',64) || "
         "                  repeat('G',100000));") == 100002);
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     constexpr std::array mixed_letter_queries{
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
         "       ARRAY['N'::bioseq.letter('dna5')];",
         "SELECT ARRAY['N'::bioseq.letter('dna5')] || "
-        "       'AC'::bioseq.seq('dna4',8);",
+        "       'AC'::bioseq.seq('dna4',64);",
     };
     for (const char* query : mixed_letter_queries) {
         CAPTURE(query);
@@ -400,8 +400,8 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
         ctx,
         "SELECT ('AC'::bioseq.seq || 'GT'::bioseq.seq)::text, "
         "       ('AC'::bioseq.seq || "
-        "        'GT'::bioseq.seq('dna4',8))::text, "
-        "       ('AC'::bioseq.seq('dna4',8) || "
+        "        'GT'::bioseq.seq('dna4',64))::text, "
+        "       ('AC'::bioseq.seq('dna4',64) || "
         "        'GT'::bioseq.seq)::text, "
         "       ('AC'::bioseq.seq || text 'GT')::text, "
         "       (text 'GT' || 'AC'::bioseq.seq)::text;");
@@ -415,8 +415,8 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
         ctx,
         "SELECT (bioseq.reverse("
         "          'AC'::bioseq.seq || 'GT'::bioseq.seq) || "
-        "        'AA'::bioseq.seq('dna4',8))::text, "
-        "       ('AA'::bioseq.seq('dna4',8) || "
+        "        'AA'::bioseq.seq('dna4',64))::text, "
+        "       ('AA'::bioseq.seq('dna4',64) || "
         "        bioseq.reverse("
         "          'AC'::bioseq.seq || 'GT'::bioseq.seq))::text;");
     REQUIRE(transformed_adoption[0] == "TGCAAA");
@@ -450,13 +450,13 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
         " varchar 'GT' || 'AC'::bioseq.seq, "
         " 'AC'::bioseq.seq || ARRAY['G','T']::text[], "
         " ARRAY['G','T']::text[] || 'AC'::bioseq.seq)) "
-        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(c,c::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(d,d::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(e,e::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(f,f::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(g,g::bioseq.seq('dna4',8)) < 0 "
+        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(c,c::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(d,d::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(e,e::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(f,f::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(g,g::bioseq.seq('dna4',64)) < 0 "
         "FROM v;");
     for (const auto& value : remains_unbound) {
         REQUIRE(value == "t");
@@ -493,8 +493,8 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
         "WITH v(a,b) AS (VALUES ("
         " 'AC'::bioseq.seq || ARRAY[]::bioseq.letter[], "
         " ARRAY[]::bioseq.letter[] || 'AC'::bioseq.seq)) "
-        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',8)) < 0, "
-        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',8)) < 0 "
+        "SELECT bioseq.seq_cmp(a,a::bioseq.seq('dna4',64)) < 0, "
+        "       bioseq.seq_cmp(b,b::bioseq.seq('dna4',64)) < 0 "
         "FROM v;");
     REQUIRE(empty_letters_stay_unbound[0] == "t");
     REQUIRE(empty_letters_stay_unbound[1] == "t");
@@ -512,8 +512,8 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
 
     constexpr std::array invalid_adoption_queries{
         "SELECT 'AN'::bioseq.seq || "
-        "       'C'::bioseq.seq('dna4',8);",
-        "SELECT 'C'::bioseq.seq('dna4',8) || "
+        "       'C'::bioseq.seq('dna4',64);",
+        "SELECT 'C'::bioseq.seq('dna4',64) || "
         "       'AN'::bioseq.seq;",
     };
     for (const char* query : invalid_adoption_queries) {
@@ -525,17 +525,17 @@ TEST_CASE("unbound concat adopts only an explicit physical alphabet",
     const auto dna5_adoption = query_one(
         ctx,
         "SELECT ('AN'::bioseq.seq || "
-        "        'N'::bioseq.seq('dna5',16))::text, "
-        "       ('N'::bioseq.seq('dna5',16) || "
+        "        'N'::bioseq.seq('dna5',64))::text, "
+        "       ('N'::bioseq.seq('dna5',64) || "
         "        'AN'::bioseq.seq)::text;");
     REQUIRE(dna5_adoption[0] == "ANN");
     REQUIRE(dna5_adoption[1] == "NAN");
 
     constexpr std::array mixed_sequence_queries{
-        "SELECT 'A'::bioseq.seq('dna4',8) || "
-        "       'A'::bioseq.seq('dna5',8);",
-        "SELECT 'A'::bioseq.seq('dna5',8) || "
-        "       'A'::bioseq.seq('dna4',8);",
+        "SELECT 'A'::bioseq.seq('dna4',64) || "
+        "       'A'::bioseq.seq('dna5',64);",
+        "SELECT 'A'::bioseq.seq('dna5',64) || "
+        "       'A'::bioseq.seq('dna4',64);",
     };
     for (const char* query : mixed_sequence_queries) {
         CAPTURE(query);
@@ -618,28 +618,28 @@ TEST_CASE("sequence operators never resolve through string casts",
 
     REQUIRE(sql_error(
         ctx,
-        "SELECT 'AC'::bioseq.seq('dna4',8) || "
-        "       'GT'::bioseq.seq('dna4',8);").sqlstate == "42883");
+        "SELECT 'AC'::bioseq.seq('dna4',64) || "
+        "       'GT'::bioseq.seq('dna4',64);").sqlstate == "42883");
     REQUIRE(sql_error(
         ctx,
-        "SELECT 'AC'::bioseq.seq('dna4',8) = "
-        "       'AC'::bioseq.seq('dna4',8);").sqlstate == "42883");
+        "SELECT 'AC'::bioseq.seq('dna4',64) = "
+        "       'AC'::bioseq.seq('dna4',64);").sqlstate == "42883");
     REQUIRE(sql_error(
         ctx,
-        "SELECT reverse('AC'::bioseq.seq('dna4',8));").sqlstate == "42883");
+        "SELECT reverse('AC'::bioseq.seq('dna4',64));").sqlstate == "42883");
 
     const auto qualified = query_one(
         ctx,
-        "SELECT pg_typeof('AC'::bioseq.seq('dna4',8) "
+        "SELECT pg_typeof('AC'::bioseq.seq('dna4',64) "
         "                 OPERATOR(bioseq.||) "
-        "                 'GT'::bioseq.seq('dna4',8))::text, "
-        "       ('AC'::bioseq.seq('dna4',8) "
+        "                 'GT'::bioseq.seq('dna4',64))::text, "
+        "       ('AC'::bioseq.seq('dna4',64) "
         "        OPERATOR(bioseq.=) "
-        "        'AC'::bioseq.seq('dna4',8)), "
-        "       bioseq.reverse('AC'::bioseq.seq('dna4',8))::text, "
-        "       (('ACGT'::bioseq.seq('dna4',8))[0:2] "
+        "        'AC'::bioseq.seq('dna4',64)), "
+        "       bioseq.reverse('AC'::bioseq.seq('dna4',64))::text, "
+        "       (('ACGT'::bioseq.seq('dna4',64))[0:2] "
         "        OPERATOR(bioseq.||) "
-        "        ('ACGT'::bioseq.seq('dna4',8))[2:])::text;");
+        "        ('ACGT'::bioseq.seq('dna4',64))[2:])::text;");
     REQUIRE(qualified[0] == "bioseq.seq");
     REQUIRE(qualified[1] == "t");
     REQUIRE(qualified[2] == "CA");
@@ -651,9 +651,9 @@ TEST_CASE("unsupported subscript shapes fail explicitly",
     auto ctx = fresh_context({"sequence_acceptance_subscript_errors"});
     exec_sql(ctx,
         "CREATE TABLE sequence_acceptance_subscript_errors "
-        " (s bioseq.seq('dna4',8)); "
+        " (s bioseq.seq('dna4',64)); "
         "INSERT INTO sequence_acceptance_subscript_errors VALUES "
-        " ('ACGT'::bioseq.seq('dna4',8));");
+        " ('ACGT'::bioseq.seq('dna4',64));");
 
     const auto assignment = sql_error(
         ctx,
@@ -688,28 +688,28 @@ TEST_CASE("string and anyarray consumers require explicit bridges",
     REQUIRE(sql_error(
         ctx,
         "SELECT pg_temp.sequence_acceptance_f_text("
-        " 'AC'::bioseq.seq('dna4',8));").sqlstate == "42883");
+        " 'AC'::bioseq.seq('dna4',64));").sqlstate == "42883");
     REQUIRE(sql_error(
         ctx,
         "SELECT pg_temp.sequence_acceptance_f_varchar("
-        " 'AC'::bioseq.seq('dna4',8));").sqlstate == "42883");
+        " 'AC'::bioseq.seq('dna4',64));").sqlstate == "42883");
     REQUIRE(sql_error(
         ctx,
         "SELECT pg_temp.sequence_acceptance_f_anyarray("
-        " 'AC'::bioseq.seq('dna4',8));").sqlstate == "42883");
+        " 'AC'::bioseq.seq('dna4',64));").sqlstate == "42883");
 
     const auto explicit_bridges = query_one(
         ctx,
         "SELECT pg_temp.sequence_acceptance_f_text(bioseq.to_text("
-        "         'AC'::bioseq.seq('dna4',8))), "
+        "         'AC'::bioseq.seq('dna4',64))), "
         "       pg_temp.sequence_acceptance_f_text("
-        "         'AC'::bioseq.seq('dna4',8)::text), "
+        "         'AC'::bioseq.seq('dna4',64)::text), "
         "       pg_temp.sequence_acceptance_f_varchar("
-        "         'AC'::bioseq.seq('dna4',8)::varchar), "
+        "         'AC'::bioseq.seq('dna4',64)::varchar), "
         "       pg_temp.sequence_acceptance_f_anyarray(bioseq.to_array("
-        "         'AC'::bioseq.seq('dna4',8))), "
+        "         'AC'::bioseq.seq('dna4',64))), "
         "       pg_catalog.array_length(bioseq.to_array("
-        "         'AC'::bioseq.seq('dna4',8)),1);");
+        "         'AC'::bioseq.seq('dna4',64)),1);");
     REQUIRE(explicit_bridges[0] == "AC");
     REQUIRE(explicit_bridges[1] == "AC");
     REQUIRE(explicit_bridges[2] == "AC");

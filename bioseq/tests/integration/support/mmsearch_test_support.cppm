@@ -407,11 +407,11 @@ void require_no_current_compatible_persisted_index(
         "required compatible persisted minimizer index unavailable"));
 }
 
-/** Format the first shared alignment target as a DNA4/32 literal. */
+/** Format the first shared alignment target as a DNA4/64 literal. */
 [[nodiscard]] std::string batch_join_target_literal() {
     return format_literal(
         hoe_seed_rows().front().sequences.front(),
-        seq_typmod{.alphabet = "dna4", .width = 32});
+        seq_typmod{.alphabet = "dna4", .width = 64});
 }
 
 /** Build an mmsearch join using sliced, concatenated, and twice-reversed target data. */
@@ -621,7 +621,7 @@ void seed_batch_join_target(
         ctx,
         seq_table_spec{
             .name = std::string{k_batch_join_target},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },
@@ -650,7 +650,7 @@ void load_batch_join_queries(
     exec_sqlf(
         ctx,
         "CREATE TEMP TABLE {} "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 32));",
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 64));",
         k_batch_join_queries);
     if (count == 0) {
         return;
@@ -662,7 +662,7 @@ void load_batch_join_queries(
             batch_join_target_literal(),
             format_literal(
                 "ACGTACGTAC",
-                seq_typmod{.alphabet = "dna4", .width = 32}))
+                seq_typmod{.alphabet = "dna4", .width = 64}))
         : batch_join_target_literal();
     exec_sqlf(
         ctx,
@@ -680,14 +680,14 @@ void load_batch_join_query(
     exec_sqlf(
         ctx,
         "CREATE TEMP TABLE {} "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 32));",
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 64));",
         k_batch_join_queries);
     exec_sqlf(
         ctx,
         "INSERT INTO {} VALUES (0, {});",
         k_batch_join_queries,
         format_literal(
-            sequence, seq_typmod{.alphabet = "dna4", .width = 32}));
+            sequence, seq_typmod{.alphabet = "dna4", .width = 64}));
 }
 
 /** Build the batch-join statement for one index-read requirement. */

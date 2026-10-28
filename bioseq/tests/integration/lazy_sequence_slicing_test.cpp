@@ -88,7 +88,7 @@ TEST_CASE("Python coordinates and letter access are exact",
     const auto row = query_one(
         ctx,
         "WITH v(s) AS (VALUES "
-        " ('CTAGT'::bioseq.seq('dna4',32))) "
+        " ('CTAGT'::bioseq.seq('dna4',64))) "
         "SELECT s[:]::text, s[-4:-1]::text, s[-100:100]::text, "
         "       s[3:1]::text, s[0]::text, s[-1]::text, "
         "       s[5] IS NULL, s[-6] IS NULL "
@@ -104,7 +104,7 @@ TEST_CASE("Python coordinates and letter access are exact",
 
     const auto nulls = query_one(
         ctx,
-        "WITH v(s) AS (VALUES ('ACGT'::bioseq.seq('dna4',32))) "
+        "WITH v(s) AS (VALUES ('ACGT'::bioseq.seq('dna4',64))) "
         "SELECT s[NULL::bigint:2]::text, s[:NULL::bigint]::text, "
         "       s[NULL::bigint]::text FROM v;");
     REQUIRE_FALSE(nulls[0].has_value());
@@ -189,7 +189,7 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
     // expression has no declared typmod.
     REQUIRE(query_scalar(
         ctx,
-        "SELECT (('AC'::bioseq.seq('dna4',32))[1])::text;") == "C");
+        "SELECT (('AC'::bioseq.seq('dna4',64))[1])::text;") == "C");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     const auto mismatched_typmod = sql_error(
@@ -249,34 +249,34 @@ TEST_CASE("nested slice concat and transforms preserve logical value",
     exec_sql(ctx, "SET search_path TO pg_catalog, public;");
     const auto unqualified_concat = sql_error(
         ctx,
-        "SELECT ('AC'::bioseq.seq('dna4',32)) "
-        "       || ('GT'::bioseq.seq('dna4',32));");
+        "SELECT ('AC'::bioseq.seq('dna4',64)) "
+        "       || ('GT'::bioseq.seq('dna4',64));");
     REQUIRE(unqualified_concat.sqlstate == "42883");
     REQUIRE(query_scalar(
         ctx,
-        "SELECT (('AC'::bioseq.seq('dna4',32)) "
+        "SELECT (('AC'::bioseq.seq('dna4',64)) "
         "        OPERATOR(bioseq.||) "
-        "        ('GT'::bioseq.seq('dna4',32)))::text;") == "ACGT");
+        "        ('GT'::bioseq.seq('dna4',64)))::text;") == "ACGT");
 
     REQUIRE(query_scalar(
         ctx,
-        "SELECT (((('ACGTACGTACGT'::bioseq.seq('dna4',32))[:10])[5:] "
+        "SELECT (((('ACGTACGTACGT'::bioseq.seq('dna4',64))[:10])[5:] "
         "       OPERATOR(bioseq.||) "
-        "       ('TTTTCCCCAAAA'::bioseq.seq('dna4',32))[5:10])"
+        "       ('TTTTCCCCAAAA'::bioseq.seq('dna4',64))[5:10])"
         "       [1:-1])::text;") == "GTACCCCA");
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq.reverse("
-        " 'AAGC'::bioseq.seq('dna4',32))::text;") == "CGAA");
+        " 'AAGC'::bioseq.seq('dna4',64))::text;") == "CGAA");
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq.reverse_complement("
-        " 'AAGC'::bioseq.seq('dna4',32))::text;") == "GCTT");
+        " 'AAGC'::bioseq.seq('dna4',64))::text;") == "GCTT");
 
     REQUIRE(query_scalar(
         ctx,
         "WITH a AS MATERIALIZED ("
-        "  SELECT 'ACGTACGT'::bioseq.seq('dna4',32) AS s), "
+        "  SELECT 'ACGTACGT'::bioseq.seq('dna4',64) AS s), "
         "b AS MATERIALIZED ("
         "  SELECT s[1:7] OPERATOR(bioseq.||) "
         "         bioseq.reverse(s[0:2]) AS s FROM a) "
@@ -335,7 +335,7 @@ TEST_CASE("explicit text and array bridges validate and round-trip",
     auto ctx = fresh_context();
     REQUIRE(query_scalar(
         ctx,
-        "SELECT (('AC'::bioseq.seq('dna4',32)) "
+        "SELECT (('AC'::bioseq.seq('dna4',64)) "
         " OPERATOR(bioseq.||) ARRAY['G','TAC']::text[])::text;")
         == "ACGTAC");
     REQUIRE(query_scalar(
@@ -343,23 +343,23 @@ TEST_CASE("explicit text and array bridges validate and round-trip",
         "SELECT (ARRAY['A'::bioseq.letter('dna4'),"
         "              'C'::bioseq.letter('dna4')] "
         " OPERATOR(bioseq.||) "
-        " 'GT'::bioseq.seq('dna4',32))::text;") == "ACGT");
+        " 'GT'::bioseq.seq('dna4',64))::text;") == "ACGT");
     REQUIRE(query_scalar(
         ctx,
         "SELECT array_to_string(bioseq.to_array("
-        " 'ACGT'::bioseq.seq('dna4',32)), '');") == "ACGT");
+        " 'ACGT'::bioseq.seq('dna4',64)), '');") == "ACGT");
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq.from_array(ARRAY["
         " 'A'::bioseq.letter('dna4'), 'C'::bioseq.letter('dna4')],"
-        " 32)::text;") == "AC");
+        " 64)::text;") == "AC");
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq.from_array(ARRAY[]::bioseq.letter[],"
-        " 'dna4', 32)::text;") == "");
+        " 'dna4', 64)::text;") == "");
     const auto null_element = sql_error(
         ctx,
-        "SELECT ('A'::bioseq.seq('dna4',32)) "
+        "SELECT ('A'::bioseq.seq('dna4',64)) "
         " OPERATOR(bioseq.||) ARRAY['C'::text,NULL::text];");
     REQUIRE(null_element.sqlstate == "22004");
 }
@@ -371,16 +371,16 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
         "sequence_slicing_slice_plan_dst"});
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_src "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     exec_sql(ctx,
         "INSERT INTO sequence_slicing_slice_src VALUES "
-        " (1, repeat('ACGT',262144)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',262144)::bioseq.seq('dna4',64));");
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_dst "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_plan_dst "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     exec_sql(ctx,
         "CREATE TEMP TABLE sequence_slicing_cast_namespace_probe(marker int);"
         "CREATE FUNCTION pg_temp.sequence_slicing_unrelated_seq_cast("
@@ -401,7 +401,7 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
         ctx,
         "SELECT bioseq.seq_send(s[0:64]) = "
         "       bioseq.seq_send(repeat('ACGT',16)::"
-        "                          bioseq.seq('dna4',32)) "
+        "                          bioseq.seq('dna4',64)) "
         "FROM sequence_slicing_slice_dst;") == "t");
     REQUIRE(query_scalar(
         ctx,
@@ -638,10 +638,10 @@ TEST_CASE("long source slice is faster than whole-sequence materialization",
         "SET bioseq.vectorization.enabled = off;");
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_perf "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     exec_sql(ctx,
         "INSERT INTO sequence_slicing_slice_perf VALUES "
-        " (1, repeat('ACGT',2097152)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',2097152)::bioseq.seq('dna4',64));");
 
     constexpr auto slice_sql =
         "SELECT octet_length(bioseq.to_text(s[4194304:4194368])) "
@@ -711,10 +711,10 @@ TEST_CASE("SliceProject selection is exact and fail-closed",
     auto ctx = fresh_context({"sequence_slicing_slice_plan"});
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_plan "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     exec_sql(ctx,
         "INSERT INTO sequence_slicing_slice_plan VALUES "
-        " (1, 'ACGTACGT'::bioseq.seq('dna4',32));");
+        " (1, 'ACGTACGT'::bioseq.seq('dna4',64));");
 
     const auto array_plan = explain_text<false>(
         ctx,

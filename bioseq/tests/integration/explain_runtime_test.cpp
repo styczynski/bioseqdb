@@ -20,10 +20,10 @@ TEST_CASE("transformed INNER mmsearch explains one per-row BatchJoin owner",
     seed_small_bioseq_column(ctx, target);
     exec_sql(ctx,
              "CREATE TEMP TABLE explain_slice_join_query "
-             "(id int, seq bioseq.seq('dna4',32));");
+             "(id int, seq bioseq.seq('dna4',64));");
     exec_sql(ctx,
              "INSERT INTO explain_slice_join_query VALUES "
-             "(1, 'ACGTACGT'::bioseq.seq('dna4',32));");
+             "(1, 'ACGTACGT'::bioseq.seq('dna4',64));");
 
     const auto plan = explain_with_options(ctx,
                                            "VERBOSE, COSTS OFF",
@@ -45,14 +45,14 @@ TEST_CASE("mmsearch slice boundaries follow the selected minimizer route",
     exec_sql(ctx,
              fmt::format("TRUNCATE {}; "
                          "INSERT INTO {} VALUES "
-                         "(1, repeat('ACGT',64)::bioseq.seq('dna4',32));",
+                         "(1, repeat('ACGT',64)::bioseq.seq('dna4',64));",
                          target,
                          target));
     exec_sql(ctx,
              "CREATE TEMP TABLE explain_slice_join_materialization_query "
-             "(id int, seq bioseq.seq('dna4',32)); "
+             "(id int, seq bioseq.seq('dna4',64)); "
              "INSERT INTO explain_slice_join_materialization_query VALUES "
-             "(1, repeat('ACGT',64)::bioseq.seq('dna4',32)); "
+             "(1, repeat('ACGT',64)::bioseq.seq('dna4',64)); "
              "SET max_parallel_workers_per_gather=0; "
              "SET bioseq.index.sequence_read.enabled=off; "
              "SET bioseq.aligner.vulkan.enabled=off;");

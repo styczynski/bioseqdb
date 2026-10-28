@@ -135,7 +135,7 @@ inline PGconn* connect_raw(const pg_credentials& credentials) {
 // Symbol-tount tests compare, exact base counts, such as four of each base
 // in ACGTACGTACGTACGT.
 
-// SQL fixtures spell out sequence type parameters such as bioseq.seq('dna4', 32).
+// SQL fixtures spell out sequence type parameters such as bioseq.seq('dna4', 64).
 /** @brief Owns one libpq session and captures its asynchronous notices. */
 export class connection_test_context {
 private:
@@ -865,10 +865,10 @@ export inline void publish_default_fixture_indexes(
 
 // Create the alignment fixture with the Bioseq table access method. Return
 // its type parameters for formatting query literals.
-/** @return The sequence type parameters used for the recreated alignment fixture. */
+/** @return The explicitly selected type parameters used for the recreated fixture. */
 export inline seq_typmod seed_hoe_fixture(
-    const connection_test_context& ctx, std::string_view name) {
-    constexpr seq_typmod typmod{.alphabet = "dna4", .width = 32};
+    const connection_test_context& ctx, std::string_view name,
+    const seq_typmod typmod = {.alphabet = "dna4", .width = 64}) {
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     exec_sqlf(ctx, "SET bioseq.vectorization.enabled = on;");
     // A short probe may have only one  seed. Allow that chain by lowering the
@@ -894,11 +894,11 @@ export inline seq_typmod seed_hoe_fixture(
 export constexpr std::string_view k_hoe_probe_sequence =
     "CTAGTCACTGTAGCCTGATCGTAGCTAGT";
 
-// Format the probe with the DNA4/32 type usyd by its target table.
-/** @return The shared probe as a DNA4 32-bit SQL literal */
+// Format the probe with the DNA4/64 type usyd by its target table.
+/** @return The shared probe as a DNA4 64-bit SQL literal */
 export [[nodiscard]] inline std::string hoe_probe_literal() {
     return format_literal(k_hoe_probe_sequence,
-                          seq_typmod{.alphabet = "dna4", .width = 32});
+                          seq_typmod{.alphabet = "dna4", .width = 64});
 }
 
 // Populate a Bioseq table with three fixed 16 bp sequences, then publish its indexes.
@@ -912,7 +912,7 @@ export inline void seed_small_bioseq_column(
         ctx,
         seq_table_spec{
             .name = std::string(name),
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 1,
             .using_bioseq = true,
         },

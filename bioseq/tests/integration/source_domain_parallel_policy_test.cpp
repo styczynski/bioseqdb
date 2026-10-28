@@ -23,14 +23,14 @@ TEST_CASE("BatchSort keeps child resnos distinct from physical attnos",
     exec_sql(ctx,
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "CREATE TABLE source_lifetime_batch_sort_attno_namespace ("
-        " pad bioseq.seq('dna4',32),"
+        " pad bioseq.seq('dna4',64),"
         " id int,"
-        " wanted bioseq.seq('dna4',32)"
+        " wanted bioseq.seq('dna4',64)"
         ") USING bioseq;"
         "INSERT INTO source_lifetime_batch_sort_attno_namespace VALUES ("
-        " repeat('A',4096)::bioseq.seq('dna4',32),"
+        " repeat('A',4096)::bioseq.seq('dna4',64),"
         " 7,"
-        " repeat('TGCA',1024)::bioseq.seq('dna4',32)"
+        " repeat('TGCA',1024)::bioseq.seq('dna4',64)"
         ");");
 
     /* wanted is the first output column but the, third table column. Mixing
@@ -82,16 +82,16 @@ TEST_CASE("parallel lazy providers adopt the flushed scan snapshot",
     exec_sql(ctx,
         "BEGIN;"
         "CREATE TABLE source_lifetime_parallel_source_snapshot "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq "
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq "
         " WITH (autovacuum_enabled=false);"
         "INSERT INTO source_lifetime_parallel_source_snapshot "
-        "SELECT g, repeat('TGCA',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('TGCA',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,64) AS g;"
         "COMMIT;");
     exec_sql(ctx,
         "BEGIN;"
         "INSERT INTO source_lifetime_parallel_source_snapshot "
-        "SELECT 1000+g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "SELECT 1000+g, repeat('ACGT',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,64) AS g;");
 
     constexpr auto sql =
@@ -143,13 +143,13 @@ TEST_CASE("parallel stripe claiming skips aborted same-relation gaps",
         "SET bioseq.storage.stripe.row_limit=1000;"
         "SET bioseq.storage.chunk_group.row_limit=1000;"
         "CREATE TABLE source_lifetime_parallel_stripe_gaps "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
 
     /* Aborted inserts leave gaps in the stripe IDs. Create visible stripes
      * 1, 3, and 5, then check that parallel readers visit each exactly once */
     exec_sql(ctx,
         "INSERT INTO source_lifetime_parallel_stripe_gaps "
-        "SELECT g, repeat('ACGT',16)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',16)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,1000) AS g;");
     exec_sql(ctx,
         "BEGIN;"
@@ -157,7 +157,7 @@ TEST_CASE("parallel stripe claiming skips aborted same-relation gaps",
         "ROLLBACK;");
     exec_sql(ctx,
         "INSERT INTO source_lifetime_parallel_stripe_gaps "
-        "SELECT g, repeat('TGCA',16)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('TGCA',16)::bioseq.seq('dna4',64) "
         "FROM generate_series(1001,2000) AS g;");
     exec_sql(ctx,
         "BEGIN;"
@@ -165,7 +165,7 @@ TEST_CASE("parallel stripe claiming skips aborted same-relation gaps",
         "ROLLBACK;");
     exec_sql(ctx,
         "INSERT INTO source_lifetime_parallel_stripe_gaps "
-        "SELECT g, repeat('GATT',16)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('GATT',16)::bioseq.seq('dna4',64) "
         "FROM generate_series(2001,3000) AS g;");
 
     REQUIRE(query_int_column(ctx,
@@ -239,9 +239,9 @@ TEST_CASE("parallel worker ERROR preserves DSM cleanup and original error",
     auto ctx = fresh_context({source});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_slice_worker_error "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_slice_worker_error "
-        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,256) AS g;");
     REQUIRE(query_scalar_int(ctx,
         "SELECT current_setting('max_parallel_workers')::int;") > 0);
@@ -311,15 +311,15 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
         "SET bioseq.aligner.vulkan.enabled=off;"
         "SET bioseq.scheduler.pipeline.mode='task_parallel';"
         "CREATE TABLE source_lifetime_source_routes "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
     const std::string route_target_sequence =
         source_domain_high_entropy_dna4(65536u);
     const std::string route_query_sequence =
         route_target_sequence.substr(32768u, 128u);
     exec_sqlf(ctx,
         "INSERT INTO source_lifetime_source_routes VALUES "
-        " (1, '{}'::bioseq.seq('dna4',32)),"
-        " (2, repeat('T',65536)::bioseq.seq('dna4',32));",
+        " (1, '{}'::bioseq.seq('dna4',64)),"
+        " (2, repeat('T',65536)::bioseq.seq('dna4',64));",
         route_target_sequence);
 
     reset_source_counters(ctx);
@@ -374,7 +374,7 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     const auto matches = query_int_column(ctx, fmt::format(
         "SELECT id FROM source_lifetime_source_routes "
         "WHERE mmsearch(s, "
-        " '{}'::bioseq.seq('dna4',32), "
+        " '{}'::bioseq.seq('dna4',64), "
         " aligner_options(index_read_requirement => 1)) "
         "ORDER BY id;",
         route_query_sequence));
@@ -445,14 +445,14 @@ TEST_CASE("locator columns never trust physical minmax metadata",
     auto ctx = fresh_context({table});
     exec_sql(ctx,
         "CREATE TABLE source_lifetime_locator_minmax "
-        " (id int, label text, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, label text, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_locator_minmax VALUES "
-        " (1,'a',repeat('A',8192)::bioseq.seq('dna4',32)),"
-        " (2,'c',repeat('C',8192)::bioseq.seq('dna4',32)),"
-        " (3,'g1',repeat('G',8192)::bioseq.seq('dna4',32)),"
-        " (4,'t',repeat('T',8192)::bioseq.seq('dna4',32)),"
-        " (5,'a2',repeat('A',8192)::bioseq.seq('dna4',32)),"
-        " (6,'g2',repeat('G',8192)::bioseq.seq('dna4',32));");
+        " (1,'a',repeat('A',8192)::bioseq.seq('dna4',64)),"
+        " (2,'c',repeat('C',8192)::bioseq.seq('dna4',64)),"
+        " (3,'g1',repeat('G',8192)::bioseq.seq('dna4',64)),"
+        " (4,'t',repeat('T',8192)::bioseq.seq('dna4',64)),"
+        " (5,'a2',repeat('A',8192)::bioseq.seq('dna4',64)),"
+        " (6,'g2',repeat('G',8192)::bioseq.seq('dna4',64));");
 
     const long long sequence_chunks = query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq.chunk "
@@ -470,9 +470,9 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         "AND attr_num=2 "
         "AND minimum_value IS NOT NULL AND maximum_value IS NOT NULL;") > 0);
 
-    const std::string adenine = "repeat('A',8192)::bioseq.seq('dna4',32)";
-    const std::string cytosine = "repeat('C',8192)::bioseq.seq('dna4',32)";
-    const std::string guanine = "repeat('G',8192)::bioseq.seq('dna4',32)";
+    const std::string adenine = "repeat('A',8192)::bioseq.seq('dna4',64)";
+    const std::string cytosine = "repeat('C',8192)::bioseq.seq('dna4',64)";
+    const std::string guanine = "repeat('G',8192)::bioseq.seq('dna4',64)";
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.<) {} ORDER BY id;",
         table, cytosine)) == std::vector<long long>{1, 5});
@@ -558,7 +558,7 @@ TEST_CASE("mmsearch ownership respects RLS barriers and effectful siblings",
     constexpr std::string_view table = "source_lifetime_source_security";
     auto ctx = fresh_context({table});
     const auto canonical_rows = hoe_seed_rows();
-    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    const seq_typmod dna4{.alphabet = "dna4", .width = 64};
     const std::string positive_target = format_literal(
         canonical_rows.front().sequences.front(), dna4);
     const std::string alternate_target = format_literal(
@@ -576,7 +576,7 @@ TEST_CASE("mmsearch ownership respects RLS barriers and effectful siblings",
         "SET bioseq.aligner.vulkan.enabled=off;"
         "SET bioseq.scheduler.pipeline.mode='task_parallel';"
         "CREATE TABLE source_lifetime_source_security "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "INSERT INTO source_lifetime_source_security VALUES "
         " (1,{}),(2,{}),(3,{});"
         "CREATE FUNCTION pg_temp.source_lifetime_nonleaky(i int) "

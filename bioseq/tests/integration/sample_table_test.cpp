@@ -51,12 +51,16 @@ TEST_CASE("bioseq.create_sample_table writes one catalog row and a "
     REQUIRE(sub_size > 0);
 }
 
-TEST_CASE("bioseq.create_sample_table rejects alphabets other than dna4",
+TEST_CASE("bioseq.create_sample_table rejects non-biological alphabets",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     auto ctx = fresh_context({k_sample_table});
-    REQUIRE(sql_fails(ctx,
-        fmt::format("SELECT bioseq.create_sample_table('{}', 1, 1024, 'dna5', 42);",
-                    k_sample_table)));
+    const auto unsupported_alphabet = sql_error(
+        ctx,
+        fmt::format("SELECT bioseq.create_sample_table('{}', 1, 1024, 'cigar', 42);",
+                    k_sample_table));
+    REQUIRE(unsupported_alphabet.sqlstate == "22023");
+    REQUIRE(unsupported_alphabet.contains(
+        "bioseq.create_sample_table requires a supported biological alphabet"));
 }
 
 TEST_CASE("sample table generators resolve the active creation namespace",
@@ -142,11 +146,11 @@ TEST_CASE("inspect_locator on an inline value returns inline fields",
     // An inline value reports version zero and its own sequence length.
     const long long version = query_scalar_int(ctx,
         "SELECT version FROM bioseq.inspect_locator("
-        "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));");
+        "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64));");
     REQUIRE(version == 0);
     const long long bp_size = query_scalar_int(ctx,
         "SELECT total_bp_size FROM bioseq.inspect_locator("
-        "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));");
+        "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64));");
     REQUIRE(bp_size == 32);
 }
 
@@ -156,11 +160,11 @@ TEST_CASE("INSERT INTO USING bioseq table writes per-fragment "
     auto ctx = fresh_context({k_sample_table});
     exec_sqlf(ctx,
               "CREATE TABLE {} (pk INT PRIMARY KEY, "
-              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              "seq bioseq.seq('dna4', 64)) USING bioseq;",
               k_sample_table);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
-              "'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
+              "'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64));",
               k_sample_table);
     // INSERT must  create a fragment storage entry for the sequence.
     REQUIRE(query_scalar_int(ctx,

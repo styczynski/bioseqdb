@@ -29,7 +29,7 @@ TEST_CASE("mmsearch on the canonical alignment dataset returns the expected matc
         query_rows(ctx,
                    fmt::format("SELECT pk FROM {} "
                                "WHERE mmsearch(seq0, "
-                               "  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4',32)) "
+                               "  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4',64)) "
                                "ORDER BY pk;",
                                k_alignment_table));
     REQUIRE(!hits.empty());

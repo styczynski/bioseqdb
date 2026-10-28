@@ -21,15 +21,35 @@ namespace {
 // Drop this fixture table whenever a test creates a fresh context for it.
 constexpr std::string_view k_coalesce_table = "typmod_coalesce";
 
+// Select an actual supported fixture type; explicit disabled requests still fail.
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+constexpr seq_typmod k_coalesce_typmod{.alphabet = "dna4", .width = 32};
+#else
+constexpr seq_typmod k_coalesce_typmod{.alphabet = "dna4", .width = 64};
+#endif
+
 }  // namespace
 
 TEST_CASE("Typmod coalesce keeps equality and hash support representation-independent",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context();
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    for (const int width : {8, 16, 32}) {
+        const auto disabled_width = sql_error(ctx, fmt::format(
+            "SELECT 'ACGTACGT'::bioseq.seq('dna4', {});", width));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", width)));
+    }
+#endif
     const auto row = query_one(
         ctx,
         "WITH v AS (SELECT "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         " 'ACGTACGT'::bioseq.seq('dna4',8) AS narrow,"
+#else
+        " 'ACGTACGT'::bioseq.seq('dna4', 64) AS narrow,"
+#endif
         " 'ACGTACGT'::bioseq.seq('dna4',64) AS wide) "
         "SELECT bioseq.seq_eq(narrow,wide),"
         "       bioseq.seq_hash(narrow)=bioseq.seq_hash(wide),"
@@ -49,19 +69,23 @@ TEST_CASE("Typmod coalesce keeps equality and hash support representation-indepe
 TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
           "yields the same rows as a width-matched query",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
-    // Compare the same probe encoded at two widths. Re-encoding the wider
-    // literal for the sarget column must preserve matches and coordinates.
+    // The wider profile compares distinct physical widths. Normal builds
+    // retain the admitted 64-bit query and coordinate checks.
     auto ctx = fresh_context({k_coalesce_table});
-    seed_hoe_fixture(ctx, k_coalesce_table);
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
 
-    // Use the column's declared 32-bit width.
+    // Use the fixture's explicitly selected storage width.
     const auto matched_width_rows = query_rows(
         ctx,
         fmt::format(
             "SELECT pk, bioseq.cigar(pk), bioseq.target_start(pk), bioseq.target_end(pk) "
             "  FROM {} "
             " WHERE mmsearch(seq0, "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+#else
+            "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
+#endif
             " ORDER BY pk;",
             k_coalesce_table));
 
@@ -85,11 +109,10 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
 TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "
           "profile",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
-    // Builds without all_coordinates store accepted sequence widths as uint64_t.
-    // The declared 32-bit column and 64-bit literal then need no conversion.
-    // all_coordinates keeps distinct widths, so EXPLAIN must show the conversion.
+    // Normal builds use an explicitly declared 64-bit fixture. The wider profile
+    // uses an actual 32-bit fixture, so its 64-bit literal requires conversion.
     auto ctx = fresh_context({k_coalesce_table});
-    seed_hoe_fixture(ctx, k_coalesce_table);
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
 
     const auto plan = explain_text(
         ctx,
@@ -111,13 +134,13 @@ TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "
 TEST_CASE("Cross-alphabet mmsearch rejects before generic recoding",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({k_coalesce_table});
-    seed_hoe_fixture(ctx, k_coalesce_table);
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
     const auto mismatch = sql_error(
         ctx,
         fmt::format(
             "SELECT pk FROM {} WHERE mmsearch("
             "seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'"
-            "::bioseq.seq('dna5', 32));",
+            "::bioseq.seq('dna5', 64));",
             k_coalesce_table));
     REQUIRE(mismatch.sqlstate == "42804");
     REQUIRE(mismatch.contains(
@@ -125,13 +148,13 @@ TEST_CASE("Cross-alphabet mmsearch rejects before generic recoding",
 }
 #endif
 
-// Compare DNA4 literals at each declared width with the DNA4/32 baseline.
+// Compare admitted DNA4 literals with the active fixture width.
 // DNA5 literals must fail as mismatched operands when DNA5 is enabled, or
 // as unsupported literals in DNA4-only builds. Fixture alphabet tags come
 // from bioseq.tests.integration.support.
 
 TEMPLATE_TEST_CASE_SIG(
-    "Typmod matrix: column dna4/32 against literal at (alphabet, width) — "
+    "Typmod matrix: active column against literal at (alphabet, width) — "
     "same-alphabet rows coalesce and different alphabets reject",
     "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]",
     ((class p_entry, int p_width), p_entry, p_width),
@@ -160,7 +183,18 @@ TEMPLATE_TEST_CASE_SIG(
     } else
 #endif
     {
-    seed_hoe_fixture(ctx, k_coalesce_table);
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    if constexpr (p_width != 64) {
+        const auto disabled_width = sql_error(ctx, fmt::format(
+            "SELECT 'ACGT'::bioseq.seq('{}', {});",
+            p_entry::alphabet_name_sv, p_width));
+        REQUIRE(disabled_width.sqlstate == "22023");
+        REQUIRE(disabled_width.contains(fmt::format(
+            "bioseq.seq width {} is not enabled in this build", p_width)));
+        return;
+    }
+#endif
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
 
     // Baseline at the column's exact typmod.
     const auto rows_baseline = query_rows(
@@ -169,7 +203,11 @@ TEMPLATE_TEST_CASE_SIG(
             "SELECT pk, bioseq.cigar(pk) "
             "  FROM {} "
             " WHERE mmsearch(seq0, "
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
+#else
+            "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)) "
+#endif
             " ORDER BY pk;",
             k_coalesce_table));
     REQUIRE_FALSE(rows_baseline.empty());
@@ -206,7 +244,7 @@ TEST_CASE("Same-alphabet PARAM_EXTERN queries rewidth in both target-width "
           "directions and match flat literals",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({k_coalesce_table, "typmod_coalesce_wide"});
-    seed_hoe_fixture(ctx, k_coalesce_table);
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
     exec_sql(
         ctx,
         "CREATE TABLE typmod_coalesce_wide ("
@@ -219,7 +257,11 @@ TEST_CASE("Same-alphabet PARAM_EXTERN queries rewidth in both target-width "
         ctx,
         "SELECT pk, bioseq.cigar(pk) FROM typmod_coalesce WHERE mmsearch("
         "seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'"
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "::bioseq.seq('dna4', 32)) ORDER BY pk;");
+#else
+        "::bioseq.seq('dna4', 64)) ORDER BY pk;");
+#endif
     exec_sql(
         ctx,
         "PREPARE typmod_param_wide(bioseq.seq('dna4', 64)) AS "
@@ -240,14 +282,22 @@ TEST_CASE("Same-alphabet PARAM_EXTERN queries rewidth in both target-width "
         "::bioseq.seq('dna4', 64)) ORDER BY pk;");
     exec_sql(
         ctx,
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "PREPARE typmod_param_narrow(bioseq.seq('dna4', 8)) AS "
+#else
+        "PREPARE typmod_param_narrow(bioseq.seq('dna4', 64)) AS "
+#endif
         "SELECT pk, bioseq.cigar(pk) FROM typmod_coalesce_wide "
         "WHERE mmsearch(seq0, $1) ORDER BY pk;");
     const auto wide_param = query_rows(
         ctx,
         "EXECUTE typmod_param_narrow("
         "'CTAGTCACTGTAGCCTGATCGTAGCTAGT'"
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
         "::bioseq.seq('dna4', 8));");
+#else
+        "::bioseq.seq('dna4', 64));");
+#endif
     REQUIRE_FALSE(wide_flat.empty());
     REQUIRE(wide_param == wide_flat);
     exec_sql(ctx, "DEALLOCATE typmod_param_wide; "
@@ -258,6 +308,13 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
           "target/query directions",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({"typmod_join_narrow", "typmod_join_wide"});
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    const auto disabled_width = sql_error(
+        ctx, "SELECT 'ACGT'::bioseq.seq('dna4', 8);");
+    REQUIRE(disabled_width.sqlstate == "22023");
+    REQUIRE(disabled_width.contains(
+        "bioseq.seq width 8 is not enabled in this build"));
+#endif
     exec_sql(ctx,
         "SET bioseq.index.insert_maintenance.enabled = off;"
         "SET bioseq.vectorization.enabled = on;"
@@ -271,7 +328,11 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         ctx,
         seq_table_spec{
             .name = "typmod_join_narrow",
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
             .typmod = {.alphabet = "dna4", .width = 8},
+#else
+            .typmod = {.alphabet = "dna4", .width = 64},
+#endif
             .seq_columns = 2,
             .using_bioseq = true,
         },
@@ -313,8 +374,9 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         "ON mmsearch(target.seq0[0:], query.seq1[0:]) "
         "ORDER BY target.pk, query.pk;";
 
-    /* Compare each cross-width join with a same-width join using the same
-     * operand form  and index-read setting Plain columns can use stored
+    /* Compare cross-width joins in the wider profile and admitted 64-bit joins
+     * otherwise, using the same operand form and index-read setting.
+     * Plain columns can use stored
      * minimizers, while sliced operands recompute them. Keep k, w, and the
      * chaining limits fixed while changing storage width. */
     const auto require_canonical_diagonal = [](
@@ -411,13 +473,13 @@ TEST_CASE("Cross-alphabet raw and sliced joins reject in both operand directions
     exec_sql(
         ctx,
         "CREATE TABLE cross_alphabet_join_dna4 ("
-        "id integer PRIMARY KEY, seq bioseq.seq('dna4', 32)) USING bioseq; "
+        "id integer PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq; "
         "CREATE TABLE cross_alphabet_join_dna5 ("
-        "id integer PRIMARY KEY, seq bioseq.seq('dna5', 32)) USING bioseq; "
+        "id integer PRIMARY KEY, seq bioseq.seq('dna5', 64)) USING bioseq; "
         "INSERT INTO cross_alphabet_join_dna4 VALUES "
-        "(1, repeat('ACGT', 400)::bioseq.seq('dna4', 32)); "
+        "(1, repeat('ACGT', 400)::bioseq.seq('dna4', 64)); "
         "INSERT INTO cross_alphabet_join_dna5 VALUES "
-        "(1, repeat('ACGT', 400)::bioseq.seq('dna5', 32));");
+        "(1, repeat('ACGT', 400)::bioseq.seq('dna5', 64));");
     const std::array<std::string_view, 4> statements{
         "SELECT d4.id FROM cross_alphabet_join_dna4 d4 "
         "JOIN cross_alphabet_join_dna5 d5 ON mmsearch(d4.seq, d5.seq);",
@@ -439,13 +501,13 @@ TEST_CASE("Cross-alphabet raw and sliced joins reject in both operand directions
 TEST_CASE("EXPLAIN rejects cross-alphabet mmsearch before plan execution",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({k_coalesce_table});
-    seed_hoe_fixture(ctx, k_coalesce_table);
+    seed_hoe_fixture(ctx, k_coalesce_table, k_coalesce_typmod);
     const auto mismatch = sql_error(
         ctx,
         fmt::format(
             "EXPLAIN SELECT pk FROM {} "
             " WHERE mmsearch(seq0, "
-            "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna5', 32));",
+            "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna5', 64));",
             k_coalesce_table));
     REQUIRE(mismatch.sqlstate == "42804");
     REQUIRE(mismatch.contains(

@@ -20,7 +20,7 @@ inline constexpr std::string_view k_table = "explain_sequences";
 /** Build the mmsearch query used by planner tests. */
 std::string explain_target_sql() {
     return fmt::format("SELECT pk, seq0 FROM {} WHERE mmsearch(seq0, "
-                       "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
+                       "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 64));",
                        k_table);
 }
 
@@ -28,7 +28,7 @@ std::string explain_target_sql() {
 std::string explain_highway_target_sql() {
     return fmt::format("SELECT pk, seq0, bioseq.edit(pk) AS edit_distance FROM {} "
                        "WHERE mmsearch(seq0, "
-                       "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
+                       "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 64));",
                        k_table);
 }
 

@@ -87,9 +87,9 @@ TEST_CASE("source-domain faults unwind every partial lifetime stage",
     auto ctx = fresh_context({"sequence_acceptance_source_faults"});
     exec_sql(ctx,
         "CREATE TABLE sequence_acceptance_source_faults "
-        " (id int, value bioseq.seq('dna4',32)) USING bioseq; "
+        " (id int, value bioseq.seq('dna4',64)) USING bioseq; "
         "INSERT INTO sequence_acceptance_source_faults VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',64));");
 
     const auto unknown = sql_error(
         ctx,
@@ -219,12 +219,12 @@ TEST_CASE("source read ERROR crosses every sequence callback boundary",
     });
     exec_sql(ctx,
         "CREATE TABLE sequence_acceptance_source_read_faults "
-        " (id int, value bioseq.seq('dna4',32)) USING bioseq; "
+        " (id int, value bioseq.seq('dna4',64)) USING bioseq; "
         "INSERT INTO sequence_acceptance_source_read_faults VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32)), "
-        " (2, repeat('TGCA',4096)::bioseq.seq('dna4',32)); "
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',64)), "
+        " (2, repeat('TGCA',4096)::bioseq.seq('dna4',64)); "
         "CREATE TABLE sequence_acceptance_source_read_heap "
-        " (value bioseq.seq('dna4',32));");
+        " (value bioseq.seq('dna4',64));");
     exec_sql(ctx,
         "SET bioseq.planner.sequence_sort_scan.enabled = on; "
         "SET bioseq.aligner.vulkan.enabled = off;");
@@ -396,7 +396,7 @@ TEST_CASE("fresh install catalogs expose exact public objects",
             "        JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace "
             "        JOIN pg_catalog.pg_proc p ON p.oid=o.oprcode "
             "        WHERE n.nspname='bioseq' AND o.oprname='||'), "
-            "       pg_typeof('AC'::bioseq.seq('dna4',8)) "
+            "       pg_typeof('AC'::bioseq.seq('dna4',64)) "
             "         = 'bioseq.seq'::regtype, "
             "       pg_typeof('A'::bioseq.letter('dna4')) "
             "         = 'bioseq.letter'::regtype;");
@@ -404,30 +404,30 @@ TEST_CASE("fresh install catalogs expose exact public objects",
         exec_sql(ctx, "SET search_path TO pg_catalog, bioseq, public;");
         runtime = query_one(
             ctx,
-            "SELECT pg_typeof('AC'::bioseq.seq('dna4',8) || 'GT') "
+            "SELECT pg_typeof('AC'::bioseq.seq('dna4',64) || 'GT') "
             "         = 'bioseq.seq'::regtype, "
-            "       ('AC'::bioseq.seq('dna4',8) || "
+            "       ('AC'::bioseq.seq('dna4',64) || "
             "         'GT'::bioseq.seq('dna4',64))::text, "
-            "       ('AC'::bioseq.seq('dna4',8) || text 'GT')::text, "
+            "       ('AC'::bioseq.seq('dna4',64) || text 'GT')::text, "
             "       (text 'GT' || "
-            "         'AC'::bioseq.seq('dna4',8))::text, "
-            "       ('AC'::bioseq.seq('dna4',8) || varchar 'GT')::text, "
+            "         'AC'::bioseq.seq('dna4',64))::text, "
+            "       ('AC'::bioseq.seq('dna4',64) || varchar 'GT')::text, "
             "       (varchar 'GT' || "
-            "         'AC'::bioseq.seq('dna4',8))::text, "
-            "       ('AC'::bioseq.seq('dna4',8) || "
+            "         'AC'::bioseq.seq('dna4',64))::text, "
+            "       ('AC'::bioseq.seq('dna4',64) || "
             "         ARRAY['G','T']::text[])::text, "
             "       (ARRAY['G','T']::text[] || "
-            "         'AC'::bioseq.seq('dna4',8))::text, "
-            "       ('AC'::bioseq.seq('dna4',8) || ARRAY["
+            "         'AC'::bioseq.seq('dna4',64))::text, "
+            "       ('AC'::bioseq.seq('dna4',64) || ARRAY["
             "         'G'::bioseq.letter('dna4'),"
             "         'T'::bioseq.letter('dna4')])::text, "
             "       (ARRAY['G'::bioseq.letter('dna4'),"
             "               'T'::bioseq.letter('dna4')] || "
-            "         'AC'::bioseq.seq('dna4',8))::text, "
-            "       ('ACGTA'::bioseq.seq('dna4',8))[1:4]::text, "
+            "         'AC'::bioseq.seq('dna4',64))::text, "
+            "       ('ACGTA'::bioseq.seq('dna4',64))[1:4]::text, "
             "       bioseq.reverse_complement("
-            "         'ACGT'::bioseq.seq('dna4',8))::text, "
-            "       ('ACGT'::bioseq.seq('dna4',8))[2]::text;");
+            "         'ACGT'::bioseq.seq('dna4',64))::text, "
+            "       ('ACGT'::bioseq.seq('dna4',64))[2]::text;");
     }
     exec_sql(admin, fmt::format("DROP DATABASE {};", database));
     cleanup.release();

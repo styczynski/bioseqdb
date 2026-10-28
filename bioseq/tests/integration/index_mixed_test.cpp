@@ -36,8 +36,8 @@ inline void insert_pair(const connection_test_context& ctx,
     const std::string target = generate_dna4(40000, seed); // crosses a 32 Ki-base fragment boundary
     const std::string query = target.substr(12000, 1500);
     exec_sqlf(ctx,
-              "INSERT INTO {} VALUES ({}, '{}'::bioseq.seq('dna4',32), "
-              "'{}'::bioseq.seq('dna4',32));",
+              "INSERT INTO {} VALUES ({}, '{}'::bioseq.seq('dna4',64), "
+              "'{}'::bioseq.seq('dna4',64));",
               table_name,
               primary_key,
               target,
@@ -50,8 +50,8 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({"mixed_index_rows"});
     exec_sql(ctx,
-             "CREATE TABLE mixed_index_rows (pk int, target bioseq.seq('dna4',32), "
-             "query bioseq.seq('dna4',32)) USING bioseq;");
+             "CREATE TABLE mixed_index_rows (pk int, target bioseq.seq('dna4',64), "
+             "query bioseq.seq('dna4',64)) USING bioseq;");
 
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     insert_pair(ctx, "mixed_index_rows", 1, 11); // indexed on insert

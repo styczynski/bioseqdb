@@ -23,7 +23,7 @@ TEST_CASE(
       ctx,
       "CREATE TABLE {} ("
       "    pk integer PRIMARY KEY,"
-      "    seq0 bioseq.seq('dna4', 32)"
+      "    seq0 bioseq.seq('dna4', 64)"
       ") USING bioseq;",
       k_metadata_interval_table);
   exec_sqlf(
@@ -210,7 +210,7 @@ TEST_CASE(
       ctx,
       "CREATE TABLE {} ("
       "  id integer PRIMARY KEY,"
-      "  seq bioseq.seq('dna4', 32)"
+      "  seq bioseq.seq('dna4', 64)"
       ") USING bioseq;",
       k_empty_vacuum_table);
   REQUIRE(query_scalar_int(

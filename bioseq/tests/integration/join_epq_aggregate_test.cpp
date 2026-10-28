@@ -26,14 +26,14 @@ TEST_CASE("Projection-only EPQ evaluates volatile final once",
              "id int PRIMARY KEY, source_id int NOT NULL, use_suffix boolean "
              "NOT NULL, touch int, sliced text);"
              "CREATE TABLE projection_epq_source ("
-             "id int PRIMARY KEY, seq bioseq.seq('dna4',32)) "
+             "id int PRIMARY KEY, seq bioseq.seq('dna4',64)) "
              "USING bioseq;"
              "CREATE TABLE projection_epq_log ("
              "ordinal bigserial PRIMARY KEY, label text UNIQUE NOT NULL, "
              "observed text);"
              "INSERT INTO projection_epq VALUES (1,1,false,0,NULL);"
              "INSERT INTO projection_epq_source VALUES "
-             "(1,'AAAACCCC'::bioseq.seq('dna4',32));"
+             "(1,'AAAACCCC'::bioseq.seq('dna4',64));"
              "CREATE FUNCTION public.projection_epq_once("
              "label text, value text) RETURNS text LANGUAGE plpgsql VOLATILE "
              "AS $$BEGIN "
@@ -93,7 +93,7 @@ TEST_CASE("BatchJoin EPQ preserves final effect order exactly once",
     create_seq_table(setup,
                      seq_table_spec{
                          .name = std::string{target},
-                         .typmod = {.alphabet = "dna4", .width = 32},
+                         .typmod = {.alphabet = "dna4", .width = 64},
                          .seq_columns = 1,
                          .using_bioseq = true,
                      },
@@ -105,11 +105,11 @@ TEST_CASE("BatchJoin EPQ preserves final effect order exactly once",
              fmt::format("DROP FUNCTION IF EXISTS public.batchjoin_epq_once("
                          "text,text);"
                          "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
-                         "seq bioseq.seq('dna4',32));"
+                         "seq bioseq.seq('dna4',64));"
                          "INSERT INTO {} SELECT id,1,{} "
                          "FROM generate_series(1,16) AS ids(id);"
                          "CREATE TABLE {} (id int PRIMARY KEY, "
-                         "seq bioseq.seq('dna4',32)) USING bioseq;"
+                         "seq bioseq.seq('dna4',64)) USING bioseq;"
                          "INSERT INTO {} VALUES (1,{});"
                          "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
                          "query_id int NOT NULL, use_suffix boolean NOT NULL, touch int, "
@@ -271,8 +271,8 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
         guc_scope no_insert(ctx, "bioseq.index.insert_maintenance.enabled", "off");
         exec_sqlf(ctx,
                   "INSERT INTO {} VALUES "
-                  "(6, 'AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT'::bioseq.seq('dna4', 32), "
-                  "'AAAACCCC'::bioseq.seq('dna4', 32));",
+                  "(6, 'AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT'::bioseq.seq('dna4', 64), "
+                  "'AAAACCCC'::bioseq.seq('dna4', 64));",
                   k_hoe_join);
     }
     {
@@ -363,8 +363,8 @@ TEST_CASE("Multiple Const mmsearch quals fail closed",
     constexpr std::string_view second_probe = "TTCATCATCATCATCTACTCCT";
     const auto error = sql_error(ctx,
                                  fmt::format("SELECT pk FROM {} WHERE "
-                                             "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) AND "
-                                             "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+                                             "mmsearch(seq0, '{}'::bioseq.seq('dna4', 64)) AND "
+                                             "mmsearch(seq0, '{}'::bioseq.seq('dna4', 64));",
                                              k_hoe_join,
                                              k_hoe_probe_sequence,
                                              second_probe));
@@ -380,7 +380,7 @@ TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
     seed_hoe_fixture(ctx, k_hoe_join);
 
     const std::string sql = fmt::format("SELECT MAX(bioseq.cigar(pk)) FROM {} "
-                                        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+                                        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 64));",
                                         k_hoe_join,
                                         k_hoe_probe_sequence);
     const auto row = query_one(ctx, sql);
@@ -401,7 +401,7 @@ TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
     const std::string count_sql =
         fmt::format("SELECT COUNT(*)::int8 AS hits "
                     "  FROM {} "
-                    " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+                    " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 64));",
                     k_hoe_join,
                     k_hoe_probe_sequence);
     const auto count_plan = explain_text<false>(ctx, count_sql);
@@ -427,7 +427,7 @@ TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
 
     const std::string sql = fmt::format("SELECT pk, MAX(bioseq.cigar(pk)) AS best_cigar "
                                         "  FROM {} "
-                                        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+                                        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 64)) "
                                         " GROUP BY pk ORDER BY pk;",
                                         k_hoe_join,
                                         k_hoe_probe_sequence);
@@ -451,7 +451,7 @@ TEST_CASE("Param-driven primary plus Const mmsearch fails closed",
         sql_error(ctx,
                   fmt::format("SELECT t1.pk, t2.pk FROM {} t1 INNER JOIN {} t2 "
                               "ON mmsearch(t2.seq0, t1.seq1) "
-                              "WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32));",
+                              "WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 64));",
                               k_hoe_join_left,
                               k_hoe_join_right,
                               "TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT"));

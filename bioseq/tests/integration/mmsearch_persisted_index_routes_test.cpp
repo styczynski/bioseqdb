@@ -1291,13 +1291,13 @@ TEST_CASE("unsupported BatchJoin shapes stay on ordinary planner paths",
     exec_sql(
         ctx,
         "CREATE TEMP TABLE mmsearch_batch_join_dna5 "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna5', 32));");
+        "(id int PRIMARY KEY, seq bioseq.seq('dna5', 64));");
     exec_sqlf(
         ctx,
         "INSERT INTO mmsearch_batch_join_dna5 VALUES (1, {});",
         format_literal(
             "ACGTACGTACGTACGTACGTACGTACGTACGT",
-            seq_typmod{.alphabet = "dna5", .width = 32}));
+            seq_typmod{.alphabet = "dna5", .width = 64}));
     // Reject mismatched alphabets during planning, before selecting a join.
     const auto typmod_mismatch = sql_error(
         ctx,
@@ -1314,7 +1314,7 @@ TEST_CASE("unsupported BatchJoin shapes stay on ordinary planner paths",
     const auto unsupported_alphabet = sql_error(
         ctx,
         "CREATE TEMP TABLE mmsearch_batch_join_dna5 "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna5', 32));");
+        "(id int PRIMARY KEY, seq bioseq.seq('dna5', 64));");
     REQUIRE(unsupported_alphabet.sqlstate == "22023");
     REQUIRE(unsupported_alphabet.contains(
         "bioseq.seq alphabet \"dna5\" is not supported"));

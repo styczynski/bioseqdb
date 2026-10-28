@@ -24,7 +24,7 @@ TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq t
     auto ctx = fresh_context({k_table});
     // Registered indexes must  appear eveb before the table has any rows.
     exec_sqlf(ctx,
-              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
+              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 64)) "
               "USING bioseq;",
               k_table);
 

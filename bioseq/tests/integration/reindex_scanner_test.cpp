@@ -116,15 +116,15 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
     exec_sql(ctx,
         "SET bioseq.index.insert_maintenance.enabled=off;"
         "CREATE TABLE expression_reindex ("
-        " id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING bioseq;"
+        " id int PRIMARY KEY, s bioseq.seq('dna4',64)) USING bioseq;"
         "CREATE TABLE expression_reindex_heap ("
-        " id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING heap;"
+        " id int PRIMARY KEY, s bioseq.seq('dna4',64)) USING heap;"
         "INSERT INTO expression_reindex VALUES "
-        " (1,repeat('A',40000)::bioseq.seq('dna4',32)),"
-        " (2,repeat('C',40000)::bioseq.seq('dna4',32));"
+        " (1,repeat('A',40000)::bioseq.seq('dna4',64)),"
+        " (2,repeat('C',40000)::bioseq.seq('dna4',64));"
         "INSERT INTO expression_reindex_heap VALUES "
-        " (1,repeat('A',40000)::bioseq.seq('dna4',32)),"
-        " (2,repeat('C',40000)::bioseq.seq('dna4',32));");
+        " (1,repeat('A',40000)::bioseq.seq('dna4',64)),"
+        " (2,repeat('C',40000)::bioseq.seq('dna4',64));");
 
     // Make index creation fail on a duplicate empty-slice key. The trace
     // self-test then checks that error cleanup restored the normal state.
@@ -158,17 +158,17 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
 
     const std::string slice_a_query =
         "SELECT id FROM expression_reindex WHERE s[4:9] "
-        "OPERATOR(bioseq.=) repeat('A',5)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('A',5)::bioseq.seq('dna4',64) "
         "ORDER BY id";
     const std::string reverse_a_query =
         "SELECT id FROM expression_reindex WHERE "
         "bioseq.reverse(s[4:36]) OPERATOR(bioseq.=) "
-        "repeat('A',32)::bioseq.seq('dna4',32) ORDER BY id";
+        "repeat('A',32)::bioseq.seq('dna4',64) ORDER BY id";
     const std::string concat_a_query =
         "SELECT id FROM expression_reindex WHERE "
         "(s[4:36] OPERATOR(bioseq.||) s[16380:16412]) "
         "OPERATOR(bioseq.=) "
-        "repeat('A',64)::bioseq.seq('dna4',32) ORDER BY id";
+        "repeat('A',64)::bioseq.seq('dna4',64) ORDER BY id";
     // Turn off Bioseq custom scans and discourage sequential scans so
     // PostgreSQL selects the expression indexes.
     exec_sql(ctx,
@@ -182,55 +182,55 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
     // Every index already exists: the new G row must acquire all three keys.
     exec_sql(ctx,
         "INSERT INTO expression_reindex VALUES "
-        "(3,repeat('G',40000)::bioseq.seq('dna4',32));"
+        "(3,repeat('G',40000)::bioseq.seq('dna4',64));"
         "INSERT INTO expression_reindex_heap VALUES "
-        "(3,repeat('G',40000)::bioseq.seq('dna4',32));");
+        "(3,repeat('G',40000)::bioseq.seq('dna4',64));");
     require_expression_index_ids(ctx, slice_index,
         "SELECT id FROM expression_reindex WHERE s[4:9] "
-        "OPERATOR(bioseq.=) repeat('G',5)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('G',5)::bioseq.seq('dna4',64) "
         "ORDER BY id", {3});
     require_expression_index_ids(ctx, reverse_index,
         "SELECT id FROM expression_reindex WHERE "
         "bioseq.reverse(s[4:36]) OPERATOR(bioseq.=) "
-        "repeat('G',32)::bioseq.seq('dna4',32) ORDER BY id", {3});
+        "repeat('G',32)::bioseq.seq('dna4',64) ORDER BY id", {3});
     require_expression_index_ids(ctx, concat_index,
         "SELECT id FROM expression_reindex WHERE "
         "(s[4:36] OPERATOR(bioseq.||) s[16380:16412]) "
-        "OPERATOR(bioseq.=) repeat('G',64)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('G',64)::bioseq.seq('dna4',64) "
         "ORDER BY id", {3});
     require_flat_mirror_equivalence(ctx, 3);
 
     // After UPDATE, searches must find the new T values and no old C values.
     exec_sql(ctx,
         "UPDATE expression_reindex SET "
-        "s=repeat('T',40000)::bioseq.seq('dna4',32) WHERE id=2;"
+        "s=repeat('T',40000)::bioseq.seq('dna4',64) WHERE id=2;"
         "UPDATE expression_reindex_heap SET "
-        "s=repeat('T',40000)::bioseq.seq('dna4',32) WHERE id=2;");
+        "s=repeat('T',40000)::bioseq.seq('dna4',64) WHERE id=2;");
     require_expression_index_ids(ctx, slice_index,
         "SELECT id FROM expression_reindex WHERE s[4:9] "
-        "OPERATOR(bioseq.=) repeat('C',5)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('C',5)::bioseq.seq('dna4',64) "
         "ORDER BY id", {});
     require_expression_index_ids(ctx, reverse_index,
         "SELECT id FROM expression_reindex WHERE "
         "bioseq.reverse(s[4:36]) OPERATOR(bioseq.=) "
-        "repeat('C',32)::bioseq.seq('dna4',32) ORDER BY id", {});
+        "repeat('C',32)::bioseq.seq('dna4',64) ORDER BY id", {});
     require_expression_index_ids(ctx, concat_index,
         "SELECT id FROM expression_reindex WHERE "
         "(s[4:36] OPERATOR(bioseq.||) s[16380:16412]) "
-        "OPERATOR(bioseq.=) repeat('C',64)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('C',64)::bioseq.seq('dna4',64) "
         "ORDER BY id", {});
     require_expression_index_ids(ctx, slice_index,
         "SELECT id FROM expression_reindex WHERE s[4:9] "
-        "OPERATOR(bioseq.=) repeat('T',5)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('T',5)::bioseq.seq('dna4',64) "
         "ORDER BY id", {2});
     require_expression_index_ids(ctx, reverse_index,
         "SELECT id FROM expression_reindex WHERE "
         "bioseq.reverse(s[4:36]) OPERATOR(bioseq.=) "
-        "repeat('T',32)::bioseq.seq('dna4',32) ORDER BY id", {2});
+        "repeat('T',32)::bioseq.seq('dna4',64) ORDER BY id", {2});
     require_expression_index_ids(ctx, concat_index,
         "SELECT id FROM expression_reindex WHERE "
         "(s[4:36] OPERATOR(bioseq.||) s[16380:16412]) "
-        "OPERATOR(bioseq.=) repeat('T',64)::bioseq.seq('dna4',32) "
+        "OPERATOR(bioseq.=) repeat('T',64)::bioseq.seq('dna4',64) "
         "ORDER BY id", {2});
     require_flat_mirror_equivalence(ctx, 3);
 
@@ -297,10 +297,10 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         "SELECT current_setting('max_parallel_workers')::int;") > 0);
     exec_sql(ctx,
         "CREATE TABLE expression_parallel_reindex ("
-        " id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " id int, s bioseq.seq('dna4',64)) USING bioseq;"
         "ALTER TABLE expression_parallel_reindex SET (parallel_workers=2);"
         "INSERT INTO expression_parallel_reindex "
-        "SELECT id, repeat('A',40000)::bioseq.seq('dna4',32) "
+        "SELECT id, repeat('A',40000)::bioseq.seq('dna4',64) "
         "FROM generate_series(1,128) AS id;"
         "CREATE OR REPLACE FUNCTION public.bioseq_parallel_index_delay(value int) "
         "RETURNS int LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $body$ "

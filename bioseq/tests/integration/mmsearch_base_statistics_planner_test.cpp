@@ -100,7 +100,7 @@ TEST_CASE("Locator output survives every multi-match context reset",
         ctx,
         seq_table_spec{
             .name = std::string{k_output_restore},
-            .typmod = {.alphabet = "dna4", .width = 32},
+            .typmod = {.alphabet = "dna4", .width = 64},
             .seq_columns = 3,
             .using_bioseq = true,
         },
@@ -590,7 +590,7 @@ TEST_CASE("multiple broadcast queries fail closed",
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     const std::string distinct_probe = format_literal(
         "CTAGTCACTGTAGCCTGATCGTAGCTAGC",
-        seq_typmod{.alphabet = "dna4", .width = 32});
+        seq_typmod{.alphabet = "dna4", .width = 64});
 
     const std::string sql = fmt::format(
         "SELECT pk FROM {} "
@@ -762,12 +762,21 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         std::string_view oracle_table;
         std::uint8_t width = 0u;
     };
-    constexpr std::array<width_case, 2u> width_cases{{
-        {"query width 32", k_batch_recipe_queries_32,
-         k_batch_recipe_oracle_32, 32u},
-        {"query width 64", k_batch_recipe_queries_64,
-         k_batch_recipe_oracle_64, 64u},
-    }};
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+    const auto unsupported_width = sql_error(
+        ctx, "SELECT 'ACGT'::bioseq.seq('dna4',32)::text;");
+    REQUIRE(unsupported_width.sqlstate == "22023");
+    REQUIRE(unsupported_width.contains(
+        "bioseq.seq width 32 is not enabled in this build"));
+#endif
+    constexpr std::array width_cases{
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+        width_case{"query width 32", k_batch_recipe_queries_32,
+                   k_batch_recipe_oracle_32, 32u},
+#endif
+        width_case{"query width 64", k_batch_recipe_queries_64,
+                   k_batch_recipe_oracle_64, 64u},
+    };
     for (const width_case& width_configuration : width_cases) {
         create_seq_table(
             ctx,
