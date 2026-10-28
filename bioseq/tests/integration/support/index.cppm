@@ -845,9 +845,16 @@ export inline std::vector<seq_row> hoe_seed_rows() {
     };
 }
 
-/** @brief Publish the default indexes after a fixture's source INSERT has committed. */
+/**
+ * @brief Publish a committed small fixture's indexes and retain compatible query settings.
+ * Select the exact fragment-directory route; grouped full-domain images are
+ * exercised by their dedicated tests rather than these small SQL fixtures.
+ */
 export inline void publish_default_fixture_indexes(
     const connection_test_context& ctx, std::string_view name) {
+    exec_sql(ctx,
+        "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+        "SET bioseq.aligner.grouped_soa_generation.enabled = off;");
     exec_sqlf(ctx,
         "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_fragment');",
         name);

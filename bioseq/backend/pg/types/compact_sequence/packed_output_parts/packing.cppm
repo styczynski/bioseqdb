@@ -142,34 +142,70 @@ export template<class p_instance>
 
 namespace {
 
-/** Consume a tree cursor under the established read-session cleanup protocol. */
+/**
+ * Consume a tree cursor for raw PostgreSQL EOH callbacks.
+ *
+ * Source readers translate PostgreSQL errors into C++ exceptions so cursor and
+ * session cleanup can finish. Restore the PostgreSQL exception stack before
+ * rethrowing exact ErrorData; no C++ exception may escape an EOH callback.
+ */
 template<class Result, class Function>
 [[nodiscard]] Result with_cigar_tree_cursor(pg_sequence_expanded const& value, Function&& callback)
 {
+    // Both EOH callers return only a scalar extent. Error emission below must
+    // never skip destruction of an owned result or cursor allocation.
+    static_assert(std::is_trivially_destructible_v<Result>);
+    static_assert(std::is_trivially_destructible_v<pg_cigar_run_cursor>);
     std::optional<Result> result;
-    std::exception_ptr failure;
+    ErrorData* callback_exact_error = nullptr;
+    bool callback_postgres_error = false;
+    bool callback_standard_error = false;
+    bool callback_unknown_error = false;
+    std::array<char, 512> callback_detail{};
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
-        auto* local = begin_pg_sequence_read_session(CurrentMemoryContext);
-        session = local;
         try {
+            auto* local = begin_pg_sequence_read_session(CurrentMemoryContext);
+            session = local;
             pg_cigar_run_cursor cursor{*local, value.root, 0u, value.bp_length};
             result.emplace(std::forward<Function>(callback)(cursor));
             finish_pg_sequence_read_session(local, true);
+            session = nullptr;
+        } catch (bioseq::postgres::support::postgres_error& error) {
+            callback_exact_error = error.release_error_data();
+            callback_postgres_error = true;
+        } catch (std::exception const& error) {
+            strlcpy(callback_detail.data(),
+                    error.what() == nullptr ? "std::exception without detail" : error.what(),
+                    callback_detail.size());
+            callback_standard_error = true;
         } catch (...) {
-            failure = std::current_exception();
-            abort_pg_sequence_read_session_noexcept(local);
+            callback_unknown_error = true;
+        }
+        if (callback_postgres_error || callback_standard_error || callback_unknown_error) {
+            abort_pg_sequence_read_session_noexcept(
+                const_cast<pg_sequence_read_session*>(session));
         }
         session = nullptr;
     }
     PG_CATCH();
     {
         abort_pg_sequence_read_session_noexcept(const_cast<pg_sequence_read_session*>(session));
+        session = nullptr;
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (failure) std::rethrow_exception(std::move(failure));
+    if (callback_postgres_error) {
+        bioseq::postgres::support::rethrow_postgres_error_after_cleanup(callback_exact_error);
+    }
+    if (callback_standard_error || callback_unknown_error) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq sequence callback raised a C++ exception"),
+                 errdetail("%s", callback_unknown_error
+                         ? "unknown non-standard C++ exception" : callback_detail.data())));
+    }
     return std::move(*result);
 }
 
